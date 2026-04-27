@@ -10,19 +10,17 @@ Source0:        %{name}-%{version}.tar.gz
 BuildArch:      noarch
 
 BuildRequires:  systemd-rpm-macros
+# Keep runtime requirements intentionally small.
+# FTCTL is installed on top of an existing ABLESTACK KVM host where
+# libvirt/qemu/firewalld related components are already provisioned as part
+# of the host stack. Requiring those packages here can trigger solver-driven
+# upgrades/removals of the existing agent/libvirt stack during localinstall.
+# Feature-specific tools are validated at runtime by ftctl commands instead.
 Requires:       bash
-Requires:       bash-completion
 Requires:       coreutils
-Requires:       findutils
-Requires:       iputils
 Requires:       jq
-Requires:       libvirt-client
 Requires:       openssh-clients
 Requires:       python3
-Requires:       qemu-img
-Requires:       firewalld
-Requires:       nmap-ncat
-Requires:       socat
 Requires:       systemd
 Requires:       util-linux
 
@@ -70,6 +68,16 @@ install -m 0644 completions/%{name} %{buildroot}%{_datadir}/bash-completion/comp
 %systemd_post ablestack-vm-ftctl.timer
 if [ -x /usr/local/bin/ablestack_vm_ftctl_firewalld ]; then
   /usr/local/bin/ablestack_vm_ftctl_firewalld apply >/dev/null 2>&1 || true
+fi
+missing_tools=""
+for tool in virsh qemu-img socat nc ping firewall-cmd; do
+  if ! command -v "${tool}" >/dev/null 2>&1; then
+    missing_tools="${missing_tools} ${tool}"
+  fi
+done
+if [ -n "${missing_tools}" ]; then
+  echo "WARNING: ablestack_vm_ftctl installed with missing optional tools:${missing_tools}" >&2
+  echo "WARNING: FTCTL features that rely on those tools may fail until the host stack provides them." >&2
 fi
 
 %preun

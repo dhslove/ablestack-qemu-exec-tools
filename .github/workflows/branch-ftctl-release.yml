@@ -1,0 +1,155 @@
+name: FTCTL Branch Development Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Branch, tag, or commit SHA to build for test deployment
+        required: true
+        default: feature/ftctl-cloud-integration
+        type: string
+      release_label:
+        description: Optional release label. Defaults to a sanitized source_ref.
+        required: false
+        default: ''
+        type: string
+      draft:
+        description: Create the GitHub Release as a draft
+        required: false
+        default: true
+        type: boolean
+
+concurrency:
+  group: ftctl-branch-dev-release-${{ inputs.source_ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-ftctl-rpm:
+    runs-on: ubuntu-latest
+    container:
+      image: rockylinux/rockylinux:9
+      options: --user 0
+    outputs:
+      release_tag: ${{ steps.metadata.outputs.release_tag }}
+      release_name: ${{ steps.metadata.outputs.release_name }}
+      source_commit_sha: ${{ steps.metadata.outputs.source_commit_sha }}
+      version: ${{ steps.metadata.outputs.version }}
+      release: ${{ steps.metadata.outputs.release }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
+          fetch-depth: 0
+
+      - id: metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ref_slug="${{ inputs.release_label }}"
+          if [ -z "$ref_slug" ]; then
+            ref_slug=$(printf '%s' "${{ inputs.source_ref }}" \
+              | tr '[:upper:]' '[:lower:]' \
+              | sed -E 's#[^a-z0-9._-]+#-#g; s#^-+##; s#-+$##')
+          fi
+
+          if [ -z "$ref_slug" ]; then
+            echo "::error::Unable to derive release label"
+            exit 1
+          fi
+
+          . ./VERSION
+          source_commit_sha=$(git rev-parse HEAD)
+          release_tag="dev-branch-${ref_slug}-ftctl-latest"
+          release_name="FTCTL Branch Dev ${ref_slug} Latest"
+
+          {
+            echo "release_tag=$release_tag"
+            echo "release_name=$release_name"
+            echo "source_commit_sha=$source_commit_sha"
+            echo "version=$VERSION"
+            echo "release=$RELEASE"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Install build deps
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /etc/yum.repos.d/rocky-vault-9.6.repo <<'EOF'
+          [rocky-vault-9.6-baseos]
+          name=Rocky Linux 9.6 - BaseOS (vault)
+          baseurl=https://dl.rockylinux.org/vault/rocky/9.6/BaseOS/$basearch/os/
+          enabled=1
+          gpgcheck=0
+
+          [rocky-vault-9.6-appstream]
+          name=Rocky Linux 9.6 - AppStream (vault)
+          baseurl=https://dl.rockylinux.org/vault/rocky/9.6/AppStream/$basearch/os/
+          enabled=1
+          gpgcheck=0
+
+          [rocky-vault-9.6-crb]
+          name=Rocky Linux 9.6 - CRB (vault)
+          baseurl=https://dl.rockylinux.org/vault/rocky/9.6/CRB/$basearch/os/
+          enabled=1
+          gpgcheck=0
+          EOF
+          dnf clean all
+          dnf -y --disablerepo="*" --enablerepo="rocky-vault-9.6-*" makecache
+          dnf -y --disablerepo="*" --enablerepo="rocky-vault-9.6-*" install \
+            make rpm-build tar git dnf-plugins-core createrepo_c systemd-rpm-macros systemd
+
+      - name: Build FTCTL RPM
+        shell: bash
+        run: |
+          set -euo pipefail
+          make ftctl-rpm
+
+      - name: Create FTCTL RPM repo
+        shell: bash
+        run: |
+          set -euo pipefail
+          workdir="release/ftctl-rpm-rocky9.6"
+          mkdir -p "$workdir"
+          cp -v build/rpm-ftctl/*.rpm "$workdir"/
+          dnf --disablerepo="*" --enablerepo="rocky-vault-9.6-*" download --resolve --alldeps \
+            --destdir="$workdir" \
+            bash jq openssh-clients python3 util-linux || true
+          createrepo_c "$workdir"
+          (
+            cd release
+            sha256sum ftctl-rpm-rocky9.6/* > SHA256SUMS
+          )
+          cat > release/DEV-RELEASE.txt <<EOF
+          Release tag: ${{ steps.metadata.outputs.release_tag }}
+          Release name: ${{ steps.metadata.outputs.release_name }}
+          Source ref: ${{ inputs.source_ref }}
+          Source commit: ${{ steps.metadata.outputs.source_commit_sha }}
+          Version: ${{ steps.metadata.outputs.version }}
+          Release: ${{ steps.metadata.outputs.release }}
+          GitHub run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EOF
+
+      - name: Upload FTCTL RPM build outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: ftctl-branch-rpm-${{ github.run_id }}
+          if-no-files-found: error
+          path: release/**
+
+      - name: Publish FTCTL branch development release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.metadata.outputs.release_tag }}
+          target_commitish: ${{ steps.metadata.outputs.source_commit_sha }}
+          name: ${{ steps.metadata.outputs.release_name }}
+          draft: ${{ inputs.draft }}
+          prerelease: true
+          generate_release_notes: false
+          files: |
+            release/DEV-RELEASE.txt
+            release/SHA256SUMS
+            release/ftctl-rpm-rocky9.6/*

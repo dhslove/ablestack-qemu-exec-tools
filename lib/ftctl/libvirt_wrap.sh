@@ -15,14 +15,57 @@
 # limitations under the License.
 # ---------------------------------------------------------------------
 
-ftctl_lock_acquire_or_exit() {
+ftctl_lock_emit_conflict() {
+  local lock_file="${1-}"
+  local cmd="${CLI_COMMAND:-unknown}"
+  local result="locked"
+  if [[ "${CLI_JSON:-0}" == "1" ]]; then
+    printf '{"command":"%s","result":"%s","lock_file":"%s"}\n' \
+      "$(ftctl__json_escape "${cmd}")" \
+      "${result}" \
+      "$(ftctl__json_escape "${lock_file}")"
+  else
+    printf 'ftctl.%s: %s (%s)\n' "${cmd}" "${result}" "${lock_file}"
+  fi
+}
+
+ftctl_lock_acquire() {
   local lock_file="${FTCTL_LOCK_FILE}"
   ftctl_ensure_dir "$(dirname "${lock_file}")" "0755"
   exec 201>"${lock_file}"
   if ! flock -n 201; then
-    ftctl_log_event "scan" "scan.skip" "skip" "" "" "reason=locked"
-    exit 0
+    ftctl_log_event "lock" "lock.acquire" "skip" "" "${EXIT_LOCKED:-20}" \
+      "reason=locked command=${CLI_COMMAND:-unknown} lock_file=${lock_file}"
+    ftctl_lock_emit_conflict "${lock_file}"
+    return "${EXIT_LOCKED:-20}"
   fi
+  return 0
+}
+
+ftctl_command_requires_lock() {
+  local command="${1-}"
+  local action="${2-}"
+  case "${command}" in
+    status|check|health|events)
+      return 1
+      ;;
+    config)
+      case "${action}" in
+        show|host-list|profile-show)
+          return 1
+          ;;
+        *)
+          return 0
+          ;;
+      esac
+      ;;
+    "")
+      return 1
+      ;;
+    *)
+      return 0
+      ;;
+  esac
 }
 
 ftctl_cmd_run() {
@@ -92,7 +135,8 @@ ftctl_local_health() {
   result="$(ftctl_result_from_rc "${rc}")"
   ftctl_log_event "health" "libvirt.local" "${result}" "" "${rc}" "uri=${FTCTL_DEFAULT_PRIMARY_URI}"
   if [[ "${json}" == "1" ]]; then
-    printf '{"result":"%s","uri":"%s","rc":%s}\n' "${result}" "${FTCTL_DEFAULT_PRIMARY_URI}" "${rc}"
+    printf '{"command":"health","result":"%s","uri":"%s","rc":%s}\n' \
+      "${result}" "${FTCTL_DEFAULT_PRIMARY_URI}" "${rc}"
   else
     printf 'libvirt.local: %s (%s)\n' "${result}" "${FTCTL_DEFAULT_PRIMARY_URI}"
   fi

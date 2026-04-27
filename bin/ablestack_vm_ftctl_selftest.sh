@@ -49,6 +49,8 @@ source "${LIB_BASE}/ftctl/fencing.sh"
 # shellcheck source=/dev/null
 source "${LIB_BASE}/ftctl/failover.sh"
 # shellcheck source=/dev/null
+source "${LIB_BASE}/ftctl/events.sh"
+# shellcheck source=/dev/null
 source "${LIB_BASE}/ftctl/verify.sh"
 # shellcheck source=/dev/null
 source "${LIB_BASE}/ftctl/orchestrator.sh"
@@ -77,6 +79,13 @@ selftest_assert_file_contains() {
   local path="${1-}"
   local needle="${2-}"
   grep -q -- "${needle}" "${path}" || selftest_fail "missing '${needle}' in ${path}"
+}
+
+selftest_assert_contains() {
+  local haystack="${1-}"
+  local needle="${2-}"
+  local msg="${3-assert_contains failed}"
+  [[ "${haystack}" == *"${needle}"* ]] || selftest_fail "${msg}: missing '${needle}'"
 }
 
 selftest_prepare_config_file() {
@@ -122,6 +131,7 @@ selftest_run_lint() {
     "lib/ftctl/xcolo.sh"
     "lib/ftctl/fencing.sh"
     "lib/ftctl/failover.sh"
+    "lib/ftctl/events.sh"
     "lib/ftctl/verify.sh"
     "lib/ftctl/orchestrator.sh"
     "completions/ablestack_vm_ftctl"
@@ -379,6 +389,95 @@ EOF
   selftest_assert_eq "$(ftctl_state_get "${vm}" "active_side")" "secondary" "xcolo failover side"
 }
 
+selftest_case_json_and_locking() {
+  selftest_reset_env
+  selftest_info "json output and lock behavior"
+
+  local vm="json-vm"
+  local fakebin="${SELFTEST_ROOT}/bin"
+  local out="" rc=0
+
+  mkdir -p "${fakebin}" "${SELFTEST_ROOT}/profiles"
+  cat > "${fakebin}/virsh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$*" == *" list --name"* ]]; then
+  exit 0
+fi
+if [[ "$*" == *" dominfo json-vm"* ]]; then
+  if [[ "$*" == *"qemu:///system"* ]]; then
+    printf 'Id: 1\nName: json-vm\n'
+    exit 0
+  fi
+  printf 'Domain not found\n' >&2
+  exit 1
+fi
+printf 'unsupported test virsh invocation: %s\n' "$*" >&2
+exit 2
+EOF
+  chmod 0755 "${fakebin}/virsh"
+
+  cat > "${SELFTEST_ROOT}/profiles/${vm}.conf" <<EOF
+FTCTL_PROFILE_MODE="ha"
+FTCTL_PROFILE_SECONDARY_URI="qemu+ssh://peer/system"
+EOF
+
+  FTCTL_PROFILE_MODE="ha"
+  FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
+  FTCTL_PROFILE_SECONDARY_URI="qemu+ssh://peer/system"
+  ftctl_state_init_vm "${vm}"
+
+  out="$(PATH="${fakebin}:$PATH" bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" status --config "${SELFTEST_CONFIG}" --vm "${vm}" --json)"
+  selftest_assert_contains "${out}" '"command":"status"' "status json command"
+  selftest_assert_contains "${out}" '"result":"ok"' "status json result"
+  selftest_assert_contains "${out}" "\"vm\":\"${vm}\"" "status json vm"
+
+  out="$(PATH="${fakebin}:$PATH" bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" check --config "${SELFTEST_CONFIG}" --vm "${vm}" --json)"
+  selftest_assert_contains "${out}" '"command":"check"' "check json command"
+  selftest_assert_contains "${out}" '"result":"ok"' "check json result"
+  selftest_assert_contains "${out}" '"inventory_result":"warn"' "check json inventory result"
+  selftest_assert_contains "${out}" '"primary_rc":0' "check primary rc"
+  selftest_assert_contains "${out}" '"peer_rc":1' "check peer rc"
+
+  out="$(PATH="${fakebin}:$PATH" bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" health --config "${SELFTEST_CONFIG}" --json)"
+  selftest_assert_contains "${out}" '"command":"health"' "health json command"
+  selftest_assert_contains "${out}" '"result":"ok"' "health json result"
+  selftest_assert_contains "${out}" '"rc":0' "health rc"
+
+  exec 209>"${FTCTL_LOCK_FILE}"
+  flock -n 209 || selftest_fail "unable to hold test lock"
+
+  set +e
+  out="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" config init-cluster --config "${SELFTEST_CONFIG}" --cluster-name demo --local-host-id host-01 --json)"
+  rc=$?
+  set -e
+  selftest_assert_eq "${rc}" "20" "lock conflict exit code"
+  selftest_assert_contains "${out}" '"result":"locked"' "lock conflict json result"
+
+  out="$(PATH="${fakebin}:$PATH" bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" status --config "${SELFTEST_CONFIG}" --vm "${vm}" --json)"
+  selftest_assert_contains "${out}" '"result":"ok"' "read-only status should ignore lock"
+
+  exec 209>&-
+}
+
+selftest_case_events_json() {
+  selftest_reset_env
+  selftest_info "events json output"
+
+  cat > "${SELFTEST_ROOT}/log/events.log" <<EOF
+{"ts":"2026-04-18T10:00:00+09:00","scan_id":"s1","vm":"vm-a","stage":"health","event":"reconcile.tick","result":"ok"}
+{"ts":"2026-04-18T10:01:00+09:00","scan_id":"s2","vm":"vm-b","stage":"failover","event":"failover.request","result":"warn"}
+{"ts":"2026-04-18T10:02:00+09:00","scan_id":"s3","vm":"vm-a","stage":"rearm","event":"rearm.defer","result":"warn","details":{"reason":"backoff"}}
+EOF
+
+  local out=""
+  out="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" events --config "${SELFTEST_CONFIG}" --vm vm-a --limit 2 --json)"
+  selftest_assert_contains "${out}" '"command":"events"' "events json command"
+  selftest_assert_contains "${out}" '"result":"ok"' "events json result"
+  selftest_assert_contains "${out}" '"count":2' "events count"
+  selftest_assert_contains "${out}" '"event":"rearm.defer"' "events latest item"
+}
+
 selftest_main() {
   selftest_run_lint
   selftest_case_cluster_cli
@@ -386,6 +485,8 @@ selftest_main() {
   selftest_case_backend_validation
   selftest_case_reconcile_and_fencing
   selftest_case_xcolo_and_xml
+  selftest_case_json_and_locking
+  selftest_case_events_json
   selftest_info "all checks passed"
 }
 

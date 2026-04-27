@@ -23,6 +23,9 @@ PROG_VERSION="0.1.0"
 EXIT_OK=0
 EXIT_USAGE=2
 EXIT_RUNTIME=10
+# Used by sourced library functions during command dispatch.
+# shellcheck disable=SC2034
+EXIT_LOCKED=20
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -47,6 +50,16 @@ CLI_LIBVIRT_URI=""
 CLI_BLOCKCOPY_IP=""
 CLI_XCOLO_CONTROL_IP=""
 CLI_XCOLO_DATA_IP=""
+CLI_BACKEND_MODE=""
+CLI_TARGET_STORAGE_SCOPE=""
+CLI_SECONDARY_VM_NAME=""
+CLI_FENCING_POLICY=""
+CLI_SECONDARY_TARGET_DIR=""
+CLI_REMOTE_NBD_EXPORT_ADDR=""
+CLI_XCOLO_PROXY_ENDPOINT=""
+CLI_XCOLO_NBD_ENDPOINT=""
+CLI_XCOLO_MIGRATE_URI=""
+CLI_LIMIT=""
 
 FTCTL_LIB_BASE=""
 
@@ -88,6 +101,7 @@ ftctl_load_libs() {
     xcolo.sh
     fencing.sh
     failover.sh
+    events.sh
     verify.sh
     orchestrator.sh
   )
@@ -123,6 +137,8 @@ ftctl_load_libs() {
   # shellcheck source=/dev/null
   source "${FTCTL_LIB_BASE}/ftctl/failover.sh"
   # shellcheck source=/dev/null
+  source "${FTCTL_LIB_BASE}/ftctl/events.sh"
+  # shellcheck source=/dev/null
   source "${FTCTL_LIB_BASE}/ftctl/verify.sh"
   # shellcheck source=/dev/null
   source "${FTCTL_LIB_BASE}/ftctl/orchestrator.sh"
@@ -145,6 +161,7 @@ Commands:
   resume-protection  Resume reconciliation for a VM
   check              Probe VM/profile/peer reachability
   health             Check local libvirt health only
+  events             Show recent FTCTL events
   config             Manage cluster/host inventory
 
 Global options:
@@ -168,6 +185,7 @@ Global options:
       --blockcopy-ip ADDR
       --xcolo-control-ip ADDR
       --xcolo-data-ip ADDR
+      --limit N       Limit items for commands that support it
 
 Config actions:
   ablestack_vm_ftctl config init-cluster --cluster-name <name> --local-host-id <id>
@@ -178,6 +196,14 @@ Config actions:
     --xcolo-control-ip <addr> --xcolo-data-ip <addr>
   ablestack_vm_ftctl config host-remove --host-id <id>
   ablestack_vm_ftctl config host-list [--json]
+  ablestack_vm_ftctl config profile-upsert --vm <name> --mode <ha|dr|ft> --peer <uri> \
+    [--profile <name>] [--backend-mode <mode>] [--target-storage-scope <scope>] \
+    [--secondary-vm-name <name>] [--fencing-policy <policy>] \
+    [--secondary-target-dir <dir>] [--remote-nbd-export-addr <addr>] \
+    [--xcolo-proxy-endpoint <endpoint>] [--xcolo-nbd-endpoint <endpoint>] \
+    [--xcolo-migrate-uri <uri>]
+  ablestack_vm_ftctl config profile-remove --vm <name>
+  ablestack_vm_ftctl config profile-show --vm <name> [--json]
 EOF
 }
 
@@ -196,7 +222,7 @@ parse_args() {
         print_version
         exit "${EXIT_OK}"
         ;;
-      protect|status|reconcile|failover|failback|fence-confirm|fence-clear|pause-protection|resume-protection|check|health|config)
+      protect|status|reconcile|failover|failback|fence-confirm|fence-clear|pause-protection|resume-protection|check|health|events|config)
         [[ -z "${CLI_COMMAND}" ]] || {
           echo "ERROR: multiple commands specified" >&2
           exit "${EXIT_USAGE}"
@@ -204,7 +230,7 @@ parse_args() {
         CLI_COMMAND="$1"
         shift
         ;;
-      init-cluster|set-local-host|show|host-upsert|host-remove|host-list)
+      init-cluster|set-local-host|show|host-upsert|host-remove|host-list|profile-upsert|profile-remove|profile-show)
         if [[ "${CLI_COMMAND}" == "config" && -z "${CLI_ACTION}" ]]; then
           CLI_ACTION="$1"
           shift
@@ -285,6 +311,46 @@ parse_args() {
         CLI_XCOLO_DATA_IP="${2-}"
         shift 2
         ;;
+      --backend-mode)
+        CLI_BACKEND_MODE="${2-}"
+        shift 2
+        ;;
+      --target-storage-scope)
+        CLI_TARGET_STORAGE_SCOPE="${2-}"
+        shift 2
+        ;;
+      --secondary-vm-name)
+        CLI_SECONDARY_VM_NAME="${2-}"
+        shift 2
+        ;;
+      --fencing-policy)
+        CLI_FENCING_POLICY="${2-}"
+        shift 2
+        ;;
+      --secondary-target-dir)
+        CLI_SECONDARY_TARGET_DIR="${2-}"
+        shift 2
+        ;;
+      --remote-nbd-export-addr)
+        CLI_REMOTE_NBD_EXPORT_ADDR="${2-}"
+        shift 2
+        ;;
+      --xcolo-proxy-endpoint)
+        CLI_XCOLO_PROXY_ENDPOINT="${2-}"
+        shift 2
+        ;;
+      --xcolo-nbd-endpoint)
+        CLI_XCOLO_NBD_ENDPOINT="${2-}"
+        shift 2
+        ;;
+      --xcolo-migrate-uri)
+        CLI_XCOLO_MIGRATE_URI="${2-}"
+        shift 2
+        ;;
+      --limit)
+        CLI_LIMIT="${2-}"
+        shift 2
+        ;;
       *)
         echo "ERROR: unknown argument: $1" >&2
         exit "${EXIT_USAGE}"
@@ -300,7 +366,9 @@ apply_common_config() {
   ftctl_config_load_file "${FTCTL_CONFIG_PATH}"
   ftctl_config_finalize_paths
   ftctl_ensure_runtime_dirs
-  ftctl_lock_acquire_or_exit
+  if ftctl_command_requires_lock "${CLI_COMMAND}" "${CLI_ACTION}"; then
+    ftctl_lock_acquire || exit $?
+  fi
 }
 
 require_vm() {
@@ -390,8 +458,34 @@ dispatch() {
             ftctl_cluster_host_list_text
           fi
           ;;
+        profile-upsert)
+          require_vm
+          require_mode
+          [[ -n "${CLI_PEER}" ]] || {
+            echo "ERROR: config profile-upsert requires --peer" >&2
+            exit "${EXIT_USAGE}"
+          }
+          ftctl_profile_write_vm "${CLI_VM}" "${CLI_MODE}" "${CLI_PEER}" "${CLI_PROFILE}" \
+            "${CLI_BACKEND_MODE}" "${CLI_TARGET_STORAGE_SCOPE}" "${CLI_SECONDARY_VM_NAME}" "${CLI_FENCING_POLICY}" \
+            "${CLI_SECONDARY_TARGET_DIR}" "${CLI_REMOTE_NBD_EXPORT_ADDR}" \
+            "${CLI_XCOLO_PROXY_ENDPOINT}" "${CLI_XCOLO_NBD_ENDPOINT}" "${CLI_XCOLO_MIGRATE_URI}"
+          ftctl_profile_show_vm "${CLI_VM}" "${CLI_JSON}"
+          ;;
+        profile-remove)
+          require_vm
+          ftctl_profile_remove_vm "${CLI_VM}"
+          if [[ "${CLI_JSON}" == "1" ]]; then
+            printf '{"command":"config.profile-remove","result":"ok","vm":"%s"}\n' "${CLI_VM}"
+          else
+            printf '%s: profile removed\n' "${CLI_VM}"
+          fi
+          ;;
+        profile-show)
+          require_vm
+          ftctl_profile_show_vm "${CLI_VM}" "${CLI_JSON}"
+          ;;
         *)
-          echo "ERROR: config requires one of: init-cluster, set-local-host, show, host-upsert, host-remove, host-list" >&2
+          echo "ERROR: config requires one of: init-cluster, set-local-host, show, host-upsert, host-remove, host-list, profile-upsert, profile-remove, profile-show" >&2
           exit "${EXIT_USAGE}"
           ;;
       esac
@@ -466,6 +560,9 @@ dispatch() {
       ;;
     health)
       ftctl_local_health "${CLI_JSON}"
+      ;;
+    events)
+      ftctl_events_print "${CLI_VM}" "${CLI_LIMIT}" "${CLI_JSON}"
       ;;
     "")
       usage

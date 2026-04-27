@@ -148,6 +148,153 @@ ftctl_profile_secondary_vm_name_resolved() {
   fi
 }
 
+ftctl_profile_path() {
+  local vm="${1-}"
+  echo "${FTCTL_PROFILE_DIR}/${vm}.conf"
+}
+
+ftctl_profile_write_vm() {
+  local vm="${1-}"
+  local mode="${2-}"
+  local peer_uri="${3-}"
+  local profile_name="${4-}"
+  local backend_mode="${5-}"
+  local target_storage_scope="${6-}"
+  local secondary_vm_name="${7-}"
+  local fencing_policy="${8-}"
+  local secondary_target_dir="${9-}"
+  local remote_nbd_export_addr="${10-}"
+  local xcolo_proxy_endpoint="${11-}"
+  local xcolo_nbd_endpoint="${12-}"
+  local xcolo_migrate_uri="${13-}"
+  local path tmp
+
+  [[ -n "${vm}" ]] || {
+    echo "ERROR: vm is required" >&2
+    return 2
+  }
+  [[ -n "${mode}" ]] || {
+    echo "ERROR: mode is required" >&2
+    return 2
+  }
+  [[ -n "${peer_uri}" ]] || {
+    echo "ERROR: peer uri is required" >&2
+    return 2
+  }
+
+  ftctl_profile_reset
+  FTCTL_PROFILE_MODE="${mode}"
+  FTCTL_PROFILE_SECONDARY_URI="${peer_uri}"
+  [[ -n "${profile_name}" ]] && FTCTL_PROFILE_NAME="${profile_name}"
+  [[ -n "${backend_mode}" ]] && FTCTL_PROFILE_BACKEND_MODE="${backend_mode}"
+  [[ -n "${target_storage_scope}" ]] && FTCTL_PROFILE_TARGET_STORAGE_SCOPE="${target_storage_scope}"
+  [[ -n "${secondary_vm_name}" ]] && FTCTL_PROFILE_SECONDARY_VM_NAME="${secondary_vm_name}"
+  [[ -n "${fencing_policy}" ]] && FTCTL_PROFILE_FENCING_POLICY="${fencing_policy}"
+  [[ -n "${secondary_target_dir}" ]] && FTCTL_PROFILE_SECONDARY_TARGET_DIR="${secondary_target_dir}"
+  [[ -n "${remote_nbd_export_addr}" ]] && FTCTL_PROFILE_REMOTE_NBD_EXPORT_ADDR="${remote_nbd_export_addr}"
+  [[ -n "${xcolo_proxy_endpoint}" ]] && FTCTL_PROFILE_XCOLO_PROXY_ENDPOINT="${xcolo_proxy_endpoint}"
+  [[ -n "${xcolo_nbd_endpoint}" ]] && FTCTL_PROFILE_XCOLO_NBD_ENDPOINT="${xcolo_nbd_endpoint}"
+  [[ -n "${xcolo_migrate_uri}" ]] && FTCTL_PROFILE_XCOLO_MIGRATE_URI="${xcolo_migrate_uri}"
+  ftctl_profile_validate "${vm}" || return $?
+
+  path="$(ftctl_profile_path "${vm}")"
+  ftctl_ensure_dir "$(dirname "${path}")" "0755"
+  tmp="$(mktemp -t ftctl.profile.XXXXXX)"
+  {
+    printf 'FTCTL_PROFILE_NAME="%s"\n' "${FTCTL_PROFILE_NAME}"
+    printf 'FTCTL_PROFILE_MODE="%s"\n' "${FTCTL_PROFILE_MODE}"
+    printf 'FTCTL_PROFILE_SECONDARY_URI="%s"\n' "${FTCTL_PROFILE_SECONDARY_URI}"
+    if [[ -n "${backend_mode}" ]]; then
+      printf 'FTCTL_PROFILE_BACKEND_MODE="%s"\n' "${FTCTL_PROFILE_BACKEND_MODE}"
+    fi
+    if [[ -n "${target_storage_scope}" ]]; then
+      printf 'FTCTL_PROFILE_TARGET_STORAGE_SCOPE="%s"\n' "${FTCTL_PROFILE_TARGET_STORAGE_SCOPE}"
+    fi
+    if [[ -n "${secondary_vm_name}" ]]; then
+      printf 'FTCTL_PROFILE_SECONDARY_VM_NAME="%s"\n' "${FTCTL_PROFILE_SECONDARY_VM_NAME}"
+    fi
+    if [[ -n "${fencing_policy}" ]]; then
+      printf 'FTCTL_PROFILE_FENCING_POLICY="%s"\n' "${FTCTL_PROFILE_FENCING_POLICY}"
+    fi
+    if [[ -n "${secondary_target_dir}" ]]; then
+      printf 'FTCTL_PROFILE_SECONDARY_TARGET_DIR="%s"\n' "${FTCTL_PROFILE_SECONDARY_TARGET_DIR}"
+    fi
+    if [[ -n "${remote_nbd_export_addr}" ]]; then
+      printf 'FTCTL_PROFILE_REMOTE_NBD_EXPORT_ADDR="%s"\n' "${FTCTL_PROFILE_REMOTE_NBD_EXPORT_ADDR}"
+    fi
+    if [[ -n "${xcolo_proxy_endpoint}" ]]; then
+      printf 'FTCTL_PROFILE_XCOLO_PROXY_ENDPOINT="%s"\n' "${FTCTL_PROFILE_XCOLO_PROXY_ENDPOINT}"
+    fi
+    if [[ -n "${xcolo_nbd_endpoint}" ]]; then
+      printf 'FTCTL_PROFILE_XCOLO_NBD_ENDPOINT="%s"\n' "${FTCTL_PROFILE_XCOLO_NBD_ENDPOINT}"
+    fi
+    if [[ -n "${xcolo_migrate_uri}" ]]; then
+      printf 'FTCTL_PROFILE_XCOLO_MIGRATE_URI="%s"\n' "${FTCTL_PROFILE_XCOLO_MIGRATE_URI}"
+    fi
+  } > "${tmp}"
+  mv -f "${tmp}" "${path}"
+  chmod 0644 "${path}" 2>/dev/null || true
+  ftctl_log_event "profile" "profile.write" "ok" "${vm}" "" \
+    "mode=${FTCTL_PROFILE_MODE} peer=${FTCTL_PROFILE_SECONDARY_URI}"
+}
+
+ftctl_profile_remove_vm() {
+  local vm="${1-}"
+  local path
+  path="$(ftctl_profile_path "${vm}")"
+  rm -f "${path}"
+  ftctl_log_event "profile" "profile.remove" "ok" "${vm}" "" "path=${path}"
+}
+
+ftctl_profile_show_vm() {
+  local vm="${1-}"
+  local json="${2-0}"
+  local path
+  path="$(ftctl_profile_path "${vm}")"
+  [[ -f "${path}" ]] || {
+    if [[ "${json}" == "1" ]]; then
+      printf '{"command":"config.profile-show","result":"not_found","vm":"%s"}\n' "${vm}"
+    else
+      printf '%s: profile not found\n' "${vm}"
+    fi
+    return 1
+  }
+
+  ftctl_profile_load_vm "${vm}"
+  if [[ "${json}" == "1" ]]; then
+    printf '{"command":"config.profile-show","result":"ok","vm":"%s","path":"%s","profile":"%s","mode":"%s","peer_uri":"%s","backend_mode":"%s","target_storage_scope":"%s","secondary_vm_name":"%s","fencing_policy":"%s","secondary_target_dir":"%s","remote_nbd_export_addr":"%s","xcolo_proxy_endpoint":"%s","xcolo_nbd_endpoint":"%s","xcolo_migrate_uri":"%s"}\n' \
+      "${vm}" \
+      "$(ftctl__json_escape "${path}")" \
+      "$(ftctl__json_escape "${FTCTL_PROFILE_NAME}")" \
+      "$(ftctl__json_escape "${FTCTL_PROFILE_MODE}")" \
+      "$(ftctl__json_escape "${FTCTL_PROFILE_SECONDARY_URI}")" \
+      "$(ftctl__json_escape "${FTCTL_PROFILE_BACKEND_MODE}")" \
+      "$(ftctl__json_escape "${FTCTL_PROFILE_TARGET_STORAGE_SCOPE}")" \
+      "$(ftctl__json_escape "${FTCTL_PROFILE_SECONDARY_VM_NAME}")" \
+      "$(ftctl__json_escape "${FTCTL_PROFILE_FENCING_POLICY}")" \
+      "$(ftctl__json_escape "${FTCTL_PROFILE_SECONDARY_TARGET_DIR}")" \
+      "$(ftctl__json_escape "${FTCTL_PROFILE_REMOTE_NBD_EXPORT_ADDR}")" \
+      "$(ftctl__json_escape "${FTCTL_PROFILE_XCOLO_PROXY_ENDPOINT}")" \
+      "$(ftctl__json_escape "${FTCTL_PROFILE_XCOLO_NBD_ENDPOINT}")" \
+      "$(ftctl__json_escape "${FTCTL_PROFILE_XCOLO_MIGRATE_URI}")"
+  else
+    printf '%s profile=%s mode=%s peer_uri=%s backend_mode=%s target_storage_scope=%s secondary_vm_name=%s fencing_policy=%s secondary_target_dir=%s remote_nbd_export_addr=%s xcolo_proxy_endpoint=%s xcolo_nbd_endpoint=%s xcolo_migrate_uri=%s\n' \
+      "${vm}" \
+      "${FTCTL_PROFILE_NAME}" \
+      "${FTCTL_PROFILE_MODE}" \
+      "${FTCTL_PROFILE_SECONDARY_URI}" \
+      "${FTCTL_PROFILE_BACKEND_MODE}" \
+      "${FTCTL_PROFILE_TARGET_STORAGE_SCOPE}" \
+      "${FTCTL_PROFILE_SECONDARY_VM_NAME}" \
+      "${FTCTL_PROFILE_FENCING_POLICY}" \
+      "${FTCTL_PROFILE_SECONDARY_TARGET_DIR}" \
+      "${FTCTL_PROFILE_REMOTE_NBD_EXPORT_ADDR}" \
+      "${FTCTL_PROFILE_XCOLO_PROXY_ENDPOINT}" \
+      "${FTCTL_PROFILE_XCOLO_NBD_ENDPOINT}" \
+      "${FTCTL_PROFILE_XCOLO_MIGRATE_URI}"
+  fi
+}
+
 ftctl_profile_apply_cli() {
   local vm="${1-}"
   local mode="${2-}"

@@ -193,8 +193,8 @@ ftctl_orchestrator_check_vm() {
   result="${probe##* }"
 
   if [[ "${json}" == "1" ]]; then
-    printf '{"vm":"%s","primary_rc":"%s","peer_rc":"%s","result":"%s"}\n' \
-      "${vm}" "${local_rc}" "${peer_rc}" "${result}"
+    printf '{"command":"check","vm":"%s","result":"ok","inventory_result":"%s","primary_rc":%s,"peer_rc":%s}\n' \
+      "${vm}" "${result}" "${local_rc}" "${peer_rc}"
   else
     printf '%s inventory=%s primary_rc=%s peer_rc=%s\n' "${vm}" "${result}" "${local_rc}" "${peer_rc}"
   fi

@@ -135,11 +135,10 @@ ftctl_state_get_elapsed_key_sec() {
   ftctl_elapsed_since_iso "${value}"
 }
 
-ftctl_state_emit_json() {
+ftctl_state_emit_json_fields() {
   local vm="${1-}"
   local path line first="1"
   path="$(ftctl_state_path "${vm}")"
-  printf "{"
   while IFS= read -r line; do
     [[ -n "${line}" ]] || continue
     if [[ "${first}" == "1" ]]; then
@@ -147,9 +146,23 @@ ftctl_state_emit_json() {
     else
       printf ","
     fi
-    printf '"%s":"%s"' "${line%%=*}" "${line#*=}"
+    printf '"%s":"%s"' \
+      "$(ftctl__json_escape "${line%%=*}")" \
+      "$(ftctl__json_escape "${line#*=}")"
   done < "${path}"
-  printf "}\n"
+}
+
+ftctl_state_emit_json_one() {
+  local vm="${1-}"
+  local result="${2-ok}"
+  printf '{"command":"status","result":"%s"' "$(ftctl__json_escape "${result}")"
+  if [[ -f "$(ftctl_state_path "${vm}")" ]]; then
+    printf ","
+    ftctl_state_emit_json_fields "${vm}"
+  else
+    printf ',"vm":"%s"' "$(ftctl__json_escape "${vm}")"
+  fi
+  printf '}\n'
 }
 
 ftctl_state_print_one() {
@@ -159,14 +172,14 @@ ftctl_state_print_one() {
   path="$(ftctl_state_path "${vm}")"
   [[ -f "${path}" ]] || {
     if [[ "${json}" == "1" ]]; then
-      printf '{"vm":"%s","result":"not_found"}\n' "${vm}"
+      ftctl_state_emit_json_one "${vm}" "not_found"
     else
       printf '%s: state not found\n' "${vm}"
     fi
     return 1
   }
   if [[ "${json}" == "1" ]]; then
-    ftctl_state_emit_json "${vm}"
+    ftctl_state_emit_json_one "${vm}" "ok"
   else
     printf '%s mode=%s state=%s transport=%s active=%s admin=%s rearm_count=%s failover_count=%s\n' \
       "${vm}" \
@@ -183,19 +196,33 @@ ftctl_state_print_one() {
 ftctl_state_print_status() {
   local vm="${1-}"
   local json="${2-0}"
-  local f name
+  local f name first count
   if [[ -n "${vm}" ]]; then
     ftctl_state_print_one "${vm}" "${json}"
     return $?
   fi
   shopt -s nullglob
+  if [[ "${json}" == "1" ]]; then
+    first="1"
+    count=0
+    printf '{"command":"status","result":"ok","items":['
+    for f in "${FTCTL_STATE_DIR}"/*.state; do
+      name="$(basename "${f}" .state)"
+      count=$((count + 1))
+      if [[ "${first}" == "1" ]]; then
+        first="0"
+      else
+        printf ','
+      fi
+      ftctl_state_emit_json_one "${name}" "ok" | tr -d '\r\n'
+    done
+    printf '],"count":%s}\n' "${count}"
+    shopt -u nullglob
+    return 0
+  fi
   for f in "${FTCTL_STATE_DIR}"/*.state; do
     name="$(basename "${f}" .state)"
-    if [[ "${json}" == "1" ]]; then
-      ftctl_state_emit_json "${name}"
-    else
-      ftctl_state_print_one "${name}" "0"
-    fi
+    ftctl_state_print_one "${name}" "0"
   done
   shopt -u nullglob
 }
