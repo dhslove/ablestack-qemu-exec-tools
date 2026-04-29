@@ -121,7 +121,7 @@ jobs:
           createrepo_c "$workdir"
           (
             cd release
-            sha256sum ftctl-rpm-rocky9.6/* > SHA256SUMS
+            find ftctl-rpm-rocky9.6 -maxdepth 1 -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
           )
           cat > release/DEV-RELEASE.txt <<EOF
           Release tag: ${{ steps.metadata.outputs.release_tag }}
