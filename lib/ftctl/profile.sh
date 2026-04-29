@@ -34,6 +34,14 @@ FTCTL_PROFILE_FENCING_POLICY=""
 FTCTL_PROFILE_FENCING_SSH_USER=""
 FTCTL_PROFILE_FENCING_IPMI_PRIMARY_HOST=""
 FTCTL_PROFILE_FENCING_IPMI_SECONDARY_HOST=""
+FTCTL_PROFILE_FENCING_IPMI_PRIMARY_PORT=""
+FTCTL_PROFILE_FENCING_IPMI_SECONDARY_PORT=""
+FTCTL_PROFILE_FENCING_IPMI_PRIMARY_USER=""
+FTCTL_PROFILE_FENCING_IPMI_SECONDARY_USER=""
+FTCTL_PROFILE_FENCING_IPMI_PRIMARY_PASSWORD=""
+FTCTL_PROFILE_FENCING_IPMI_SECONDARY_PASSWORD=""
+FTCTL_PROFILE_FENCING_IPMI_PRIMARY_INTERFACE=""
+FTCTL_PROFILE_FENCING_IPMI_SECONDARY_INTERFACE=""
 FTCTL_PROFILE_FENCING_IPMI_USER=""
 FTCTL_PROFILE_FENCING_IPMI_PASSWORD=""
 FTCTL_PROFILE_FENCING_IPMI_INTERFACE=""
@@ -71,6 +79,14 @@ ftctl_profile_reset() {
   FTCTL_PROFILE_FENCING_SSH_USER="${FTCTL_FENCING_SSH_USER}"
   FTCTL_PROFILE_FENCING_IPMI_PRIMARY_HOST=""
   FTCTL_PROFILE_FENCING_IPMI_SECONDARY_HOST=""
+  FTCTL_PROFILE_FENCING_IPMI_PRIMARY_PORT=""
+  FTCTL_PROFILE_FENCING_IPMI_SECONDARY_PORT=""
+  FTCTL_PROFILE_FENCING_IPMI_PRIMARY_USER=""
+  FTCTL_PROFILE_FENCING_IPMI_SECONDARY_USER=""
+  FTCTL_PROFILE_FENCING_IPMI_PRIMARY_PASSWORD=""
+  FTCTL_PROFILE_FENCING_IPMI_SECONDARY_PASSWORD=""
+  FTCTL_PROFILE_FENCING_IPMI_PRIMARY_INTERFACE=""
+  FTCTL_PROFILE_FENCING_IPMI_SECONDARY_INTERFACE=""
   FTCTL_PROFILE_FENCING_IPMI_USER="${FTCTL_FENCING_IPMI_USER}"
   FTCTL_PROFILE_FENCING_IPMI_PASSWORD="${FTCTL_FENCING_IPMI_PASSWORD}"
   FTCTL_PROFILE_FENCING_IPMI_INTERFACE="${FTCTL_FENCING_IPMI_INTERFACE}"
@@ -117,6 +133,14 @@ ftctl_profile_load_vm() {
     FTCTL_PROFILE_FENCING_SSH_USER="${FTCTL_PROFILE_FENCING_SSH_USER:-${FTCTL_FENCING_SSH_USER}}"
     FTCTL_PROFILE_FENCING_IPMI_PRIMARY_HOST="${FTCTL_PROFILE_FENCING_IPMI_PRIMARY_HOST:-}"
     FTCTL_PROFILE_FENCING_IPMI_SECONDARY_HOST="${FTCTL_PROFILE_FENCING_IPMI_SECONDARY_HOST:-}"
+    FTCTL_PROFILE_FENCING_IPMI_PRIMARY_PORT="${FTCTL_PROFILE_FENCING_IPMI_PRIMARY_PORT:-}"
+    FTCTL_PROFILE_FENCING_IPMI_SECONDARY_PORT="${FTCTL_PROFILE_FENCING_IPMI_SECONDARY_PORT:-}"
+    FTCTL_PROFILE_FENCING_IPMI_PRIMARY_USER="${FTCTL_PROFILE_FENCING_IPMI_PRIMARY_USER:-}"
+    FTCTL_PROFILE_FENCING_IPMI_SECONDARY_USER="${FTCTL_PROFILE_FENCING_IPMI_SECONDARY_USER:-}"
+    FTCTL_PROFILE_FENCING_IPMI_PRIMARY_PASSWORD="${FTCTL_PROFILE_FENCING_IPMI_PRIMARY_PASSWORD:-}"
+    FTCTL_PROFILE_FENCING_IPMI_SECONDARY_PASSWORD="${FTCTL_PROFILE_FENCING_IPMI_SECONDARY_PASSWORD:-}"
+    FTCTL_PROFILE_FENCING_IPMI_PRIMARY_INTERFACE="${FTCTL_PROFILE_FENCING_IPMI_PRIMARY_INTERFACE:-}"
+    FTCTL_PROFILE_FENCING_IPMI_SECONDARY_INTERFACE="${FTCTL_PROFILE_FENCING_IPMI_SECONDARY_INTERFACE:-}"
     FTCTL_PROFILE_FENCING_IPMI_USER="${FTCTL_PROFILE_FENCING_IPMI_USER:-${FTCTL_FENCING_IPMI_USER}}"
     FTCTL_PROFILE_FENCING_IPMI_PASSWORD="${FTCTL_PROFILE_FENCING_IPMI_PASSWORD:-${FTCTL_FENCING_IPMI_PASSWORD}}"
     FTCTL_PROFILE_FENCING_IPMI_INTERFACE="${FTCTL_PROFILE_FENCING_IPMI_INTERFACE:-${FTCTL_FENCING_IPMI_INTERFACE}}"
@@ -153,6 +177,14 @@ ftctl_profile_path() {
   echo "${FTCTL_PROFILE_DIR}/${vm}.conf"
 }
 
+ftctl_profile_write_assignment() {
+  local name="${1-}"
+  local value="${2-}"
+  printf '%s=' "${name}"
+  printf '%q' "${value}"
+  printf '\n'
+}
+
 ftctl_profile_write_vm() {
   local vm="${1-}"
   local mode="${2-}"
@@ -167,6 +199,16 @@ ftctl_profile_write_vm() {
   local xcolo_proxy_endpoint="${11-}"
   local xcolo_nbd_endpoint="${12-}"
   local xcolo_migrate_uri="${13-}"
+  local fencing_ipmi_primary_host="${14-}"
+  local fencing_ipmi_primary_port="${15-}"
+  local fencing_ipmi_primary_user="${16-}"
+  local fencing_ipmi_primary_password="${17-}"
+  local fencing_ipmi_primary_interface="${18-}"
+  local fencing_ipmi_secondary_host="${19-}"
+  local fencing_ipmi_secondary_port="${20-}"
+  local fencing_ipmi_secondary_user="${21-}"
+  local fencing_ipmi_secondary_password="${22-}"
+  local fencing_ipmi_secondary_interface="${23-}"
   local path tmp
 
   [[ -n "${vm}" ]] || {
@@ -195,6 +237,16 @@ ftctl_profile_write_vm() {
   [[ -n "${xcolo_proxy_endpoint}" ]] && FTCTL_PROFILE_XCOLO_PROXY_ENDPOINT="${xcolo_proxy_endpoint}"
   [[ -n "${xcolo_nbd_endpoint}" ]] && FTCTL_PROFILE_XCOLO_NBD_ENDPOINT="${xcolo_nbd_endpoint}"
   [[ -n "${xcolo_migrate_uri}" ]] && FTCTL_PROFILE_XCOLO_MIGRATE_URI="${xcolo_migrate_uri}"
+  [[ -n "${fencing_ipmi_primary_host}" ]] && FTCTL_PROFILE_FENCING_IPMI_PRIMARY_HOST="${fencing_ipmi_primary_host}"
+  [[ -n "${fencing_ipmi_primary_port}" ]] && FTCTL_PROFILE_FENCING_IPMI_PRIMARY_PORT="${fencing_ipmi_primary_port}"
+  [[ -n "${fencing_ipmi_primary_user}" ]] && FTCTL_PROFILE_FENCING_IPMI_PRIMARY_USER="${fencing_ipmi_primary_user}"
+  [[ -n "${fencing_ipmi_primary_password}" ]] && FTCTL_PROFILE_FENCING_IPMI_PRIMARY_PASSWORD="${fencing_ipmi_primary_password}"
+  [[ -n "${fencing_ipmi_primary_interface}" ]] && FTCTL_PROFILE_FENCING_IPMI_PRIMARY_INTERFACE="${fencing_ipmi_primary_interface}"
+  [[ -n "${fencing_ipmi_secondary_host}" ]] && FTCTL_PROFILE_FENCING_IPMI_SECONDARY_HOST="${fencing_ipmi_secondary_host}"
+  [[ -n "${fencing_ipmi_secondary_port}" ]] && FTCTL_PROFILE_FENCING_IPMI_SECONDARY_PORT="${fencing_ipmi_secondary_port}"
+  [[ -n "${fencing_ipmi_secondary_user}" ]] && FTCTL_PROFILE_FENCING_IPMI_SECONDARY_USER="${fencing_ipmi_secondary_user}"
+  [[ -n "${fencing_ipmi_secondary_password}" ]] && FTCTL_PROFILE_FENCING_IPMI_SECONDARY_PASSWORD="${fencing_ipmi_secondary_password}"
+  [[ -n "${fencing_ipmi_secondary_interface}" ]] && FTCTL_PROFILE_FENCING_IPMI_SECONDARY_INTERFACE="${fencing_ipmi_secondary_interface}"
   ftctl_profile_validate "${vm}" || return $?
 
   path="$(ftctl_profile_path "${vm}")"
@@ -216,6 +268,36 @@ ftctl_profile_write_vm() {
     if [[ -n "${fencing_policy}" ]]; then
       printf 'FTCTL_PROFILE_FENCING_POLICY="%s"\n' "${FTCTL_PROFILE_FENCING_POLICY}"
     fi
+    if [[ -n "${fencing_ipmi_primary_host}" ]]; then
+      ftctl_profile_write_assignment "FTCTL_PROFILE_FENCING_IPMI_PRIMARY_HOST" "${FTCTL_PROFILE_FENCING_IPMI_PRIMARY_HOST}"
+    fi
+    if [[ -n "${fencing_ipmi_primary_port}" ]]; then
+      ftctl_profile_write_assignment "FTCTL_PROFILE_FENCING_IPMI_PRIMARY_PORT" "${FTCTL_PROFILE_FENCING_IPMI_PRIMARY_PORT}"
+    fi
+    if [[ -n "${fencing_ipmi_primary_user}" ]]; then
+      ftctl_profile_write_assignment "FTCTL_PROFILE_FENCING_IPMI_PRIMARY_USER" "${FTCTL_PROFILE_FENCING_IPMI_PRIMARY_USER}"
+    fi
+    if [[ -n "${fencing_ipmi_primary_password}" ]]; then
+      ftctl_profile_write_assignment "FTCTL_PROFILE_FENCING_IPMI_PRIMARY_PASSWORD" "${FTCTL_PROFILE_FENCING_IPMI_PRIMARY_PASSWORD}"
+    fi
+    if [[ -n "${fencing_ipmi_primary_interface}" ]]; then
+      ftctl_profile_write_assignment "FTCTL_PROFILE_FENCING_IPMI_PRIMARY_INTERFACE" "${FTCTL_PROFILE_FENCING_IPMI_PRIMARY_INTERFACE}"
+    fi
+    if [[ -n "${fencing_ipmi_secondary_host}" ]]; then
+      ftctl_profile_write_assignment "FTCTL_PROFILE_FENCING_IPMI_SECONDARY_HOST" "${FTCTL_PROFILE_FENCING_IPMI_SECONDARY_HOST}"
+    fi
+    if [[ -n "${fencing_ipmi_secondary_port}" ]]; then
+      ftctl_profile_write_assignment "FTCTL_PROFILE_FENCING_IPMI_SECONDARY_PORT" "${FTCTL_PROFILE_FENCING_IPMI_SECONDARY_PORT}"
+    fi
+    if [[ -n "${fencing_ipmi_secondary_user}" ]]; then
+      ftctl_profile_write_assignment "FTCTL_PROFILE_FENCING_IPMI_SECONDARY_USER" "${FTCTL_PROFILE_FENCING_IPMI_SECONDARY_USER}"
+    fi
+    if [[ -n "${fencing_ipmi_secondary_password}" ]]; then
+      ftctl_profile_write_assignment "FTCTL_PROFILE_FENCING_IPMI_SECONDARY_PASSWORD" "${FTCTL_PROFILE_FENCING_IPMI_SECONDARY_PASSWORD}"
+    fi
+    if [[ -n "${fencing_ipmi_secondary_interface}" ]]; then
+      ftctl_profile_write_assignment "FTCTL_PROFILE_FENCING_IPMI_SECONDARY_INTERFACE" "${FTCTL_PROFILE_FENCING_IPMI_SECONDARY_INTERFACE}"
+    fi
     if [[ -n "${secondary_target_dir}" ]]; then
       printf 'FTCTL_PROFILE_SECONDARY_TARGET_DIR="%s"\n' "${FTCTL_PROFILE_SECONDARY_TARGET_DIR}"
     fi
@@ -233,7 +315,7 @@ ftctl_profile_write_vm() {
     fi
   } > "${tmp}"
   mv -f "${tmp}" "${path}"
-  chmod 0644 "${path}" 2>/dev/null || true
+  chmod 0600 "${path}" 2>/dev/null || true
   ftctl_log_event "profile" "profile.write" "ok" "${vm}" "" \
     "mode=${FTCTL_PROFILE_MODE} peer=${FTCTL_PROFILE_SECONDARY_URI}"
 }
@@ -441,9 +523,24 @@ ftctl_profile_validate() {
     ipmi)
       ftctl_profile__validate_nonempty "FTCTL_PROFILE_FENCING_IPMI_PRIMARY_HOST" "${FTCTL_PROFILE_FENCING_IPMI_PRIMARY_HOST}" || return 2
       ftctl_profile__validate_nonempty "FTCTL_PROFILE_FENCING_IPMI_SECONDARY_HOST" "${FTCTL_PROFILE_FENCING_IPMI_SECONDARY_HOST}" || return 2
-      ftctl_profile__validate_nonempty "FTCTL_PROFILE_FENCING_IPMI_USER" "${FTCTL_PROFILE_FENCING_IPMI_USER}" || return 2
-      ftctl_profile__validate_nonempty "FTCTL_PROFILE_FENCING_IPMI_PASSWORD" "${FTCTL_PROFILE_FENCING_IPMI_PASSWORD}" || return 2
-      ftctl_profile__validate_nonempty "FTCTL_PROFILE_FENCING_IPMI_INTERFACE" "${FTCTL_PROFILE_FENCING_IPMI_INTERFACE}" || return 2
+      ftctl_profile__validate_nonempty "FTCTL_PROFILE_FENCING_IPMI_PRIMARY_USER" "${FTCTL_PROFILE_FENCING_IPMI_PRIMARY_USER:-${FTCTL_PROFILE_FENCING_IPMI_USER}}" || return 2
+      ftctl_profile__validate_nonempty "FTCTL_PROFILE_FENCING_IPMI_PRIMARY_PASSWORD" "${FTCTL_PROFILE_FENCING_IPMI_PRIMARY_PASSWORD:-${FTCTL_PROFILE_FENCING_IPMI_PASSWORD}}" || return 2
+      ftctl_profile__validate_nonempty "FTCTL_PROFILE_FENCING_IPMI_PRIMARY_INTERFACE" "${FTCTL_PROFILE_FENCING_IPMI_PRIMARY_INTERFACE:-${FTCTL_PROFILE_FENCING_IPMI_INTERFACE}}" || return 2
+      ftctl_profile__validate_nonempty "FTCTL_PROFILE_FENCING_IPMI_SECONDARY_USER" "${FTCTL_PROFILE_FENCING_IPMI_SECONDARY_USER:-${FTCTL_PROFILE_FENCING_IPMI_USER}}" || return 2
+      ftctl_profile__validate_nonempty "FTCTL_PROFILE_FENCING_IPMI_SECONDARY_PASSWORD" "${FTCTL_PROFILE_FENCING_IPMI_SECONDARY_PASSWORD:-${FTCTL_PROFILE_FENCING_IPMI_PASSWORD}}" || return 2
+      ftctl_profile__validate_nonempty "FTCTL_PROFILE_FENCING_IPMI_SECONDARY_INTERFACE" "${FTCTL_PROFILE_FENCING_IPMI_SECONDARY_INTERFACE:-${FTCTL_PROFILE_FENCING_IPMI_INTERFACE}}" || return 2
+      if [[ -n "${FTCTL_PROFILE_FENCING_IPMI_PRIMARY_PORT}" ]]; then
+        ftctl_profile__is_uint "${FTCTL_PROFILE_FENCING_IPMI_PRIMARY_PORT}" || {
+          echo "ERROR: FTCTL_PROFILE_FENCING_IPMI_PRIMARY_PORT must be an unsigned integer" >&2
+          return 2
+        }
+      fi
+      if [[ -n "${FTCTL_PROFILE_FENCING_IPMI_SECONDARY_PORT}" ]]; then
+        ftctl_profile__is_uint "${FTCTL_PROFILE_FENCING_IPMI_SECONDARY_PORT}" || {
+          echo "ERROR: FTCTL_PROFILE_FENCING_IPMI_SECONDARY_PORT must be an unsigned integer" >&2
+          return 2
+        }
+      fi
       ;;
   esac
 

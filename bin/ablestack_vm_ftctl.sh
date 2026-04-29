@@ -54,6 +54,16 @@ CLI_BACKEND_MODE=""
 CLI_TARGET_STORAGE_SCOPE=""
 CLI_SECONDARY_VM_NAME=""
 CLI_FENCING_POLICY=""
+CLI_FENCING_IPMI_PRIMARY_HOST=""
+CLI_FENCING_IPMI_PRIMARY_PORT=""
+CLI_FENCING_IPMI_PRIMARY_USER=""
+CLI_FENCING_IPMI_PRIMARY_PASSWORD=""
+CLI_FENCING_IPMI_PRIMARY_INTERFACE=""
+CLI_FENCING_IPMI_SECONDARY_HOST=""
+CLI_FENCING_IPMI_SECONDARY_PORT=""
+CLI_FENCING_IPMI_SECONDARY_USER=""
+CLI_FENCING_IPMI_SECONDARY_PASSWORD=""
+CLI_FENCING_IPMI_SECONDARY_INTERFACE=""
 CLI_SECONDARY_TARGET_DIR=""
 CLI_REMOTE_NBD_EXPORT_ADDR=""
 CLI_XCOLO_PROXY_ENDPOINT=""
@@ -199,6 +209,12 @@ Config actions:
   ablestack_vm_ftctl config profile-upsert --vm <name> --mode <ha|dr|ft> --peer <uri> \
     [--profile <name>] [--backend-mode <mode>] [--target-storage-scope <scope>] \
     [--secondary-vm-name <name>] [--fencing-policy <policy>] \
+    [--fencing-ipmi-primary-host <addr>] [--fencing-ipmi-primary-port <port>] \
+    [--fencing-ipmi-primary-user <user>] [--fencing-ipmi-primary-password <password>] \
+    [--fencing-ipmi-primary-interface <interface>] \
+    [--fencing-ipmi-secondary-host <addr>] [--fencing-ipmi-secondary-port <port>] \
+    [--fencing-ipmi-secondary-user <user>] [--fencing-ipmi-secondary-password <password>] \
+    [--fencing-ipmi-secondary-interface <interface>] \
     [--secondary-target-dir <dir>] [--remote-nbd-export-addr <addr>] \
     [--xcolo-proxy-endpoint <endpoint>] [--xcolo-nbd-endpoint <endpoint>] \
     [--xcolo-migrate-uri <uri>]
@@ -325,6 +341,46 @@ parse_args() {
         ;;
       --fencing-policy)
         CLI_FENCING_POLICY="${2-}"
+        shift 2
+        ;;
+      --fencing-ipmi-primary-host)
+        CLI_FENCING_IPMI_PRIMARY_HOST="${2-}"
+        shift 2
+        ;;
+      --fencing-ipmi-primary-port)
+        CLI_FENCING_IPMI_PRIMARY_PORT="${2-}"
+        shift 2
+        ;;
+      --fencing-ipmi-primary-user)
+        CLI_FENCING_IPMI_PRIMARY_USER="${2-}"
+        shift 2
+        ;;
+      --fencing-ipmi-primary-password)
+        CLI_FENCING_IPMI_PRIMARY_PASSWORD="${2-}"
+        shift 2
+        ;;
+      --fencing-ipmi-primary-interface)
+        CLI_FENCING_IPMI_PRIMARY_INTERFACE="${2-}"
+        shift 2
+        ;;
+      --fencing-ipmi-secondary-host)
+        CLI_FENCING_IPMI_SECONDARY_HOST="${2-}"
+        shift 2
+        ;;
+      --fencing-ipmi-secondary-port)
+        CLI_FENCING_IPMI_SECONDARY_PORT="${2-}"
+        shift 2
+        ;;
+      --fencing-ipmi-secondary-user)
+        CLI_FENCING_IPMI_SECONDARY_USER="${2-}"
+        shift 2
+        ;;
+      --fencing-ipmi-secondary-password)
+        CLI_FENCING_IPMI_SECONDARY_PASSWORD="${2-}"
+        shift 2
+        ;;
+      --fencing-ipmi-secondary-interface)
+        CLI_FENCING_IPMI_SECONDARY_INTERFACE="${2-}"
         shift 2
         ;;
       --secondary-target-dir)
@@ -468,7 +524,11 @@ dispatch() {
           ftctl_profile_write_vm "${CLI_VM}" "${CLI_MODE}" "${CLI_PEER}" "${CLI_PROFILE}" \
             "${CLI_BACKEND_MODE}" "${CLI_TARGET_STORAGE_SCOPE}" "${CLI_SECONDARY_VM_NAME}" "${CLI_FENCING_POLICY}" \
             "${CLI_SECONDARY_TARGET_DIR}" "${CLI_REMOTE_NBD_EXPORT_ADDR}" \
-            "${CLI_XCOLO_PROXY_ENDPOINT}" "${CLI_XCOLO_NBD_ENDPOINT}" "${CLI_XCOLO_MIGRATE_URI}"
+            "${CLI_XCOLO_PROXY_ENDPOINT}" "${CLI_XCOLO_NBD_ENDPOINT}" "${CLI_XCOLO_MIGRATE_URI}" \
+            "${CLI_FENCING_IPMI_PRIMARY_HOST}" "${CLI_FENCING_IPMI_PRIMARY_PORT}" \
+            "${CLI_FENCING_IPMI_PRIMARY_USER}" "${CLI_FENCING_IPMI_PRIMARY_PASSWORD}" "${CLI_FENCING_IPMI_PRIMARY_INTERFACE}" \
+            "${CLI_FENCING_IPMI_SECONDARY_HOST}" "${CLI_FENCING_IPMI_SECONDARY_PORT}" \
+            "${CLI_FENCING_IPMI_SECONDARY_USER}" "${CLI_FENCING_IPMI_SECONDARY_PASSWORD}" "${CLI_FENCING_IPMI_SECONDARY_INTERFACE}"
           ftctl_profile_show_vm "${CLI_VM}" "${CLI_JSON}"
           ;;
         profile-remove)
