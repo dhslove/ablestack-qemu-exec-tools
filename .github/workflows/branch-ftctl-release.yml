@@ -62,7 +62,7 @@ jobs:
           fi
 
           . ./VERSION
-          source_commit_sha=$(git rev-parse HEAD)
+          source_commit_sha="${GITHUB_SHA}"
           release_tag="dev-branch-${ref_slug}-ftctl-latest"
           release_name="FTCTL Branch Dev ${ref_slug} Latest"
 
