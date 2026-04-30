@@ -50,6 +50,7 @@ CLI_LIBVIRT_URI=""
 CLI_BLOCKCOPY_IP=""
 CLI_XCOLO_CONTROL_IP=""
 CLI_XCOLO_DATA_IP=""
+CLI_DISK_MAP=""
 CLI_BACKEND_MODE=""
 CLI_TARGET_STORAGE_SCOPE=""
 CLI_SECONDARY_VM_NAME=""
@@ -207,7 +208,7 @@ Config actions:
   ablestack_vm_ftctl config host-remove --host-id <id>
   ablestack_vm_ftctl config host-list [--json]
   ablestack_vm_ftctl config profile-upsert --vm <name> --mode <ha|dr|ft> --peer <uri> \
-    [--profile <name>] [--backend-mode <mode>] [--target-storage-scope <scope>] \
+    [--profile <name>] [--disk-map <map>] [--backend-mode <mode>] [--target-storage-scope <scope>] \
     [--secondary-vm-name <name>] [--fencing-policy <policy>] \
     [--fencing-ipmi-primary-host <addr>] [--fencing-ipmi-primary-port <port>] \
     [--fencing-ipmi-primary-user <user>] [--fencing-ipmi-primary-password <password>] \
@@ -329,6 +330,10 @@ parse_args() {
         ;;
       --backend-mode)
         CLI_BACKEND_MODE="${2-}"
+        shift 2
+        ;;
+      --disk-map)
+        CLI_DISK_MAP="${2-}"
         shift 2
         ;;
       --target-storage-scope)
@@ -522,7 +527,7 @@ dispatch() {
             exit "${EXIT_USAGE}"
           }
           ftctl_profile_write_vm "${CLI_VM}" "${CLI_MODE}" "${CLI_PEER}" "${CLI_PROFILE}" \
-            "${CLI_BACKEND_MODE}" "${CLI_TARGET_STORAGE_SCOPE}" "${CLI_SECONDARY_VM_NAME}" "${CLI_FENCING_POLICY}" \
+            "${CLI_DISK_MAP}" "${CLI_BACKEND_MODE}" "${CLI_TARGET_STORAGE_SCOPE}" "${CLI_SECONDARY_VM_NAME}" "${CLI_FENCING_POLICY}" \
             "${CLI_SECONDARY_TARGET_DIR}" "${CLI_REMOTE_NBD_EXPORT_ADDR}" \
             "${CLI_XCOLO_PROXY_ENDPOINT}" "${CLI_XCOLO_NBD_ENDPOINT}" "${CLI_XCOLO_MIGRATE_URI}" \
             "${CLI_FENCING_IPMI_PRIMARY_HOST}" "${CLI_FENCING_IPMI_PRIMARY_PORT}" \
