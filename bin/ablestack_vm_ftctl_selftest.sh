@@ -212,6 +212,71 @@ EOF
   selftest_assert_eq "$(ftctl_state_get "${vm}" "active_side")" "secondary" "standby activate side"
 }
 
+selftest_case_libvirt_managed_peer_krbd_map() (
+  selftest_reset_env
+  selftest_info "libvirt-managed peer krbd map"
+
+  local vm="krbd-standby"
+  local bundle="${SELFTEST_ROOT}/xml/${vm}"
+  local call_log="${SELFTEST_ROOT}/peer-map-calls.log"
+  FTCTL_DRY_RUN="0"
+  FTCTL_PROFILE_MODE="ha"
+  FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
+  FTCTL_PROFILE_SECONDARY_URI="qemu+ssh://peer/system"
+  FTCTL_PROFILE_PROVISIONING_BACKEND="libvirt-managed"
+  FTCTL_PROFILE_SECONDARY_VM_NAME="${vm}-standby"
+  FTCTL_PROFILE_FENCING_SSH_USER="root"
+  ftctl_state_init_vm "${vm}"
+  mkdir -p "${bundle}"
+
+  cat > "${bundle}/standby.xml" <<EOF
+<domain type='kvm'>
+  <name>${vm}</name>
+  <devices>
+    <disk type='file' device='disk'>
+      <source file='/var/lib/libvirt/images/${vm}.qcow2'/>
+      <target dev='vda' bus='virtio'/>
+    </disk>
+  </devices>
+</domain>
+EOF
+
+  ftctl_state_set "${vm}" \
+    "standby_xml_seed=${bundle}/standby.xml" \
+    "primary_persistence=no"
+  cat > "$(ftctl_blockcopy_state_path "${vm}")" <<EOF
+vda|/dev/rbd/rbd/${vm}-source|/dev/rbd/rbd/${vm}-mirror|raw|copy|yes
+EOF
+
+  ftctl_standby_prepare "${vm}"
+
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_remote_target_host_user() {
+    printf -v "$1" '%s' "peer"
+    printf -v "$2" '%s' "root"
+  }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_remote_exec() {
+    printf 'REMOTE:%s:%s:%s\n' "$1" "$2" "$6" >> "${call_log}"
+    printf -v "$3" '%s' ""
+    printf -v "$4" '%s' ""
+    printf -v "$5" '%s' "0"
+  }
+  # shellcheck disable=SC2317
+  ftctl_virsh() {
+    printf 'VIRSH:%s\n' "$*" >> "${call_log}"
+    printf -v "$2" '%s' ""
+    printf -v "$3" '%s' ""
+    printf -v "$4" '%s' "0"
+  }
+
+  ftctl_standby_activate "${vm}"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "standby_state")" "running" "libvirt-managed standby activate"
+  selftest_assert_file_contains "${call_log}" "rbd map"
+  selftest_assert_file_contains "${call_log}" "/dev/rbd/rbd/${vm}-mirror"
+  selftest_assert_file_contains "${call_log}" "VIRSH:"
+)
+
 selftest_case_backend_validation() {
   selftest_reset_env
   selftest_info "backend mode validation"
@@ -280,6 +345,53 @@ EOF
   (( chosen_port >= FTCTL_REMOTE_NBD_PORT_BASE && chosen_port < FTCTL_REMOTE_NBD_PORT_BASE + FTCTL_REMOTE_NBD_PORT_COUNT )) || \
     selftest_fail "remote-nbd port out of range"
 }
+
+selftest_case_blockcopy_missing_job_state() (
+  selftest_reset_env
+  selftest_info "blockcopy missing job state"
+
+  local vm="missing-job-vm"
+  FTCTL_PROFILE_MODE="ha"
+  FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
+  FTCTL_PROFILE_SECONDARY_URI="qemu+ssh://peer/system"
+  FTCTL_PROFILE_BACKEND_MODE="shared-blockcopy"
+  FTCTL_PROFILE_TARGET_STORAGE_SCOPE="shared"
+  FTCTL_PROFILE_DISK_MAP="vda=/dev/rbd/rbd/${vm}-mirror"
+  ftctl_state_init_vm "${vm}"
+  ftctl_state_set "${vm}" \
+    "protection_state=protected" \
+    "transport_state=mirroring" \
+    "active_side=primary" \
+    "last_error="
+  cat > "$(ftctl_blockcopy_state_path "${vm}")" <<EOF
+vda|/dev/rbd/rbd/${vm}-source|/dev/rbd/rbd/${vm}-mirror|raw|copy|no
+EOF
+
+  # shellcheck disable=SC2317
+  ftctl_inventory_collect_vm_disks() {
+    local -n _out_array="$2"
+    _out_array=("vda|/dev/rbd/rbd/${vm}-source|raw")
+  }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_job_query() {
+    printf -v "$3" '%s' "unknown"
+    printf -v "$4" '%s' "unknown"
+    return 4
+  }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_runtime_mirror_query() {
+    printf -v "$3" '%s' "none"
+    printf -v "$4" '%s' "unknown"
+    return 1
+  }
+
+  if ftctl_blockcopy_refresh_vm_jobs "${vm}"; then
+    selftest_fail "missing blockjob should fail refresh"
+  fi
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "protection_state")" "error" "missing blockjob protection state"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "transport_state")" "failed" "missing blockjob transport state"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" "blockcopy_job_missing:vda" "missing blockjob last_error"
+)
 
 selftest_case_reconcile_and_fencing() {
   selftest_reset_env
@@ -482,7 +594,9 @@ selftest_main() {
   selftest_run_lint
   selftest_case_cluster_cli
   selftest_case_blockcopy_and_standby
+  selftest_case_libvirt_managed_peer_krbd_map
   selftest_case_backend_validation
+  selftest_case_blockcopy_missing_job_state
   selftest_case_reconcile_and_fencing
   selftest_case_xcolo_and_xml
   selftest_case_json_and_locking

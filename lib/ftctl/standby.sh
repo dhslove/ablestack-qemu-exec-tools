@@ -164,6 +164,105 @@ tree.write(xml_path, encoding="unicode")
 PY
 }
 
+ftctl_standby_krbd_paths() {
+  local vm="${1-}"
+  local out_array_name="${2}"
+  local records=()
+  local -n _out_array="${out_array_name}"
+  local record target source dest format job_state ready secondary_dest path existing
+
+  _out_array=()
+  ftctl_standby_blockcopy_records "${vm}" records || return 0
+  for record in "${records[@]}"; do
+    target="${record%%|*}"
+    record="${record#*|}"
+    source="${record%%|*}"
+    record="${record#*|}"
+    dest="${record%%|*}"
+    record="${record#*|}"
+    format="${record%%|*}"
+    record="${record#*|}"
+    job_state="${record%%|*}"
+    record="${record#*|}"
+    if [[ "${record}" == *"|"* ]]; then
+      ready="${record%%|*}"
+      secondary_dest="${record##*|}"
+    else
+      ready="${record}"
+      secondary_dest=""
+    fi
+    : "${target}${source}${format}${job_state}${ready}"
+    [[ -n "${secondary_dest}" ]] && dest="${secondary_dest}"
+    [[ "${dest}" == /dev/rbd/* ]] || continue
+    existing="0"
+    for path in "${_out_array[@]}"; do
+      if [[ "${path}" == "${dest}" ]]; then
+        existing="1"
+        break
+      fi
+    done
+    [[ "${existing}" == "1" ]] || _out_array+=("${dest}")
+  done
+}
+
+ftctl_standby_map_remote_krbd_path() {
+  local host="${1-}"
+  local user="${2-}"
+  local path="${3-}"
+  local spec q_path q_spec remote_cmd out err rc
+
+  ftctl_blockcopy_krbd_spec_from_path "${path}" spec || return 1
+  printf -v q_path '%q' "${path}"
+  printf -v q_spec '%q' "${spec}"
+  remote_cmd=$(cat <<EOF
+set -euo pipefail
+path=${q_path}
+spec=${q_spec}
+if [[ -b "\${path}" ]]; then
+  exit 0
+fi
+command -v rbd >/dev/null 2>&1
+rbd map "\${spec}" >/dev/null
+udevadm settle >/dev/null 2>&1 || true
+[[ -b "\${path}" ]]
+EOF
+)
+  out=""
+  err=""
+  rc=0
+  ftctl_blockcopy_remote_exec "${host}" "${user}" out err rc "${remote_cmd}" || true
+  : "${out}"
+  if [[ "${rc}" != "0" ]]; then
+    echo "ERROR: peer rbd map failed for ${path}: ${err}" >&2
+    return "${rc}"
+  fi
+}
+
+ftctl_standby_map_peer_krbd_paths() {
+  local vm="${1-}"
+  local paths=()
+  local path host user
+
+  [[ "${FTCTL_PROFILE_PROVISIONING_BACKEND:-libvirt-managed}" != "cloud-managed" ]] || return 0
+  ftctl_standby_krbd_paths "${vm}" paths
+  ((${#paths[@]} > 0)) || return 0
+
+  if ftctl_blockcopy_secondary_uri_is_local_system; then
+    for path in "${paths[@]}"; do
+      ftctl_blockcopy_krbd_map_local "${path}" || return $?
+    done
+  else
+    host=""
+    user=""
+    ftctl_blockcopy_remote_target_host_user host user || return $?
+    for path in "${paths[@]}"; do
+      ftctl_standby_map_remote_krbd_path "${host}" "${user}" "${path}" || return $?
+    done
+  fi
+  ftctl_log_event "standby" "standby.rbd-map" "ok" "${vm}" "" \
+    "count=${#paths[@]} secondary_uri=${FTCTL_PROFILE_SECONDARY_URI}"
+}
+
 ftctl_xml_apply_qemu_commandline() {
   local xml_path="${1-}"
   local args_string="${2-}"
@@ -489,6 +588,15 @@ ftctl_standby_activate() {
       return 1
     }
   fi
+
+  ftctl_standby_map_peer_krbd_paths "${vm}" || {
+    ftctl_state_set "${vm}" \
+      "standby_state=activate-failed" \
+      "last_error=standby_rbd_map_failed"
+    ftctl_log_event "standby" "standby.rbd-map" "fail" "${vm}" "" \
+      "secondary_uri=${FTCTL_PROFILE_SECONDARY_URI}"
+    return 1
+  }
 
   out=""
   err=""

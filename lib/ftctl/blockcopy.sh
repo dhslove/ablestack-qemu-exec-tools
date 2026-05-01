@@ -1468,6 +1468,7 @@ ftctl_blockcopy_refresh_vm_jobs() {
   local records=()
   local all_ready="1"
   local rc_any=0
+  local missing_targets=""
 
   ftctl_inventory_collect_vm_disks "${vm}" disks || return $?
 
@@ -1512,12 +1513,21 @@ ftctl_blockcopy_refresh_vm_jobs() {
             ready="no"
           else
             rc_any=1
+            job_state="missing"
+            ready="no"
+            missing_targets="${missing_targets}${missing_targets:+,}${target}"
           fi
         else
           rc_any=1
+          job_state="missing"
+          ready="no"
+          missing_targets="${missing_targets}${missing_targets:+,}${target}"
         fi
       else
         rc_any=1
+        job_state="missing"
+        ready="no"
+        missing_targets="${missing_targets}${missing_targets:+,}${target}"
       fi
     fi
     [[ "${ready}" == "yes" ]] || all_ready="0"
@@ -1532,6 +1542,14 @@ ftctl_blockcopy_refresh_vm_jobs() {
       "transport_state=mirroring" \
       "last_sync_ts=$(ftctl_now_iso8601)" \
       "last_error="
+  elif [[ -n "${missing_targets}" ]]; then
+    ftctl_state_set "${vm}" \
+      "protection_state=error" \
+      "transport_state=failed" \
+      "last_sync_ts=$(ftctl_now_iso8601)" \
+      "last_error=blockcopy_job_missing:${missing_targets}"
+    ftctl_log_event "mirror" "blockcopy.refresh" "fail" "${vm}" "" \
+      "missing_targets=${missing_targets}"
   else
     ftctl_state_set "${vm}" \
       "protection_state=syncing" \
@@ -1713,7 +1731,7 @@ xml=${remote_xml}"
   done
 
   ftctl_blockcopy_state_write "${vm}" "${records[@]}"
-  ftctl_blockcopy_refresh_vm_jobs "${vm}" || true
+  ftctl_blockcopy_refresh_vm_jobs "${vm}" || return $?
   if [[ "${FTCTL_PROFILE_MODE}" == "dr" && "${FTCTL_EXPERIMENT_DR_DEFER_STANDBY_PREPARE:-0}" == "1" ]]; then
     ftctl_log_event "standby" "standby.prepare" "skip" "${vm}" "" "reason=dr_experiment_defer"
   else
@@ -2153,6 +2171,7 @@ EOF
 ftctl_blockcopy_refresh_and_classify() {
   local vm="${1-}"
   local rc=0
+  local last_error=""
   ftctl_blockcopy_refresh_vm_jobs "${vm}" || rc=$?
   case "${rc}" in
     0)
@@ -2162,6 +2181,10 @@ ftctl_blockcopy_refresh_and_classify() {
       return 11
       ;;
     *)
+      last_error="$(ftctl_state_get "${vm}" "last_error" 2>/dev/null || true)"
+      if [[ "${last_error}" == blockcopy_job_missing:* ]]; then
+        return 12
+      fi
       ftctl_state_set "${vm}" \
         "protection_state=degraded" \
         "transport_state=lost" \
