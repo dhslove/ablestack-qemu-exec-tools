@@ -27,17 +27,36 @@ ftctl_inventory_probe_uri_vm() {
   return "${rc}"
 }
 
+ftctl_inventory_peer_missing_is_expected() {
+  local vm="${1-}"
+  local standby_state
+  [[ "${FTCTL_PROFILE_PROVISIONING_BACKEND:-libvirt-managed}" == "cloud-managed" ]] || return 1
+  standby_state="$(ftctl_state_get "${vm}" "standby_state" 2>/dev/null || true)"
+  case "${standby_state}" in
+    prepared-transient|stopped|stopped-dry-run)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
 ftctl_inventory_check_vm() {
   local vm="${1-}"
-  local local_rc peer_rc result
+  local local_rc peer_rc result peer_domain_expected standby_domain_state
   local_rc=0
   peer_rc=0
+  peer_domain_expected="true"
+  standby_domain_state=""
 
   ftctl_inventory_probe_uri_vm "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" || local_rc=$?
   ftctl_inventory_probe_uri_vm "${FTCTL_PROFILE_SECONDARY_URI}" "${vm}" || peer_rc=$?
 
   if [[ "${local_rc}" == "0" && "${peer_rc}" == "0" ]]; then
     result="ok"
+  elif [[ "${local_rc}" == "0" ]] && ftctl_inventory_peer_missing_is_expected "${vm}"; then
+    result="ok"
+    peer_domain_expected="false"
+    standby_domain_state="not-defined-expected"
   elif [[ "${local_rc}" == "0" ]]; then
     result="warn"
   else
@@ -45,7 +64,7 @@ ftctl_inventory_check_vm() {
   fi
 
   ftctl_log_event "inventory" "inventory.check" "${result}" "${vm}" "" \
-    "primary_rc=${local_rc} peer_rc=${peer_rc} peer_uri=${FTCTL_PROFILE_SECONDARY_URI}"
+    "primary_rc=${local_rc} peer_rc=${peer_rc} peer_uri=${FTCTL_PROFILE_SECONDARY_URI} peer_domain_expected=${peer_domain_expected} standby_domain_state=${standby_domain_state}"
 
   printf '%s %s %s\n' "${local_rc}" "${peer_rc}" "${result}"
 }

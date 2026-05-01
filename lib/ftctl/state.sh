@@ -58,6 +58,8 @@ ftctl_state_init_vm() {
     "vm=${vm}" \
     "mode=${FTCTL_PROFILE_MODE}" \
     "profile=${FTCTL_PROFILE_NAME}" \
+    "provisioning_backend=${FTCTL_PROFILE_PROVISIONING_BACKEND}" \
+    "provisioning_state=${FTCTL_PROFILE_PROVISIONING_STATE}" \
     "primary_uri=${FTCTL_PROFILE_PRIMARY_URI}" \
     "secondary_uri=${FTCTL_PROFILE_SECONDARY_URI}" \
     "active_side=primary" \

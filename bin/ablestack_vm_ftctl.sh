@@ -52,6 +52,8 @@ CLI_XCOLO_CONTROL_IP=""
 CLI_XCOLO_DATA_IP=""
 CLI_DISK_MAP=""
 CLI_BACKEND_MODE=""
+CLI_PROVISIONING_BACKEND=""
+CLI_PROVISIONING_STATE=""
 CLI_TARGET_STORAGE_SCOPE=""
 CLI_SECONDARY_VM_NAME=""
 CLI_FENCING_POLICY=""
@@ -332,6 +334,14 @@ parse_args() {
         CLI_BACKEND_MODE="${2-}"
         shift 2
         ;;
+      --provisioning-backend)
+        CLI_PROVISIONING_BACKEND="${2-}"
+        shift 2
+        ;;
+      --provisioning-state)
+        CLI_PROVISIONING_STATE="${2-}"
+        shift 2
+        ;;
       --disk-map)
         CLI_DISK_MAP="${2-}"
         shift 2
@@ -527,7 +537,8 @@ dispatch() {
             exit "${EXIT_USAGE}"
           }
           ftctl_profile_write_vm "${CLI_VM}" "${CLI_MODE}" "${CLI_PEER}" "${CLI_PROFILE}" \
-            "${CLI_DISK_MAP}" "${CLI_BACKEND_MODE}" "${CLI_TARGET_STORAGE_SCOPE}" "${CLI_SECONDARY_VM_NAME}" "${CLI_FENCING_POLICY}" \
+            "${CLI_DISK_MAP}" "${CLI_BACKEND_MODE}" "${CLI_PROVISIONING_BACKEND}" "${CLI_PROVISIONING_STATE}" \
+            "${CLI_TARGET_STORAGE_SCOPE}" "${CLI_SECONDARY_VM_NAME}" "${CLI_FENCING_POLICY}" \
             "${CLI_SECONDARY_TARGET_DIR}" "${CLI_REMOTE_NBD_EXPORT_ADDR}" \
             "${CLI_XCOLO_PROXY_ENDPOINT}" "${CLI_XCOLO_NBD_ENDPOINT}" "${CLI_XCOLO_MIGRATE_URI}" \
             "${CLI_FENCING_IPMI_PRIMARY_HOST}" "${CLI_FENCING_IPMI_PRIMARY_PORT}" \

@@ -413,7 +413,14 @@ ftctl_standby_prepare() {
   fi
 
   if [[ "${persistence}" != "yes" ]]; then
-    ftctl_state_set "${vm}" "standby_state=prepared-transient"
+    if [[ "${FTCTL_PROFILE_PROVISIONING_BACKEND:-libvirt-managed}" == "cloud-managed" ]]; then
+      ftctl_state_set "${vm}" \
+        "standby_state=prepared-transient" \
+        "standby_domain_state=not-defined-expected" \
+        "peer_domain_expected=false"
+    else
+      ftctl_state_set "${vm}" "standby_state=prepared-transient"
+    fi
     ftctl_log_event "standby" "standby.prepare" "ok" "${vm}" "" \
       "mode=transient path=${generated_xml}"
     return 0
@@ -440,7 +447,10 @@ ftctl_standby_prepare() {
     return "${rc}"
   fi
 
-  ftctl_state_set "${vm}" "standby_state=defined"
+  ftctl_state_set "${vm}" \
+    "standby_state=defined" \
+    "standby_domain_state=defined" \
+    "peer_domain_expected=true"
   ftctl_log_event "standby" "standby.prepare" "ok" "${vm}" "" \
     "mode=persistent path=${generated_xml} secondary_uri=${FTCTL_PROFILE_SECONDARY_URI}"
 }
