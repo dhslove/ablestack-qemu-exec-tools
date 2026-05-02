@@ -609,7 +609,7 @@ ftctl_standby_activate() {
   : "${out}${err}"
   if [[ "${rc}" != "0" ]]; then
     case "$(printf '%s %s' "${out}" "${err}" | tr '[:upper:]' '[:lower:]')" in
-      *"already active"*|*"domain is already running"*|*"operation invalid"*"running"*)
+      *"already active"*|*"domain is already running"*|*"operation invalid"*"running"*|*"already exists with uuid"*)
         ftctl_state_set "${vm}" \
           "standby_state=running" \
           "active_side=secondary"

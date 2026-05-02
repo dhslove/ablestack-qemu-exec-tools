@@ -277,6 +277,47 @@ EOF
   selftest_assert_file_contains "${call_log}" "VIRSH:"
 )
 
+selftest_case_standby_activate_already_exists() (
+  selftest_reset_env
+  selftest_info "standby activate already exists"
+
+  local vm="already-running-standby"
+  local bundle="${SELFTEST_ROOT}/xml/${vm}"
+  FTCTL_DRY_RUN="0"
+  FTCTL_PROFILE_MODE="ha"
+  FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
+  FTCTL_PROFILE_SECONDARY_URI="qemu+ssh://peer/system"
+  FTCTL_PROFILE_PROVISIONING_BACKEND="cloud-managed"
+  FTCTL_PROFILE_SECONDARY_VM_NAME="${vm}-standby"
+  ftctl_state_init_vm "${vm}"
+  mkdir -p "${bundle}"
+
+  cat > "${bundle}/standby.generated.xml" <<EOF
+<domain type='kvm'>
+  <name>${vm}-standby</name>
+</domain>
+EOF
+
+  ftctl_state_set "${vm}" \
+    "standby_xml_generated=${bundle}/standby.generated.xml" \
+    "primary_persistence=no"
+
+  # shellcheck disable=SC2317
+  ftctl_standby_map_peer_krbd_paths() {
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_virsh() {
+    printf -v "$2" '%s' ""
+    printf -v "$3" '%s' "error: operation failed: domain '${vm}-standby' already exists with uuid 00000000-0000-0000-0000-000000000001"
+    printf -v "$4" '%s' "1"
+  }
+
+  ftctl_standby_activate "${vm}"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "standby_state")" "running" "already existing standby activate"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "active_side")" "secondary" "already existing standby side"
+)
+
 selftest_case_backend_validation() {
   selftest_reset_env
   selftest_info "backend mode validation"
@@ -606,6 +647,7 @@ selftest_main() {
   selftest_case_cluster_cli
   selftest_case_blockcopy_and_standby
   selftest_case_libvirt_managed_peer_krbd_map
+  selftest_case_standby_activate_already_exists
   selftest_case_backend_validation
   selftest_case_blockcopy_missing_job_state
   selftest_case_reconcile_and_fencing
