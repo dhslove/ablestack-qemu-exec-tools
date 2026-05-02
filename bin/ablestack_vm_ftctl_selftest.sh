@@ -442,6 +442,17 @@ EOF
   selftest_assert_eq "$(ftctl_state_get "${vm}" "fencing_state")" "required" "manual fencing required"
   ftctl_fencing_manual_confirm "${vm}"
   selftest_assert_eq "$(ftctl_state_get "${vm}" "fencing_state")" "manual-fenced" "manual fencing confirm"
+
+  ftctl_state_set "${vm}" \
+    "standby_xml_generated=${SELFTEST_ROOT}/standby.generated.xml" \
+    "primary_persistence=no"
+  ftctl_failover_request "${vm}" "manual-confirmed"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "fencing_state")" "manual-fenced" "manual fencing retained"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "standby_state")" "start-dry-run" "manual fencing starts standby"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "active_side")" "secondary" "manual fencing active side"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "protection_state")" "failed_over" "manual fencing failover complete"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "transport_state")" "failed_over" "manual fencing transport complete"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" "" "manual fencing clears last_error"
 }
 
 selftest_case_xcolo_and_xml() {

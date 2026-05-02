@@ -608,6 +608,16 @@ ftctl_standby_activate() {
   fi
   : "${out}${err}"
   if [[ "${rc}" != "0" ]]; then
+    case "$(printf '%s %s' "${out}" "${err}" | tr '[:upper:]' '[:lower:]')" in
+      *"already active"*|*"domain is already running"*|*"operation invalid"*"running"*)
+        ftctl_state_set "${vm}" \
+          "standby_state=running" \
+          "active_side=secondary"
+        ftctl_log_event "standby" "standby.activate" "ok" "${vm}" "" \
+          "secondary_uri=${FTCTL_PROFILE_SECONDARY_URI} already_running=1"
+        return 0
+        ;;
+    esac
     ftctl_state_set "${vm}" \
       "standby_state=activate-failed" \
       "last_error=standby_activate_failed"

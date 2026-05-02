@@ -27,7 +27,13 @@ ftctl_failover_request() {
     "protection_state=failing_over" \
     "last_error=skeleton_failover_pending"
   fence_rc=0
-  ftctl_fencing_execute "${vm}" "${reason}" || fence_rc=$?
+  if ftctl_fencing_is_explicit "${vm}"; then
+    ftctl_state_set "${vm}" "last_error="
+    ftctl_log_event "failover" "failover.fencing" "ok" "${vm}" "" \
+      "reason=${reason} failover_count=${count} fencing=already_confirmed"
+  else
+    ftctl_fencing_execute "${vm}" "${reason}" || fence_rc=$?
+  fi
   case "${fence_rc}" in
     0)
       if [[ "${mode}" == "ft" ]]; then
