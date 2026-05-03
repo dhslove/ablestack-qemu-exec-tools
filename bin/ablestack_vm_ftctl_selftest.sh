@@ -479,6 +479,7 @@ EOF
   selftest_assert_eq "$(ftctl_state_get "${vm}" "transport_state")" "rearm_pending" "reconcile rearm"
 
   FTCTL_PROFILE_FENCING_POLICY="manual-block"
+  ftctl_state_set "${vm}" "protection_state=protected" "transport_state=mirroring"
   ftctl_failover_request "${vm}" "manual" || true
   selftest_assert_eq "$(ftctl_state_get "${vm}" "fencing_state")" "required" "manual fencing required"
   ftctl_fencing_manual_confirm "${vm}"
@@ -495,6 +496,44 @@ EOF
   selftest_assert_eq "$(ftctl_state_get "${vm}" "transport_state")" "failed_over" "manual fencing transport complete"
   selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" "" "manual fencing clears last_error"
 }
+
+selftest_case_failover_blocks_copying_transport() (
+  selftest_reset_env
+  selftest_info "failover blocks non-ready blockcopy"
+
+  local vm="copying-failover"
+  ftctl_state_init_vm "${vm}"
+  ftctl_state_set "${vm}" \
+    "mode=ha" \
+    "protection_state=syncing" \
+    "transport_state=copying" \
+    "fencing_state=clear"
+  FTCTL_PROFILE_BACKEND_MODE="shared-blockcopy"
+  FTCTL_PROFILE_FENCING_POLICY="manual-block"
+  FTCTL_FAILOVER_SYNC_READY_TIMEOUT_SEC="1"
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_wait_forward_sync_ready() { return 1; }
+
+  if ftctl_failover_request "${vm}" "manual"; then
+    selftest_fail "copying transport should block initial failover"
+  fi
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "fencing_state")" "clear" "copying failover keeps fencing clear"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "protection_state")" "syncing" "copying failover keeps syncing"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" "blockcopy_not_ready_for_failover" "copying failover last_error"
+
+  ftctl_fencing_manual_confirm "${vm}"
+  ftctl_state_set "${vm}" \
+    "protection_state=failing_over" \
+    "transport_state=copying" \
+    "standby_xml_generated=${SELFTEST_ROOT}/standby.generated.xml" \
+    "primary_persistence=no"
+
+  if ftctl_failover_request "${vm}" "manual-confirmed"; then
+    selftest_fail "copying transport should block fenced failover continuation"
+  fi
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "protection_state")" "error" "fenced copying continuation errors"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" "blockcopy_not_ready_for_failover" "fenced copying continuation last_error"
+)
 
 selftest_case_xcolo_and_xml() {
   selftest_reset_env
@@ -651,6 +690,7 @@ selftest_main() {
   selftest_case_backend_validation
   selftest_case_blockcopy_missing_job_state
   selftest_case_reconcile_and_fencing
+  selftest_case_failover_blocks_copying_transport
   selftest_case_xcolo_and_xml
   selftest_case_json_and_locking
   selftest_case_events_json

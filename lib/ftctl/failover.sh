@@ -15,19 +15,88 @@
 # limitations under the License.
 # ---------------------------------------------------------------------
 
+ftctl_failover_requires_blockcopy_ready() {
+  local mode="${1-}"
+
+  [[ "${mode}" == "ha" ]] || return 1
+  case "${FTCTL_PROFILE_BACKEND_MODE:-}" in
+    remote-nbd|shared-blockcopy) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+ftctl_failover_transport_is_ready() {
+  local vm="${1-}"
+  local transport
+
+  transport="$(ftctl_state_get "${vm}" "transport_state" 2>/dev/null || true)"
+  case "${transport}" in
+    mirroring|failed_over) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+ftctl_failover_precheck_blockcopy_ready() {
+  local vm="${1-}"
+  local mode="${2-}"
+  local count="${3-}"
+  local stage="${4-}"
+  local allow_wait="${5-0}"
+  local timeout_sec="${FTCTL_FAILOVER_SYNC_READY_TIMEOUT_SEC:-120}"
+  local transport
+
+  ftctl_failover_requires_blockcopy_ready "${mode}" || return 0
+  if ftctl_failover_transport_is_ready "${vm}"; then
+    ftctl_log_event "failover" "failover.precheck" "ok" "${vm}" "" \
+      "stage=${stage} failover_count=${count} transport=$(ftctl_state_get "${vm}" "transport_state" 2>/dev/null || true)"
+    return 0
+  fi
+
+  if [[ "${allow_wait}" == "1" ]]; then
+    if ftctl_blockcopy_wait_forward_sync_ready "${vm}" "${timeout_sec}" && ftctl_failover_transport_is_ready "${vm}"; then
+      ftctl_log_event "failover" "failover.precheck" "ok" "${vm}" "" \
+        "stage=${stage} failover_count=${count} transport=$(ftctl_state_get "${vm}" "transport_state" 2>/dev/null || true)"
+      return 0
+    fi
+  fi
+
+  transport="$(ftctl_state_get "${vm}" "transport_state" 2>/dev/null || echo "unknown")"
+  if [[ "${allow_wait}" == "1" ]]; then
+    ftctl_state_set "${vm}" \
+      "protection_state=syncing" \
+      "last_error=blockcopy_not_ready_for_failover"
+  else
+    ftctl_state_set "${vm}" \
+      "protection_state=error" \
+      "last_error=blockcopy_not_ready_for_failover"
+  fi
+  ftctl_log_event "failover" "failover.precheck" "fail" "${vm}" "" \
+    "stage=${stage} failover_count=${count} transport=${transport} required=mirroring"
+  return 1
+}
+
 ftctl_failover_request() {
   local vm="${1-}"
   local reason="${2-manual}"
   local count
   local fence_rc
   local mode
+  local explicit_fencing
   count="$(ftctl_state_increment "${vm}" "failover_count")"
   mode="$(ftctl_state_get "${vm}" "mode" 2>/dev/null || echo "")"
+  mode="${mode:-${FTCTL_PROFILE_MODE:-}}"
+  explicit_fencing="0"
+  if ftctl_fencing_is_explicit "${vm}"; then
+    explicit_fencing="1"
+  fi
+  if [[ "${explicit_fencing}" != "1" ]]; then
+    ftctl_failover_precheck_blockcopy_ready "${vm}" "${mode}" "${count}" "before_fencing" "1" || return 1
+  fi
   ftctl_state_set "${vm}" \
     "protection_state=failing_over" \
     "last_error=skeleton_failover_pending"
   fence_rc=0
-  if ftctl_fencing_is_explicit "${vm}"; then
+  if [[ "${explicit_fencing}" == "1" ]]; then
     ftctl_state_set "${vm}" "last_error="
     ftctl_log_event "failover" "failover.fencing" "ok" "${vm}" "" \
       "reason=${reason} failover_count=${count} fencing=already_confirmed"
@@ -50,6 +119,8 @@ ftctl_failover_request() {
           "reason=${reason} failover_count=${count} fencing=complete xcolo=running"
         return 0
       fi
+
+      ftctl_failover_precheck_blockcopy_ready "${vm}" "${mode}" "${count}" "before_standby" "0" || return 1
 
       if [[ "${FTCTL_PROFILE_BACKEND_MODE}" == "remote-nbd" ]]; then
         ftctl_blockcopy_stop_remote_nbd_exports "${vm}" || true
