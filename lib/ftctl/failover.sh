@@ -175,18 +175,22 @@ ftctl_failback_reprotect_from_primary() {
   local vm="${1-}"
   local mode="${2-}"
   local host="" user="" out="" err="" rc=0 remote_cmd="" remote_blockcopy=""
+  local timeout_sec="${FTCTL_FAILBACK_REPROTECT_TIMEOUT_SEC:-600}"
+  local attempts
 
   if [[ "${FTCTL_PROFILE_PRIMARY_URI}" == "qemu:///system" ]]; then
     ftctl_blockcopy_plan_protect "${vm}" || return 1
-    ftctl_blockcopy_wait_forward_sync_ready "${vm}" "120" || return 1
+    ftctl_blockcopy_wait_forward_sync_ready "${vm}" "${timeout_sec}" || return 1
     return 0
   fi
 
   ftctl_blockcopy_primary_target_host_user host user || return 1
+  attempts=$(((timeout_sec + 1) / 2))
+  ((attempts > 0)) || attempts=1
   remote_cmd="$(cat <<EOF
 set -euo pipefail
 ablestack_vm_ftctl protect --vm ${vm@Q} --mode ${mode@Q}
-for _i in \$(seq 1 60); do
+for _i in \$(seq 1 ${attempts}); do
   ablestack_vm_ftctl reconcile --vm ${vm@Q} >/dev/null 2>&1 || true
   status_json="\$(ablestack_vm_ftctl status --vm ${vm@Q} --json 2>/dev/null || true)"
   if [[ "\${status_json}" == *'"protection_state":"protected"'* && "\${status_json}" == *'"transport_state":"mirroring"'* && "\${status_json}" == *'"active_side":"primary"'* ]]; then
@@ -194,7 +198,7 @@ for _i in \$(seq 1 60); do
   fi
   sleep 2
 done
-echo "primary_reprotect_timeout:${vm}" >&2
+echo "primary_reprotect_timeout:${vm}:${timeout_sec}" >&2
 exit 99
 EOF
 )"
@@ -231,10 +235,53 @@ EOF
     "last_error="
 }
 
+ftctl_failback_resume_primary_reprotect() {
+  local vm="${1-}"
+  local reason="${2-manual}"
+  local mode="${FTCTL_PROFILE_MODE:-ha}"
+  local protection transport
+
+  protection="$(ftctl_state_get "${vm}" "protection_state" 2>/dev/null || true)"
+  transport="$(ftctl_state_get "${vm}" "transport_state" 2>/dev/null || true)"
+  case "${protection}:${transport}" in
+    protected:mirroring)
+      ftctl_log_event "failback" "failback.resume" "ok" "${vm}" "" \
+        "reason=${reason} state=already_primary"
+      return 0
+      ;;
+    syncing:copying|pairing:initializing|error:copying)
+      ftctl_log_event "failback" "failback.resume" "ok" "${vm}" "" \
+        "reason=${reason} state=reprotect_wait protection=${protection} transport=${transport}"
+      if ftctl_blockcopy_wait_forward_sync_ready "${vm}" "${FTCTL_FAILBACK_REPROTECT_TIMEOUT_SEC:-600}"; then
+        ftctl_state_set "${vm}" \
+          "active_side=primary" \
+          "protection_state=protected" \
+          "transport_state=mirroring" \
+          "fencing_state=clear" \
+          "standby_state=prepared-transient" \
+          "last_error="
+        ftctl_log_event "failback" "failback.request" "ok" "${vm}" "" \
+          "reason=${reason} cutback=already_done reprotect=completed"
+        return 0
+      fi
+      ftctl_state_set "${vm}" \
+        "protection_state=error" \
+        "last_error=cutback_reprotect_failed"
+      ftctl_log_event "failback" "failback.cutback" "fail" "${vm}" "" \
+        "reason=${reason} reprotect=resume_failed"
+      return 1
+      ;;
+  esac
+
+  echo "ERROR: failback requires active_side=secondary" >&2
+  return 1
+}
+
 ftctl_failback_request() {
   local vm="${1-}"
   local reason="${2-manual}"
   local mode="${FTCTL_PROFILE_MODE:-ha}"
+  local active_side
   if [[ "${mode}" == "ft" ]]; then
     if ! ftctl_xcolo_failback "${vm}"; then
       ftctl_log_event "failback" "failback.request" "fail" "${vm}" "" \
@@ -242,6 +289,11 @@ ftctl_failback_request() {
       return 1
     fi
     return 0
+  fi
+  active_side="$(ftctl_state_get "${vm}" "active_side" 2>/dev/null || echo "primary")"
+  if [[ "${active_side}" == "primary" ]]; then
+    ftctl_failback_resume_primary_reprotect "${vm}" "${reason}"
+    return $?
   fi
   if ! ftctl_verify_failback_ready "${vm}"; then
     ftctl_state_set "${vm}" \
