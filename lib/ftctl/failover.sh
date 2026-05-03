@@ -277,6 +277,116 @@ ftctl_failback_resume_primary_reprotect() {
   return 1
 }
 
+ftctl_failback_sync_for_cloud_cutback() {
+  local vm="${1-}"
+  local reason="${2-manual}"
+  local mode="${FTCTL_PROFILE_MODE:-ha}"
+  local active_side primary_xml
+
+  if [[ "${mode}" == "ft" ]]; then
+    echo "ERROR: failback-sync is not supported for FT mode" >&2
+    return 1
+  fi
+
+  active_side="$(ftctl_state_get "${vm}" "active_side" 2>/dev/null || echo "primary")"
+  if [[ "${active_side}" == "primary" ]]; then
+    ftctl_log_event "failback" "failback.sync" "ok" "${vm}" "" \
+      "reason=${reason} state=already_primary"
+    return 0
+  fi
+
+  if ! ftctl_verify_failback_ready "${vm}"; then
+    ftctl_state_set "${vm}" \
+      "protection_state=error" \
+      "last_error=failback_precheck_failed"
+    return 1
+  fi
+
+  primary_xml="$(ftctl_state_get "${vm}" "primary_xml_backup" 2>/dev/null || true)"
+  if [[ -n "${primary_xml}" && -f "${primary_xml}" ]]; then
+    if ! ftctl_primary_map_local_krbd_paths_from_xml "${vm}" "${primary_xml}"; then
+      ftctl_state_set "${vm}" \
+        "protection_state=error" \
+        "transport_state=reverse_sync_failed" \
+        "last_error=primary_rbd_map_failed"
+      ftctl_log_event "failback" "failback.sync" "fail" "${vm}" "" \
+        "reason=${reason} primary_rbd_map=failed"
+      return 1
+    fi
+  fi
+
+  ftctl_state_set "${vm}" \
+    "protection_state=failing_back" \
+    "last_error=reverse_sync_pending"
+  if ! ftctl_blockcopy_start_reverse_sync "${vm}"; then
+    ftctl_log_event "failback" "failback.sync" "fail" "${vm}" "" \
+      "reason=${reason} reverse_sync=failed"
+    return 1
+  fi
+  if ! ftctl_blockcopy_wait_reverse_sync_ready "${vm}" "${FTCTL_FAILBACK_REVERSE_SYNC_TIMEOUT_SEC:-600}"; then
+    ftctl_state_set "${vm}" \
+      "protection_state=error" \
+      "transport_state=reverse_sync_failed" \
+      "last_error=reverse_sync_timeout"
+    ftctl_log_event "failback" "failback.sync" "fail" "${vm}" "" \
+      "reason=${reason} reverse_sync=timeout"
+    return 1
+  fi
+
+  ftctl_state_set "${vm}" \
+    "protection_state=failing_back" \
+    "transport_state=reverse_sync_ready" \
+    "last_error="
+
+  if [[ "${FTCTL_PROFILE_BACKEND_MODE}" == "remote-nbd" ]]; then
+    ftctl_blockcopy_stop_primary_reverse_nbd_exports "${vm}" || true
+    sleep 2
+  fi
+
+  ftctl_log_event "failback" "failback.sync" "ok" "${vm}" "" \
+    "reason=${reason} reverse_sync=ready"
+}
+
+ftctl_failback_reprotect_after_cloud_cutback() {
+  local vm="${1-}"
+  local reason="${2-manual}"
+  local mode="${FTCTL_PROFILE_MODE:-ha}"
+  local protection transport
+
+  if [[ "${mode}" == "ft" ]]; then
+    echo "ERROR: failback-reprotect is not supported for FT mode" >&2
+    return 1
+  fi
+
+  protection="$(ftctl_state_get "${vm}" "protection_state" 2>/dev/null || true)"
+  transport="$(ftctl_state_get "${vm}" "transport_state" 2>/dev/null || true)"
+  if [[ "${protection}:${transport}" == "protected:mirroring" ]]; then
+    ftctl_log_event "failback" "failback.reprotect" "ok" "${vm}" "" \
+      "reason=${reason} state=already_protected"
+    return 0
+  fi
+
+  ftctl_state_set "${vm}" \
+    "active_side=primary" \
+    "fencing_state=clear" \
+    "protection_state=pairing" \
+    "transport_state=initializing" \
+    "standby_state=prepared-transient" \
+    "last_error="
+
+  if ! ftctl_failback_reprotect_from_primary "${vm}" "${mode}"; then
+    ftctl_state_set "${vm}" \
+      "protection_state=error" \
+      "last_error=cutback_reprotect_failed"
+    ftctl_log_event "failback" "failback.reprotect" "fail" "${vm}" "" \
+      "reason=${reason} reprotect=failed"
+    return 1
+  fi
+
+  ftctl_log_event "failback" "failback.reprotect" "ok" "${vm}" "" \
+    "reason=${reason} cloud_cutback=done"
+}
+
 ftctl_failback_request() {
   local vm="${1-}"
   local reason="${2-manual}"
