@@ -56,6 +56,7 @@ CLI_PROVISIONING_BACKEND=""
 CLI_PROVISIONING_STATE=""
 CLI_TARGET_STORAGE_SCOPE=""
 CLI_SECONDARY_VM_NAME=""
+CLI_ACTIVE_SIDE=""
 CLI_FENCING_POLICY=""
 CLI_FENCING_IPMI_PRIMARY_HOST=""
 CLI_FENCING_IPMI_PRIMARY_PORT=""
@@ -199,6 +200,9 @@ Global options:
       --xcolo-control-ip ADDR
       --xcolo-data-ip ADDR
       --limit N       Limit items for commands that support it
+      --secondary-vm-name NAME
+      --active-side SIDE
+      --provisioning-backend BACKEND
 
 Config actions:
   ablestack_vm_ftctl config init-cluster --cluster-name <name> --local-host-id <id>
@@ -352,6 +356,10 @@ parse_args() {
         ;;
       --secondary-vm-name)
         CLI_SECONDARY_VM_NAME="${2-}"
+        shift 2
+        ;;
+      --active-side)
+        CLI_ACTIVE_SIDE="${2-}"
         shift 2
         ;;
       --fencing-policy)
@@ -576,6 +584,14 @@ dispatch() {
       ;;
     status)
       if [[ -n "${CLI_VM}" ]]; then
+        if [[ ! -f "$(ftctl_profile_path "${CLI_VM}")" ]]; then
+          if [[ "${CLI_JSON}" == "1" ]]; then
+            printf '{"command":"status","result":"not_found","vm":"%s"}\n' "$(ftctl__json_escape "${CLI_VM}")"
+            exit "${EXIT_USAGE}"
+          fi
+          echo "ERROR: FTCTL profile not found for VM ${CLI_VM}" >&2
+          exit "${EXIT_USAGE}"
+        fi
         ftctl_profile_load_vm "${CLI_VM}"
         ftctl_profile_validate "${CLI_VM}"
       fi
@@ -630,7 +646,20 @@ dispatch() {
       ;;
     check)
       require_vm
+      if [[ ! -f "$(ftctl_profile_path "${CLI_VM}")" ]]; then
+        if [[ "${CLI_JSON}" == "1" ]]; then
+          printf '{"command":"check","vm":"%s","result":"not_found","inventory_result":"not_found","primary_rc":1,"peer_rc":1,"peer_domain_expected":false,"standby_domain_state":"profile-not-found","provisioning_backend":""}\n' "$(ftctl__json_escape "${CLI_VM}")"
+          exit "${EXIT_USAGE}"
+        fi
+        echo "ERROR: FTCTL profile not found for VM ${CLI_VM}" >&2
+        exit "${EXIT_USAGE}"
+      fi
       ftctl_profile_load_vm "${CLI_VM}"
+      # shellcheck disable=SC2034
+      [[ -n "${CLI_SECONDARY_VM_NAME}" ]] && FTCTL_PROFILE_SECONDARY_VM_NAME="${CLI_SECONDARY_VM_NAME}"
+      # shellcheck disable=SC2034
+      [[ -n "${CLI_PROVISIONING_BACKEND}" ]] && FTCTL_PROFILE_PROVISIONING_BACKEND="${CLI_PROVISIONING_BACKEND}"
+      [[ -n "${CLI_ACTIVE_SIDE}" ]] && export FTCTL_CHECK_ACTIVE_SIDE="${CLI_ACTIVE_SIDE}"
       ftctl_profile_validate "${CLI_VM}"
       ftctl_orchestrator_check_vm "${CLI_VM}" "${CLI_JSON}"
       ;;

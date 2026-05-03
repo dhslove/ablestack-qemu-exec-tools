@@ -27,6 +27,50 @@ ftctl_inventory_probe_uri_vm() {
   return "${rc}"
 }
 
+ftctl_inventory_probe_uri_vm_state() {
+  local uri="${1-}"
+  local vm="${2-}"
+  local _state_var="${3}"
+  local out err rc state
+
+  out=""
+  err=""
+  rc=0
+  ftctl_virsh "${FTCTL_HEALTH_INTERVAL_SEC}" out err rc -- -c "${uri}" domstate "${vm}" || true
+  : "${err}"
+  if [[ "${rc}" == "0" ]]; then
+    state="$(head -n 1 <<< "${out}" | tr '[:upper:]' '[:lower:]' | awk '{print $1}')"
+    [[ -n "${state}" ]] || state="unknown"
+    printf -v "${_state_var}" '%s' "${state}"
+    return 0
+  fi
+
+  out=""
+  err=""
+  rc=0
+  ftctl_virsh "${FTCTL_HEALTH_INTERVAL_SEC}" out err rc -- -c "${uri}" dominfo "${vm}" || true
+  : "${out}${err}"
+  if [[ "${rc}" == "0" ]]; then
+    state="$(awk -F: 'tolower($1) ~ /^state$/ {gsub(/^[ \t]+|[ \t]+$/, "", $2); print tolower($2); exit}' <<< "${out}" | awk '{print $1}')"
+    [[ -n "${state}" ]] || state="defined"
+    printf -v "${_state_var}" '%s' "${state}"
+    return 0
+  fi
+
+  printf -v "${_state_var}" '%s' "not-found"
+  return "${rc}"
+}
+
+ftctl_inventory_secondary_domain_name() {
+  local vm="${1-}"
+  local secondary_vm_name
+  secondary_vm_name="$(ftctl_state_get "${vm}" "secondary_vm_name" 2>/dev/null || true)"
+  if [[ -z "${secondary_vm_name}" ]]; then
+    secondary_vm_name="$(ftctl_profile_secondary_vm_name_resolved "${vm}")"
+  fi
+  printf '%s\n' "${secondary_vm_name}"
+}
+
 ftctl_inventory_peer_missing_is_expected() {
   local vm="${1-}"
   local standby_state
@@ -42,31 +86,45 @@ ftctl_inventory_peer_missing_is_expected() {
 
 ftctl_inventory_check_vm() {
   local vm="${1-}"
-  local local_rc peer_rc result peer_domain_expected standby_domain_state
+  local local_rc peer_rc result peer_domain_expected primary_domain_state standby_domain_state active_side secondary_vm
   local_rc=0
   peer_rc=0
   peer_domain_expected="true"
   standby_domain_state=""
+  active_side="${FTCTL_CHECK_ACTIVE_SIDE:-}"
+  [[ -n "${active_side}" ]] || active_side="$(ftctl_state_get "${vm}" "active_side" 2>/dev/null || echo "primary")"
+  secondary_vm="$(ftctl_inventory_secondary_domain_name "${vm}")"
 
-  ftctl_inventory_probe_uri_vm "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" || local_rc=$?
-  ftctl_inventory_probe_uri_vm "${FTCTL_PROFILE_SECONDARY_URI}" "${vm}" || peer_rc=$?
+  ftctl_inventory_probe_uri_vm_state "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" primary_domain_state || local_rc=$?
+  ftctl_inventory_probe_uri_vm_state "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" standby_domain_state || peer_rc=$?
 
-  if [[ "${local_rc}" == "0" && "${peer_rc}" == "0" ]]; then
-    result="ok"
-  elif [[ "${local_rc}" == "0" ]] && ftctl_inventory_peer_missing_is_expected "${vm}"; then
-    result="ok"
-    peer_domain_expected="false"
-    standby_domain_state="not-defined-expected"
-  elif [[ "${local_rc}" == "0" ]]; then
-    result="warn"
+  if [[ "${active_side}" == "secondary" ]]; then
+    if [[ "${local_rc}" == "0" && "${primary_domain_state}" == "running" && "${peer_rc}" == "0" ]]; then
+      result="fail"
+    elif [[ "${peer_rc}" == "0" ]]; then
+      result="ok"
+      peer_domain_expected="true"
+    else
+      result="fail"
+    fi
   else
-    result="fail"
+    if [[ "${local_rc}" == "0" && "${peer_rc}" == "0" ]]; then
+      result="ok"
+    elif [[ "${local_rc}" == "0" ]] && ftctl_inventory_peer_missing_is_expected "${vm}"; then
+      result="ok"
+      peer_domain_expected="false"
+      standby_domain_state="not-defined-expected"
+    elif [[ "${local_rc}" == "0" ]]; then
+      result="warn"
+    else
+      result="fail"
+    fi
   fi
 
   ftctl_log_event "inventory" "inventory.check" "${result}" "${vm}" "" \
-    "primary_rc=${local_rc} peer_rc=${peer_rc} peer_uri=${FTCTL_PROFILE_SECONDARY_URI} peer_domain_expected=${peer_domain_expected} standby_domain_state=${standby_domain_state}"
+    "primary_rc=${local_rc} peer_rc=${peer_rc} peer_uri=${FTCTL_PROFILE_SECONDARY_URI} active_side=${active_side} primary_domain_state=${primary_domain_state} secondary_vm_name=${secondary_vm} peer_domain_expected=${peer_domain_expected} standby_domain_state=${standby_domain_state}"
 
-  printf '%s %s %s\n' "${local_rc}" "${peer_rc}" "${result}"
+  printf '%s %s %s %s %s\n' "${local_rc}" "${peer_rc}" "${result}" "${peer_domain_expected}" "${standby_domain_state}"
 }
 
 ftctl_inventory_detect_disk_format() {

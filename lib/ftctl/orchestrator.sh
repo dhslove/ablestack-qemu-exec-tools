@@ -187,16 +187,9 @@ ftctl_orchestrator_check_vm() {
   local json="${2-0}"
   local probe local_rc peer_rc result peer_domain_expected standby_domain_state
   probe="$(ftctl_inventory_check_vm "${vm}")"
-  local_rc="${probe%% *}"
-  probe="${probe#* }"
-  peer_rc="${probe%% *}"
-  result="${probe##* }"
-  peer_domain_expected="true"
-  standby_domain_state=""
-  if [[ "${local_rc}" == "0" && "${peer_rc}" != "0" ]] && ftctl_inventory_peer_missing_is_expected "${vm}"; then
-    peer_domain_expected="false"
-    standby_domain_state="not-defined-expected"
-  fi
+  read -r local_rc peer_rc result peer_domain_expected standby_domain_state <<< "${probe}"
+  peer_domain_expected="${peer_domain_expected:-true}"
+  standby_domain_state="${standby_domain_state:-}"
 
   if [[ "${json}" == "1" ]]; then
     printf '{"command":"check","vm":"%s","result":"ok","inventory_result":"%s","primary_rc":%s,"peer_rc":%s,"peer_domain_expected":%s,"standby_domain_state":"%s","provisioning_backend":"%s"}\n' \
@@ -233,10 +226,7 @@ ftctl_orchestrator_reconcile_one() {
   ftctl_state_set "${vm}" "last_reconcile_ts=$(ftctl_now_iso8601)"
 
   inventory_probe="$(ftctl_inventory_check_vm "${vm}")"
-  local_rc="${inventory_probe%% *}"
-  inventory_probe="${inventory_probe#* }"
-  peer_rc="${inventory_probe%% *}"
-  inventory_result="${inventory_probe##* }"
+  read -r local_rc peer_rc inventory_result _peer_domain_expected _standby_domain_state <<< "${inventory_probe}"
   : "${peer_rc}${inventory_result}"
 
   if [[ "${mode}" == "ha" && "${active_side}" == "primary" && "${local_rc}" != "0" ]]; then

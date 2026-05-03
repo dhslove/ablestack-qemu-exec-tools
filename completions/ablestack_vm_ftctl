@@ -34,7 +34,7 @@ _ablestack_vm_ftctl()
     --cluster-name --local-host-id --host-id --role
     --management-ip --libvirt-uri --blockcopy-ip
     --xcolo-control-ip --xcolo-data-ip
-    --backend-mode --target-storage-scope --secondary-vm-name --fencing-policy
+    --backend-mode --provisioning-backend --target-storage-scope --secondary-vm-name --active-side --fencing-policy
     --fencing-ipmi-primary-host --fencing-ipmi-primary-port
     --fencing-ipmi-primary-user --fencing-ipmi-primary-password --fencing-ipmi-primary-interface
     --fencing-ipmi-secondary-host --fencing-ipmi-secondary-port
@@ -60,6 +60,14 @@ _ablestack_vm_ftctl()
       COMPREPLY=( $(compgen -W "shared-blockcopy remote-nbd" -- "${cur}") )
       return 0
       ;;
+    --provisioning-backend)
+      COMPREPLY=( $(compgen -W "libvirt-managed cloud-managed" -- "${cur}") )
+      return 0
+      ;;
+    --active-side)
+      COMPREPLY=( $(compgen -W "primary secondary" -- "${cur}") )
+      return 0
+      ;;
     --target-storage-scope)
       COMPREPLY=( $(compgen -W "shared secondary-local" -- "${cur}") )
       return 0
@@ -77,7 +85,7 @@ _ablestack_vm_ftctl()
   local i=1
   while (( i < cword )); do
     case "${words[i]}" in
-      --vm|--mode|--peer|--profile|--config|--policy|--cluster-name|--local-host-id|--host-id|--role|--management-ip|--libvirt-uri|--blockcopy-ip|--xcolo-control-ip|--xcolo-data-ip|--backend-mode|--target-storage-scope|--secondary-vm-name|--fencing-policy|--fencing-ipmi-primary-host|--fencing-ipmi-primary-port|--fencing-ipmi-primary-user|--fencing-ipmi-primary-password|--fencing-ipmi-primary-interface|--fencing-ipmi-secondary-host|--fencing-ipmi-secondary-port|--fencing-ipmi-secondary-user|--fencing-ipmi-secondary-password|--fencing-ipmi-secondary-interface|--secondary-target-dir|--remote-nbd-export-addr|--xcolo-proxy-endpoint|--xcolo-nbd-endpoint|--xcolo-migrate-uri)
+      --vm|--mode|--peer|--profile|--config|--policy|--cluster-name|--local-host-id|--host-id|--role|--management-ip|--libvirt-uri|--blockcopy-ip|--xcolo-control-ip|--xcolo-data-ip|--backend-mode|--provisioning-backend|--target-storage-scope|--secondary-vm-name|--active-side|--fencing-policy|--fencing-ipmi-primary-host|--fencing-ipmi-primary-port|--fencing-ipmi-primary-user|--fencing-ipmi-primary-password|--fencing-ipmi-primary-interface|--fencing-ipmi-secondary-host|--fencing-ipmi-secondary-port|--fencing-ipmi-secondary-user|--fencing-ipmi-secondary-password|--fencing-ipmi-secondary-interface|--secondary-target-dir|--remote-nbd-export-addr|--xcolo-proxy-endpoint|--xcolo-nbd-endpoint|--xcolo-migrate-uri)
         ((i+=2))
         continue
         ;;

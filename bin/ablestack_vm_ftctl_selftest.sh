@@ -615,6 +615,14 @@ if [[ "$*" == *" dominfo json-vm"* ]]; then
   printf 'Domain not found\n' >&2
   exit 1
 fi
+if [[ "$*" == *"qemu+ssh://peer/system"* && "$*" == *" domstate json-vm-standby"* ]]; then
+  printf 'Domain not found\n' >&2
+  exit 1
+fi
+if [[ "$*" == *"qemu+ssh://peer/system"* && "$*" == *" dominfo json-vm-standby"* ]]; then
+  printf 'Domain not found\n' >&2
+  exit 1
+fi
 printf 'unsupported test virsh invocation: %s\n' "$*" >&2
 exit 2
 EOF
@@ -663,6 +671,53 @@ EOF
   exec 209>&-
 }
 
+selftest_case_check_secondary_active_side() {
+  selftest_reset_env
+  selftest_info "check accepts cloud-managed secondary runtime domain"
+
+  local vm="failover-vm"
+  local secondary_vm="i-2-309-VM"
+  local fakebin="${SELFTEST_ROOT}/bin"
+  local out=""
+
+  mkdir -p "${fakebin}" "${SELFTEST_ROOT}/profiles"
+  cat > "${fakebin}/virsh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$*" == *" list --name"* ]]; then
+  exit 0
+fi
+if [[ "$*" == *"qemu:///system"* && "$*" == *" dominfo failover-vm"* ]]; then
+  printf 'Domain not found\n' >&2
+  exit 1
+fi
+if [[ "$*" == *"qemu+ssh://peer/system"* && "$*" == *" domstate i-2-309-VM"* ]]; then
+  printf 'running\n'
+  exit 0
+fi
+printf 'unsupported test virsh invocation: %s\n' "$*" >&2
+exit 2
+EOF
+  chmod 0755 "${fakebin}/virsh"
+
+  cat > "${SELFTEST_ROOT}/profiles/${vm}.conf" <<EOF
+FTCTL_PROFILE_MODE="ha"
+FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
+FTCTL_PROFILE_SECONDARY_URI="qemu+ssh://peer/system"
+FTCTL_PROFILE_SECONDARY_VM_NAME="${secondary_vm}"
+FTCTL_PROFILE_PROVISIONING_BACKEND="cloud-managed"
+EOF
+
+  out="$(PATH="${fakebin}:$PATH" bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" check --config "${SELFTEST_CONFIG}" --vm "${vm}" --secondary-vm-name "${secondary_vm}" --active-side secondary --provisioning-backend cloud-managed --json)"
+  selftest_assert_contains "${out}" '"command":"check"' "secondary check json command"
+  selftest_assert_contains "${out}" '"inventory_result":"ok"' "secondary check inventory result"
+  selftest_assert_contains "${out}" '"primary_rc":1' "secondary check primary rc"
+  selftest_assert_contains "${out}" '"peer_rc":0' "secondary check peer rc"
+  selftest_assert_contains "${out}" '"peer_domain_expected":true' "secondary check peer expected"
+  selftest_assert_contains "${out}" '"standby_domain_state":"running"' "secondary check standby running"
+  selftest_assert_contains "${out}" '"provisioning_backend":"cloud-managed"' "secondary check provisioning backend"
+}
+
 selftest_case_events_json() {
   selftest_reset_env
   selftest_info "events json output"
@@ -693,6 +748,7 @@ selftest_main() {
   selftest_case_failover_blocks_copying_transport
   selftest_case_xcolo_and_xml
   selftest_case_json_and_locking
+  selftest_case_check_secondary_active_side
   selftest_case_events_json
   selftest_info "all checks passed"
 }
