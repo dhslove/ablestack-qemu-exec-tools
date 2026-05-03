@@ -120,7 +120,7 @@ ftctl_verify_standby_boot() {
 
 ftctl_verify_failback_ready() {
   local vm="${1-}"
-  local active_side standby_state
+  local active_side standby_state probe local_rc peer_rc inventory_result peer_domain_expected standby_domain_state
   active_side="$(ftctl_state_get "${vm}" "active_side" 2>/dev/null || echo "primary")"
   standby_state="$(ftctl_state_get "${vm}" "standby_state" 2>/dev/null || echo "unknown")"
   if [[ "${active_side}" != "secondary" ]]; then
@@ -129,11 +129,20 @@ ftctl_verify_failback_ready() {
   fi
   case "${standby_state}" in
     running|start-dry-run|running-network-ok|running-network-unknown) return 0 ;;
-    *)
-      echo "ERROR: failback requires standby_state to be active-ready, got ${standby_state}" >&2
-      return 1
-      ;;
   esac
+
+  probe="$(ftctl_inventory_check_vm "${vm}")"
+  read -r local_rc peer_rc inventory_result peer_domain_expected standby_domain_state <<< "${probe}"
+  : "${local_rc}${peer_domain_expected}"
+  if [[ "${inventory_result}" == "ok" && "${peer_rc}" == "0" && "${standby_domain_state}" == "running" ]]; then
+    ftctl_state_set "${vm}" "standby_state=running"
+    ftctl_log_event "failback" "failback.precheck" "ok" "${vm}" "" \
+      "reason=standby_state_reconciled previous=${standby_state} standby_domain_state=${standby_domain_state}"
+    return 0
+  fi
+
+  echo "ERROR: failback requires standby_state to be active-ready, got ${standby_state}" >&2
+  return 1
 }
 
 ftctl_verify_xcolo_failback_ready() {
