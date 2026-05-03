@@ -171,6 +171,7 @@ Commands:
   failback           Start failback workflow
   failback-sync      Prepare reverse sync for cloud-managed failback
   failback-reprotect Re-arm protection after cloud-managed failback cutback
+  unprotect          Stop protection and remove host-side FTCTL runtime state
   fence-confirm      Mark manual fencing as completed
   fence-clear        Clear fencing state
   pause-protection   Pause reconciliation for a VM
@@ -247,7 +248,7 @@ parse_args() {
         print_version
         exit "${EXIT_OK}"
         ;;
-      protect|status|reconcile|failover|failback|failback-sync|failback-reprotect|fence-confirm|fence-clear|pause-protection|resume-protection|check|health|events|config)
+      protect|status|reconcile|failover|failback|failback-sync|failback-reprotect|unprotect|fence-confirm|fence-clear|pause-protection|resume-protection|check|health|events|config)
         [[ -z "${CLI_COMMAND}" ]] || {
           echo "ERROR: multiple commands specified" >&2
           exit "${EXIT_USAGE}"
@@ -641,6 +642,14 @@ dispatch() {
       ftctl_profile_load_vm "${CLI_VM}"
       ftctl_profile_validate "${CLI_VM}"
       ftctl_failback_reprotect_after_cloud_cutback "${CLI_VM}" "manual"
+      ;;
+    unprotect)
+      require_vm
+      [[ "${CLI_FORCE}" == "1" ]] || {
+        echo "ERROR: unprotect requires --force" >&2
+        exit "${EXIT_USAGE}"
+      }
+      ftctl_state_unprotect_vm "${CLI_VM}" "${CLI_JSON}"
       ;;
     fence-confirm)
       require_vm

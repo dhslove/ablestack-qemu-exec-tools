@@ -128,6 +128,67 @@ ftctl_state_resume_vm() {
   ftctl_log_event "state" "protection.resume" "ok" "${vm}" "" "admin_state=active"
 }
 
+ftctl_state_qmp_block_job_devices() {
+  local payload="${1-}"
+  python3 -c 'import json,sys
+try:
+    data=json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for item in data.get("return", []) or []:
+    device=item.get("device")
+    if device:
+        print(device)
+' <<< "${payload}" 2>/dev/null || true
+}
+
+ftctl_state_cancel_block_jobs() {
+  local vm="${1-}"
+  local out="" err="" rc=0 device="" canceled=0
+
+  ftctl_virsh "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC:-30}" out err rc -- -c "${FTCTL_DEFAULT_PRIMARY_URI:-qemu:///system}" qemu-monitor-command "${vm}" --pretty '{"execute":"query-block-jobs"}' || true
+  while IFS= read -r device; do
+    [[ -n "${device}" ]] || continue
+    canceled=$((canceled + 1))
+    ftctl_virsh "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC:-30}" out err rc -- -c "${FTCTL_DEFAULT_PRIMARY_URI:-qemu:///system}" qemu-monitor-command "${vm}" --pretty "{\"execute\":\"block-job-cancel\",\"arguments\":{\"device\":\"${device}\",\"force\":true}}" || true
+    ftctl_log_event "state" "protection.unprotect.block-job-cancel" "$(ftctl_result_from_rc "${rc}")" "${vm}" "${rc}" "device=${device}"
+  done < <(ftctl_state_qmp_block_job_devices "${out}")
+
+  printf '%s\n' "${canceled}"
+}
+
+ftctl_state_remove_runtime_files() {
+  local vm="${1-}"
+  local key
+  key="$(ftctl_state_vm_key "${vm}")"
+
+  rm -f "$(ftctl_profile_path "${vm}")" 2>/dev/null || true
+  rm -f "${FTCTL_STATE_DIR}/${key}.state" "${FTCTL_STATE_DIR}/${key}.state.blockcopy" "${FTCTL_STATE_DIR}/${key}.state.blockcopy.reverse" 2>/dev/null || true
+  rm -rf "${FTCTL_RUN_DIR}/debug/blockcopy/${key}" 2>/dev/null || true
+  rm -f "${FTCTL_RUN_DIR}/xml/${key}-"*.xml 2>/dev/null || true
+  rm -rf "${FTCTL_XML_BACKUP_DIR}/${key}" 2>/dev/null || true
+  rm -f "${FTCTL_XML_BACKUP_DIR}/${key}-"*.xml 2>/dev/null || true
+  rm -f /tmp/ftctl_* 2>/dev/null || true
+}
+
+ftctl_state_unprotect_vm() {
+  local vm="${1-}"
+  local json="${2-0}"
+  local canceled
+
+  canceled="$(ftctl_state_cancel_block_jobs "${vm}" 2>/dev/null || echo 0)"
+  ftctl_state_remove_runtime_files "${vm}"
+  ftctl_log_event "state" "protection.unprotect" "ok" "${vm}" "" "block_jobs_cancelled=${canceled}"
+
+  if [[ "${json}" == "1" ]]; then
+    printf '{"command":"unprotect","result":"ok","vm":"%s","block_jobs_cancelled":%s}\n' \
+      "$(ftctl__json_escape "${vm}")" \
+      "${canceled}"
+  else
+    printf '%s: protection runtime removed\n' "${vm}"
+  fi
+}
+
 ftctl_state_get_elapsed_key_sec() {
   local vm="${1-}"
   local key="${2-}"
