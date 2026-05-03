@@ -152,6 +152,46 @@ ftctl_blockcopy_krbd_map_local() {
   }
 }
 
+ftctl_blockcopy_map_remote_krbd_path() {
+  local host="${1-}"
+  local user="${2-}"
+  local path="${3-}"
+  local spec q_path q_spec remote_cmd out err rc
+
+  ftctl_blockcopy_krbd_spec_from_path "${path}" spec || return 1
+  printf -v q_path '%q' "${path}"
+  printf -v q_spec '%q' "${spec}"
+  remote_cmd=$(cat <<EOF
+set -euo pipefail
+path=${q_path}
+spec=${q_spec}
+if [[ -b "\${path}" ]]; then
+  exit 0
+fi
+command -v rbd >/dev/null 2>&1
+rbd map "\${spec}" >/dev/null
+udevadm settle >/dev/null 2>&1 || true
+[[ -b "\${path}" ]]
+EOF
+)
+  out=""
+  err=""
+  rc=0
+  ftctl_blockcopy_remote_exec "${host}" "${user}" out err rc "${remote_cmd}" || true
+  : "${out}"
+  if [[ "${rc}" != "0" ]]; then
+    echo "ERROR: remote rbd map failed for ${path}: ${err}" >&2
+    return "${rc}"
+  fi
+}
+
+ftctl_blockcopy_payload_indicates_start_failure() {
+  local payload="${1-}"
+  grep -Eiq \
+    "missing destination file|No such file or directory|Cannot access storage file|failed to stat|could not open|failed to get shared" \
+    <<< "${payload}"
+}
+
 ftctl_blockcopy_remote_nbd_port_extract_from_uri() {
   local uri="${1-}"
   local out_var="${2}"
@@ -1308,6 +1348,70 @@ ftctl_blockcopy_state_write_reverse() {
   chmod 0644 "${path}" 2>/dev/null || true
 }
 
+ftctl_blockcopy_reverse_krbd_paths() {
+  local vm="${1-}"
+  local out_array_name="${2}"
+  local -n _out_array="${out_array_name}"
+  local path line target source dest format existing item
+
+  _out_array=()
+  path="$(ftctl_blockcopy_reverse_state_path "${vm}")"
+  [[ -f "${path}" ]] || return 0
+
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] || continue
+    target="${line%%|*}"
+    line="${line#*|}"
+    source="${line%%|*}"
+    line="${line#*|}"
+    dest="${line%%|*}"
+    format="${line##*|}"
+    : "${target}${source}${format}"
+    ftctl_blockcopy_is_krbd_path "${dest}" || continue
+    existing="0"
+    for item in "${_out_array[@]}"; do
+      if [[ "${item}" == "${dest}" ]]; then
+        existing="1"
+        break
+      fi
+    done
+    [[ "${existing}" == "1" ]] || _out_array+=("${dest}")
+  done < "${path}"
+}
+
+ftctl_blockcopy_map_reverse_krbd_destinations() {
+  local vm="${1-}"
+  local paths=()
+  local path host user
+
+  ftctl_blockcopy_reverse_krbd_paths "${vm}" paths
+  ((${#paths[@]} > 0)) || return 0
+
+  if ftctl_blockcopy_secondary_uri_is_local_system; then
+    for path in "${paths[@]}"; do
+      if ! ftctl_blockcopy_krbd_map_local "${path}"; then
+        ftctl_log_event "failback" "reverse_sync.rbd-map" "fail" "${vm}" "" \
+          "path=${path} secondary_uri=${FTCTL_PROFILE_SECONDARY_URI}"
+        return 1
+      fi
+    done
+  else
+    host=""
+    user=""
+    ftctl_blockcopy_remote_target_host_user host user || return $?
+    for path in "${paths[@]}"; do
+      if ! ftctl_blockcopy_map_remote_krbd_path "${host}" "${user}" "${path}"; then
+        ftctl_log_event "failback" "reverse_sync.rbd-map" "fail" "${vm}" "" \
+          "path=${path} secondary_uri=${FTCTL_PROFILE_SECONDARY_URI}"
+        return 1
+      fi
+    done
+  fi
+
+  ftctl_log_event "failback" "reverse_sync.rbd-map" "ok" "${vm}" "" \
+    "count=${#paths[@]} secondary_uri=${FTCTL_PROFILE_SECONDARY_URI}"
+}
+
 ftctl_blockcopy_job_query() {
   local vm="${1-}"
   local target="${2-}"
@@ -1838,7 +1942,7 @@ ftctl_blockcopy_prepare_reverse_sync_plan() {
 
 ftctl_blockcopy_start_reverse_sync() {
   local vm="${1-}"
-  local path line target source dest format rc_any=0
+  local path line target source dest format rc_any=0 payload state ready query_rc i
   local persistence out err rc
   local active_vm export_name export_port export_addr reverse_xml source_xml
 
@@ -1850,6 +1954,14 @@ ftctl_blockcopy_start_reverse_sync() {
   path="$(ftctl_blockcopy_reverse_state_path "${vm}")"
   [[ -f "${path}" ]] || return 1
   persistence="$(ftctl_state_get "${vm}" "primary_persistence" 2>/dev/null || echo "unknown")"
+
+  if ! ftctl_blockcopy_map_reverse_krbd_destinations "${vm}"; then
+    ftctl_state_set "${vm}" \
+      "protection_state=error" \
+      "transport_state=reverse_sync_failed" \
+      "last_error=reverse_rbd_map_failed"
+    return 1
+  fi
 
   active_vm="$(ftctl_blockcopy_active_domain_on_secondary "${vm}")"
   while IFS= read -r line; do
@@ -1898,6 +2010,26 @@ ftctl_blockcopy_start_reverse_sync() {
         out \
         err \
         rc || true
+    fi
+    payload="${out}"$'\n'"${err}"
+    if [[ "${rc}" == "0" ]] && ftctl_blockcopy_payload_indicates_start_failure "${payload}"; then
+      rc=2
+    fi
+    if [[ "${rc}" == "0" ]]; then
+      state="unknown"
+      ready="unknown"
+      query_rc=1
+      for i in 1 2 3 4 5; do
+        if ftctl_blockcopy_reverse_job_query "${vm}" "${target}" state ready; then
+          query_rc=0
+          break
+        fi
+        sleep 1
+      done
+      if [[ "${query_rc}" != "0" ]]; then
+        rc=3
+        err="${err}"$'\n'"reverse block job not found after start for ${target}"
+      fi
     fi
     if [[ "${rc}" != "0" ]]; then
       rc_any=1

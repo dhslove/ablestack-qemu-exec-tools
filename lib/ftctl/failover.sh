@@ -257,7 +257,7 @@ ftctl_failback_request() {
       "reason=${reason} reverse_sync=failed"
     return 1
   fi
-  if ! ftctl_blockcopy_wait_reverse_sync_ready "${vm}" "120"; then
+  if ! ftctl_blockcopy_wait_reverse_sync_ready "${vm}" "${FTCTL_FAILBACK_REVERSE_SYNC_TIMEOUT_SEC:-600}"; then
     ftctl_state_set "${vm}" \
       "protection_state=error" \
       "transport_state=reverse_sync_failed" \
