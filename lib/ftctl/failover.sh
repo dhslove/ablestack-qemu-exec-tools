@@ -286,9 +286,11 @@ ftctl_failback_request() {
     return 1
   fi
   if ! ftctl_primary_activate_from_backup "${vm}"; then
+    local primary_activate_error
+    primary_activate_error="$(ftctl_state_get "${vm}" "last_error" 2>/dev/null || true)"
     ftctl_state_set "${vm}" \
       "protection_state=error" \
-      "last_error=cutback_primary_activate_failed"
+      "last_error=${primary_activate_error:-cutback_primary_activate_failed}"
     ftctl_log_event "failback" "failback.cutback" "fail" "${vm}" "" \
       "reason=${reason} primary=activate_failed"
     return 1

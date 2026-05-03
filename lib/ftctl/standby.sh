@@ -263,6 +263,70 @@ ftctl_standby_map_peer_krbd_paths() {
     "count=${#paths[@]} secondary_uri=${FTCTL_PROFILE_SECONDARY_URI}"
 }
 
+ftctl_primary_krbd_paths_from_xml() {
+  local xml_path="${1-}"
+  local out_array_name="${2}"
+  local payload line
+  local -n _out_array="${out_array_name}"
+
+  _out_array=()
+  [[ -n "${xml_path}" && -f "${xml_path}" ]] || return 1
+  command -v python3 >/dev/null 2>&1 || {
+    echo "ERROR: python3 is required for primary KRBD XML inspection" >&2
+    return 2
+  }
+
+  payload="$(python3 - "${xml_path}" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+xml_path = sys.argv[1]
+root = ET.parse(xml_path).getroot()
+devices = root.find("devices")
+seen = set()
+
+if devices is not None:
+    for disk in devices.findall("disk"):
+        source = disk.find("source")
+        if source is None:
+            continue
+        for attr in ("dev", "file", "name"):
+            value = source.get(attr, "")
+            if value.startswith("/dev/rbd/") and value not in seen:
+                seen.add(value)
+                print(value)
+PY
+)" || return $?
+
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] || continue
+    _out_array+=("${line}")
+  done <<< "${payload}"
+  return 0
+}
+
+ftctl_primary_map_local_krbd_paths_from_xml() {
+  local vm="${1-}"
+  local primary_xml="${2-}"
+  local paths=()
+  local path
+
+  ftctl_primary_krbd_paths_from_xml "${primary_xml}" paths || return $?
+  ((${#paths[@]} > 0)) || return 0
+
+  for path in "${paths[@]}"; do
+    if ! ftctl_blockcopy_krbd_map_local "${path}"; then
+      ftctl_state_set "${vm}" "last_error=primary_rbd_map_failed"
+      ftctl_log_event "primary" "primary.rbd-map" "fail" "${vm}" "" \
+        "path=${path} primary_uri=${FTCTL_PROFILE_PRIMARY_URI}"
+      return 1
+    fi
+  done
+
+  ftctl_log_event "primary" "primary.rbd-map" "ok" "${vm}" "" \
+    "count=${#paths[@]} primary_uri=${FTCTL_PROFILE_PRIMARY_URI}"
+}
+
 ftctl_xml_apply_qemu_commandline() {
   local xml_path="${1-}"
   local args_string="${2-}"
@@ -686,6 +750,8 @@ ftctl_primary_activate_from_backup() {
       "reason=dry_run primary_uri=${FTCTL_PROFILE_PRIMARY_URI}"
     return 0
   fi
+
+  ftctl_primary_map_local_krbd_paths_from_xml "${vm}" "${primary_xml}" || return $?
 
   out=""
   err=""
