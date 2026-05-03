@@ -1999,14 +1999,16 @@ ftctl_blockcopy_start_reverse_sync() {
         err \
         rc || true
     else
-      ftctl_blockcopy_start_job \
+      reverse_xml=""
+      source_xml="$(ftctl_state_get "${vm}" "standby_xml_seed" 2>/dev/null || true)"
+      ftctl_blockcopy_build_shared_dest_xml \
+        "${vm}" "${target}" "${format}" "${dest}" "${source_xml}" reverse_xml
+      ftctl_blockcopy_start_shared_xml_job \
         "${FTCTL_PROFILE_SECONDARY_URI}" \
         "${active_vm}" \
         "${target}" \
-        "${dest}" \
-        "${format}" \
-        "1" \
         "${persistence}" \
+        "${reverse_xml}" \
         out \
         err \
         rc || true
