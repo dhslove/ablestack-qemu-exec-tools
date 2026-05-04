@@ -263,6 +263,33 @@ ftctl_blockcopy_remote_nbd_secondary_path() {
   printf '%s\n' "${path}"
 }
 
+ftctl_blockcopy_remote_nbd_target_format() {
+  local secondary_path="${1-}"
+  local source_format="${2-raw}"
+  local out_var="${3}"
+  local target_format=""
+
+  case "${secondary_path}" in
+    /dev/rbd/*)
+      target_format="raw"
+      ;;
+    /dev/*)
+      target_format="${source_format:-raw}"
+      ;;
+    *.raw)
+      target_format="raw"
+      ;;
+    *.qcow2|*.qcow2.*)
+      target_format="qcow2"
+      ;;
+    *)
+      target_format="qcow2"
+      ;;
+  esac
+
+  printf -v "${out_var}" '%s' "${target_format}"
+}
+
 ftctl_blockcopy_parse_ssh_target_from_uri() {
   local uri="${1-}"
   local host_var="${2}"
@@ -612,7 +639,7 @@ ftctl_blockcopy_build_remote_nbd_dest_xml() {
   fi
   cat > "${out_path}" <<EOF
 <disk type='network' device='disk'>
-  <driver name='qemu' type='${format}'/>
+  <driver name='qemu' type='raw'/>
   <source protocol='nbd' name='${export_name}'>
     <host name='${export_host}' port='${export_port}' transport='tcp'/>
   </source>
@@ -934,10 +961,11 @@ ftctl_blockcopy_remote_nbd_prepare_target() {
   local secondary_path="${5-}"
   local export_name="${6-}"
   local export_port="${7-}"
-  local host="" user="" size="" alloc_size="" out="" err="" rc=0 pid_file="" remote_cmd="" debug_cmd="" bind_addr=""
+  local host="" user="" size="" alloc_size="" out="" err="" rc=0 pid_file="" remote_cmd="" debug_cmd="" bind_addr="" target_format=""
 
   ftctl_blockcopy_remote_target_host_user host user || return 2
   ftctl_blockcopy_remote_nbd_host_only "${FTCTL_PROFILE_REMOTE_NBD_EXPORT_ADDR}" bind_addr || return 2
+  ftctl_blockcopy_remote_nbd_target_format "${secondary_path}" "${format}" target_format
   ftctl_blockcopy_source_virtual_size_bytes "${vm}" "${target}" "${source}" size || {
     echo "ERROR: could not determine source virtual size for ${source}" >&2
     return 2
@@ -969,6 +997,7 @@ if [[ "${secondary_path}" == /dev/rbd/* ]]; then
     udevadm settle >/dev/null 2>&1 || true
   fi
 fi
+target_format="${target_format}"
 if [[ -b "${secondary_path}" && "${secondary_path}" != /dev/rbd/* ]]; then
   secondary_real="\$(readlink -f "${secondary_path}" 2>/dev/null || true)"
   stale_map=""
@@ -1003,17 +1032,17 @@ if [[ -b "${secondary_path}" && "${secondary_path}" != /dev/rbd/* ]]; then
   if [[ -n "\${secondary_real}" ]]; then
     dmsetup info -c "\${secondary_real}" 2>/dev/null || true
   fi
-  if [[ "${format}" != "raw" ]]; then
+  if [[ "\${target_format}" != "raw" ]]; then
     current_format="\$(qemu-img info --force-share --output=json "${secondary_path}" 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get(\"format\",\"\"))' 2>/dev/null || true)"
-    if [[ "\${current_format}" != "${format}" ]]; then
-      qemu-img create -f "${format}" "${secondary_path}" "${size}"
+    if [[ "\${current_format}" != "\${target_format}" ]]; then
+      qemu-img create -f "\${target_format}" "${secondary_path}" "${size}"
     fi
   fi
 elif [[ -b "${secondary_path}" && "${secondary_path}" == /dev/rbd/* ]]; then
-  if [[ "${format}" != "raw" ]]; then
+  if [[ "\${target_format}" != "raw" ]]; then
     current_format="\$(qemu-img info --force-share --output=json "${secondary_path}" 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get(\"format\",\"\"))' 2>/dev/null || true)"
-    if [[ "\${current_format}" != "${format}" ]]; then
-      qemu-img create -f "${format}" "${secondary_path}" "${size}"
+    if [[ "\${current_format}" != "\${target_format}" ]]; then
+      qemu-img create -f "\${target_format}" "${secondary_path}" "${size}"
     fi
   fi
 else
@@ -1024,7 +1053,13 @@ else
     exit 97
   fi
   if [[ ! -f "${secondary_path}" ]]; then
-    qemu-img create -f "${format}" "${secondary_path}" "${size}"
+    qemu-img create -f "\${target_format}" "${secondary_path}" "${size}"
+  else
+    current_format="\$(qemu-img info --force-share --output=json "${secondary_path}" 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get(\"format\",\"\"))' 2>/dev/null || true)"
+    if [[ -n "\${current_format}" && "\${current_format}" != "\${target_format}" ]]; then
+      echo "secondary_format_mismatch:${secondary_path}:\${current_format}:\${target_format}" >&2
+      exit 96
+    fi
   fi
 fi
 if [[ -f "${pid_file}" ]]; then
@@ -1052,7 +1087,7 @@ qemu-nbd --fork --persistent --shared=8 \
   --bind "${bind_addr}" \
   --port "${export_port}" \
   --export-name "${export_name}" \
-  --format "${format}" \
+  --format "\${target_format}" \
   --pid-file "${pid_file}" \
   "${secondary_path}"
 EOF
@@ -1068,7 +1103,7 @@ EOF
   ftctl_blockcopy_write_debug_file "${vm}" "${target}" "secondary-prepare-rc.txt" "${rc}"
   : "${out}${err}"
   [[ "${rc}" == "0" ]] || {
-    echo "ERROR: remote-nbd prepare context: host=${host} user=${user} size=${size} format=${format} secondary_path=${secondary_path} export=${export_name}" >&2
+    echo "ERROR: remote-nbd prepare context: host=${host} user=${user} size=${size} source_format=${format} target_format=${target_format} secondary_path=${secondary_path} export=${export_name}" >&2
     echo "ERROR: remote-nbd prepare command: ${debug_cmd}" >&2
     [[ -n "${err}" ]] && echo "ERROR: remote-nbd prepare failed: ${err}" >&2
     return "${rc}"
@@ -1752,17 +1787,18 @@ ftctl_blockcopy_plan_protect() {
         "${FTCTL_PROFILE_REMOTE_NBD_EXPORT_ADDR}" "${export_port}" "${export_name}" \
         "${primary_xml_backup}" remote_xml
       {
-        local remote_host="" remote_user="" debug_remote_cmd="" debug_size="" debug_bind_addr=""
+        local remote_host="" remote_user="" debug_remote_cmd="" debug_size="" debug_bind_addr="" debug_target_format=""
         ftctl_blockcopy_remote_target_host_user remote_host remote_user || true
         ftctl_blockcopy_remote_nbd_host_only "${FTCTL_PROFILE_REMOTE_NBD_EXPORT_ADDR}" debug_bind_addr || debug_bind_addr="${FTCTL_PROFILE_REMOTE_NBD_EXPORT_ADDR}"
+        ftctl_blockcopy_remote_nbd_target_format "${secondary_dest}" "${format}" debug_target_format
         ftctl_blockcopy_source_virtual_size_bytes "${vm}" "${target}" "${source}" debug_size || true
         debug_remote_cmd="$(cat <<EOF
 set -euo pipefail
 mkdir -p "$(dirname "${secondary_dest}")" /run/ablestack-vm-ftctl
 if [[ ! -f "${secondary_dest}" ]]; then
-  qemu-img create -f "${format}" "${secondary_dest}" "${debug_size}"
+  qemu-img create -f "${debug_target_format}" "${secondary_dest}" "${debug_size}"
 fi
-qemu-nbd --fork --persistent --shared=8 --bind "${debug_bind_addr}" --port "${export_port}" --export-name "${export_name}" --format "${format}" --pid-file "/run/ablestack-vm-ftctl/nbd-${vm}-${target}.pid" "${secondary_dest}"
+qemu-nbd --fork --persistent --shared=8 --bind "${debug_bind_addr}" --port "${export_port}" --export-name "${export_name}" --format "${debug_target_format}" --pid-file "/run/ablestack-vm-ftctl/nbd-${vm}-${target}.pid" "${secondary_dest}"
 EOF
 )"
         ftctl_blockcopy_write_remote_nbd_repro "${vm}" "${target}" "${remote_xml}" "${remote_host}" "${remote_user}" "${debug_remote_cmd}" "${persistence}"
@@ -1770,7 +1806,8 @@ EOF
           "host=${remote_host}
 user=${remote_user}
 size=${debug_size}
-format=${format}
+source_format=${format}
+target_format=${debug_target_format}
 secondary_path=${secondary_dest}
 export_name=${export_name}
 xml_port=${export_port}
