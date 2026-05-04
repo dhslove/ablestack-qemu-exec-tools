@@ -246,6 +246,7 @@ ftctl_profile_write_vm() {
   [[ -n "${fencing_policy}" ]] && FTCTL_PROFILE_FENCING_POLICY="${fencing_policy}"
   [[ -n "${secondary_target_dir}" ]] && FTCTL_PROFILE_SECONDARY_TARGET_DIR="${secondary_target_dir}"
   [[ -n "${remote_nbd_export_addr}" ]] && FTCTL_PROFILE_REMOTE_NBD_EXPORT_ADDR="${remote_nbd_export_addr}"
+  FTCTL_PROFILE_REMOTE_NBD_EXPORT_NAME="${FTCTL_PROFILE_REMOTE_NBD_EXPORT_NAME:-${vm}}"
   [[ -n "${xcolo_proxy_endpoint}" ]] && FTCTL_PROFILE_XCOLO_PROXY_ENDPOINT="${xcolo_proxy_endpoint}"
   [[ -n "${xcolo_nbd_endpoint}" ]] && FTCTL_PROFILE_XCOLO_NBD_ENDPOINT="${xcolo_nbd_endpoint}"
   [[ -n "${xcolo_migrate_uri}" ]] && FTCTL_PROFILE_XCOLO_MIGRATE_URI="${xcolo_migrate_uri}"
@@ -324,6 +325,7 @@ ftctl_profile_write_vm() {
     fi
     if [[ -n "${remote_nbd_export_addr}" ]]; then
       printf 'FTCTL_PROFILE_REMOTE_NBD_EXPORT_ADDR="%s"\n' "${FTCTL_PROFILE_REMOTE_NBD_EXPORT_ADDR}"
+      printf 'FTCTL_PROFILE_REMOTE_NBD_EXPORT_NAME="%s"\n' "${FTCTL_PROFILE_REMOTE_NBD_EXPORT_NAME}"
     fi
     if [[ -n "${xcolo_proxy_endpoint}" ]]; then
       printf 'FTCTL_PROFILE_XCOLO_PROXY_ENDPOINT="%s"\n' "${FTCTL_PROFILE_XCOLO_PROXY_ENDPOINT}"
