@@ -195,11 +195,17 @@ HA/DR profiles also use backend-mode fields.
     - `FTCTL_PROFILE_TARGET_STORAGE_SCOPE=shared`
     - explicit `FTCTL_PROFILE_DISK_MAP`
     - `FTCTL_PROFILE_SECONDARY_VM_NAME` different from the primary VM name for `ha` and `dr`
+  - intended for shared-visible target paths that the primary host can open directly
 - `remote-nbd`
+  - requires:
+    - `FTCTL_PROFILE_TARGET_STORAGE_SCOPE=secondary-local`
+    - `FTCTL_PROFILE_SECONDARY_TARGET_DIR`
+    - `FTCTL_PROFILE_REMOTE_NBD_EXPORT_ADDR`
   - validated and implemented for the tested HA/DR paths:
     - protect
     - failover
     - full failback
+  - required for peer-host local storage where the primary host cannot directly open the target path
 
 ## FT Backend Notes
 

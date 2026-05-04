@@ -341,6 +341,20 @@ selftest_case_backend_validation() {
   FTCTL_PROFILE_MODE="ha"
   FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
   FTCTL_PROFILE_SECONDARY_URI="qemu+ssh://peer/system"
+  FTCTL_PROFILE_BACKEND_MODE="shared-blockcopy"
+  FTCTL_PROFILE_TARGET_STORAGE_SCOPE="secondary-local"
+  FTCTL_PROFILE_SECONDARY_VM_NAME="${vm}-standby"
+  FTCTL_PROFILE_DOMAIN_PERSISTENCE="yes"
+  FTCTL_PROFILE_DISK_MAP="vda=/secondary/${vm}.qcow2"
+
+  if ftctl_profile_validate "${vm}"; then
+    selftest_fail "shared-blockcopy should reject secondary-local target storage scope"
+  fi
+
+  ftctl_profile_reset
+  FTCTL_PROFILE_MODE="ha"
+  FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
+  FTCTL_PROFILE_SECONDARY_URI="qemu+ssh://peer/system"
   FTCTL_PROFILE_BACKEND_MODE="remote-nbd"
   FTCTL_PROFILE_TARGET_STORAGE_SCOPE="secondary-local"
   FTCTL_PROFILE_SECONDARY_VM_NAME="${vm}-standby"
