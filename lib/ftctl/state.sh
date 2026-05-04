@@ -142,6 +142,153 @@ for item in data.get("return", []) or []:
 ' <<< "${payload}" 2>/dev/null || true
 }
 
+ftctl_state_qmp_payload_contains_path() {
+  local payload="${1-}"
+  local path="${2-}"
+  [[ -n "${path}" ]] || return 1
+  python3 -c 'import json
+import sys
+
+needle = sys.argv[1]
+
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+
+def contains(value):
+    if isinstance(value, str):
+        return needle in value
+    if isinstance(value, dict):
+        return any(contains(v) for v in value.values())
+    if isinstance(value, list):
+        return any(contains(v) for v in value)
+    return False
+
+sys.exit(0 if contains(data) else 1)
+' "${path}" <<< "${payload}" >/dev/null 2>&1
+}
+
+ftctl_state_blockcopy_targets() {
+  local vm="${1-}"
+  local path line target
+
+  path="$(ftctl_state_path "${vm}").blockcopy"
+  [[ -f "${path}" ]] || return 0
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] || continue
+    target="${line%%|*}"
+    [[ -n "${target}" ]] && printf '%s\n' "${target}"
+  done < "${path}" | awk '!seen[$0]++'
+}
+
+ftctl_state_blockcopy_destinations() {
+  local vm="${1-}"
+  local path line dest
+
+  for path in "$(ftctl_state_path "${vm}").blockcopy" "$(ftctl_state_path "${vm}").blockcopy.reverse"; do
+    [[ -f "${path}" ]] || continue
+    while IFS= read -r line; do
+      [[ -n "${line}" ]] || continue
+      IFS='|' read -r _ _ dest _ <<< "${line}"
+      [[ -n "${dest}" ]] && printf '%s\n' "${dest}"
+    done < "${path}"
+  done | awk '!seen[$0]++'
+}
+
+ftctl_state_wait_block_jobs_released() {
+  local vm="${1-}"
+  local timeout_sec="${2:-${FTCTL_UNPROTECT_RELEASE_TIMEOUT_SEC:-180}}"
+  local deadline now out="" err="" rc=0 remaining=""
+
+  deadline=$(( $(ftctl_now_epoch) + timeout_sec ))
+  while true; do
+    ftctl_virsh "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC:-30}" out err rc -- -c "${FTCTL_DEFAULT_PRIMARY_URI:-qemu:///system}" qemu-monitor-command "${vm}" --pretty '{"execute":"query-block-jobs"}' || true
+    remaining="$(ftctl_state_qmp_block_job_devices "${out}")"
+    if [[ -z "${remaining}" ]]; then
+      ftctl_log_event "state" "protection.unprotect.block-jobs-released" "ok" "${vm}" "${rc}" ""
+      return 0
+    fi
+    now="$(ftctl_now_epoch)"
+    if (( now >= deadline )); then
+      ftctl_log_event "state" "protection.unprotect.block-jobs-released" "timeout" "${vm}" "${rc}" "devices=$(tr '\n' ',' <<< "${remaining}" | sed 's/,$//')"
+      echo "ERROR: block jobs still active for ${vm}: ${remaining}" >&2
+      return 2
+    fi
+    sleep 1
+  done
+}
+
+ftctl_state_wait_qmp_destinations_released() {
+  local vm="${1-}"
+  local timeout_sec="${2:-${FTCTL_UNPROTECT_RELEASE_TIMEOUT_SEC:-180}}"
+  local deadline now out="" err="" rc=0 dest
+  local -a destinations=()
+  local -a pending=()
+
+  mapfile -t destinations < <(ftctl_state_blockcopy_destinations "${vm}")
+  ((${#destinations[@]})) || return 0
+
+  deadline=$(( $(ftctl_now_epoch) + timeout_sec ))
+  while true; do
+    pending=()
+    ftctl_virsh "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC:-30}" out err rc -- -c "${FTCTL_DEFAULT_PRIMARY_URI:-qemu:///system}" qemu-monitor-command "${vm}" --pretty '{"execute":"query-named-block-nodes"}' || true
+    for dest in "${destinations[@]}"; do
+      [[ -n "${dest}" ]] || continue
+      if ftctl_state_qmp_payload_contains_path "${out}" "${dest}"; then
+        pending+=("${dest}")
+      fi
+    done
+    if ((${#pending[@]} == 0)); then
+      ftctl_log_event "state" "protection.unprotect.qmp-destinations-released" "ok" "${vm}" "${rc}" "count=${#destinations[@]}"
+      return 0
+    fi
+    now="$(ftctl_now_epoch)"
+    if (( now >= deadline )); then
+      ftctl_log_event "state" "protection.unprotect.qmp-destinations-released" "timeout" "${vm}" "${rc}" "destinations=$(IFS=,; echo "${pending[*]}")"
+      echo "ERROR: block nodes still reference FTCTL destinations for ${vm}: ${pending[*]}" >&2
+      return 2
+    fi
+    sleep 1
+  done
+}
+
+ftctl_state_unmap_local_krbd_destinations() {
+  local vm="${1-}"
+  local timeout_sec="${2:-${FTCTL_UNPROTECT_RELEASE_TIMEOUT_SEC:-180}}"
+  local dest spec deadline now unmap_out unmap_count=0
+
+  while IFS= read -r dest; do
+    [[ "${dest}" == /dev/rbd/* ]] || continue
+    spec="${dest#/dev/rbd/}"
+    if [[ ! -b "${dest}" ]]; then
+      ftctl_log_event "state" "protection.unprotect.rbd-unmap" "ok" "${vm}" "" "path=${dest} spec=${spec} already_unmapped=1"
+      continue
+    fi
+    command -v rbd >/dev/null 2>&1 || {
+      echo "ERROR: rbd CLI not found while releasing ${dest}" >&2
+      return 2
+    }
+    deadline=$(( $(ftctl_now_epoch) + timeout_sec ))
+    while [[ -b "${dest}" ]]; do
+      unmap_out="$(rbd unmap "${dest}" 2>&1)" || true
+      udevadm settle >/dev/null 2>&1 || true
+      [[ ! -b "${dest}" ]] && break
+      now="$(ftctl_now_epoch)"
+      if (( now >= deadline )); then
+        ftctl_log_event "state" "protection.unprotect.rbd-unmap" "timeout" "${vm}" "" "path=${dest} spec=${spec} message=${unmap_out}"
+        echo "ERROR: unable to unmap FTCTL RBD destination ${dest}: ${unmap_out}" >&2
+        return 2
+      fi
+      sleep 1
+    done
+    unmap_count=$((unmap_count + 1))
+    ftctl_log_event "state" "protection.unprotect.rbd-unmap" "ok" "${vm}" "" "path=${dest} spec=${spec}"
+  done < <(ftctl_state_blockcopy_destinations "${vm}")
+
+  printf '%s\n' "${unmap_count}"
+}
+
 ftctl_state_cancel_block_jobs() {
   local vm="${1-}"
   local out="" err="" rc=0 device="" canceled=0
@@ -174,16 +321,20 @@ ftctl_state_remove_runtime_files() {
 ftctl_state_unprotect_vm() {
   local vm="${1-}"
   local json="${2-0}"
-  local canceled
+  local canceled unmapped
 
   canceled="$(ftctl_state_cancel_block_jobs "${vm}" 2>/dev/null || echo 0)"
+  ftctl_state_wait_block_jobs_released "${vm}"
+  ftctl_state_wait_qmp_destinations_released "${vm}"
+  unmapped="$(ftctl_state_unmap_local_krbd_destinations "${vm}")"
   ftctl_state_remove_runtime_files "${vm}"
-  ftctl_log_event "state" "protection.unprotect" "ok" "${vm}" "" "block_jobs_cancelled=${canceled}"
+  ftctl_log_event "state" "protection.unprotect" "ok" "${vm}" "" "block_jobs_cancelled=${canceled} rbd_unmapped=${unmapped}"
 
   if [[ "${json}" == "1" ]]; then
-    printf '{"command":"unprotect","result":"ok","vm":"%s","block_jobs_cancelled":%s}\n' \
+    printf '{"command":"unprotect","result":"ok","vm":"%s","block_jobs_cancelled":%s,"rbd_unmapped":%s}\n' \
       "$(ftctl__json_escape "${vm}")" \
-      "${canceled}"
+      "${canceled}" \
+      "${unmapped}"
   else
     printf '%s: protection runtime removed\n' "${vm}"
   fi

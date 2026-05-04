@@ -718,6 +718,62 @@ EOF
   selftest_assert_contains "${out}" '"provisioning_backend":"cloud-managed"' "secondary check provisioning backend"
 }
 
+selftest_case_unprotect_releases_blockcopy_targets() (
+  selftest_reset_env
+  selftest_info "unprotect releases blockcopy targets"
+
+  local vm="unprotect-release"
+  local call_log="${SELFTEST_ROOT}/unprotect-release-calls.log"
+  local job_queries=0
+  local node_queries=0
+  FTCTL_UNPROTECT_RELEASE_TIMEOUT_SEC="5"
+  FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC="1"
+  ftctl_state_init_vm "${vm}"
+  cat > "$(ftctl_blockcopy_state_path "${vm}")" <<EOF
+vdb|/dev/rbd/rbd/${vm}-source|/dev/rbd/rbd/${vm}-mirror|raw|copy|yes
+EOF
+
+  # shellcheck disable=SC2317
+  ftctl_virsh() {
+    local out_var="${2}"
+    local err_var="${3}"
+    local rc_var="${4}"
+    local cmd="$*"
+    printf '%s\n' "${cmd}" >> "${call_log}"
+    printf -v "${err_var}" '%s' ""
+    printf -v "${rc_var}" '%s' "0"
+    if [[ "${cmd}" == *"query-block-jobs"* ]]; then
+      job_queries=$((job_queries + 1))
+      if (( job_queries == 1 )); then
+        printf -v "${out_var}" '%s' '{"return":[{"device":"vdb"}]}'
+      else
+        printf -v "${out_var}" '%s' '{"return":[]}'
+      fi
+      return 0
+    fi
+    if [[ "${cmd}" == *"query-named-block-nodes"* ]]; then
+      node_queries=$((node_queries + 1))
+      if (( node_queries == 1 )); then
+        printf -v "${out_var}" '%s' '{"return":[{"file":"/dev/rbd/rbd/unprotect-release-mirror"}]}'
+      else
+        printf -v "${out_var}" '%s' '{"return":[]}'
+      fi
+      return 0
+    fi
+    printf -v "${out_var}" '%s' '{"return":{}}'
+  }
+
+  local out=""
+  out="$(ftctl_state_unprotect_vm "${vm}" 1)"
+  selftest_assert_contains "${out}" '"result":"ok"' "unprotect result"
+  selftest_assert_contains "${out}" '"block_jobs_cancelled":1' "unprotect cancels job"
+  [[ ! -f "$(ftctl_blockcopy_state_path "${vm}")" ]] || selftest_fail "blockcopy state should be removed after release"
+  selftest_assert_file_contains "${call_log}" "block-job-cancel"
+  selftest_assert_file_contains "${call_log}" "query-named-block-nodes"
+  selftest_assert_file_contains "${FTCTL_EVENTS_LOG}" "protection.unprotect.block-jobs-released"
+  selftest_assert_file_contains "${FTCTL_EVENTS_LOG}" "protection.unprotect.qmp-destinations-released"
+)
+
 selftest_case_events_json() {
   selftest_reset_env
   selftest_info "events json output"
@@ -749,6 +805,7 @@ selftest_main() {
   selftest_case_xcolo_and_xml
   selftest_case_json_and_locking
   selftest_case_check_secondary_active_side
+  selftest_case_unprotect_releases_blockcopy_targets
   selftest_case_events_json
   selftest_info "all checks passed"
 }
