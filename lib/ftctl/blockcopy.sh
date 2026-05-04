@@ -112,8 +112,9 @@ ftctl_blockcopy_remote_nbd_uri() {
   local host="${1-}"
   local port="${2-}"
   local export_name="${3-}"
-  ftctl_blockcopy_remote_nbd_host_only "${host}" host
-  printf 'nbd://%s:%s/%s\n' "${host}" "${port}" "${export_name}"
+  local normalized_host
+  ftctl_blockcopy_remote_nbd_host_only "${host}" normalized_host
+  printf 'nbd://%s:%s/%s\n' "${normalized_host}" "${port}" "${export_name}"
 }
 
 ftctl_blockcopy_remote_nbd_host_only() {
