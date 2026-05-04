@@ -267,27 +267,27 @@ ftctl_blockcopy_remote_nbd_target_format() {
   local secondary_path="${1-}"
   local source_format="${2-raw}"
   local out_var="${3}"
-  local target_format=""
+  local resolved_format=""
 
   case "${secondary_path}" in
     /dev/rbd/*)
-      target_format="raw"
+      resolved_format="raw"
       ;;
     /dev/*)
-      target_format="${source_format:-raw}"
+      resolved_format="${source_format:-raw}"
       ;;
     *.raw)
-      target_format="raw"
+      resolved_format="raw"
       ;;
     *.qcow2|*.qcow2.*)
-      target_format="qcow2"
+      resolved_format="qcow2"
       ;;
     *)
-      target_format="qcow2"
+      resolved_format="qcow2"
       ;;
   esac
 
-  printf -v "${out_var}" '%s' "${target_format}"
+  printf -v "${out_var}" '%s' "${resolved_format}"
 }
 
 ftctl_blockcopy_parse_ssh_target_from_uri() {
