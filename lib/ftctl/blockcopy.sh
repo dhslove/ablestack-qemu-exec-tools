@@ -112,7 +112,20 @@ ftctl_blockcopy_remote_nbd_uri() {
   local host="${1-}"
   local port="${2-}"
   local export_name="${3-}"
+  ftctl_blockcopy_remote_nbd_host_only "${host}" host
   printf 'nbd://%s:%s/%s\n' "${host}" "${port}" "${export_name}"
+}
+
+ftctl_blockcopy_remote_nbd_host_only() {
+  local value="${1-}"
+  local out_var="${2}"
+  local host="${value}"
+
+  if [[ "${value}" =~ ^([^:]+):([0-9]+)$ ]]; then
+    host="${BASH_REMATCH[1]}"
+  fi
+  [[ -n "${host}" ]] || return 1
+  printf -v "${out_var}" '%s' "${host}"
 }
 
 ftctl_blockcopy_is_krbd_path() {
@@ -288,6 +301,7 @@ ftctl_blockcopy_remote_target_host_user() {
   if [[ "${FTCTL_PROFILE_SECONDARY_URI}" == "qemu:///system" ]]; then
     resolved_host="${FTCTL_PROFILE_REMOTE_NBD_EXPORT_ADDR:-}"
     [[ -n "${resolved_host}" ]] || resolved_host="127.0.0.1"
+    ftctl_blockcopy_remote_nbd_host_only "${resolved_host}" resolved_host || return 2
     printf -v "${host_var}" '%s' "${resolved_host}"
     printf -v "${user_var}" '%s' "${resolved_user}"
     return 0
@@ -586,9 +600,10 @@ ftctl_blockcopy_build_remote_nbd_dest_xml() {
   local export_name="${6-}"
   local source_xml="${7-}"
   local out_path_var="${8}"
-  local out_path bus
+  local out_path bus export_host
 
   out_path="$(ftctl_blockcopy_remote_nbd_dest_xml_path "${vm}" "${target}")"
+  ftctl_blockcopy_remote_nbd_host_only "${export_addr}" export_host || return 2
   ftctl_ensure_dir "$(dirname "${out_path}")" "0755"
   bus="virtio"
   if [[ -n "${source_xml}" && -f "${source_xml}" ]]; then
@@ -598,7 +613,7 @@ ftctl_blockcopy_build_remote_nbd_dest_xml() {
 <disk type='network' device='disk'>
   <driver name='qemu' type='${format}'/>
   <source protocol='nbd' name='${export_name}'>
-    <host name='${export_addr}' port='${export_port}' transport='tcp'/>
+    <host name='${export_host}' port='${export_port}' transport='tcp'/>
   </source>
   <target dev='${target}' bus='${bus}'/>
 </disk>
@@ -918,9 +933,10 @@ ftctl_blockcopy_remote_nbd_prepare_target() {
   local secondary_path="${5-}"
   local export_name="${6-}"
   local export_port="${7-}"
-  local host="" user="" size="" alloc_size="" out="" err="" rc=0 pid_file="" remote_cmd="" debug_cmd=""
+  local host="" user="" size="" alloc_size="" out="" err="" rc=0 pid_file="" remote_cmd="" debug_cmd="" bind_addr=""
 
   ftctl_blockcopy_remote_target_host_user host user || return 2
+  ftctl_blockcopy_remote_nbd_host_only "${FTCTL_PROFILE_REMOTE_NBD_EXPORT_ADDR}" bind_addr || return 2
   ftctl_blockcopy_source_virtual_size_bytes "${vm}" "${target}" "${source}" size || {
     echo "ERROR: could not determine source virtual size for ${source}" >&2
     return 2
@@ -1032,7 +1048,7 @@ if ss -lntp | grep -q ":${export_port}[[:space:]]"; then
   exit 98
 fi
 qemu-nbd --fork --persistent --shared=8 \
-  --bind "${FTCTL_PROFILE_REMOTE_NBD_EXPORT_ADDR}" \
+  --bind "${bind_addr}" \
   --port "${export_port}" \
   --export-name "${export_name}" \
   --format "${format}" \
@@ -1735,8 +1751,9 @@ ftctl_blockcopy_plan_protect() {
         "${FTCTL_PROFILE_REMOTE_NBD_EXPORT_ADDR}" "${export_port}" "${export_name}" \
         "${primary_xml_backup}" remote_xml
       {
-        local remote_host="" remote_user="" debug_remote_cmd="" debug_size=""
+        local remote_host="" remote_user="" debug_remote_cmd="" debug_size="" debug_bind_addr=""
         ftctl_blockcopy_remote_target_host_user remote_host remote_user || true
+        ftctl_blockcopy_remote_nbd_host_only "${FTCTL_PROFILE_REMOTE_NBD_EXPORT_ADDR}" debug_bind_addr || debug_bind_addr="${FTCTL_PROFILE_REMOTE_NBD_EXPORT_ADDR}"
         ftctl_blockcopy_source_virtual_size_bytes "${vm}" "${target}" "${source}" debug_size || true
         debug_remote_cmd="$(cat <<EOF
 set -euo pipefail
@@ -1744,7 +1761,7 @@ mkdir -p "$(dirname "${secondary_dest}")" /run/ablestack-vm-ftctl
 if [[ ! -f "${secondary_dest}" ]]; then
   qemu-img create -f "${format}" "${secondary_dest}" "${debug_size}"
 fi
-qemu-nbd --fork --persistent --shared=8 --bind "${FTCTL_PROFILE_REMOTE_NBD_EXPORT_ADDR}" --port "${export_port}" --export-name "${export_name}" --format "${format}" --pid-file "/run/ablestack-vm-ftctl/nbd-${vm}-${target}.pid" "${secondary_dest}"
+qemu-nbd --fork --persistent --shared=8 --bind "${debug_bind_addr}" --port "${export_port}" --export-name "${export_name}" --format "${format}" --pid-file "/run/ablestack-vm-ftctl/nbd-${vm}-${target}.pid" "${secondary_dest}"
 EOF
 )"
         ftctl_blockcopy_write_remote_nbd_repro "${vm}" "${target}" "${remote_xml}" "${remote_host}" "${remote_user}" "${debug_remote_cmd}" "${persistence}"
