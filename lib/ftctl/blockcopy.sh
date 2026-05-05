@@ -25,6 +25,16 @@ ftctl_blockcopy_reverse_state_path() {
   echo "$(ftctl_state_path "${vm}").blockcopy.reverse"
 }
 
+ftctl_blockcopy_progress_path() {
+  local vm="${1-}"
+  echo "$(ftctl_state_path "${vm}").blockcopy.progress"
+}
+
+ftctl_blockcopy_progress_event_state_path() {
+  local vm="${1-}"
+  echo "$(ftctl_state_path "${vm}").blockcopy.progress.event"
+}
+
 ftctl_blockcopy_state_write() {
   local vm="${1-}"
   shift
@@ -74,6 +84,161 @@ ftctl_blockcopy_write_debug_file() {
   path="${dir}/${name}"
   printf '%s\n' "${content}" > "${path}"
   chmod 0644 "${path}" 2>/dev/null || true
+}
+
+ftctl_blockcopy_progress_refresh_from_qmp() {
+  local vm="${1-}"
+  local active_vm="${2-}"
+  local uri="${3-}"
+  local direction="${4-forward}"
+  local stage="${5-mirror}"
+  local event="${6-blockcopy.progress}"
+  local out err rc progress tmp updated path
+
+  out=""
+  err=""
+  rc=0
+  ftctl_virsh "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC}" out err rc -- -c "${uri}" qemu-monitor-command "${active_vm}" --pretty '{"execute":"query-block-jobs"}' || true
+  [[ "${rc}" == "0" ]] || return "${rc}"
+
+  updated="$(ftctl_now_iso8601)"
+  progress="$(python3 -c '
+import json
+import re
+import sys
+
+direction = sys.argv[1]
+updated = sys.argv[2]
+
+try:
+    payload = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+
+jobs = payload.get("return", []) or []
+disks = []
+copied = 0
+total = 0
+all_ready = bool(jobs)
+
+for job in jobs:
+    device = str(job.get("device") or "")
+    match = re.match(r"^copy-(.+?)-libvirt-", device)
+    target = match.group(1) if match else device
+    length = int(job.get("len") or 0)
+    offset = int(job.get("offset") or 0)
+    if length < 0:
+        length = 0
+    if offset < 0:
+        offset = 0
+    ready = bool(job.get("ready"))
+    all_ready = all_ready and ready
+    copied += offset
+    total += length
+    percent = round((offset * 100.0 / length), 1) if length > 0 else 0.0
+    disks.append({
+        "target": target,
+        "device": device,
+        "percent": percent,
+        "offset": offset,
+        "len": length,
+        "ready": ready,
+        "status": job.get("status") or "",
+        "paused": bool(job.get("paused")),
+        "io_status": job.get("io-status") or "",
+    })
+
+if not disks:
+    sys.exit(2)
+
+percent = round((copied * 100.0 / total), 1) if total > 0 else 0.0
+print(json.dumps({
+    "direction": direction,
+    "percent": percent,
+    "copied_bytes": copied,
+    "total_bytes": total,
+    "ready": all_ready,
+    "updated": updated,
+    "disks": disks,
+}, separators=(",", ":")))
+' "${direction}" "${updated}" <<< "${out}" 2>/dev/null || true)"
+  [[ -n "${progress}" ]] || return 2
+
+  path="$(ftctl_blockcopy_progress_path "${vm}")"
+  tmp="$(mktemp -t ftctl.blockcopy.progress.XXXXXX)"
+  printf '%s\n' "${progress}" > "${tmp}"
+  mv -f "${tmp}" "${path}"
+  chmod 0644 "${path}" 2>/dev/null || true
+  ftctl_blockcopy_progress_log_event "${vm}" "${stage}" "${event}" "${progress}"
+}
+
+ftctl_blockcopy_progress_log_event() {
+  local vm="${1-}"
+  local stage="${2-mirror}"
+  local event="${3-blockcopy.progress}"
+  local progress_json="${4-}"
+  local state_path bucket bucket_key previous details
+
+  [[ -n "${progress_json}" ]] || return 0
+  bucket="$(python3 -c '
+import json
+import math
+import sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+percent = float(data.get("percent") or 0)
+ready = bool(data.get("ready"))
+bucket = 100 if ready or percent >= 100 else int(math.floor(percent / 5.0) * 5)
+print(bucket)
+' <<< "${progress_json}" 2>/dev/null || true)"
+  [[ "${bucket}" =~ ^[0-9]+$ ]] || return 0
+  bucket_key="${event}:${bucket}"
+
+  state_path="$(ftctl_blockcopy_progress_event_state_path "${vm}")"
+  previous=""
+  [[ -f "${state_path}" ]] && previous="$(cat "${state_path}" 2>/dev/null || true)"
+  [[ "${previous}" != "${bucket_key}" ]] || return 0
+
+  details="$(python3 -c '
+import json
+import sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+print(
+    "direction={direction} percent={percent} copied_bytes={copied} total_bytes={total} ready={ready} disks={disks}".format(
+        direction=data.get("direction") or "",
+        percent=data.get("percent") or 0,
+        copied=data.get("copied_bytes") or 0,
+        total=data.get("total_bytes") or 0,
+        ready=str(bool(data.get("ready"))).lower(),
+        disks=len(data.get("disks") or []),
+    )
+)
+' <<< "${progress_json}" 2>/dev/null || true)"
+  [[ -n "${details}" ]] || return 0
+  printf '%s\n' "${bucket_key}" > "${state_path}" 2>/dev/null || true
+  chmod 0644 "${state_path}" 2>/dev/null || true
+  ftctl_log_event "${stage}" "${event}" "ok" "${vm}" "" "${details}"
+}
+
+ftctl_blockcopy_refresh_status_progress() {
+  local vm="${1-}"
+  local transport active_vm
+
+  transport="$(ftctl_state_get "${vm}" "transport_state" 2>/dev/null || true)"
+  case "${transport}" in
+    copying|mirroring|syncing)
+      ftctl_blockcopy_progress_refresh_from_qmp "${vm}" "${vm}" "${FTCTL_PROFILE_PRIMARY_URI}" "forward" "mirror" "blockcopy.progress" >/dev/null 2>&1 || true
+      ;;
+    reverse_syncing|reverse_sync_ready)
+      active_vm="$(ftctl_blockcopy_active_domain_on_secondary "${vm}")"
+      ftctl_blockcopy_progress_refresh_from_qmp "${vm}" "${active_vm}" "${FTCTL_PROFILE_SECONDARY_URI}" "reverse" "failback" "reverse_sync.progress" >/dev/null 2>&1 || true
+      ;;
+  esac
 }
 
 ftctl_blockcopy_resolve_dest() {
@@ -1691,6 +1856,7 @@ ftctl_blockcopy_refresh_vm_jobs() {
   done
 
   ftctl_blockcopy_state_write "${vm}" "${records[@]}"
+  ftctl_blockcopy_progress_refresh_from_qmp "${vm}" "${vm}" "${FTCTL_PROFILE_PRIMARY_URI}" "forward" "mirror" "blockcopy.progress" >/dev/null 2>&1 || true
 
   if [[ "${all_ready}" == "1" && "${rc_any}" == "0" ]]; then
     ftctl_state_set "${vm}" \
@@ -2136,6 +2302,7 @@ ftctl_blockcopy_refresh_reverse_jobs() {
     fi
     [[ "${ready}" == "yes" ]] || all_ready="0"
   done < "${path}"
+  ftctl_blockcopy_progress_refresh_from_qmp "${vm}" "$(ftctl_blockcopy_active_domain_on_secondary "${vm}")" "${FTCTL_PROFILE_SECONDARY_URI}" "reverse" "failback" "reverse_sync.progress" >/dev/null 2>&1 || true
 
   if [[ "${all_ready}" == "1" && "${rc_any}" == "0" ]]; then
     ftctl_state_set "${vm}" "transport_state=reverse_sync_ready" "last_sync_ts=$(ftctl_now_iso8601)"

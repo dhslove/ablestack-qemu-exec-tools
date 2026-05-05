@@ -310,7 +310,11 @@ ftctl_state_remove_runtime_files() {
   key="$(ftctl_state_vm_key "${vm}")"
 
   rm -f "$(ftctl_profile_path "${vm}")" 2>/dev/null || true
-  rm -f "${FTCTL_STATE_DIR}/${key}.state" "${FTCTL_STATE_DIR}/${key}.state.blockcopy" "${FTCTL_STATE_DIR}/${key}.state.blockcopy.reverse" 2>/dev/null || true
+  rm -f "${FTCTL_STATE_DIR}/${key}.state" \
+    "${FTCTL_STATE_DIR}/${key}.state.blockcopy" \
+    "${FTCTL_STATE_DIR}/${key}.state.blockcopy.reverse" \
+    "${FTCTL_STATE_DIR}/${key}.state.blockcopy.progress" \
+    "${FTCTL_STATE_DIR}/${key}.state.blockcopy.progress.event" 2>/dev/null || true
   rm -rf "${FTCTL_RUN_DIR}/debug/blockcopy/${key}" 2>/dev/null || true
   rm -f "${FTCTL_RUN_DIR}/xml/${key}-"*.xml 2>/dev/null || true
   rm -rf "${FTCTL_XML_BACKUP_DIR}/${key}" 2>/dev/null || true
@@ -369,10 +373,18 @@ ftctl_state_emit_json_fields() {
 ftctl_state_emit_json_one() {
   local vm="${1-}"
   local result="${2-ok}"
+  local progress_path progress_json
   printf '{"command":"status","result":"%s"' "$(ftctl__json_escape "${result}")"
   if [[ -f "$(ftctl_state_path "${vm}")" ]]; then
     printf ","
     ftctl_state_emit_json_fields "${vm}"
+    progress_path="$(ftctl_state_path "${vm}").blockcopy.progress"
+    if [[ -f "${progress_path}" ]]; then
+      progress_json="$(cat "${progress_path}" 2>/dev/null || true)"
+      if [[ -n "${progress_json}" ]] && python3 -m json.tool "${progress_path}" >/dev/null 2>&1; then
+        printf ',"sync_progress":%s' "${progress_json}"
+      fi
+    fi
   else
     printf ',"vm":"%s"' "$(ftctl__json_escape "${vm}")"
   fi
@@ -392,6 +404,9 @@ ftctl_state_print_one() {
     fi
     return 1
   }
+  if declare -F ftctl_blockcopy_refresh_status_progress >/dev/null 2>&1; then
+    ftctl_blockcopy_refresh_status_progress "${vm}" >/dev/null 2>&1 || true
+  fi
   if [[ "${json}" == "1" ]]; then
     ftctl_state_emit_json_one "${vm}" "ok"
   else

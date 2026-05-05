@@ -448,6 +448,37 @@ EOF
   selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" "blockcopy_job_missing:vda" "missing blockjob last_error"
 )
 
+selftest_case_blockcopy_progress_status() (
+  selftest_reset_env
+  selftest_info "blockcopy progress status"
+
+  local vm="progress-vm"
+  FTCTL_PROFILE_MODE="ha"
+  FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
+  ftctl_state_init_vm "${vm}"
+  ftctl_state_set "${vm}" "transport_state=copying"
+
+  # shellcheck disable=SC2317
+  ftctl_virsh() {
+    local out_var="${2}"
+    local err_var="${3}"
+    local rc_var="${4}"
+    printf -v "${out_var}" '%s' '{"return":[{"device":"copy-vda-libvirt-1-storage","offset":5368709120,"len":10737418240,"ready":false,"status":"running","paused":false,"io-status":"ok"},{"device":"copy-vdb-libvirt-2-storage","offset":10737418240,"len":10737418240,"ready":true,"status":"running","paused":false,"io-status":"ok"}]}'
+    printf -v "${err_var}" '%s' ""
+    printf -v "${rc_var}" '%s' "0"
+  }
+
+  ftctl_blockcopy_progress_refresh_from_qmp "${vm}" "${vm}" "${FTCTL_PROFILE_PRIMARY_URI}" "forward" "mirror" "blockcopy.progress"
+  selftest_assert_file_contains "$(ftctl_blockcopy_progress_path "${vm}")" '"percent":75.0'
+  selftest_assert_file_contains "$(ftctl_blockcopy_progress_path "${vm}")" '"target":"vda"'
+  selftest_assert_file_contains "${FTCTL_EVENTS_LOG}" '"event":"blockcopy.progress"'
+
+  local out=""
+  out="$(ftctl_state_print_one "${vm}" "1")"
+  selftest_assert_contains "${out}" '"sync_progress"' "status includes sync progress"
+  selftest_assert_contains "${out}" '"copied_bytes":16106127360' "status includes copied bytes"
+)
+
 selftest_case_reconcile_and_fencing() {
   selftest_reset_env
   selftest_info "reconcile/fencing state machine"
@@ -814,6 +845,7 @@ selftest_main() {
   selftest_case_standby_activate_already_exists
   selftest_case_backend_validation
   selftest_case_blockcopy_missing_job_state
+  selftest_case_blockcopy_progress_status
   selftest_case_reconcile_and_fencing
   selftest_case_failover_blocks_copying_transport
   selftest_case_xcolo_and_xml
