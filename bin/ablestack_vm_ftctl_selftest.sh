@@ -457,6 +457,9 @@ selftest_case_blockcopy_progress_status() (
   FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
   ftctl_state_init_vm "${vm}"
   ftctl_state_set "${vm}" "transport_state=copying"
+  ftctl_blockcopy_state_write "${vm}" \
+    "vda|/dev/source-vda|nbd://10.0.0.12:10827/progress-vm-vda|qcow2|running|no|/secondary/progress-vm/vda.qcow2" \
+    "vdb|/dev/source-vdb|/shared/progress-vm/vdb.raw|raw|ready|yes|"
 
   # shellcheck disable=SC2317
   ftctl_virsh() {
@@ -471,6 +474,8 @@ selftest_case_blockcopy_progress_status() (
   ftctl_blockcopy_progress_refresh_from_qmp "${vm}" "${vm}" "${FTCTL_PROFILE_PRIMARY_URI}" "forward" "mirror" "blockcopy.progress"
   selftest_assert_file_contains "$(ftctl_blockcopy_progress_path "${vm}")" '"percent":75.0'
   selftest_assert_file_contains "$(ftctl_blockcopy_progress_path "${vm}")" '"target":"vda"'
+  selftest_assert_file_contains "$(ftctl_blockcopy_progress_path "${vm}")" '"nbd_port":10827'
+  selftest_assert_file_contains "$(ftctl_blockcopy_progress_path "${vm}")" '"nbd_endpoint":"10.0.0.12:10827/progress-vm-vda"'
   selftest_assert_file_contains "${FTCTL_EVENTS_LOG}" '"event":"blockcopy.progress"'
 
   local out=""

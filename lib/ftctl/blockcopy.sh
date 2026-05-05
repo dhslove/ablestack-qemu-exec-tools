@@ -93,7 +93,7 @@ ftctl_blockcopy_progress_refresh_from_qmp() {
   local direction="${4-forward}"
   local stage="${5-mirror}"
   local event="${6-blockcopy.progress}"
-  local out err rc progress tmp updated path
+  local out err rc progress tmp updated path state_path
 
   out=""
   err=""
@@ -102,6 +102,12 @@ ftctl_blockcopy_progress_refresh_from_qmp() {
   [[ "${rc}" == "0" ]] || return "${rc}"
 
   updated="$(ftctl_now_iso8601)"
+  if [[ "${direction}" == "reverse" ]]; then
+    state_path="$(ftctl_blockcopy_reverse_state_path "${vm}")"
+  else
+    state_path="$(ftctl_blockcopy_state_path "${vm}")"
+  fi
+
   progress="$(python3 -c '
 import json
 import re
@@ -109,11 +115,39 @@ import sys
 
 direction = sys.argv[1]
 updated = sys.argv[2]
+state_path = sys.argv[3]
 
 try:
     payload = json.load(sys.stdin)
 except Exception:
     sys.exit(1)
+
+records = {}
+try:
+    with open(state_path, "r", encoding="utf-8") as fh:
+        for raw in fh:
+            parts = raw.rstrip("\n").split("|")
+            if len(parts) < 3 or not parts[0]:
+                continue
+            target = parts[0]
+            dest = parts[2]
+            secondary_path = parts[6] if len(parts) > 6 else ""
+            item = {
+                "dest": dest,
+                "secondary_path": secondary_path,
+            }
+            match = re.match(r"^nbd://([^:/]+):([0-9]+)/(.+)$", dest or "")
+            if match:
+                item.update({
+                    "nbd_uri": dest,
+                    "nbd_host": match.group(1),
+                    "nbd_port": int(match.group(2)),
+                    "nbd_export_name": match.group(3),
+                    "nbd_endpoint": "%s:%s/%s" % (match.group(1), match.group(2), match.group(3)),
+                })
+            records[target] = item
+except Exception:
+    records = {}
 
 jobs = payload.get("return", []) or []
 disks = []
@@ -136,7 +170,7 @@ for job in jobs:
     copied += offset
     total += length
     percent = round((offset * 100.0 / length), 1) if length > 0 else 0.0
-    disks.append({
+    disk = {
         "target": target,
         "device": device,
         "percent": percent,
@@ -146,7 +180,17 @@ for job in jobs:
         "status": job.get("status") or "",
         "paused": bool(job.get("paused")),
         "io_status": job.get("io-status") or "",
-    })
+    }
+    record = records.get(target)
+    if record:
+        if record.get("dest"):
+            disk["mirror_uri"] = record.get("dest")
+        if record.get("secondary_path"):
+            disk["secondary_path"] = record.get("secondary_path")
+        for key in ("nbd_uri", "nbd_host", "nbd_port", "nbd_export_name", "nbd_endpoint"):
+            if record.get(key) not in (None, ""):
+                disk[key] = record.get(key)
+    disks.append(disk)
 
 if not disks:
     sys.exit(2)
@@ -161,7 +205,7 @@ print(json.dumps({
     "updated": updated,
     "disks": disks,
 }, separators=(",", ":")))
-' "${direction}" "${updated}" <<< "${out}" 2>/dev/null || true)"
+' "${direction}" "${updated}" "${state_path}" <<< "${out}" 2>/dev/null || true)"
   [[ -n "${progress}" ]] || return 2
 
   path="$(ftctl_blockcopy_progress_path "${vm}")"
