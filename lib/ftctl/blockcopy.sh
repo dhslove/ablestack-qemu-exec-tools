@@ -294,8 +294,14 @@ ftctl_blockcopy_resolve_dest() {
 
   explicit="$(ftctl_profile_lookup_map_value "${FTCTL_PROFILE_DISK_MAP}" "${target}" 2>/dev/null || true)"
   if [[ -n "${explicit}" ]]; then
+    ftctl_blockcopy_validate_cloud_managed_dest "${target}" "${explicit}" || return $?
     printf '%s\n' "${explicit}"
     return 0
+  fi
+
+  if ftctl_blockcopy_is_cloud_managed; then
+    echo "ERROR: cloud-managed missing destination mapping for disk target ${target}" >&2
+    return 2
   fi
 
   if [[ "${FTCTL_PROFILE_DISK_MAP}" == "auto" ]]; then
@@ -336,6 +342,30 @@ ftctl_blockcopy_remote_nbd_host_only() {
   fi
   [[ -n "${host}" ]] || return 1
   printf -v "${out_var}" '%s' "${host}"
+}
+
+ftctl_blockcopy_is_cloud_managed() {
+  [[ "${FTCTL_PROFILE_PROVISIONING_BACKEND:-}" == "cloud-managed" ]]
+}
+
+ftctl_blockcopy_is_absolute_dest() {
+  local path="${1-}"
+  [[ "${path}" == /* ]]
+}
+
+ftctl_blockcopy_validate_cloud_managed_dest() {
+  local target="${1-}"
+  local dest="${2-}"
+
+  ftctl_blockcopy_is_cloud_managed || return 0
+  [[ -n "${dest}" ]] || {
+    echo "ERROR: cloud-managed missing destination mapping for disk target ${target}" >&2
+    return 2
+  }
+  ftctl_blockcopy_is_absolute_dest "${dest}" || {
+    echo "ERROR: cloud-managed disk target ${target} must use an absolute Cloud-managed path: ${dest}" >&2
+    return 2
+  }
 }
 
 ftctl_blockcopy_is_krbd_path() {
@@ -457,8 +487,18 @@ ftctl_blockcopy_remote_nbd_secondary_path() {
 
   explicit="$(ftctl_profile_lookup_map_value "${FTCTL_PROFILE_DISK_MAP}" "${target}" 2>/dev/null || true)"
   if [[ -n "${explicit}" && "${FTCTL_PROFILE_DISK_MAP}" != "auto" ]]; then
+    ftctl_blockcopy_validate_cloud_managed_dest "${target}" "${explicit}" || return $?
     printf '%s\n' "${explicit}"
     return 0
+  fi
+
+  if ftctl_blockcopy_is_cloud_managed; then
+    if [[ "${FTCTL_PROFILE_DISK_MAP}" == "auto" ]]; then
+      echo "ERROR: cloud-managed requires an explicit FTCTL_PROFILE_DISK_MAP" >&2
+    else
+      echo "ERROR: cloud-managed missing destination mapping for disk target ${target}" >&2
+    fi
+    return 2
   fi
 
   source_base="$(basename "${source}")"
@@ -1170,10 +1210,12 @@ ftctl_blockcopy_remote_nbd_prepare_target() {
   local secondary_path="${5-}"
   local export_name="${6-}"
   local export_port="${7-}"
-  local host="" user="" size="" alloc_size="" out="" err="" rc=0 pid_file="" remote_cmd="" debug_cmd="" bind_addr="" target_format=""
+  local host="" user="" size="" alloc_size="" out="" err="" rc=0 pid_file="" remote_cmd="" debug_cmd="" bind_addr="" target_format="" cloud_managed="0"
 
   ftctl_blockcopy_remote_target_host_user host user || return 2
   ftctl_blockcopy_remote_nbd_host_only "${FTCTL_PROFILE_REMOTE_NBD_EXPORT_ADDR}" bind_addr || return 2
+  ftctl_blockcopy_is_cloud_managed && cloud_managed="1"
+  ftctl_blockcopy_validate_cloud_managed_dest "${target}" "${secondary_path}" || return $?
   ftctl_blockcopy_remote_nbd_target_format "${secondary_path}" "${format}" target_format
   ftctl_blockcopy_source_virtual_size_bytes "${vm}" "${target}" "${source}" size || {
     echo "ERROR: could not determine source virtual size for ${source}" >&2
@@ -1188,6 +1230,7 @@ ftctl_blockcopy_remote_nbd_prepare_target() {
 remote_cmd=$(cat <<EOF
 set -euo pipefail
 mkdir -p /run/ablestack-vm-ftctl
+cloud_managed="${cloud_managed}"
 if [[ "${secondary_path}" == /dev/rbd/* ]]; then
   krbd_spec="${secondary_path#/dev/rbd/}"
   if [[ -b "${secondary_path}" ]]; then
@@ -1255,6 +1298,10 @@ elif [[ -b "${secondary_path}" && "${secondary_path}" == /dev/rbd/* ]]; then
     fi
   fi
 else
+  if [[ "\${cloud_managed}" == "1" && ! -f "${secondary_path}" ]]; then
+    echo "cloud_managed_target_missing:${secondary_path}" >&2
+    exit 95
+  fi
   mkdir -p "$(dirname "${secondary_path}")"
   avail_bytes="\$(df -B1 --output=avail "$(dirname "${secondary_path}")" | tail -n 1 | tr -dc '0-9' || true)"
   if [[ -n "\${avail_bytes}" && "\${avail_bytes}" =~ ^[0-9]+$ ]] && (( avail_bytes < ${alloc_size} )); then
@@ -1514,13 +1561,17 @@ ftctl_blockcopy_validate_backend_mode() {
       done
       ;;
     remote-nbd)
+      if ftctl_blockcopy_is_cloud_managed && [[ "${FTCTL_PROFILE_DISK_MAP}" == "auto" ]]; then
+        echo "ERROR: cloud-managed requires an explicit FTCTL_PROFILE_DISK_MAP" >&2
+        return 2
+      fi
       ftctl_inventory_collect_vm_disks "${vm}" disks || return $?
       for line in "${disks[@]}"; do
         target="${line%%|*}"
         source="${line#*|}"
         source="${source%%|*}"
         format="${line##*|}"
-        secondary_target="$(ftctl_blockcopy_remote_nbd_secondary_path "${vm}" "${target}" "${source}" "${format}")"
+        secondary_target="$(ftctl_blockcopy_remote_nbd_secondary_path "${vm}" "${target}" "${source}" "${format}")" || return $?
         [[ -n "${secondary_target}" ]] || {
           echo "ERROR: remote-nbd requires a resolvable secondary target path" >&2
           return 2
@@ -1856,7 +1907,10 @@ ftctl_blockcopy_refresh_vm_jobs() {
         dest="$(ftctl_blockcopy_remote_nbd_uri "${FTCTL_PROFILE_REMOTE_NBD_EXPORT_ADDR}" "${FTCTL_PROFILE_REMOTE_NBD_EXPORT_PORT}" "${FTCTL_PROFILE_REMOTE_NBD_EXPORT_NAME}-${target}")"
       fi
       if [[ -z "${secondary_dest}" ]]; then
-        secondary_dest="$(ftctl_blockcopy_remote_nbd_secondary_path "${vm}" "${target}" "${source}" "${format}")"
+        secondary_dest="$(ftctl_blockcopy_remote_nbd_secondary_path "${vm}" "${target}" "${source}" "${format}")" || {
+          rc_any=1
+          secondary_dest=""
+        }
       fi
     else
       dest="$(ftctl_blockcopy_resolve_dest "${vm}" "${target}" "${source}" "${format}")"
@@ -1968,7 +2022,7 @@ ftctl_blockcopy_plan_protect() {
     source="${source%%|*}"
     format="${line##*|}"
     if [[ "${FTCTL_PROFILE_BACKEND_MODE}" == "remote-nbd" ]]; then
-      secondary_dest="$(ftctl_blockcopy_remote_nbd_secondary_path "${vm}" "${target}" "${source}" "${format}")"
+      secondary_dest="$(ftctl_blockcopy_remote_nbd_secondary_path "${vm}" "${target}" "${source}" "${format}")" || return $?
       export_port=""
       ftctl_blockcopy_remote_nbd_pick_port "${vm}" "${target}" export_port || return $?
       export_name="${FTCTL_PROFILE_REMOTE_NBD_EXPORT_NAME}-${target}"

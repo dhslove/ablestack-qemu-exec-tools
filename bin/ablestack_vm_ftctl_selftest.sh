@@ -366,6 +366,36 @@ selftest_case_backend_validation() {
   FTCTL_PROFILE_DOMAIN_PERSISTENCE="no"
   ftctl_profile_validate "${vm}"
 
+  FTCTL_PROFILE_PROVISIONING_BACKEND="cloud-managed"
+  if ftctl_profile_validate "${vm}" && ftctl_blockcopy_validate_backend_mode "${vm}"; then
+    selftest_fail "cloud-managed remote-nbd should reject disk_map=auto"
+  fi
+
+  FTCTL_PROFILE_DISK_MAP="vda=relative-target.qcow2"
+  ftctl_profile_validate "${vm}"
+  ftctl_inventory_collect_vm_disks() {
+    local out_array_name="${2}"
+    local -n _out_array="${out_array_name}"
+    _out_array=("vda|/var/lib/libvirt/images/${vm}.qcow2|qcow2")
+  }
+  if ftctl_blockcopy_validate_backend_mode "${vm}"; then
+    selftest_fail "cloud-managed remote-nbd should reject relative disk map paths"
+  fi
+
+  FTCTL_PROFILE_DISK_MAP="vdb=/secondary/${vm}.qcow2"
+  if ftctl_blockcopy_validate_backend_mode "${vm}"; then
+    selftest_fail "cloud-managed remote-nbd should reject missing target mappings"
+  fi
+
+  FTCTL_PROFILE_DISK_MAP="vda=/secondary/${vm}.qcow2"
+  ftctl_blockcopy_validate_backend_mode "${vm}"
+
+  # Restore the real inventory function after the focused backend validation stub.
+  # shellcheck source=/dev/null
+  source "${LIB_BASE}/ftctl/inventory.sh"
+  FTCTL_PROFILE_PROVISIONING_BACKEND="libvirt-managed"
+  FTCTL_PROFILE_DISK_MAP="auto"
+
   mkdir -p "${SELFTEST_ROOT}/xml/${vm}"
   cat > "${SELFTEST_ROOT}/xml/${vm}/standby.xml" <<EOF
 <domain type='kvm'>
