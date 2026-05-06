@@ -20,10 +20,11 @@ ftctl_lock_emit_conflict() {
   local cmd="${CLI_COMMAND:-unknown}"
   local result="locked"
   if [[ "${CLI_JSON:-0}" == "1" ]]; then
-    printf '{"command":"%s","result":"%s","lock_file":"%s"}\n' \
+    printf '{"command":"%s","result":"%s","lock_file":"%s","exit_code":%s,"retryable":true,"retry_after_sec":2}\n' \
       "$(ftctl__json_escape "${cmd}")" \
       "${result}" \
-      "$(ftctl__json_escape "${lock_file}")"
+      "$(ftctl__json_escape "${lock_file}")" \
+      "${EXIT_LOCKED:-20}"
   else
     printf 'ftctl.%s: %s (%s)\n' "${cmd}" "${result}" "${lock_file}"
   fi
