@@ -273,7 +273,7 @@ ftctl_orchestrator_reconcile_one() {
 ftctl_orchestrator_reconcile() {
   local vm="${1-}"
   local json="${2-0}"
-  local f name
+  local f name lock_file
   if [[ -n "${vm}" ]]; then
     ftctl_orchestrator_reconcile_one "${vm}"
     ftctl_state_print_one "${vm}" "${json}"
@@ -283,6 +283,12 @@ ftctl_orchestrator_reconcile() {
   shopt -s nullglob
   for f in "${FTCTL_STATE_DIR}"/*.state; do
     name="$(basename "${f}" .state)"
+    lock_file="$(ftctl_lock_path_for_command "reconcile" "${name}")"
+    CLI_COMMAND="reconcile" CLI_VM="${name}" ftctl_lock_acquire "${lock_file}" || {
+      ftctl_log_event "lock" "reconcile.skip" "skip" "${name}" "${EXIT_LOCKED:-20}" \
+        "reason=vm_locked lock_file=${lock_file}"
+      continue
+    }
     ftctl_orchestrator_reconcile_one "${name}"
     if [[ "${json}" == "1" ]]; then
       ftctl_state_emit_json "${name}"

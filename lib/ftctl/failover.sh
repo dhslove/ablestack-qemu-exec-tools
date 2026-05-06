@@ -75,6 +75,46 @@ ftctl_failover_precheck_blockcopy_ready() {
   return 1
 }
 
+ftctl_failover_release_remote_nbd_for_standby() {
+  local vm="${1-}"
+
+  [[ "${FTCTL_PROFILE_BACKEND_MODE:-}" == "remote-nbd" ]] || return 0
+  ftctl_blockcopy_stop_remote_nbd_exports "${vm}" || true
+  ftctl_blockcopy_wait_remote_nbd_release "${vm}" || {
+    ftctl_state_set "${vm}" \
+      "standby_state=release-timeout" \
+      "last_error=remote_nbd_release_timeout"
+    ftctl_log_event "failover" "failover.prepare" "fail" "${vm}" "" \
+      "reason=remote_nbd_release_timeout"
+    return 1
+  }
+}
+
+ftctl_failover_prepare_cloud_managed() {
+  local vm="${1-}"
+  local reason="${2-manual}"
+  local mode count
+
+  mode="$(ftctl_state_get "${vm}" "mode" 2>/dev/null || echo "")"
+  mode="${mode:-${FTCTL_PROFILE_MODE:-}}"
+  count="$(ftctl_state_get "${vm}" "failover_count" 2>/dev/null || echo "0")"
+
+  if [[ "${FTCTL_PROFILE_PROVISIONING_BACKEND:-libvirt-managed}" != "cloud-managed" ]]; then
+    ftctl_log_event "failover" "failover.prepare" "skip" "${vm}" "" \
+      "reason=not_cloud_managed provisioning=${FTCTL_PROFILE_PROVISIONING_BACKEND:-libvirt-managed}"
+    return 0
+  fi
+
+  ftctl_failover_precheck_blockcopy_ready "${vm}" "${mode}" "${count}" "cloud_prepare" "1" || return 1
+  ftctl_failover_release_remote_nbd_for_standby "${vm}" || return 1
+  ftctl_state_set "${vm}" \
+    "protection_state=failing_over" \
+    "standby_state=start-ready" \
+    "last_error="
+  ftctl_log_event "failover" "failover.prepare" "ok" "${vm}" "" \
+    "reason=${reason} provisioning=cloud-managed transport=$(ftctl_state_get "${vm}" "transport_state" 2>/dev/null || true)"
+}
+
 ftctl_failover_request() {
   local vm="${1-}"
   local reason="${2-manual}"
@@ -122,9 +162,37 @@ ftctl_failover_request() {
 
       ftctl_failover_precheck_blockcopy_ready "${vm}" "${mode}" "${count}" "before_standby" "0" || return 1
 
+      if [[ "${FTCTL_PROFILE_PROVISIONING_BACKEND:-libvirt-managed}" == "cloud-managed" ]]; then
+        if [[ "${reason}" != "manual" && "${reason}" != "manual-confirmed" ]]; then
+          ftctl_state_set "${vm}" \
+            "protection_state=failing_over" \
+            "last_error=cloud_managed_standby_start_pending"
+          ftctl_log_event "failover" "failover.request" "skip" "${vm}" "" \
+            "reason=${reason} failover_count=${count} provisioning=cloud-managed standby=cloud_start_required"
+          return 0
+        fi
+        ftctl_failover_release_remote_nbd_for_standby "${vm}" || return 1
+        if ! ftctl_verify_standby_boot "${vm}"; then
+          ftctl_state_set "${vm}" \
+            "protection_state=error" \
+            "last_error=standby_verify_failed"
+          ftctl_log_event "failover" "failover.request" "fail" "${vm}" "" \
+            "reason=${reason} failover_count=${count} standby=cloud_started_verify_failed"
+          return 1
+        fi
+        ftctl_state_set "${vm}" \
+          "standby_state=running" \
+          "active_side=secondary" \
+          "protection_state=failed_over" \
+          "transport_state=failed_over" \
+          "last_error="
+        ftctl_log_event "failover" "failover.request" "ok" "${vm}" "" \
+          "reason=${reason} failover_count=${count} fencing=complete standby=cloud-managed"
+        return 0
+      fi
+
       if [[ "${FTCTL_PROFILE_BACKEND_MODE}" == "remote-nbd" ]]; then
-        ftctl_blockcopy_stop_remote_nbd_exports "${vm}" || true
-        sleep 2
+        ftctl_failover_release_remote_nbd_for_standby "${vm}" || return 1
       fi
 
       if ! ftctl_standby_activate "${vm}"; then

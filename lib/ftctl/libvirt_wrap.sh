@@ -18,20 +18,57 @@
 ftctl_lock_emit_conflict() {
   local lock_file="${1-}"
   local cmd="${CLI_COMMAND:-unknown}"
+  local vm="${CLI_VM:-}"
   local result="locked"
+  local holder_pid="" holder_age="" holder_command=""
+  if [[ -f "${lock_file}.meta" ]]; then
+    # shellcheck disable=SC1090
+    source "${lock_file}.meta" 2>/dev/null || true
+    holder_pid="${pid:-}"
+    holder_command="${command:-}"
+    if [[ -n "${started_epoch:-}" && "${started_epoch}" =~ ^[0-9]+$ ]]; then
+      holder_age="$(( $(date +%s) - started_epoch ))"
+    fi
+  fi
   if [[ "${CLI_JSON:-0}" == "1" ]]; then
-    printf '{"command":"%s","result":"%s","lock_file":"%s","exit_code":%s,"retryable":true,"retry_after_sec":2}\n' \
+    printf '{"command":"%s","result":"%s","lock_file":"%s","vm":"%s","holder_pid":"%s","holder_command":"%s","holder_age_sec":"%s","exit_code":%s,"retryable":true,"retry_after_sec":2}\n' \
       "$(ftctl__json_escape "${cmd}")" \
       "${result}" \
       "$(ftctl__json_escape "${lock_file}")" \
+      "$(ftctl__json_escape "${vm}")" \
+      "$(ftctl__json_escape "${holder_pid}")" \
+      "$(ftctl__json_escape "${holder_command}")" \
+      "$(ftctl__json_escape "${holder_age}")" \
       "${EXIT_LOCKED:-20}"
   else
     printf 'ftctl.%s: %s (%s)\n' "${cmd}" "${result}" "${lock_file}"
   fi
 }
 
+ftctl_lock_path_for_command() {
+  local command="${1-}"
+  local vm="${2-}"
+  case "${command}" in
+    reconcile)
+      if [[ -n "${vm}" ]]; then
+        printf '%s/locks/%s.lock\n' "${FTCTL_RUN_DIR}" "$(ftctl_state_vm_key "${vm}")"
+      else
+        printf '%s\n' "${FTCTL_LOCK_FILE}"
+      fi
+      ;;
+    *)
+      if [[ -n "${vm}" ]]; then
+        printf '%s/locks/%s.lock\n' "${FTCTL_RUN_DIR}" "$(ftctl_state_vm_key "${vm}")"
+      else
+        printf '%s\n' "${FTCTL_LOCK_FILE}"
+      fi
+      ;;
+  esac
+}
+
 ftctl_lock_acquire() {
-  local lock_file="${FTCTL_LOCK_FILE}"
+  local lock_file="${1-}"
+  lock_file="${lock_file:-$(ftctl_lock_path_for_command "${CLI_COMMAND:-}" "${CLI_VM:-}")}"
   ftctl_ensure_dir "$(dirname "${lock_file}")" "0755"
   exec 201>"${lock_file}"
   if ! flock -n 201; then
@@ -40,6 +77,12 @@ ftctl_lock_acquire() {
     ftctl_lock_emit_conflict "${lock_file}"
     return "${EXIT_LOCKED:-20}"
   fi
+  {
+    printf 'pid=%q\n' "$$"
+    printf 'command=%q\n' "${CLI_COMMAND:-unknown}"
+    printf 'vm=%q\n' "${CLI_VM:-}"
+    printf 'started_epoch=%q\n' "$(date +%s)"
+  } > "${lock_file}.meta" 2>/dev/null || true
   return 0
 }
 
