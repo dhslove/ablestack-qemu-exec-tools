@@ -468,6 +468,29 @@ require_mode() {
   }
 }
 
+emit_action_result_json() {
+  local command="${1-}"
+  local vm="${2-}"
+  local rc="${3-0}"
+  local result protection transport active_side last_error
+
+  [[ "${CLI_JSON}" == "1" ]] || return 0
+  result="$(ftctl_result_from_rc "${rc}")"
+  protection="$(ftctl_state_get "${vm}" "protection_state" 2>/dev/null || true)"
+  transport="$(ftctl_state_get "${vm}" "transport_state" 2>/dev/null || true)"
+  active_side="$(ftctl_state_get "${vm}" "active_side" 2>/dev/null || true)"
+  last_error="$(ftctl_state_get "${vm}" "last_error" 2>/dev/null || true)"
+  printf '{"command":"%s","result":"%s","vm":"%s","exit_code":%s,"protection_state":"%s","transport_state":"%s","active_side":"%s","last_error":"%s"}\n' \
+    "$(ftctl__json_escape "${command}")" \
+    "$(ftctl__json_escape "${result}")" \
+    "$(ftctl__json_escape "${vm}")" \
+    "${rc}" \
+    "$(ftctl__json_escape "${protection}")" \
+    "$(ftctl__json_escape "${transport}")" \
+    "$(ftctl__json_escape "${active_side}")" \
+    "$(ftctl__json_escape "${last_error}")"
+}
+
 dispatch() {
   case "${CLI_COMMAND}" in
     config)
@@ -642,7 +665,10 @@ dispatch() {
       }
       ftctl_profile_load_vm "${CLI_VM}"
       ftctl_profile_validate "${CLI_VM}"
-      ftctl_failback_sync_for_cloud_cutback "${CLI_VM}" "manual"
+      rc=0
+      ftctl_failback_sync_for_cloud_cutback "${CLI_VM}" "manual" || rc=$?
+      emit_action_result_json "failback-sync" "${CLI_VM}" "${rc}"
+      exit "${rc}"
       ;;
     failback-reprotect)
       require_vm
@@ -652,7 +678,10 @@ dispatch() {
       }
       ftctl_profile_load_vm "${CLI_VM}"
       ftctl_profile_validate "${CLI_VM}"
-      ftctl_failback_reprotect_after_cloud_cutback "${CLI_VM}" "manual"
+      rc=0
+      ftctl_failback_reprotect_after_cloud_cutback "${CLI_VM}" "manual" || rc=$?
+      emit_action_result_json "failback-reprotect" "${CLI_VM}" "${rc}"
+      exit "${rc}"
       ;;
     unprotect)
       require_vm

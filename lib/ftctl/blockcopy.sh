@@ -1770,6 +1770,25 @@ ftctl_blockcopy_active_domain_on_secondary() {
   printf '%s\n' "${secondary_vm_name}"
 }
 
+ftctl_blockcopy_secondary_domain_state() {
+  local vm="${1-}"
+  local state_var="${2}"
+  local active_vm out err rc state
+
+  active_vm="$(ftctl_blockcopy_active_domain_on_secondary "${vm}")"
+  out=""
+  err=""
+  rc=0
+  ftctl_virsh "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC}" out err rc -- -c "${FTCTL_PROFILE_SECONDARY_URI}" domstate "${active_vm}" || true
+  if [[ "${rc}" != "0" ]]; then
+    printf -v "${state_var}" '%s' "not-found"
+    return "${rc}"
+  fi
+  state="$(awk 'NF {print tolower($0); exit}' <<< "${out}")"
+  [[ -n "${state}" ]] || state="unknown"
+  printf -v "${state_var}" '%s' "${state}"
+}
+
 ftctl_blockcopy_reverse_job_query() {
   local vm="${1-}"
   local target="${2-}"
@@ -2378,12 +2397,39 @@ ftctl_blockcopy_start_reverse_sync() {
 
 ftctl_blockcopy_refresh_reverse_jobs() {
   local vm="${1-}"
-  local path line target source dest format state ready
+  local path line target source dest format state ready active_vm domain_state
   local all_ready="1"
   local rc_any=0
 
   path="$(ftctl_blockcopy_reverse_state_path "${vm}")"
   [[ -f "${path}" ]] || return 1
+
+  active_vm="$(ftctl_blockcopy_active_domain_on_secondary "${vm}")"
+  domain_state=""
+  if ! ftctl_blockcopy_secondary_domain_state "${vm}" domain_state; then
+    ftctl_state_set "${vm}" \
+      "protection_state=error" \
+      "transport_state=reverse_sync_failed" \
+      "last_error=reverse_sync_domain_lost" \
+      "last_sync_ts=$(ftctl_now_iso8601)"
+    ftctl_log_event "failback" "reverse_sync.domain" "fail" "${vm}" "" \
+      "active_vm=${active_vm} state=${domain_state} peer_uri=${FTCTL_PROFILE_SECONDARY_URI}"
+    return 21
+  fi
+  case "${domain_state}" in
+    running|running\ \(*)
+      ;;
+    *)
+      ftctl_state_set "${vm}" \
+        "protection_state=error" \
+        "transport_state=reverse_sync_failed" \
+        "last_error=reverse_sync_domain_not_running" \
+        "last_sync_ts=$(ftctl_now_iso8601)"
+      ftctl_log_event "failback" "reverse_sync.domain" "fail" "${vm}" "" \
+        "active_vm=${active_vm} state=${domain_state} peer_uri=${FTCTL_PROFILE_SECONDARY_URI}"
+      return 22
+      ;;
+  esac
 
   while IFS= read -r line; do
     [[ -n "${line}" ]] || continue
@@ -2400,7 +2446,7 @@ ftctl_blockcopy_refresh_reverse_jobs() {
     fi
     [[ "${ready}" == "yes" ]] || all_ready="0"
   done < "${path}"
-  ftctl_blockcopy_progress_refresh_from_qmp "${vm}" "$(ftctl_blockcopy_active_domain_on_secondary "${vm}")" "${FTCTL_PROFILE_SECONDARY_URI}" "reverse" "failback" "reverse_sync.progress" >/dev/null 2>&1 || true
+  ftctl_blockcopy_progress_refresh_from_qmp "${vm}" "${active_vm}" "${FTCTL_PROFILE_SECONDARY_URI}" "reverse" "failback" "reverse_sync.progress" >/dev/null 2>&1 || true
 
   if [[ "${all_ready}" == "1" && "${rc_any}" == "0" ]]; then
     ftctl_state_set "${vm}" "transport_state=reverse_sync_ready" "last_sync_ts=$(ftctl_now_iso8601)"
@@ -2422,6 +2468,9 @@ ftctl_blockcopy_wait_reverse_sync_ready() {
     ftctl_blockcopy_refresh_reverse_jobs "${vm}" || rc=$?
     if [[ "${rc}" == "0" ]]; then
       return 0
+    fi
+    if [[ "${rc}" == "21" || "${rc}" == "22" ]]; then
+      return "${rc}"
     fi
     sleep 2
   done

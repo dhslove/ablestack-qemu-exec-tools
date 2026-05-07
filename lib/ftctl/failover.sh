@@ -345,11 +345,31 @@ ftctl_failback_resume_primary_reprotect() {
   return 1
 }
 
+ftctl_failback_reverse_sync_fail() {
+  local vm="${1-}"
+  local event="${2-failback.sync}"
+  local reason="${3-manual}"
+  local last_error="${4-reverse_sync_failed}"
+  local details="${5-}"
+
+  [[ -n "${last_error}" ]] || last_error="reverse_sync_failed"
+  ftctl_state_set "${vm}" \
+    "protection_state=error" \
+    "transport_state=reverse_sync_failed" \
+    "last_error=${last_error}"
+  ftctl_log_event "failback" "${event}" "fail" "${vm}" "" \
+    "reason=${reason} reverse_sync=${last_error}${details:+ ${details}}"
+  if [[ "${FTCTL_PROFILE_BACKEND_MODE:-}" == "remote-nbd" ]]; then
+    ftctl_blockcopy_stop_primary_reverse_nbd_exports "${vm}" || true
+  fi
+  return 1
+}
+
 ftctl_failback_sync_for_cloud_cutback() {
   local vm="${1-}"
   local reason="${2-manual}"
   local mode="${FTCTL_PROFILE_MODE:-ha}"
-  local active_side primary_xml
+  local active_side primary_xml reverse_error
 
   if [[ "${mode}" == "ft" ]]; then
     echo "ERROR: failback-sync is not supported for FT mode" >&2
@@ -373,13 +393,8 @@ ftctl_failback_sync_for_cloud_cutback() {
   primary_xml="$(ftctl_state_get "${vm}" "primary_xml_backup" 2>/dev/null || true)"
   if [[ -n "${primary_xml}" && -f "${primary_xml}" ]]; then
     if ! ftctl_primary_map_local_krbd_paths_from_xml "${vm}" "${primary_xml}"; then
-      ftctl_state_set "${vm}" \
-        "protection_state=error" \
-        "transport_state=reverse_sync_failed" \
-        "last_error=primary_rbd_map_failed"
-      ftctl_log_event "failback" "failback.sync" "fail" "${vm}" "" \
-        "reason=${reason} primary_rbd_map=failed"
-      return 1
+      ftctl_failback_reverse_sync_fail "${vm}" "failback.sync" "${reason}" "primary_rbd_map_failed" "primary_rbd_map=failed"
+      return $?
     fi
   fi
 
@@ -387,18 +402,16 @@ ftctl_failback_sync_for_cloud_cutback() {
     "protection_state=failing_back" \
     "last_error=reverse_sync_pending"
   if ! ftctl_blockcopy_start_reverse_sync "${vm}"; then
-    ftctl_log_event "failback" "failback.sync" "fail" "${vm}" "" \
-      "reason=${reason} reverse_sync=failed"
-    return 1
+    reverse_error="$(ftctl_state_get "${vm}" "last_error" 2>/dev/null || true)"
+    [[ -n "${reverse_error}" && "${reverse_error}" != "reverse_sync_pending" ]] || reverse_error="reverse_sync_start_failed"
+    ftctl_failback_reverse_sync_fail "${vm}" "failback.sync" "${reason}" "${reverse_error}" ""
+    return $?
   fi
   if ! ftctl_blockcopy_wait_reverse_sync_ready "${vm}" "${FTCTL_FAILBACK_REVERSE_SYNC_TIMEOUT_SEC:-600}"; then
-    ftctl_state_set "${vm}" \
-      "protection_state=error" \
-      "transport_state=reverse_sync_failed" \
-      "last_error=reverse_sync_timeout"
-    ftctl_log_event "failback" "failback.sync" "fail" "${vm}" "" \
-      "reason=${reason} reverse_sync=timeout"
-    return 1
+    reverse_error="$(ftctl_state_get "${vm}" "last_error" 2>/dev/null || true)"
+    [[ -n "${reverse_error}" && "${reverse_error}" != "reverse_sync_pending" ]] || reverse_error="reverse_sync_timeout"
+    ftctl_failback_reverse_sync_fail "${vm}" "failback.sync" "${reason}" "${reverse_error}" ""
+    return $?
   fi
 
   ftctl_state_set "${vm}" \
@@ -483,18 +496,18 @@ ftctl_failback_request() {
     "protection_state=failing_back" \
     "last_error=reverse_sync_pending"
   if ! ftctl_blockcopy_start_reverse_sync "${vm}"; then
-    ftctl_log_event "failback" "failback.request" "fail" "${vm}" "" \
-      "reason=${reason} reverse_sync=failed"
-    return 1
+    local reverse_error
+    reverse_error="$(ftctl_state_get "${vm}" "last_error" 2>/dev/null || true)"
+    [[ -n "${reverse_error}" && "${reverse_error}" != "reverse_sync_pending" ]] || reverse_error="reverse_sync_start_failed"
+    ftctl_failback_reverse_sync_fail "${vm}" "failback.request" "${reason}" "${reverse_error}" ""
+    return $?
   fi
   if ! ftctl_blockcopy_wait_reverse_sync_ready "${vm}" "${FTCTL_FAILBACK_REVERSE_SYNC_TIMEOUT_SEC:-600}"; then
-    ftctl_state_set "${vm}" \
-      "protection_state=error" \
-      "transport_state=reverse_sync_failed" \
-      "last_error=reverse_sync_timeout"
-    ftctl_log_event "failback" "failback.request" "fail" "${vm}" "" \
-      "reason=${reason} reverse_sync=timeout"
-    return 1
+    local reverse_error
+    reverse_error="$(ftctl_state_get "${vm}" "last_error" 2>/dev/null || true)"
+    [[ -n "${reverse_error}" && "${reverse_error}" != "reverse_sync_pending" ]] || reverse_error="reverse_sync_timeout"
+    ftctl_failback_reverse_sync_fail "${vm}" "failback.request" "${reason}" "${reverse_error}" ""
+    return $?
   fi
 
   ftctl_state_set "${vm}" \
