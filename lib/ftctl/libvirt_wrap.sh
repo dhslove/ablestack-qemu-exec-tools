@@ -133,10 +133,16 @@ ftctl_cmd_run() {
   trap "rm -f -- '${tmp_out}' '${tmp_err}' 2>/dev/null || true" RETURN
 
   if command -v timeout >/dev/null 2>&1; then
-    timeout --preserve-status "${timeout_sec}" "$@" >"${tmp_out}" 2>"${tmp_err}" || _rc=$?
+    (
+      exec 201>&- 2>/dev/null || true
+      timeout --preserve-status "${timeout_sec}" "$@"
+    ) >"${tmp_out}" 2>"${tmp_err}" || _rc=$?
     : "${_rc:=0}"
   else
-    "$@" >"${tmp_out}" 2>"${tmp_err}" || _rc=$?
+    (
+      exec 201>&- 2>/dev/null || true
+      "$@"
+    ) >"${tmp_out}" 2>"${tmp_err}" || _rc=$?
     : "${_rc:=0}"
   fi
 
