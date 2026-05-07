@@ -123,6 +123,7 @@ except Exception:
     sys.exit(1)
 
 records = {}
+runtime = {}
 try:
     with open(state_path, "r", encoding="utf-8") as fh:
         for raw in fh:
@@ -217,8 +218,26 @@ for job in jobs:
 if not disks:
     sys.exit(2)
 
+runtime_path = ""
+if state_path.endswith(".blockcopy.reverse"):
+    runtime_path = state_path[:-len(".blockcopy.reverse")]
+elif state_path.endswith(".blockcopy"):
+    runtime_path = state_path[:-len(".blockcopy")]
+if runtime_path:
+    try:
+        with open(runtime_path, "r", encoding="utf-8") as fh:
+            for raw in fh:
+                raw = raw.rstrip("\n")
+                if "=" not in raw:
+                    continue
+                key, value = raw.split("=", 1)
+                if key in ("thin_preserve", "rbd_parent_flattened", "last_thin_preserve_reason"):
+                    runtime[key] = value
+    except Exception:
+        runtime = {}
+
 percent = round((copied * 100.0 / total), 1) if total > 0 else 0.0
-print(json.dumps({
+payload = {
     "direction": direction,
     "percent": percent,
     "copied_bytes": copied,
@@ -226,7 +245,9 @@ print(json.dumps({
     "ready": all_ready,
     "updated": updated,
     "disks": disks,
-}, separators=(",", ":")))
+}
+payload.update({k: v for k, v in runtime.items() if v not in (None, "")})
+print(json.dumps(payload, separators=(",", ":")))
 ' "${direction}" "${updated}" "${state_path}" <<< "${out}" 2>/dev/null || true)"
   [[ -n "${progress}" ]] || return 2
 
@@ -890,6 +911,203 @@ ftctl_blockcopy_rbd_parse_spec() {
   _image_ref="${parsed_image}"
 }
 
+ftctl_blockcopy_rbd_spec_from_path() {
+  local path="${1-}"
+  local out_var="${2}"
+  local spec=""
+
+  case "${path}" in
+    rbd:*)
+      spec="${path#rbd:}"
+      ;;
+    /dev/rbd/*/*)
+      spec="${path#/dev/rbd/}"
+      ;;
+    /dev/rbd/*)
+      spec="${path#/dev/rbd/}"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  [[ "${spec}" == */* && "${spec}" != */ ]] || return 1
+  printf -v "${out_var}" '%s' "${spec}"
+}
+
+ftctl_blockcopy_rbd_run_on_primary() {
+  local timeout_sec="${1-30}"
+  local out_var="${2}"
+  local err_var="${3}"
+  local rc_var="${4}"
+  local command_text="${5-}"
+  local host="" user="" out="" err="" rc=0
+
+  if ftctl_blockcopy_primary_uri_is_local_system; then
+    ftctl_cmd_run "${timeout_sec}" out err rc -- bash -lc "${command_text}" || true
+  else
+    ftctl_blockcopy_primary_target_host_user host user || {
+      printf -v "${out_var}" '%s' ""
+      printf -v "${err_var}" '%s' "primary_target_unresolved"
+      printf -v "${rc_var}" '%s' "2"
+      return 2
+    }
+    ftctl_blockcopy_remote_exec "${host}" "${user}" out err rc "${command_text}" || true
+  fi
+  printf -v "${out_var}" '%s' "${out}"
+  printf -v "${err_var}" '%s' "${err}"
+  printf -v "${rc_var}" '%s' "${rc}"
+  [[ "${rc}" == "0" ]]
+}
+
+ftctl_blockcopy_rbd_parent_from_info_json() {
+  local json_payload="${1-}"
+  python3 -c '
+import json, sys
+try:
+    data = json.loads(sys.argv[1])
+except Exception:
+    sys.exit(1)
+parent = data.get("parent")
+if isinstance(parent, dict):
+    pool = str(parent.get("pool") or "")
+    image = str(parent.get("image") or "")
+    snap = str(parent.get("snapshot") or parent.get("snap") or "")
+    value = "/".join(x for x in (pool, image) if x)
+    if snap:
+        value = value + "@" + snap if value else snap
+    print(value)
+elif isinstance(parent, str):
+    print(parent)
+' "${json_payload}" 2>/dev/null
+}
+
+ftctl_blockcopy_rbd_du_used_bytes_from_json() {
+  local json_payload="${1-}"
+  python3 -c '
+import json, sys
+try:
+    data = json.loads(sys.argv[1])
+except Exception:
+    sys.exit(1)
+def walk(value):
+    if isinstance(value, dict):
+        for key in ("used_size", "used_size_bytes", "used", "provisioned_size"):
+            raw = value.get(key)
+            if isinstance(raw, int):
+                print(raw)
+                return True
+            if isinstance(raw, str) and raw.isdigit():
+                print(raw)
+                return True
+        for item in value.values():
+            if walk(item):
+                return True
+    if isinstance(value, list):
+        for item in value:
+            if walk(item):
+                return True
+    return False
+if not walk(data):
+    sys.exit(1)
+' "${json_payload}" 2>/dev/null
+}
+
+ftctl_blockcopy_rbd_du_used_bytes_primary() {
+  local spec="${1-}"
+  local out_var="${2}"
+  local q_spec="" out="" err="" rc=0 used=""
+
+  [[ -n "${spec}" ]] || return 1
+  printf -v q_spec '%q' "${spec}"
+  ftctl_blockcopy_rbd_run_on_primary "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC}" out err rc \
+    "rbd du --format json ${q_spec}" || true
+  : "${err}"
+  if [[ "${rc}" == "0" ]]; then
+    used="$(ftctl_blockcopy_rbd_du_used_bytes_from_json "${out}" || true)"
+  fi
+  [[ "${used}" =~ ^[0-9]+$ ]] || used=""
+  printf -v "${out_var}" '%s' "${used}"
+  [[ -n "${used}" ]]
+}
+
+ftctl_blockcopy_prepare_primary_rbd_thin_for_protect() {
+  local vm="${1-}"
+  local target="${2-}"
+  local source_path="${3-}"
+  local spec="" q_spec="" out="" err="" rc=0 parent="" before_used="" after_flatten_used="" after_sparsify_used=""
+  local policy="${FTCTL_RBD_PARENT_POLICY:-flatten-on-protect}"
+
+  [[ "${FTCTL_THIN_PRESERVE:-1}" == "1" ]] || return 0
+  ftctl_blockcopy_rbd_spec_from_path "${source_path}" spec || return 0
+
+  printf -v q_spec '%q' "${spec}"
+  ftctl_blockcopy_rbd_du_used_bytes_primary "${spec}" before_used || before_used=""
+  ftctl_blockcopy_rbd_run_on_primary "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC}" out err rc \
+    "rbd info --format json ${q_spec}" || true
+  if [[ "${rc}" != "0" ]]; then
+    ftctl_log_event "mirror" "rbd.thin.precheck" "warn" "${vm}" "${rc}" \
+      "target=${target} image=${spec} error=${err}"
+    ftctl_state_set "${vm}" "thin_preserve=warn" "last_thin_preserve_reason=rbd_info_failed:${target}"
+    return 0
+  fi
+
+  parent="$(ftctl_blockcopy_rbd_parent_from_info_json "${out}" || true)"
+  if [[ -z "${parent}" ]]; then
+    ftctl_state_set "${vm}" "thin_preserve=enabled" "rbd_parent_flattened=no"
+    ftctl_log_event "mirror" "rbd.parent.check" "ok" "${vm}" "" \
+      "target=${target} image=${spec} parent=none used_bytes=${before_used}"
+    return 0
+  fi
+
+  if [[ "${policy}" != "flatten-on-protect" ]]; then
+    ftctl_state_set "${vm}" "thin_preserve=disabled" "last_thin_preserve_reason=parent_present:${target}"
+    ftctl_log_event "mirror" "rbd.parent.check" "warn" "${vm}" "" \
+      "target=${target} image=${spec} parent=${parent} policy=${policy}"
+    return 0
+  fi
+
+  ftctl_state_set "${vm}" "thin_preserve=preparing" "last_thin_preserve_reason=flattening:${target}"
+  ftctl_log_event "mirror" "rbd.flatten.start" "ok" "${vm}" "" \
+    "target=${target} image=${spec} parent=${parent} used_before=${before_used}"
+
+  out=""; err=""; rc=0
+  ftctl_blockcopy_rbd_run_on_primary "${FTCTL_RBD_FLATTEN_TIMEOUT_SEC:-3600}" out err rc \
+    "rbd flatten ${q_spec}" || true
+  if [[ "${rc}" != "0" ]]; then
+    ftctl_state_set "${vm}" "protection_state=error" "transport_state=failed" "thin_preserve=failed" "last_error=rbd_flatten_failed:${target}"
+    ftctl_log_event "mirror" "rbd.flatten" "fail" "${vm}" "${rc}" \
+      "target=${target} image=${spec} parent=${parent} error=${err}"
+    return "${rc}"
+  fi
+
+  ftctl_blockcopy_rbd_du_used_bytes_primary "${spec}" after_flatten_used || after_flatten_used=""
+  out=""; err=""; rc=0
+  ftctl_blockcopy_rbd_run_on_primary "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC}" out err rc \
+    "rbd info --format json ${q_spec}" || true
+  parent="$(ftctl_blockcopy_rbd_parent_from_info_json "${out}" || true)"
+  if [[ -n "${parent}" ]]; then
+    ftctl_state_set "${vm}" "protection_state=error" "transport_state=failed" "thin_preserve=failed" "last_error=rbd_parent_still_present:${target}"
+    ftctl_log_event "mirror" "rbd.flatten.verify" "fail" "${vm}" "" \
+      "target=${target} image=${spec} parent=${parent}"
+    return 2
+  fi
+
+  out=""; err=""; rc=0
+  ftctl_blockcopy_rbd_run_on_primary "${FTCTL_RBD_SPARSIFY_TIMEOUT_SEC:-1800}" out err rc \
+    "rbd sparsify ${q_spec}" || true
+  if [[ "${rc}" != "0" ]]; then
+    ftctl_state_set "${vm}" "thin_preserve=warn" "rbd_parent_flattened=yes" "last_thin_preserve_reason=rbd_sparsify_failed:${target}"
+    ftctl_log_event "mirror" "rbd.sparsify" "warn" "${vm}" "${rc}" \
+      "target=${target} image=${spec} used_before=${before_used} used_after_flatten=${after_flatten_used} error=${err}"
+    return 0
+  fi
+
+  ftctl_blockcopy_rbd_du_used_bytes_primary "${spec}" after_sparsify_used || after_sparsify_used=""
+  ftctl_state_set "${vm}" "thin_preserve=enabled" "rbd_parent_flattened=yes" "last_thin_preserve_reason="
+  ftctl_log_event "mirror" "rbd.sparsify" "ok" "${vm}" "" \
+    "target=${target} image=${spec} used_before=${before_used} used_after_flatten=${after_flatten_used} used_after_sparsify=${after_sparsify_used}"
+}
+
 ftctl_blockcopy_rbd_connection_from_xml() {
   local xml_path="${1-}"
   local target="${2-}"
@@ -967,7 +1185,7 @@ ftctl_blockcopy_build_remote_nbd_dest_xml() {
   fi
   cat > "${out_path}" <<EOF
 <disk type='network' device='disk'>
-  <driver name='qemu' type='raw'/>
+  <driver name='qemu' type='raw' discard='unmap' detect_zeroes='unmap'/>
   <source protocol='nbd' name='${export_name}'>
     <host name='${export_host}' port='${export_port}' transport='tcp'/>
   </source>
@@ -1253,7 +1471,12 @@ if ss -lntp | grep -q ":${export_port}[[:space:]]"; then
   echo "port_in_use:${export_port}" >&2
   exit 98
 fi
-qemu-nbd --fork --persistent --shared=8 \
+nbd_thin_opts=()
+if [[ "${FTCTL_THIN_PRESERVE:-1}" == "1" ]]; then
+  qemu-nbd --help 2>&1 | grep -q -- '--discard' && nbd_thin_opts+=(--discard=unmap)
+  qemu-nbd --help 2>&1 | grep -q -- '--detect-zeroes' && nbd_thin_opts+=(--detect-zeroes=unmap)
+fi
+qemu-nbd --fork --persistent --shared=8 "\${nbd_thin_opts[@]}" \
   --bind "${bind_addr}" \
   --port "${export_port}" \
   --export-name "${export_name}" \
@@ -1418,7 +1641,12 @@ if ss -lntp | grep -q ":${export_port}[[:space:]]"; then
   echo "port_in_use:${export_port}" >&2
   exit 98
 fi
-qemu-nbd --fork --persistent --shared=8 \
+nbd_thin_opts=()
+if [[ "${FTCTL_THIN_PRESERVE:-1}" == "1" ]]; then
+  qemu-nbd --help 2>&1 | grep -q -- '--discard' && nbd_thin_opts+=(--discard=unmap)
+  qemu-nbd --help 2>&1 | grep -q -- '--detect-zeroes' && nbd_thin_opts+=(--detect-zeroes=unmap)
+fi
+qemu-nbd --fork --persistent --shared=8 "\${nbd_thin_opts[@]}" \
   --bind "${bind_addr}" \
   --port "${export_port}" \
   --export-name "${export_name}" \
@@ -2119,6 +2347,7 @@ ftctl_blockcopy_plan_protect() {
     source="${line#*|}"
     source="${source%%|*}"
     format="${line##*|}"
+    ftctl_blockcopy_prepare_primary_rbd_thin_for_protect "${vm}" "${target}" "${source}" || return $?
     if [[ "${FTCTL_PROFILE_BACKEND_MODE}" == "remote-nbd" ]]; then
       secondary_dest="$(ftctl_blockcopy_remote_nbd_secondary_path "${vm}" "${target}" "${source}" "${format}")" || return $?
       export_port=""
@@ -2160,7 +2389,12 @@ mkdir -p "$(dirname "${secondary_dest}")" /run/ablestack-vm-ftctl
 if [[ ! -f "${secondary_dest}" ]]; then
   qemu-img create -f "${debug_target_format}" "${secondary_dest}" "${debug_size}"
 fi
-qemu-nbd --fork --persistent --shared=8 --bind "${debug_bind_addr}" --port "${export_port}" --export-name "${export_name}" --format "${debug_target_format}" --pid-file "/run/ablestack-vm-ftctl/nbd-${vm}-${target}.pid" "${secondary_dest}"
+nbd_thin_opts=()
+if [[ "${FTCTL_THIN_PRESERVE:-1}" == "1" ]]; then
+  qemu-nbd --help 2>&1 | grep -q -- '--discard' && nbd_thin_opts+=(--discard=unmap)
+  qemu-nbd --help 2>&1 | grep -q -- '--detect-zeroes' && nbd_thin_opts+=(--detect-zeroes=unmap)
+fi
+qemu-nbd --fork --persistent --shared=8 "\${nbd_thin_opts[@]}" --bind "${debug_bind_addr}" --port "${export_port}" --export-name "${export_name}" --format "${debug_target_format}" --pid-file "/run/ablestack-vm-ftctl/nbd-${vm}-${target}.pid" "${secondary_dest}"
 EOF
 )"
         ftctl_blockcopy_write_remote_nbd_repro "${vm}" "${target}" "${remote_xml}" "${remote_host}" "${remote_user}" "${debug_remote_cmd}" "${persistence}"
@@ -2683,11 +2917,79 @@ ftctl_blockcopy_reverse_secondary_path_for_target() {
   return 1
 }
 
+ftctl_blockcopy_prepare_rbd_target_for_sparse_finalize() {
+  local vm="${1-}"
+  local target="${2-}"
+  local primary_path="${3-}"
+  local spec="" q_spec="" q_path="" out="" err="" rc=0 parent="" before_used=""
+
+  [[ "${FTCTL_THIN_PRESERVE:-1}" == "1" ]] || return 0
+  ftctl_blockcopy_rbd_spec_from_path "${primary_path}" spec || return 0
+  printf -v q_spec '%q' "${spec}"
+  printf -v q_path '%q' "${primary_path}"
+
+  ftctl_blockcopy_rbd_du_used_bytes_primary "${spec}" before_used || before_used=""
+  ftctl_blockcopy_rbd_run_on_primary "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC}" out err rc \
+    "rbd info --format json ${q_spec}" || true
+  if [[ "${rc}" != "0" ]]; then
+    ftctl_state_set "${vm}" "last_error=reverse_finalize_rbd_info_failed:${target}" "thin_preserve=failed"
+    ftctl_log_event "failback" "rbd.thin.precheck" "fail" "${vm}" "${rc}" \
+      "target=${target} image=${spec} error=${err}"
+    return "${rc}"
+  fi
+  parent="$(ftctl_blockcopy_rbd_parent_from_info_json "${out}" || true)"
+  if [[ -n "${parent}" ]]; then
+    ftctl_state_set "${vm}" "last_error=reverse_finalize_parent_present:${target}" "thin_preserve=failed"
+    ftctl_log_event "failback" "rbd.thin.precheck" "fail" "${vm}" "" \
+      "target=${target} image=${spec} parent=${parent}"
+    return 2
+  fi
+
+  out=""; err=""; rc=0
+  ftctl_blockcopy_rbd_run_on_primary "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC}" out err rc \
+    "if [[ -b ${q_path} ]]; then blkdiscard ${q_path}; else exit 11; fi" || true
+  if [[ "${rc}" != "0" ]]; then
+    ftctl_state_set "${vm}" "thin_preserve=warn" "last_thin_preserve_reason=blkdiscard_failed:${target}"
+    ftctl_log_event "failback" "rbd.discard" "warn" "${vm}" "${rc}" \
+      "target=${target} image=${spec} path=${primary_path} used_before=${before_used} error=${err}"
+    return 30
+  fi
+
+  ftctl_state_set "${vm}" "thin_preserve=enabled" "last_thin_preserve_reason="
+  ftctl_log_event "failback" "rbd.discard" "ok" "${vm}" "" \
+    "target=${target} image=${spec} path=${primary_path} used_before=${before_used}"
+}
+
+ftctl_blockcopy_sparsify_rbd_target_after_finalize() {
+  local vm="${1-}"
+  local target="${2-}"
+  local primary_path="${3-}"
+  local spec="" q_spec="" out="" err="" rc=0 after_used=""
+
+  [[ "${FTCTL_THIN_PRESERVE:-1}" == "1" ]] || return 0
+  ftctl_blockcopy_rbd_spec_from_path "${primary_path}" spec || return 0
+  printf -v q_spec '%q' "${spec}"
+  out=""; err=""; rc=0
+  ftctl_blockcopy_rbd_run_on_primary "${FTCTL_RBD_SPARSIFY_TIMEOUT_SEC:-1800}" out err rc \
+    "rbd sparsify ${q_spec}" || true
+  if [[ "${rc}" != "0" ]]; then
+    ftctl_state_set "${vm}" "thin_preserve=warn" "last_thin_preserve_reason=post_finalize_sparsify_failed:${target}"
+    ftctl_log_event "failback" "rbd.sparsify" "warn" "${vm}" "${rc}" \
+      "target=${target} image=${spec} error=${err}"
+    return 0
+  fi
+  ftctl_blockcopy_rbd_du_used_bytes_primary "${spec}" after_used || after_used=""
+  ftctl_state_set "${vm}" "thin_preserve=enabled" "last_thin_preserve_reason="
+  ftctl_log_event "failback" "rbd.sparsify" "ok" "${vm}" "" \
+    "target=${target} image=${spec} used_after_sparsify=${after_used}"
+}
+
 ftctl_blockcopy_finalize_reverse_sync() {
   local vm="${1-}"
   local path line target source dest format secondary_path guest_size target_size
   local domain_state active_vm remote_host="" remote_user="" export_addr="" export_port="" export_name=""
   local out="" err="" rc=0 q_secondary="" q_nbd="" remote_cmd=""
+  local convert_sparse_size="0" dest_rbd_spec=""
   local saved_wait_timeout="${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC}"
 
   path="$(ftctl_blockcopy_reverse_state_path "${vm}")"
@@ -2753,6 +3055,22 @@ ftctl_blockcopy_finalize_reverse_sync() {
       return $?
     }
     export_name="${FTCTL_PROFILE_REMOTE_NBD_EXPORT_NAME}-${target}-reverse"
+    convert_sparse_size="0"
+    dest_rbd_spec=""
+    if [[ "${FTCTL_THIN_PRESERVE:-1}" == "1" ]] && ftctl_blockcopy_rbd_spec_from_path "${dest}" dest_rbd_spec; then
+      rc=0
+      ftctl_blockcopy_prepare_rbd_target_for_sparse_finalize "${vm}" "${target}" "${dest}" || rc=$?
+      if [[ "${rc}" == "0" ]]; then
+        convert_sparse_size="${FTCTL_THIN_SPARSE_SIZE:-4k}"
+      elif [[ "${rc}" == "30" ]]; then
+        convert_sparse_size="0"
+        ftctl_log_event "failback" "rbd.thin.fallback" "warn" "${vm}" "" \
+          "target=${target} image=${dest_rbd_spec} reason=discard_unavailable action=full_overwrite"
+      else
+        FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC="${saved_wait_timeout}"
+        return "${rc}"
+      fi
+    fi
     ftctl_blockcopy_primary_nbd_prepare_target "${vm}" "${target}" "${dest}" "raw" "${dest}" "${export_name}" "${export_port}" || {
       FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC="${saved_wait_timeout}"
       return $?
@@ -2775,7 +3093,7 @@ if [[ "\${actual_guest_size}" != "\${expected_size}" ]]; then
   echo "reverse_finalize_source_size_mismatch:\${secondary_path}:\${actual_guest_size}:\${expected_size}" >&2
   exit 91
 fi
-qemu-img convert -p -n -f "\${source_format}" -O raw "\${secondary_path}" "\${target_uri}"
+qemu-img convert -p -n -S "${convert_sparse_size}" -f "\${source_format}" -O raw "\${secondary_path}" "\${target_uri}"
 EOF
 )
     out=""
@@ -2791,8 +3109,12 @@ EOF
       ftctl_blockcopy_stop_primary_reverse_nbd_exports "${vm}" || true
       return "${rc}"
     fi
+    ftctl_blockcopy_stop_primary_reverse_nbd_exports "${vm}" || true
+    if [[ "${convert_sparse_size}" != "0" ]]; then
+      ftctl_blockcopy_sparsify_rbd_target_after_finalize "${vm}" "${target}" "${dest}" || true
+    fi
     ftctl_log_event "failback" "reverse_sync.finalize" "ok" "${vm}" "" \
-      "target=${target} secondary_path=${secondary_path} dest=${dest} guest_virtual_size=${guest_size}"
+      "target=${target} secondary_path=${secondary_path} dest=${dest} guest_virtual_size=${guest_size} sparse_size=${convert_sparse_size}"
   done < "${path}"
 
   ftctl_blockcopy_stop_primary_reverse_nbd_exports "${vm}" || true

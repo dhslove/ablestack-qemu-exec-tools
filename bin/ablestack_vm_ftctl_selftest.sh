@@ -942,6 +942,10 @@ EOF
   # shellcheck disable=SC2317
   ftctl_blockcopy_primary_nbd_pick_port() { printf -v "$3" '%s' '10821'; }
   # shellcheck disable=SC2317
+  ftctl_blockcopy_prepare_rbd_target_for_sparse_finalize() {
+    printf '%s\n' "PREPARE_SPARSE:$2:$3" >> "${call_log}"
+  }
+  # shellcheck disable=SC2317
   ftctl_blockcopy_primary_nbd_prepare_target() {
     printf 'PREPARE:%s:%s:%s:%s:%s\n' "$2" "$3" "$4" "$6" "$7" >> "${call_log}"
   }
@@ -957,11 +961,17 @@ EOF
   ftctl_blockcopy_stop_primary_reverse_nbd_exports() {
     printf '%s\n' "STOP_REVERSE_NBD" >> "${call_log}"
   }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_sparsify_rbd_target_after_finalize() {
+    printf '%s\n' "SPARSIFY:$2:$3" >> "${call_log}"
+  }
 
   ftctl_blockcopy_finalize_reverse_sync "${vm}"
   selftest_assert_eq "$(ftctl_state_get "${vm}" "transport_state")" "cutback_ready" "reverse finalize transport"
   selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" "" "reverse finalize clears error"
   selftest_assert_file_contains "${call_log}" "qemu-img convert -p -n"
+  selftest_assert_file_contains "${call_log}" "-S 4k"
+  selftest_assert_file_contains "${call_log}" "SPARSIFY:vda:/dev/rbd/rbd/${vm}-root"
   selftest_assert_file_contains "${call_log}" "nbd://10.0.0.11:10821/${vm}-vda-reverse"
   selftest_assert_file_contains "${FTCTL_EVENTS_LOG}" "reverse_sync.finalize"
 )
