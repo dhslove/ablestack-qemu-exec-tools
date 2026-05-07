@@ -2876,15 +2876,51 @@ ftctl_blockcopy_stop_primary_reverse_nbd_exports() {
     stop_cmd="$(cat <<EOF
 set -euo pipefail
 pid_file="/run/ablestack-vm-ftctl/nbd-reverse-${vm}-${target}.pid"
+export_name="${FTCTL_PROFILE_REMOTE_NBD_EXPORT_NAME}-${target}-reverse"
+collect_pids() {
+  if [[ -f "\${pid_file}" ]]; then
+    oldpid="\$(cat "\${pid_file}" 2>/dev/null || true)"
+    if [[ -n "\${oldpid}" ]] && kill -0 "\${oldpid}" >/dev/null 2>&1; then
+      printf '%s\n' "\${oldpid}"
+    fi
+  fi
+  ps -C qemu-nbd -o pid=,args= 2>/dev/null | while read -r qpid qargs; do
+    [[ -n "\${qpid}" ]] || continue
+    case "\${qargs}" in
+      *"--export-name \${export_name}"*|*"--export-name=\${export_name}"*|*"\${pid_file}"*)
+        printf '%s\n' "\${qpid}"
+        ;;
+    esac
+  done | sort -u
+}
 if [[ -f "\${pid_file}" ]]; then
   oldpid="\$(cat "\${pid_file}" 2>/dev/null || true)"
   if [[ -n "\${oldpid}" ]] && kill -0 "\${oldpid}" >/dev/null 2>&1; then
     kill "\${oldpid}" >/dev/null 2>&1 || true
-    sleep 1
   fi
-  rm -f "\${pid_file}"
 fi
-pkill -f "qemu-nbd.*${FTCTL_PROFILE_REMOTE_NBD_EXPORT_NAME}-${target}-reverse" >/dev/null 2>&1 || true
+for qpid in \$(collect_pids); do
+  kill "\${qpid}" >/dev/null 2>&1 || true
+done
+for _i in \$(seq 1 10); do
+  if [[ -z "\$(collect_pids)" ]]; then
+    rm -f "\${pid_file}"
+    exit 0
+  fi
+  sleep 1
+done
+for qpid in \$(collect_pids); do
+  kill -9 "\${qpid}" >/dev/null 2>&1 || true
+done
+for _i in \$(seq 1 5); do
+  if [[ -z "\$(collect_pids)" ]]; then
+    rm -f "\${pid_file}"
+    exit 0
+  fi
+  sleep 1
+done
+echo "reverse_nbd_stop_failed:\${export_name}:\${pid_file}" >&2
+exit 99
 EOF
 )"
     if ftctl_blockcopy_primary_uri_is_local_system; then
@@ -2893,7 +2929,14 @@ EOF
       ftctl_blockcopy_remote_exec "${host}" "${user}" out err rc "${stop_cmd}" || true
     fi
     : "${out}${err}"
-    [[ "${rc}" == "0" ]] || return "${rc}"
+    if [[ "${rc}" != "0" ]]; then
+      ftctl_state_set "${vm}" "last_error=reverse_nbd_stop_failed:${target}"
+      ftctl_log_event "failback" "reverse_nbd.stop" "fail" "${vm}" "${rc}" \
+        "target=${target} error=${err}"
+      return "${rc}"
+    fi
+    ftctl_log_event "failback" "reverse_nbd.stop" "ok" "${vm}" "" \
+      "target=${target}"
   done < "${path}"
 }
 
@@ -3109,7 +3152,11 @@ EOF
       ftctl_blockcopy_stop_primary_reverse_nbd_exports "${vm}" || true
       return "${rc}"
     fi
-    ftctl_blockcopy_stop_primary_reverse_nbd_exports "${vm}" || true
+    if ! ftctl_blockcopy_stop_primary_reverse_nbd_exports "${vm}"; then
+      FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC="${saved_wait_timeout}"
+      ftctl_state_set "${vm}" "last_error=reverse_finalize_nbd_cleanup_failed:${target}"
+      return 99
+    fi
     if [[ "${convert_sparse_size}" != "0" ]]; then
       ftctl_blockcopy_sparsify_rbd_target_after_finalize "${vm}" "${target}" "${dest}" || true
     fi
@@ -3117,7 +3164,12 @@ EOF
       "target=${target} secondary_path=${secondary_path} dest=${dest} guest_virtual_size=${guest_size} sparse_size=${convert_sparse_size}"
   done < "${path}"
 
-  ftctl_blockcopy_stop_primary_reverse_nbd_exports "${vm}" || true
+  if ! ftctl_blockcopy_stop_primary_reverse_nbd_exports "${vm}"; then
+    FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC="${saved_wait_timeout}"
+    ftctl_state_set "${vm}" "last_error=reverse_finalize_nbd_cleanup_failed"
+    return 99
+  fi
+  rm -f -- "${path}" 2>/dev/null || true
   FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC="${saved_wait_timeout}"
   ftctl_state_set "${vm}" \
     "transport_state=cutback_ready" \
