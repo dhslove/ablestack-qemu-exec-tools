@@ -461,8 +461,47 @@ ftctl_failback_sync_for_cloud_cutback() {
     sleep 2
   fi
 
+  local sync_state
+  sync_state="$(ftctl_state_get "${vm}" "transport_state" 2>/dev/null || echo "ready")"
   ftctl_log_event "failback" "failback.sync" "ok" "${vm}" "" \
-    "reason=${reason} reverse_sync=ready"
+    "reason=${reason} reverse_sync=${sync_state}"
+}
+
+ftctl_failback_finalize_after_cloud_secondary_stop() {
+  local vm="${1-}"
+  local reason="${2-manual}"
+  local mode="${FTCTL_PROFILE_MODE:-ha}"
+  local active_side finalize_error
+
+  if [[ "${mode}" == "ft" ]]; then
+    echo "ERROR: failback-finalize is not supported for FT mode" >&2
+    return 1
+  fi
+
+  active_side="$(ftctl_state_get "${vm}" "active_side" 2>/dev/null || echo "primary")"
+  if [[ "${active_side}" == "primary" ]]; then
+    ftctl_log_event "failback" "failback.finalize" "ok" "${vm}" "" \
+      "reason=${reason} state=already_primary"
+    return 0
+  fi
+
+  ftctl_state_set "${vm}" \
+    "protection_state=failing_back" \
+    "transport_state=finalizing" \
+    "last_error=reverse_finalize_pending"
+  if ! ftctl_blockcopy_finalize_reverse_sync "${vm}"; then
+    finalize_error="$(ftctl_state_get "${vm}" "last_error" 2>/dev/null || true)"
+    [[ -n "${finalize_error}" && "${finalize_error}" != "reverse_finalize_pending" ]] || finalize_error="reverse_finalize_failed"
+    ftctl_failback_reverse_sync_fail "${vm}" "failback.finalize" "${reason}" "${finalize_error}" ""
+    return $?
+  fi
+
+  ftctl_state_set "${vm}" \
+    "protection_state=failing_back" \
+    "transport_state=cutback_ready" \
+    "last_error="
+  ftctl_log_event "failback" "failback.finalize" "ok" "${vm}" "" \
+    "reason=${reason} reverse_sync=offline_finalized"
 }
 
 ftctl_failback_reprotect_after_cloud_cutback() {

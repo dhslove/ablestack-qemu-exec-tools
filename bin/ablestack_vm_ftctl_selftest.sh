@@ -914,6 +914,58 @@ EOF
   selftest_assert_file_contains "${FTCTL_EVENTS_LOG}" "protection.unprotect.qmp-destinations-released"
 )
 
+selftest_case_failback_reverse_finalize() (
+  selftest_reset_env
+  selftest_info "failback reverse finalize"
+
+  local vm="reverse-finalize"
+  local call_log="${SELFTEST_ROOT}/reverse-finalize-calls.log"
+  FTCTL_PROFILE_BACKEND_MODE="remote-nbd"
+  FTCTL_PROFILE_FAILBACK_DISK_MAP="source"
+  FTCTL_PROFILE_REMOTE_NBD_EXPORT_NAME="${vm}"
+  ftctl_state_init_vm "${vm}"
+  ftctl_state_set "${vm}" "active_side=secondary"
+  ftctl_blockcopy_state_write_reverse "${vm}" \
+    "vda|nbd://10.0.0.12:10820/${vm}-vda|/dev/rbd/rbd/${vm}-root|qcow2|/secondary/${vm}/root.qcow2|1024|1024"
+
+  cat > "$(ftctl_blockcopy_progress_path "${vm}")" <<EOF
+{"vm":"${vm}","direction":"reverse","disks":[{"target":"vda","offset":2048,"len":4096,"guest_virtual_size":1024,"target_size":1024}]}
+EOF
+  ftctl_blockcopy_reverse_cutback_ready "${vm}" || selftest_fail "reverse cutback readiness should accept guest virtual size boundary"
+
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_secondary_domain_state() { return 1; }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_remote_target_host_user() { printf -v "$1" '%s' '10.0.0.12'; printf -v "$2" '%s' 'root'; }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_primary_export_addr() { printf -v "$1" '%s' '10.0.0.11'; }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_primary_nbd_pick_port() { printf -v "$3" '%s' '10821'; }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_primary_nbd_prepare_target() {
+    printf 'PREPARE:%s:%s:%s:%s:%s\n' "$2" "$3" "$4" "$6" "$7" >> "${call_log}"
+  }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_remote_exec() {
+    local out_var="$3" err_var="$4" rc_var="$5" cmd="$6"
+    printf '%s\n' "${cmd}" >> "${call_log}"
+    printf -v "${out_var}" '%s' ""
+    printf -v "${err_var}" '%s' ""
+    printf -v "${rc_var}" '%s' "0"
+  }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_stop_primary_reverse_nbd_exports() {
+    printf '%s\n' "STOP_REVERSE_NBD" >> "${call_log}"
+  }
+
+  ftctl_blockcopy_finalize_reverse_sync "${vm}"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "transport_state")" "cutback_ready" "reverse finalize transport"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" "" "reverse finalize clears error"
+  selftest_assert_file_contains "${call_log}" "qemu-img convert -p -n"
+  selftest_assert_file_contains "${call_log}" "nbd://10.0.0.11:10821/${vm}-vda-reverse"
+  selftest_assert_file_contains "${FTCTL_EVENTS_LOG}" "reverse_sync.finalize"
+)
+
 selftest_case_events_json() {
   selftest_reset_env
   selftest_info "events json output"
@@ -948,6 +1000,7 @@ selftest_main() {
   selftest_case_check_secondary_active_side
   selftest_case_reconcile_secondary_steady_skips_primary_disks
   selftest_case_unprotect_releases_blockcopy_targets
+  selftest_case_failback_reverse_finalize
   selftest_case_events_json
   selftest_info "all checks passed"
 }

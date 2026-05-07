@@ -171,6 +171,7 @@ Commands:
   failover-prepare   Release replication handles before cloud-managed standby start
   failback           Start failback workflow
   failback-sync      Prepare reverse sync for cloud-managed failback
+  failback-finalize  Finalize reverse sync after cloud-managed standby stop
   failback-reprotect Re-arm protection after cloud-managed failback cutback
   unprotect          Stop protection and remove host-side FTCTL runtime state
   fence-confirm      Mark manual fencing as completed
@@ -249,7 +250,7 @@ parse_args() {
         print_version
         exit "${EXIT_OK}"
         ;;
-      protect|status|reconcile|failover|failover-prepare|failback|failback-sync|failback-reprotect|unprotect|fence-confirm|fence-clear|pause-protection|resume-protection|check|health|events|config)
+      protect|status|reconcile|failover|failover-prepare|failback|failback-sync|failback-finalize|failback-reprotect|unprotect|fence-confirm|fence-clear|pause-protection|resume-protection|check|health|events|config)
         [[ -z "${CLI_COMMAND}" ]] || {
           echo "ERROR: multiple commands specified" >&2
           exit "${EXIT_USAGE}"
@@ -668,6 +669,19 @@ dispatch() {
       rc=0
       ftctl_failback_sync_for_cloud_cutback "${CLI_VM}" "manual" || rc=$?
       emit_action_result_json "failback-sync" "${CLI_VM}" "${rc}"
+      exit "${rc}"
+      ;;
+    failback-finalize)
+      require_vm
+      [[ "${CLI_FORCE}" == "1" ]] || {
+        echo "ERROR: failback-finalize requires --force" >&2
+        exit "${EXIT_USAGE}"
+      }
+      ftctl_profile_load_vm "${CLI_VM}"
+      ftctl_profile_validate "${CLI_VM}"
+      rc=0
+      ftctl_failback_finalize_after_cloud_secondary_stop "${CLI_VM}" "manual" || rc=$?
+      emit_action_result_json "failback-finalize" "${CLI_VM}" "${rc}"
       exit "${rc}"
       ;;
     failback-reprotect)

@@ -131,11 +131,22 @@ try:
                 continue
             target = parts[0]
             dest = parts[2]
-            secondary_path = parts[6] if len(parts) > 6 else ""
+            if direction == "reverse":
+                secondary_path = parts[4] if len(parts) > 4 else ""
+                guest_virtual_size = parts[5] if len(parts) > 5 else ""
+                target_size = parts[6] if len(parts) > 6 else ""
+            else:
+                secondary_path = parts[6] if len(parts) > 6 else ""
+                guest_virtual_size = ""
+                target_size = ""
             item = {
                 "dest": dest,
                 "secondary_path": secondary_path,
             }
+            if guest_virtual_size.isdigit():
+                item["guest_virtual_size"] = int(guest_virtual_size)
+            if target_size.isdigit():
+                item["target_size"] = int(target_size)
             match = re.match(r"^nbd://([^:/]+):([0-9]+)/(.+)$", dest or "")
             if match:
                 item.update({
@@ -187,6 +198,17 @@ for job in jobs:
             disk["mirror_uri"] = record.get("dest")
         if record.get("secondary_path"):
             disk["secondary_path"] = record.get("secondary_path")
+        if record.get("guest_virtual_size"):
+            guest_virtual_size = int(record.get("guest_virtual_size") or 0)
+            disk["guest_virtual_size"] = guest_virtual_size
+            if length > guest_virtual_size > 0:
+                disk["virtual_size_exceeded"] = True
+                disk["excess_bytes"] = length - guest_virtual_size
+            else:
+                disk["virtual_size_exceeded"] = False
+                disk["excess_bytes"] = 0
+        if record.get("target_size"):
+            disk["target_size"] = int(record.get("target_size") or 0)
         for key in ("nbd_uri", "nbd_host", "nbd_port", "nbd_export_name", "nbd_endpoint"):
             if record.get(key) not in (None, ""):
                 disk[key] = record.get(key)
@@ -773,6 +795,63 @@ ftctl_blockcopy_source_allocated_size_bytes() {
     return "${rc}"
   fi
   size_value="$(python3 -c 'import json, sys; obj=json.loads(sys.argv[1]); print(obj.get("actual-size", obj.get("virtual-size", "")))' "${out}")" || return 1
+  [[ "${size_value}" =~ ^[0-9]+$ ]] || return 1
+  printf -v "${out_var}" '%s' "${size_value}"
+}
+
+ftctl_blockcopy_local_path_virtual_size_bytes() {
+  local path="${1-}"
+  local out_var="${2}"
+  local out err rc size_value
+
+  [[ -n "${path}" ]] || return 1
+  if [[ -b "${path}" ]]; then
+    out=""
+    err=""
+    rc=0
+    ftctl_cmd_run "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC}" out err rc -- blockdev --getsize64 "${path}" || true
+    if [[ "${rc}" == "0" && "${out}" =~ ^[0-9]+$ ]]; then
+      printf -v "${out_var}" '%s' "${out}"
+      return 0
+    fi
+  fi
+
+  out=""
+  err=""
+  rc=0
+  ftctl_cmd_run "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC}" out err rc -- qemu-img info --force-share --output=json "${path}" || true
+  [[ "${rc}" == "0" ]] || return "${rc}"
+  size_value="$(python3 -c 'import json, sys; obj=json.loads(sys.argv[1]); print(obj.get("virtual-size", ""))' "${out}")" || return 1
+  [[ "${size_value}" =~ ^[0-9]+$ ]] || return 1
+  printf -v "${out_var}" '%s' "${size_value}"
+}
+
+ftctl_blockcopy_remote_path_virtual_size_bytes() {
+  local host="${1-}"
+  local user="${2-}"
+  local path="${3-}"
+  local out_var="${4}"
+  local q_path remote_cmd out err rc size_value
+
+  [[ -n "${path}" ]] || return 1
+  printf -v q_path '%q' "${path}"
+  remote_cmd=$(cat <<EOF
+set -euo pipefail
+path=${q_path}
+if [[ -b "\${path}" ]]; then
+  blockdev --getsize64 "\${path}"
+  exit 0
+fi
+qemu-img info --force-share --output=json "\${path}" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("virtual-size",""))'
+EOF
+)
+  out=""
+  err=""
+  rc=0
+  ftctl_blockcopy_remote_exec "${host}" "${user}" out err rc "${remote_cmd}" || true
+  : "${err}"
+  [[ "${rc}" == "0" ]] || return "${rc}"
+  size_value="$(awk 'NF {print $1; exit}' <<< "${out}")"
   [[ "${size_value}" =~ ^[0-9]+$ ]] || return 1
   printf -v "${out_var}" '%s' "${size_value}"
 }
@@ -2258,21 +2337,33 @@ ftctl_blockcopy_prepare_reverse_sync_plan() {
   local vm="${1-}"
   local records=()
   local reverse_records=()
-  local record target source dest format reverse_dest
+  local record target source dest format job_state ready secondary_path reverse_dest
+  local remote_host="" remote_user="" guest_size="" target_size=""
 
   ftctl_standby_blockcopy_records "${vm}" records || return 1
+  if [[ "${FTCTL_PROFILE_BACKEND_MODE:-}" == "remote-nbd" ]]; then
+    ftctl_blockcopy_remote_target_host_user remote_host remote_user || return 2
+  fi
 
   for record in "${records[@]}"; do
-    target="${record%%|*}"
-    record="${record#*|}"
-    source="${record%%|*}"
-    record="${record#*|}"
-    dest="${record%%|*}"
-    record="${record#*|}"
-    format="${record%%|*}"
+    target=""; source=""; dest=""; format=""; job_state=""; ready=""; secondary_path=""
+    IFS='|' read -r target source dest format job_state ready secondary_path <<< "${record}"
+    : "${job_state}${ready}"
 
     reverse_dest="$(ftctl_blockcopy_resolve_reverse_dest "${target}" "${source}")"
-    reverse_records+=("${target}|${dest}|${reverse_dest}|${format}")
+    guest_size=""
+    target_size=""
+    if [[ "${FTCTL_PROFILE_BACKEND_MODE:-}" == "remote-nbd" && -n "${secondary_path}" ]]; then
+      ftctl_blockcopy_remote_path_virtual_size_bytes "${remote_host}" "${remote_user}" "${secondary_path}" guest_size || guest_size=""
+      ftctl_blockcopy_local_path_virtual_size_bytes "${reverse_dest}" target_size || target_size=""
+    fi
+    if [[ -n "${guest_size}" && -n "${target_size}" && "${guest_size}" != "${target_size}" ]]; then
+      ftctl_state_set "${vm}" "last_error=reverse_size_mismatch:${target}:${guest_size}:${target_size}"
+      ftctl_log_event "failback" "reverse_sync.size" "fail" "${vm}" "" \
+        "target=${target} secondary_path=${secondary_path} guest_virtual_size=${guest_size} target_size=${target_size}"
+      return 2
+    fi
+    reverse_records+=("${target}|${dest}|${reverse_dest}|${format}|${secondary_path}|${guest_size}|${target_size}")
   done
 
   ftctl_blockcopy_state_write_reverse "${vm}" "${reverse_records[@]}"
@@ -2280,7 +2371,7 @@ ftctl_blockcopy_prepare_reverse_sync_plan() {
 
 ftctl_blockcopy_start_reverse_sync() {
   local vm="${1-}"
-  local path line target source dest format rc_any=0 payload state ready query_rc i
+  local path line target source dest format secondary_path guest_size target_size rc_any=0 payload state ready query_rc i
   local persistence out err rc
   local active_vm export_name export_port export_addr reverse_xml source_xml
 
@@ -2304,13 +2395,9 @@ ftctl_blockcopy_start_reverse_sync() {
   active_vm="$(ftctl_blockcopy_active_domain_on_secondary "${vm}")"
   while IFS= read -r line; do
     [[ -n "${line}" ]] || continue
-    target="${line%%|*}"
-    line="${line#*|}"
-    source="${line%%|*}"
-    line="${line#*|}"
-    dest="${line%%|*}"
-    format="${line##*|}"
-    : "${source}"
+    target=""; source=""; dest=""; format=""; secondary_path=""; guest_size=""; target_size=""
+    IFS='|' read -r target source dest format secondary_path guest_size target_size <<< "${line}"
+    : "${source}${secondary_path}${guest_size}${target_size}"
     out=""
     err=""
     rc=0
@@ -2397,7 +2484,7 @@ ftctl_blockcopy_start_reverse_sync() {
 
 ftctl_blockcopy_refresh_reverse_jobs() {
   local vm="${1-}"
-  local path line target source dest format state ready active_vm domain_state
+  local path line target source dest format secondary_path guest_size target_size state ready active_vm domain_state
   local all_ready="1"
   local rc_any=0
 
@@ -2433,12 +2520,9 @@ ftctl_blockcopy_refresh_reverse_jobs() {
 
   while IFS= read -r line; do
     [[ -n "${line}" ]] || continue
-    target="${line%%|*}"
-    line="${line#*|}"
-    source="${line%%|*}"
-    line="${line#*|}"
-    dest="${line%%|*}"
-    format="${line##*|}"
+    target=""; source=""; dest=""; format=""; secondary_path=""; guest_size=""; target_size=""
+    IFS='|' read -r target source dest format secondary_path guest_size target_size <<< "${line}"
+    : "${source}${dest}${format}${secondary_path}${guest_size}${target_size}"
     state="unknown"
     ready="unknown"
     if ! ftctl_blockcopy_reverse_job_query "${vm}" "${target}" state ready; then
@@ -2453,8 +2537,52 @@ ftctl_blockcopy_refresh_reverse_jobs() {
     return 0
   fi
 
+  if [[ "${rc_any}" == "0" ]] && ftctl_blockcopy_reverse_cutback_ready "${vm}"; then
+    ftctl_state_set "${vm}" "transport_state=reverse_sync_cutback_required" "last_sync_ts=$(ftctl_now_iso8601)" "last_error="
+    ftctl_log_event "failback" "reverse_sync.cutback-ready" "ok" "${vm}" "" \
+      "reason=guest_virtual_size_reached"
+    return 23
+  fi
+
   ftctl_state_set "${vm}" "transport_state=reverse_syncing" "last_sync_ts=$(ftctl_now_iso8601)"
   return 11
+}
+
+ftctl_blockcopy_reverse_cutback_ready() {
+  local vm="${1-}"
+  local progress_path
+
+  progress_path="$(ftctl_blockcopy_progress_path "${vm}")"
+  [[ -f "${progress_path}" ]] || return 1
+  python3 - "${progress_path}" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+try:
+    with open(path, "r", encoding="utf-8") as fh:
+        data = json.load(fh)
+except Exception:
+    raise SystemExit(1)
+
+if data.get("direction") != "reverse":
+    raise SystemExit(1)
+disks = data.get("disks") or []
+if not disks:
+    raise SystemExit(1)
+
+for disk in disks:
+    guest = int(disk.get("guest_virtual_size") or 0)
+    target = int(disk.get("target_size") or 0)
+    offset = int(disk.get("offset") or 0)
+    if guest <= 0 or target <= 0:
+        raise SystemExit(1)
+    if guest != target:
+        raise SystemExit(1)
+    if offset < guest:
+        raise SystemExit(1)
+raise SystemExit(0)
+PY
 }
 
 ftctl_blockcopy_wait_reverse_sync_ready() {
@@ -2466,7 +2594,7 @@ ftctl_blockcopy_wait_reverse_sync_ready() {
   while (( SECONDS <= deadline )); do
     rc=0
     ftctl_blockcopy_refresh_reverse_jobs "${vm}" || rc=$?
-    if [[ "${rc}" == "0" ]]; then
+    if [[ "${rc}" == "0" || "${rc}" == "23" ]]; then
       return 0
     fi
     if [[ "${rc}" == "21" || "${rc}" == "22" ]]; then
@@ -2496,7 +2624,7 @@ ftctl_blockcopy_wait_forward_sync_ready() {
 
 ftctl_blockcopy_stop_primary_reverse_nbd_exports() {
   local vm="${1-}"
-  local path line target source dest format host="" user="" out="" err="" rc=0
+  local path line target source dest format secondary_path guest_size target_size host="" user="" out="" err="" rc=0
 
   path="$(ftctl_blockcopy_reverse_state_path "${vm}")"
   [[ -f "${path}" ]] || return 0
@@ -2506,13 +2634,9 @@ ftctl_blockcopy_stop_primary_reverse_nbd_exports() {
 
   while IFS= read -r line; do
     [[ -n "${line}" ]] || continue
-    target="${line%%|*}"
-    line="${line#*|}"
-    source="${line%%|*}"
-    line="${line#*|}"
-    dest="${line%%|*}"
-    format="${line##*|}"
-    : "${source}${dest}${format}"
+    target=""; source=""; dest=""; format=""; secondary_path=""; guest_size=""; target_size=""
+    IFS='|' read -r target source dest format secondary_path guest_size target_size <<< "${line}"
+    : "${source}${dest}${format}${secondary_path}${guest_size}${target_size}"
     out="" err="" rc=0
     local stop_cmd
     stop_cmd="$(cat <<EOF
@@ -2537,6 +2661,146 @@ EOF
     : "${out}${err}"
     [[ "${rc}" == "0" ]] || return "${rc}"
   done < "${path}"
+}
+
+ftctl_blockcopy_reverse_secondary_path_for_target() {
+  local vm="${1-}"
+  local target="${2-}"
+  local out_var="${3}"
+  local records=()
+  local record rec_target source dest format job_state ready secondary_path
+
+  ftctl_standby_blockcopy_records "${vm}" records || return 1
+  for record in "${records[@]}"; do
+    rec_target=""; source=""; dest=""; format=""; job_state=""; ready=""; secondary_path=""
+    IFS='|' read -r rec_target source dest format job_state ready secondary_path <<< "${record}"
+    : "${source}${dest}${format}${job_state}${ready}"
+    if [[ "${rec_target}" == "${target}" && -n "${secondary_path}" ]]; then
+      printf -v "${out_var}" '%s' "${secondary_path}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+ftctl_blockcopy_finalize_reverse_sync() {
+  local vm="${1-}"
+  local path line target source dest format secondary_path guest_size target_size
+  local domain_state active_vm remote_host="" remote_user="" export_addr="" export_port="" export_name=""
+  local out="" err="" rc=0 q_secondary="" q_nbd="" remote_cmd=""
+  local saved_wait_timeout="${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC}"
+
+  path="$(ftctl_blockcopy_reverse_state_path "${vm}")"
+  [[ -f "${path}" ]] || {
+    ftctl_state_set "${vm}" "last_error=reverse_finalize_missing_state"
+    return 1
+  }
+
+  active_vm="$(ftctl_blockcopy_active_domain_on_secondary "${vm}")"
+  domain_state=""
+  if ftctl_blockcopy_secondary_domain_state "${vm}" domain_state; then
+    case "${domain_state}" in
+      running|running\ \(*)
+        ftctl_state_set "${vm}" "last_error=reverse_finalize_secondary_running"
+        ftctl_log_event "failback" "reverse_sync.finalize" "fail" "${vm}" "" \
+          "active_vm=${active_vm} state=${domain_state}"
+        return 22
+        ;;
+    esac
+  fi
+
+  [[ "${FTCTL_PROFILE_BACKEND_MODE:-}" == "remote-nbd" ]] || {
+    ftctl_state_set "${vm}" "last_error=reverse_finalize_unsupported_backend:${FTCTL_PROFILE_BACKEND_MODE:-}"
+    return 2
+  }
+
+  ftctl_blockcopy_remote_target_host_user remote_host remote_user || return 2
+  ftctl_blockcopy_primary_export_addr export_addr || return 2
+  FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC="${FTCTL_FAILBACK_FINALIZE_TIMEOUT_SEC:-1800}"
+
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] || continue
+    target=""; source=""; dest=""; format=""; secondary_path=""; guest_size=""; target_size=""
+    IFS='|' read -r target source dest format secondary_path guest_size target_size <<< "${line}"
+    : "${source}${format}"
+    if [[ -z "${secondary_path}" ]]; then
+      ftctl_blockcopy_reverse_secondary_path_for_target "${vm}" "${target}" secondary_path || secondary_path=""
+    fi
+    if [[ -z "${secondary_path}" ]]; then
+      FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC="${saved_wait_timeout}"
+      ftctl_state_set "${vm}" "last_error=reverse_finalize_missing_secondary_path:${target}"
+      return 1
+    fi
+
+    if [[ -z "${guest_size}" ]]; then
+      ftctl_blockcopy_remote_path_virtual_size_bytes "${remote_host}" "${remote_user}" "${secondary_path}" guest_size || guest_size=""
+    fi
+    if [[ -z "${target_size}" ]]; then
+      ftctl_blockcopy_local_path_virtual_size_bytes "${dest}" target_size || target_size=""
+    fi
+    if [[ -z "${guest_size}" || -z "${target_size}" || "${guest_size}" != "${target_size}" ]]; then
+      FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC="${saved_wait_timeout}"
+      ftctl_state_set "${vm}" "last_error=reverse_finalize_size_mismatch:${target}:${guest_size}:${target_size}"
+      ftctl_log_event "failback" "reverse_sync.finalize" "fail" "${vm}" "" \
+        "target=${target} secondary_path=${secondary_path} guest_virtual_size=${guest_size} target_size=${target_size}"
+      ftctl_blockcopy_stop_primary_reverse_nbd_exports "${vm}" || true
+      return 2
+    fi
+
+    export_port=""
+    ftctl_blockcopy_primary_nbd_pick_port "${vm}" "${target}" export_port || {
+      FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC="${saved_wait_timeout}"
+      return $?
+    }
+    export_name="${FTCTL_PROFILE_REMOTE_NBD_EXPORT_NAME}-${target}-reverse"
+    ftctl_blockcopy_primary_nbd_prepare_target "${vm}" "${target}" "${dest}" "raw" "${dest}" "${export_name}" "${export_port}" || {
+      FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC="${saved_wait_timeout}"
+      return $?
+    }
+
+    printf -v q_secondary '%q' "${secondary_path}"
+    printf -v q_nbd '%q' "$(ftctl_blockcopy_remote_nbd_uri "${export_addr}" "${export_port}" "${export_name}")"
+    remote_cmd=$(cat <<EOF
+set -euo pipefail
+secondary_path=${q_secondary}
+target_uri=${q_nbd}
+expected_size=${guest_size}
+source_format="\$(qemu-img info --force-share --output=json "\${secondary_path}" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("format",""))')"
+if [[ -z "\${source_format}" ]]; then
+  echo "reverse_finalize_source_format_unknown:\${secondary_path}" >&2
+  exit 90
+fi
+actual_guest_size="\$(qemu-img info --force-share --output=json "\${secondary_path}" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("virtual-size",""))')"
+if [[ "\${actual_guest_size}" != "\${expected_size}" ]]; then
+  echo "reverse_finalize_source_size_mismatch:\${secondary_path}:\${actual_guest_size}:\${expected_size}" >&2
+  exit 91
+fi
+qemu-img convert -p -n -f "\${source_format}" -O raw "\${secondary_path}" "\${target_uri}"
+EOF
+)
+    out=""
+    err=""
+    rc=0
+    ftctl_blockcopy_remote_exec "${remote_host}" "${remote_user}" out err rc "${remote_cmd}" || true
+    : "${out}"
+    if [[ "${rc}" != "0" ]]; then
+      FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC="${saved_wait_timeout}"
+      ftctl_state_set "${vm}" "last_error=reverse_finalize_convert_failed:${target}"
+      ftctl_log_event "failback" "reverse_sync.finalize" "fail" "${vm}" "${rc}" \
+        "target=${target} secondary_path=${secondary_path} dest=${dest} error=${err}"
+      ftctl_blockcopy_stop_primary_reverse_nbd_exports "${vm}" || true
+      return "${rc}"
+    fi
+    ftctl_log_event "failback" "reverse_sync.finalize" "ok" "${vm}" "" \
+      "target=${target} secondary_path=${secondary_path} dest=${dest} guest_virtual_size=${guest_size}"
+  done < "${path}"
+
+  ftctl_blockcopy_stop_primary_reverse_nbd_exports "${vm}" || true
+  FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC="${saved_wait_timeout}"
+  ftctl_state_set "${vm}" \
+    "transport_state=cutback_ready" \
+    "last_sync_ts=$(ftctl_now_iso8601)" \
+    "last_error="
 }
 
 ftctl_blockcopy_stop_remote_nbd_exports() {
