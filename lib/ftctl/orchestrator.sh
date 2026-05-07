@@ -203,10 +203,35 @@ ftctl_orchestrator_check_vm() {
   fi
 }
 
+ftctl_orchestrator_is_failover_steady_state() {
+  local vm="${1-}"
+  local mode="${2-}"
+  local active_side="${3-}"
+  local peer_rc="${4-}"
+  local inventory_result="${5-}"
+  local standby_domain_state="${6-}"
+  local standby_state
+
+  [[ "${mode}" == "ha" ]] || return 1
+  [[ "${active_side}" == "secondary" ]] || return 1
+  [[ "${FTCTL_PROFILE_PROVISIONING_BACKEND:-libvirt-managed}" == "cloud-managed" ]] || return 1
+  [[ "${inventory_result}" == "ok" ]] || return 1
+  [[ "${peer_rc}" == "0" ]] || return 1
+  ftctl_fencing_is_explicit "${vm}" || return 1
+
+  standby_state="${standby_domain_state:-$(ftctl_state_get "${vm}" "standby_state" 2>/dev/null || echo "unknown")}"
+  case "${standby_state}" in
+    running|start-dry-run|running-network-ok|running-network-unknown)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
 ftctl_orchestrator_reconcile_one() {
   local vm="${1-}"
   local admin mode transport refresh_rc peer_host_id peer_mgmt_ip peer_reach active_side
-  local inventory_probe local_rc peer_rc inventory_result
+  local inventory_probe local_rc peer_rc inventory_result _peer_domain_expected _standby_domain_state
   admin="$(ftctl_state_get "${vm}" "admin_state" 2>/dev/null || echo "active")"
   [[ "${admin}" == "paused" ]] && {
     ftctl_log_event "rearm" "reconcile.skip" "skip" "${vm}" "" "reason=admin_paused"
@@ -228,6 +253,17 @@ ftctl_orchestrator_reconcile_one() {
   inventory_probe="$(ftctl_inventory_check_vm "${vm}")"
   read -r local_rc peer_rc inventory_result _peer_domain_expected _standby_domain_state <<< "${inventory_probe}"
   : "${peer_rc}${inventory_result}"
+
+  if ftctl_orchestrator_is_failover_steady_state "${vm}" "${mode}" "${active_side}" "${peer_rc}" "${inventory_result}" "${_standby_domain_state}"; then
+    ftctl_state_set "${vm}" \
+      "protection_state=failed_over" \
+      "transport_state=failed_over" \
+      "last_error=" \
+      "last_healthy_ts=$(ftctl_now_iso8601)"
+    ftctl_log_event "failover" "failover.steady" "ok" "${vm}" "" \
+      "reason=source_fenced active_side=secondary standby=${_standby_domain_state:-unknown}"
+    return 0
+  fi
 
   if [[ "${mode}" == "ha" && "${active_side}" == "primary" && "${local_rc}" != "0" ]]; then
     ftctl_log_event "failover" "failover.auto" "warn" "${vm}" "" \

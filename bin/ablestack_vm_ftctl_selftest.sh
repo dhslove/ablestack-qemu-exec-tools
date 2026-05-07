@@ -81,6 +81,12 @@ selftest_assert_file_contains() {
   grep -q -- "${needle}" "${path}" || selftest_fail "missing '${needle}' in ${path}"
 }
 
+selftest_assert_file_not_contains() {
+  local path="${1-}"
+  local needle="${2-}"
+  ! grep -q -- "${needle}" "${path}" || selftest_fail "unexpected '${needle}' in ${path}"
+}
+
 selftest_assert_contains() {
   local haystack="${1-}"
   local needle="${2-}"
@@ -798,6 +804,52 @@ EOF
   selftest_assert_contains "${out}" '"provisioning_backend":"cloud-managed"' "secondary check provisioning backend"
 }
 
+selftest_case_reconcile_secondary_steady_skips_primary_disks() (
+  selftest_reset_env
+  selftest_info "reconcile skips primary disk inventory after cloud-managed failover"
+
+  local vm="steady-failover-vm"
+  local call_log="${SELFTEST_ROOT}/steady-failover-calls.log"
+
+  FTCTL_PROFILE_MODE="ha"
+  FTCTL_PROFILE_PROVISIONING_BACKEND="cloud-managed"
+  ftctl_state_init_vm "${vm}"
+  ftctl_state_set "${vm}" \
+    "mode=ha" \
+    "active_side=secondary" \
+    "fencing_state=manual-fenced" \
+    "protection_state=failed_over" \
+    "transport_state=failed_over" \
+    "standby_state=running"
+
+  # shellcheck disable=SC2317
+  ftctl_profile_load_vm() { :; }
+  # shellcheck disable=SC2317
+  ftctl_profile_apply_cli() { :; }
+  # shellcheck disable=SC2317
+  ftctl_profile_validate() { :; }
+  # shellcheck disable=SC2317
+  ftctl_cluster_load() { :; }
+  # shellcheck disable=SC2317
+  ftctl_orchestrator_probe_peer() { printf -v "$1" '%s' 'host-02'; printf -v "$2" '%s' '10.0.0.12'; printf -v "$3" '%s' 'reachable'; }
+  # shellcheck disable=SC2317
+  ftctl_inventory_check_vm() { printf '1 0 ok true running\n'; }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_refresh_and_classify() {
+    printf 'blockcopy-refresh-called\n' >> "${call_log}"
+    return 12
+  }
+
+  ftctl_orchestrator_reconcile_one "${vm}"
+
+  [[ ! -f "${call_log}" ]] || selftest_fail "blockcopy refresh should not run after steady failover"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "protection_state")" "failed_over" "steady failover protection state"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "transport_state")" "failed_over" "steady failover transport state"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" "" "steady failover clears last_error"
+  selftest_assert_file_contains "${FTCTL_EVENTS_LOG}" '"event":"failover.steady"'
+  selftest_assert_file_not_contains "${FTCTL_EVENTS_LOG}" 'inventory.disks'
+)
+
 selftest_case_unprotect_releases_blockcopy_targets() (
   selftest_reset_env
   selftest_info "unprotect releases blockcopy targets"
@@ -886,6 +938,7 @@ selftest_main() {
   selftest_case_xcolo_and_xml
   selftest_case_json_and_locking
   selftest_case_check_secondary_active_side
+  selftest_case_reconcile_secondary_steady_skips_primary_disks
   selftest_case_unprotect_releases_blockcopy_targets
   selftest_case_events_json
   selftest_info "all checks passed"
