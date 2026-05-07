@@ -607,6 +607,14 @@ selftest_case_failover_blocks_copying_transport() (
   selftest_assert_eq "$(ftctl_state_get "${vm}" "protection_state")" "syncing" "copying failover keeps syncing"
   selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" "blockcopy_not_ready_for_failover" "copying failover last_error"
 
+  ftctl_state_set "${vm}" "transport_state=mirroring" "last_error="
+  ftctl_failover_precheck_blockcopy_ready "${vm}" "ha" "7" "before_fencing" "0"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "failover_ready")" "1" "ready precheck records failover marker"
+  ftctl_state_set "${vm}" "transport_state=transient_loss"
+  ftctl_failover_precheck_blockcopy_ready "${vm}" "ha" "7" "cloud_prepare" "0"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" "" "marker permits cloud prepare after primary stop"
+
+  ftctl_state_set "${vm}" "failover_ready=" "transport_state=copying"
   ftctl_fencing_manual_confirm "${vm}"
   ftctl_state_set "${vm}" \
     "protection_state=failing_over" \

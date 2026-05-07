@@ -36,6 +36,34 @@ ftctl_failover_transport_is_ready() {
   esac
 }
 
+ftctl_failover_mark_blockcopy_ready() {
+  local vm="${1-}"
+  local stage="${2-}"
+  local count="${3-}"
+  local transport
+
+  transport="$(ftctl_state_get "${vm}" "transport_state" 2>/dev/null || true)"
+  ftctl_state_set "${vm}" \
+    "failover_ready=1" \
+    "failover_ready_stage=${stage}" \
+    "failover_ready_count=${count}" \
+    "failover_ready_transport=${transport}" \
+    "failover_ready_ts=$(ftctl_now_iso8601)"
+}
+
+ftctl_failover_ready_marker_is_valid() {
+  local vm="${1-}"
+  local stage="${2-}"
+  local marker
+
+  [[ "${stage}" != "before_fencing" ]] || return 1
+  marker="$(ftctl_state_get "${vm}" "failover_ready" 2>/dev/null || true)"
+  case "${marker}" in
+    1|true|yes) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 ftctl_failover_precheck_blockcopy_ready() {
   local vm="${1-}"
   local mode="${2-}"
@@ -46,7 +74,13 @@ ftctl_failover_precheck_blockcopy_ready() {
   local transport
 
   ftctl_failover_requires_blockcopy_ready "${mode}" || return 0
+  if ftctl_failover_ready_marker_is_valid "${vm}" "${stage}"; then
+    ftctl_log_event "failover" "failover.precheck" "ok" "${vm}" "" \
+      "stage=${stage} failover_count=${count} readiness=marker marker_stage=$(ftctl_state_get "${vm}" "failover_ready_stage" 2>/dev/null || true) marker_transport=$(ftctl_state_get "${vm}" "failover_ready_transport" 2>/dev/null || true)"
+    return 0
+  fi
   if ftctl_failover_transport_is_ready "${vm}"; then
+    ftctl_failover_mark_blockcopy_ready "${vm}" "${stage}" "${count}"
     ftctl_log_event "failover" "failover.precheck" "ok" "${vm}" "" \
       "stage=${stage} failover_count=${count} transport=$(ftctl_state_get "${vm}" "transport_state" 2>/dev/null || true)"
     return 0
@@ -54,6 +88,7 @@ ftctl_failover_precheck_blockcopy_ready() {
 
   if [[ "${allow_wait}" == "1" ]]; then
     if ftctl_blockcopy_wait_forward_sync_ready "${vm}" "${timeout_sec}" && ftctl_failover_transport_is_ready "${vm}"; then
+      ftctl_failover_mark_blockcopy_ready "${vm}" "${stage}" "${count}"
       ftctl_log_event "failover" "failover.precheck" "ok" "${vm}" "" \
         "stage=${stage} failover_count=${count} transport=$(ftctl_state_get "${vm}" "transport_state" 2>/dev/null || true)"
       return 0
@@ -185,6 +220,7 @@ ftctl_failover_request() {
           "active_side=secondary" \
           "protection_state=failed_over" \
           "transport_state=failed_over" \
+          "failover_ready=" \
           "last_error="
         ftctl_log_event "failover" "failover.request" "ok" "${vm}" "" \
           "reason=${reason} failover_count=${count} fencing=complete standby=cloud-managed"
@@ -214,6 +250,7 @@ ftctl_failover_request() {
       ftctl_state_set "${vm}" \
         "protection_state=failed_over" \
         "transport_state=failed_over" \
+        "failover_ready=" \
         "last_error="
       ftctl_log_event "failover" "failover.request" "ok" "${vm}" "" \
         "reason=${reason} failover_count=${count} fencing=complete standby=running"
