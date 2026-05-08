@@ -94,6 +94,13 @@ selftest_assert_contains() {
   [[ "${haystack}" == *"${needle}"* ]] || selftest_fail "${msg}: missing '${needle}'"
 }
 
+selftest_assert_not_contains() {
+  local haystack="${1-}"
+  local needle="${2-}"
+  local msg="${3-assert_not_contains failed}"
+  [[ "${haystack}" != *"${needle}"* ]] || selftest_fail "${msg}: unexpected '${needle}'"
+}
+
 selftest_prepare_config_file() {
   mkdir -p "${SELFTEST_ROOT}"
   cat > "${SELFTEST_CONFIG}" <<EOF
@@ -976,6 +983,49 @@ EOF
   selftest_assert_file_contains "${FTCTL_EVENTS_LOG}" "reverse_sync.finalize"
 )
 
+selftest_case_failback_reprotect_clears_standby_verify_state() (
+  selftest_reset_env
+  selftest_info "failback reprotect clears stale standby verification state"
+
+  local vm="failback-standby-state"
+  FTCTL_PROFILE_MODE="ha"
+  ftctl_state_init_vm "${vm}"
+  ftctl_state_set "${vm}" \
+    "active_side=secondary" \
+    "protection_state=failing_back" \
+    "transport_state=cutback_ready" \
+    "standby_state=running" \
+    "standby_verify_state=running-network-unknown" \
+    "standby_domain_state=running" \
+    "peer_domain_expected=true"
+
+  # shellcheck disable=SC2317
+  ftctl_failback_reprotect_from_primary() {
+    ftctl_state_set "$1" \
+      "protection_state=protected" \
+      "transport_state=mirroring"
+  }
+
+  ftctl_failback_reprotect_after_cloud_cutback "${vm}" "selftest"
+
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "active_side")" "primary" "reprotect active side"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "protection_state")" "protected" "reprotect protection state"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "transport_state")" "mirroring" "reprotect transport state"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "standby_state")" "prepared-transient" "reprotect standby state"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "standby_verify_state")" "not-defined-expected" "reprotect standby verify state"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "standby_domain_state")" "not-defined-expected" "reprotect standby domain state"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "peer_domain_expected")" "false" "reprotect peer domain expected"
+
+  ftctl_state_set "${vm}" "standby_verify_state=running-network-unknown"
+  ftctl_failback_reprotect_after_cloud_cutback "${vm}" "selftest-idempotent"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "standby_verify_state")" "not-defined-expected" "idempotent reprotect standby verify state"
+
+  local out=""
+  out="$(ftctl_state_print_one "${vm}" 1)"
+  selftest_assert_contains "${out}" '"standby_verify_state":"not-defined-expected"' "status emits post-failback standby verify state"
+  selftest_assert_not_contains "${out}" '"standby_verify_state":"running-network-unknown"' "status omits stale standby verify state"
+)
+
 selftest_case_events_json() {
   selftest_reset_env
   selftest_info "events json output"
@@ -1011,6 +1061,7 @@ selftest_main() {
   selftest_case_reconcile_secondary_steady_skips_primary_disks
   selftest_case_unprotect_releases_blockcopy_targets
   selftest_case_failback_reverse_finalize
+  selftest_case_failback_reprotect_clears_standby_verify_state
   selftest_case_events_json
   selftest_info "all checks passed"
 }

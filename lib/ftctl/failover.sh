@@ -402,6 +402,16 @@ ftctl_failback_reverse_sync_fail() {
   return 1
 }
 
+ftctl_failback_mark_cloud_standby_not_expected() {
+  local vm="${1-}"
+
+  ftctl_state_set "${vm}" \
+    "standby_state=prepared-transient" \
+    "standby_verify_state=not-defined-expected" \
+    "standby_domain_state=not-defined-expected" \
+    "peer_domain_expected=false"
+}
+
 ftctl_failback_sync_for_cloud_cutback() {
   local vm="${1-}"
   local reason="${2-manual}"
@@ -518,8 +528,9 @@ ftctl_failback_reprotect_after_cloud_cutback() {
   protection="$(ftctl_state_get "${vm}" "protection_state" 2>/dev/null || true)"
   transport="$(ftctl_state_get "${vm}" "transport_state" 2>/dev/null || true)"
   if [[ "${protection}:${transport}" == "protected:mirroring" ]]; then
+    ftctl_failback_mark_cloud_standby_not_expected "${vm}"
     ftctl_log_event "failback" "failback.reprotect" "ok" "${vm}" "" \
-      "reason=${reason} state=already_protected"
+      "reason=${reason} state=already_protected standby=not-defined-expected"
     return 0
   fi
 
@@ -528,8 +539,8 @@ ftctl_failback_reprotect_after_cloud_cutback() {
     "fencing_state=clear" \
     "protection_state=pairing" \
     "transport_state=initializing" \
-    "standby_state=prepared-transient" \
     "last_error="
+  ftctl_failback_mark_cloud_standby_not_expected "${vm}"
 
   if ! ftctl_failback_reprotect_from_primary "${vm}" "${mode}"; then
     ftctl_state_set "${vm}" \
@@ -540,8 +551,9 @@ ftctl_failback_reprotect_after_cloud_cutback() {
     return 1
   fi
 
+  ftctl_failback_mark_cloud_standby_not_expected "${vm}"
   ftctl_log_event "failback" "failback.reprotect" "ok" "${vm}" "" \
-    "reason=${reason} cloud_cutback=done"
+    "reason=${reason} cloud_cutback=done standby=not-defined-expected"
 }
 
 ftctl_failback_request() {
