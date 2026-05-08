@@ -865,6 +865,49 @@ selftest_case_reconcile_secondary_steady_skips_primary_disks() (
   selftest_assert_file_not_contains "${FTCTL_EVENTS_LOG}" 'inventory.disks'
 )
 
+selftest_case_reconcile_defers_manual_fence_pending() (
+  selftest_reset_env
+  selftest_info "reconcile defers manual fence pending state"
+
+  local vm="manual-fence-pending-vm"
+  local call_log="${SELFTEST_ROOT}/manual-fence-pending-calls.log"
+
+  ftctl_state_init_vm "${vm}"
+  ftctl_state_set "${vm}" \
+    "mode=ha" \
+    "active_side=primary" \
+    "protection_state=failing_over" \
+    "transport_state=mirroring" \
+    "fencing_state=required" \
+    "failover_ready=1" \
+    "last_error=manual_fencing_required"
+
+  # shellcheck disable=SC2317
+  ftctl_profile_load_vm() {
+    printf 'profile-load-called\n' >> "${call_log}"
+  }
+  # shellcheck disable=SC2317
+  ftctl_inventory_check_vm() {
+    printf 'inventory-called\n' >> "${call_log}"
+    printf '1 0 ok true running\n'
+  }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_refresh_and_classify() {
+    printf 'blockcopy-refresh-called\n' >> "${call_log}"
+    return 12
+  }
+
+  ftctl_orchestrator_reconcile_one "${vm}"
+
+  [[ ! -f "${call_log}" ]] || selftest_fail "manual fence pending reconcile should not probe inventory or blockcopy"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "protection_state")" "failing_over" "manual fence pending protection state"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "transport_state")" "mirroring" "manual fence pending transport state"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "fencing_state")" "required" "manual fence pending fencing state"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" "manual_fencing_required" "manual fence pending last_error retained"
+  selftest_assert_file_contains "${FTCTL_EVENTS_LOG}" '"event":"reconcile.defer"'
+  selftest_assert_file_contains "${FTCTL_EVENTS_LOG}" 'manual_fence_in_progress'
+)
+
 selftest_case_unprotect_releases_blockcopy_targets() (
   selftest_reset_env
   selftest_info "unprotect releases blockcopy targets"
@@ -1142,6 +1185,7 @@ selftest_main() {
   selftest_case_json_and_locking
   selftest_case_check_secondary_active_side
   selftest_case_reconcile_secondary_steady_skips_primary_disks
+  selftest_case_reconcile_defers_manual_fence_pending
   selftest_case_unprotect_releases_blockcopy_targets
   selftest_case_unprotect_releases_remote_nbd_exports
   selftest_case_unprotect_fails_when_remote_nbd_release_fails

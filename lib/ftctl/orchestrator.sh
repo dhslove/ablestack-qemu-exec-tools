@@ -231,6 +231,7 @@ ftctl_orchestrator_is_failover_steady_state() {
 ftctl_orchestrator_reconcile_one() {
   local vm="${1-}"
   local admin mode transport refresh_rc peer_host_id peer_mgmt_ip peer_reach active_side
+  local protection_state fencing_state failover_ready
   local inventory_probe local_rc peer_rc inventory_result _peer_domain_expected _standby_domain_state
   admin="$(ftctl_state_get "${vm}" "admin_state" 2>/dev/null || echo "active")"
   [[ "${admin}" == "paused" ]] && {
@@ -241,6 +242,24 @@ ftctl_orchestrator_reconcile_one() {
   mode="$(ftctl_state_get "${vm}" "mode" 2>/dev/null || echo "")"
   transport="$(ftctl_state_get "${vm}" "transport_state" 2>/dev/null || echo "unknown")"
   active_side="$(ftctl_state_get "${vm}" "active_side" 2>/dev/null || echo "primary")"
+  protection_state="$(ftctl_state_get "${vm}" "protection_state" 2>/dev/null || echo "")"
+  fencing_state="$(ftctl_state_get "${vm}" "fencing_state" 2>/dev/null || echo "clear")"
+  failover_ready="$(ftctl_state_get "${vm}" "failover_ready" 2>/dev/null || echo "")"
+
+  if [[ "${mode}" == "ha" && "${active_side}" == "primary" && "${protection_state}" == "failing_over" ]]; then
+    case "${fencing_state}" in
+      required|manual-required|manual-fenced)
+        case "${failover_ready}" in
+          1|true|yes)
+            ftctl_state_set "${vm}" "last_reconcile_ts=$(ftctl_now_iso8601)"
+            ftctl_log_event "failover" "reconcile.defer" "skip" "${vm}" "" \
+              "reason=manual_fence_in_progress protection=${protection_state} transport=${transport} fencing=${fencing_state} readiness=marker"
+            return 0
+            ;;
+        esac
+        ;;
+    esac
+  fi
 
   ftctl_profile_load_vm "${vm}"
   ftctl_profile_apply_cli "${vm}" "${mode}" "" ""
@@ -326,6 +345,7 @@ ftctl_orchestrator_reconcile() {
       continue
     }
     ftctl_orchestrator_reconcile_one "${name}"
+    ftctl_lock_release
     if [[ "${json}" == "1" ]]; then
       ftctl_state_emit_json "${name}"
     else
