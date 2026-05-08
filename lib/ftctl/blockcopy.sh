@@ -1060,9 +1060,9 @@ ftctl_blockcopy_prepare_primary_rbd_thin_for_protect() {
   fi
 
   if [[ "${policy}" != "flatten-on-protect" ]]; then
-    ftctl_state_set "${vm}" "thin_preserve=disabled" "last_thin_preserve_reason=parent_present:${target}"
+    ftctl_state_set "${vm}" "thin_preserve=enabled" "rbd_parent_flattened=deferred" "last_thin_preserve_reason=parent_present:${target}:${policy}"
     ftctl_log_event "mirror" "rbd.parent.check" "warn" "${vm}" "" \
-      "target=${target} image=${spec} parent=${parent} policy=${policy}"
+      "target=${target} image=${spec} parent=${parent} policy=${policy} action=defer_flatten"
     return 0
   fi
 
@@ -1165,6 +1165,12 @@ ftctl_blockcopy_shared_dest_xml_path() {
   printf '%s\n' "${FTCTL_RUN_DIR}/xml/$(ftctl_state_vm_key "${vm}")-${target}-shared-blockcopy.xml"
 }
 
+ftctl_blockcopy_driver_thin_attrs() {
+  if [[ "${FTCTL_THIN_PRESERVE:-1}" == "1" ]]; then
+    printf " discard='unmap' detect_zeroes='unmap'"
+  fi
+}
+
 ftctl_blockcopy_build_remote_nbd_dest_xml() {
   local vm="${1-}"
   local target="${2-}"
@@ -1202,7 +1208,7 @@ ftctl_blockcopy_build_shared_dest_xml() {
   local dest="${4-}"
   local source_xml="${5-}"
   local out_path_var="${6}"
-  local out_path bus disk_type source_attr_name
+  local out_path bus disk_type source_attr_name driver_thin_attrs
   local rbd_pool="" rbd_image="" rbd_host="" rbd_port="" rbd_user="" rbd_secret=""
 
   out_path="$(ftctl_blockcopy_shared_dest_xml_path "${vm}" "${target}")"
@@ -1230,11 +1236,12 @@ ftctl_blockcopy_build_shared_dest_xml() {
     disk_type="file"
     source_attr_name="file"
   fi
+  driver_thin_attrs="$(ftctl_blockcopy_driver_thin_attrs)"
 
   if [[ "${disk_type}" == "network" ]]; then
     cat > "${out_path}" <<EOF
 <disk type='network' device='disk'>
-  <driver name='qemu' type='${format}'/>
+  <driver name='qemu' type='${format}'${driver_thin_attrs}/>
   <auth username='${rbd_user}'>
     <secret type='ceph' uuid='${rbd_secret}'/>
   </auth>
@@ -1247,7 +1254,7 @@ EOF
   else
     cat > "${out_path}" <<EOF
 <disk type='${disk_type}' device='disk'>
-  <driver name='qemu' type='${format}'/>
+  <driver name='qemu' type='${format}'${driver_thin_attrs}/>
   <source ${source_attr_name}='${dest}'/>
   <target dev='${target}' bus='${bus}'/>
 </disk>
