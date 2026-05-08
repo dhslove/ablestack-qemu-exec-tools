@@ -914,11 +914,94 @@ EOF
   out="$(ftctl_state_unprotect_vm "${vm}" 1)"
   selftest_assert_contains "${out}" '"result":"ok"' "unprotect result"
   selftest_assert_contains "${out}" '"block_jobs_cancelled":1' "unprotect cancels job"
+  selftest_assert_contains "${out}" '"remote_nbd_required":false' "shared unprotect does not require remote nbd"
   [[ ! -f "$(ftctl_blockcopy_state_path "${vm}")" ]] || selftest_fail "blockcopy state should be removed after release"
   selftest_assert_file_contains "${call_log}" "block-job-cancel"
   selftest_assert_file_contains "${call_log}" "query-named-block-nodes"
   selftest_assert_file_contains "${FTCTL_EVENTS_LOG}" "protection.unprotect.block-jobs-released"
   selftest_assert_file_contains "${FTCTL_EVENTS_LOG}" "protection.unprotect.qmp-destinations-released"
+)
+
+selftest_case_unprotect_releases_remote_nbd_exports() (
+  selftest_reset_env
+  selftest_info "unprotect releases remote-nbd exports"
+
+  local vm="unprotect-remote-nbd"
+  local call_log="${SELFTEST_ROOT}/unprotect-remote-nbd-calls.log"
+  FTCTL_PROFILE_BACKEND_MODE="remote-nbd"
+  FTCTL_PROFILE_REMOTE_NBD_EXPORT_NAME="${vm}"
+  FTCTL_UNPROTECT_RELEASE_TIMEOUT_SEC="5"
+  FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC="1"
+  ftctl_state_init_vm "${vm}"
+  cat > "$(ftctl_blockcopy_state_path "${vm}")" <<EOF
+vdb|/dev/rbd/rbd/${vm}-source|nbd://10.0.0.12:10823/${vm}-vdb|raw|copy|yes|/var/lib/libvirt/images/${vm}-vdb
+EOF
+
+  # shellcheck disable=SC2317
+  ftctl_virsh() {
+    local out_var="${2}"
+    local err_var="${3}"
+    local rc_var="${4}"
+    local cmd="$*"
+    printf '%s\n' "${cmd}" >> "${call_log}"
+    printf -v "${out_var}" '%s' '{"return":[]}'
+    printf -v "${err_var}" '%s' ""
+    printf -v "${rc_var}" '%s' "0"
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_stop_remote_nbd_exports() {
+    printf 'stop-remote-nbd:%s\n' "$1" >> "${call_log}"
+  }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_wait_remote_nbd_release() {
+    printf 'wait-remote-nbd:%s\n' "$1" >> "${call_log}"
+  }
+
+  local out=""
+  out="$(ftctl_state_unprotect_vm "${vm}" 1)"
+  selftest_assert_contains "${out}" '"result":"ok"' "remote-nbd unprotect result"
+  selftest_assert_contains "${out}" '"remote_nbd_required":true' "remote-nbd unprotect requires release"
+  selftest_assert_contains "${out}" '"remote_nbd_released":true' "remote-nbd unprotect release result"
+  selftest_assert_file_contains "${call_log}" "stop-remote-nbd:${vm}"
+  selftest_assert_file_contains "${call_log}" "wait-remote-nbd:${vm}"
+  selftest_assert_file_contains "${FTCTL_EVENTS_LOG}" "protection.unprotect.remote-nbd-release"
+)
+
+selftest_case_unprotect_fails_when_remote_nbd_release_fails() (
+  selftest_reset_env
+  selftest_info "unprotect fails when remote-nbd release fails"
+
+  local vm="unprotect-remote-nbd-fail"
+  FTCTL_PROFILE_BACKEND_MODE="remote-nbd"
+  FTCTL_PROFILE_REMOTE_NBD_EXPORT_NAME="${vm}"
+  FTCTL_UNPROTECT_RELEASE_TIMEOUT_SEC="1"
+  FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC="1"
+  ftctl_state_init_vm "${vm}"
+  cat > "$(ftctl_blockcopy_state_path "${vm}")" <<EOF
+vdb|/dev/rbd/rbd/${vm}-source|nbd://10.0.0.12:10824/${vm}-vdb|raw|copy|yes|/var/lib/libvirt/images/${vm}-vdb
+EOF
+
+  # shellcheck disable=SC2317
+  ftctl_virsh() {
+    local out_var="${2}"
+    local err_var="${3}"
+    local rc_var="${4}"
+    printf -v "${out_var}" '%s' '{"return":[]}'
+    printf -v "${err_var}" '%s' ""
+    printf -v "${rc_var}" '%s' "0"
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_stop_remote_nbd_exports() { :; }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_wait_remote_nbd_release() { return 99; }
+
+  local rc=0
+  ftctl_state_unprotect_vm "${vm}" 1 >/dev/null 2>&1 || rc=$?
+  [[ "${rc}" != "0" ]] || selftest_fail "unprotect should fail when remote-nbd release fails"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" "remote_nbd_release_timeout" "remote-nbd release failure last_error"
+  [[ -f "$(ftctl_blockcopy_state_path "${vm}")" ]] || selftest_fail "blockcopy state should remain after failed remote-nbd release"
 )
 
 selftest_case_failback_reverse_finalize() (
@@ -1060,6 +1143,8 @@ selftest_main() {
   selftest_case_check_secondary_active_side
   selftest_case_reconcile_secondary_steady_skips_primary_disks
   selftest_case_unprotect_releases_blockcopy_targets
+  selftest_case_unprotect_releases_remote_nbd_exports
+  selftest_case_unprotect_fails_when_remote_nbd_release_fails
   selftest_case_failback_reverse_finalize
   selftest_case_failback_reprotect_clears_standby_verify_state
   selftest_case_events_json

@@ -304,6 +304,38 @@ ftctl_state_cancel_block_jobs() {
   printf '%s\n' "${canceled}"
 }
 
+ftctl_state_release_remote_nbd_exports() {
+  local vm="${1-}"
+
+  [[ "${FTCTL_PROFILE_BACKEND_MODE:-}" == "remote-nbd" ]] || {
+    printf 'false\n'
+    return 0
+  }
+  if ! declare -F ftctl_blockcopy_stop_remote_nbd_exports >/dev/null 2>&1 ||
+     ! declare -F ftctl_blockcopy_wait_remote_nbd_release >/dev/null 2>&1; then
+    ftctl_state_set "${vm}" "last_error=remote_nbd_release_unsupported"
+    ftctl_log_event "state" "protection.unprotect.remote-nbd-release" "fail" "${vm}" "" "reason=unsupported"
+    echo "ERROR: remote-nbd release helpers are not available for ${vm}" >&2
+    return 2
+  fi
+
+  ftctl_blockcopy_stop_remote_nbd_exports "${vm}" || {
+    ftctl_state_set "${vm}" "last_error=remote_nbd_stop_failed"
+    ftctl_log_event "state" "protection.unprotect.remote-nbd-stop" "fail" "${vm}" "" ""
+    echo "ERROR: unable to stop remote-nbd exports for ${vm}" >&2
+    return 2
+  }
+  ftctl_blockcopy_wait_remote_nbd_release "${vm}" || {
+    ftctl_state_set "${vm}" "last_error=remote_nbd_release_timeout"
+    ftctl_log_event "state" "protection.unprotect.remote-nbd-release" "fail" "${vm}" "" "reason=timeout"
+    echo "ERROR: remote-nbd exports still active for ${vm}" >&2
+    return 2
+  }
+
+  ftctl_log_event "state" "protection.unprotect.remote-nbd-release" "ok" "${vm}" "" ""
+  printf 'true\n'
+}
+
 ftctl_state_remove_runtime_files() {
   local vm="${1-}"
   local key
@@ -325,20 +357,25 @@ ftctl_state_remove_runtime_files() {
 ftctl_state_unprotect_vm() {
   local vm="${1-}"
   local json="${2-0}"
-  local canceled unmapped
+  local canceled unmapped remote_nbd_required remote_nbd_released
 
   canceled="$(ftctl_state_cancel_block_jobs "${vm}" 2>/dev/null || echo 0)"
   ftctl_state_wait_block_jobs_released "${vm}"
   ftctl_state_wait_qmp_destinations_released "${vm}"
+  remote_nbd_required="false"
+  [[ "${FTCTL_PROFILE_BACKEND_MODE:-}" == "remote-nbd" ]] && remote_nbd_required="true"
+  remote_nbd_released="$(ftctl_state_release_remote_nbd_exports "${vm}")" || return $?
   unmapped="$(ftctl_state_unmap_local_krbd_destinations "${vm}")"
   ftctl_state_remove_runtime_files "${vm}"
-  ftctl_log_event "state" "protection.unprotect" "ok" "${vm}" "" "block_jobs_cancelled=${canceled} rbd_unmapped=${unmapped}"
+  ftctl_log_event "state" "protection.unprotect" "ok" "${vm}" "" "block_jobs_cancelled=${canceled} rbd_unmapped=${unmapped} remote_nbd_required=${remote_nbd_required} remote_nbd_released=${remote_nbd_released}"
 
   if [[ "${json}" == "1" ]]; then
-    printf '{"command":"unprotect","result":"ok","vm":"%s","block_jobs_cancelled":%s,"rbd_unmapped":%s}\n' \
+    printf '{"command":"unprotect","result":"ok","vm":"%s","block_jobs_cancelled":%s,"rbd_unmapped":%s,"remote_nbd_required":%s,"remote_nbd_released":%s}\n' \
       "$(ftctl__json_escape "${vm}")" \
       "${canceled}" \
-      "${unmapped}"
+      "${unmapped}" \
+      "${remote_nbd_required}" \
+      "${remote_nbd_released}"
   else
     printf '%s: protection runtime removed\n' "${vm}"
   fi

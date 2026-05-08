@@ -703,6 +703,7 @@ dispatch() {
         echo "ERROR: unprotect requires --force" >&2
         exit "${EXIT_USAGE}"
       }
+      ftctl_profile_load_vm "${CLI_VM}" 2>/dev/null || true
       ftctl_state_unprotect_vm "${CLI_VM}" "${CLI_JSON}"
       ;;
     fence-confirm)

@@ -45,6 +45,24 @@ ftctl_lock_emit_conflict() {
   fi
 }
 
+FTCTL_HELD_LOCK_FILE=""
+
+ftctl_lock_release() {
+  local lock_file="${FTCTL_HELD_LOCK_FILE:-}"
+  local meta_pid=""
+
+  [[ -n "${lock_file}" ]] || return 0
+  if [[ -f "${lock_file}.meta" ]]; then
+    # shellcheck disable=SC1090
+    source "${lock_file}.meta" 2>/dev/null || true
+    meta_pid="${pid:-}"
+  fi
+  if [[ -z "${meta_pid}" || "${meta_pid}" == "$$" ]]; then
+    rm -f -- "${lock_file}.meta" "${lock_file}" 2>/dev/null || true
+  fi
+  FTCTL_HELD_LOCK_FILE=""
+}
+
 ftctl_lock_path_for_command() {
   local command="${1-}"
   local vm="${2-}"
@@ -83,6 +101,8 @@ ftctl_lock_acquire() {
     printf 'vm=%q\n' "${CLI_VM:-}"
     printf 'started_epoch=%q\n' "$(date +%s)"
   } > "${lock_file}.meta" 2>/dev/null || true
+  FTCTL_HELD_LOCK_FILE="${lock_file}"
+  trap ftctl_lock_release EXIT
   return 0
 }
 
