@@ -2826,26 +2826,6 @@ raise SystemExit(0)
 PY
 }
 
-ftctl_blockcopy_wait_reverse_sync_ready() {
-  local vm="${1-}"
-  local timeout_sec="${2-120}"
-  local deadline rc
-
-  deadline=$((SECONDS + timeout_sec))
-  while (( SECONDS <= deadline )); do
-    rc=0
-    ftctl_blockcopy_refresh_reverse_jobs "${vm}" || rc=$?
-    if [[ "${rc}" == "0" || "${rc}" == "23" ]]; then
-      return 0
-    fi
-    if [[ "${rc}" == "21" || "${rc}" == "22" ]]; then
-      return "${rc}"
-    fi
-    sleep 2
-  done
-  return 1
-}
-
 ftctl_blockcopy_wait_forward_sync_ready() {
   local vm="${1-}"
   local timeout_sec="${2-120}"
