@@ -228,6 +228,31 @@ ftctl_orchestrator_is_failover_steady_state() {
   return 1
 }
 
+ftctl_orchestrator_is_cloud_failback_transition() {
+  local vm="${1-}"
+  local protection_state="${2-}"
+  local transport_state="${3-}"
+
+  [[ "${FTCTL_PROFILE_PROVISIONING_BACKEND:-libvirt-managed}" == "cloud-managed" ]] || return 1
+  case "${protection_state}" in
+    failing_back)
+      return 0
+      ;;
+  esac
+  case "${transport_state}" in
+    reverse_syncing|reverse_sync_ready|reverse_sync_cutback_required|secondary_stopping|finalizing|primary_restoring|cutback_ready|cutback_switching)
+      return 0
+      ;;
+    failed_over|unknown|"")
+      if declare -F ftctl_blockcopy_reverse_sync_artifacts_present >/dev/null 2>&1 &&
+          ftctl_blockcopy_reverse_sync_artifacts_present "${vm}"; then
+        return 0
+      fi
+      ;;
+  esac
+  return 1
+}
+
 ftctl_orchestrator_reconcile_one() {
   local vm="${1-}"
   local admin mode transport refresh_rc peer_host_id peer_mgmt_ip peer_reach active_side
@@ -268,6 +293,42 @@ ftctl_orchestrator_reconcile_one() {
   ftctl_orchestrator_probe_peer peer_host_id peer_mgmt_ip peer_reach || true
   : "${peer_mgmt_ip}"
   ftctl_state_set "${vm}" "last_reconcile_ts=$(ftctl_now_iso8601)"
+
+  protection_state="$(ftctl_state_get "${vm}" "protection_state" 2>/dev/null || echo "${protection_state}")"
+  transport="$(ftctl_state_get "${vm}" "transport_state" 2>/dev/null || echo "${transport}")"
+  active_side="$(ftctl_state_get "${vm}" "active_side" 2>/dev/null || echo "${active_side}")"
+  if [[ "${mode}" != "ft" ]] && ftctl_orchestrator_is_cloud_failback_transition "${vm}" "${protection_state}" "${transport}"; then
+    case "${transport}" in
+      reverse_syncing|reverse_sync_ready|reverse_sync_cutback_required|failed_over|unknown|"")
+        refresh_rc=0
+        ftctl_blockcopy_refresh_and_classify "${vm}" || refresh_rc=$?
+        transport="$(ftctl_state_get "${vm}" "transport_state" 2>/dev/null || echo "${transport}")"
+        case "${refresh_rc}" in
+          0|11|23)
+            ftctl_state_set "${vm}" "last_healthy_ts=$(ftctl_now_iso8601)"
+            ftctl_log_event "failback" "reconcile.reverse-sync" "ok" "${vm}" "" \
+              "transport=${transport} refresh_rc=${refresh_rc}"
+            return 0
+            ;;
+          *)
+            ftctl_state_set "${vm}" \
+              "protection_state=error" \
+              "transport_state=reverse_sync_failed" \
+              "last_error=reverse_sync_refresh_failed"
+            ftctl_log_event "failback" "reconcile.reverse-sync" "fail" "${vm}" "" \
+              "transport=${transport} refresh_rc=${refresh_rc} peer_host=${peer_host_id} peer_reach=${peer_reach}"
+            return 0
+            ;;
+        esac
+        ;;
+      *)
+        ftctl_state_set "${vm}" "last_healthy_ts=$(ftctl_now_iso8601)"
+        ftctl_log_event "failback" "reconcile.defer" "ok" "${vm}" "" \
+          "reason=cloud_failback_transition transport=${transport}"
+        return 0
+        ;;
+    esac
+  fi
 
   inventory_probe="$(ftctl_inventory_check_vm "${vm}")"
   read -r local_rc peer_rc inventory_result _peer_domain_expected _standby_domain_state <<< "${inventory_probe}"

@@ -35,6 +35,59 @@ ftctl_blockcopy_progress_event_state_path() {
   echo "$(ftctl_state_path "${vm}").blockcopy.progress.event"
 }
 
+ftctl_blockcopy_progress_direction_is() {
+  local vm="${1-}"
+  local expected="${2-}"
+  local progress_path
+
+  progress_path="$(ftctl_blockcopy_progress_path "${vm}")"
+  [[ -f "${progress_path}" ]] || return 1
+  python3 - "${progress_path}" "${expected}" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as fh:
+        data = json.load(fh)
+except Exception:
+    raise SystemExit(1)
+
+raise SystemExit(0 if data.get("direction") == sys.argv[2] else 1)
+PY
+}
+
+ftctl_blockcopy_reverse_sync_artifacts_present() {
+  local vm="${1-}"
+  local reverse_path
+
+  reverse_path="$(ftctl_blockcopy_reverse_state_path "${vm}")"
+  [[ -s "${reverse_path}" ]] || return 1
+  if ftctl_blockcopy_progress_direction_is "${vm}" "reverse"; then
+    return 0
+  fi
+  [[ ! -f "$(ftctl_blockcopy_progress_path "${vm}")" ]]
+}
+
+ftctl_blockcopy_promote_stale_reverse_sync() {
+  local vm="${1-}"
+  local transport
+
+  ftctl_blockcopy_reverse_sync_artifacts_present "${vm}" || return 1
+  transport="$(ftctl_state_get "${vm}" "transport_state" 2>/dev/null || true)"
+  case "${transport}" in
+    failed_over|unknown|"")
+      ftctl_state_set "${vm}" \
+        "protection_state=failing_back" \
+        "transport_state=reverse_syncing" \
+        "last_error=reverse_sync_pending"
+      ftctl_log_event "failback" "reverse_sync.recover" "warn" "${vm}" "" \
+        "reason=reverse_sync_artifacts_present previous_transport=${transport:-unknown}"
+      return 0
+      ;;
+  esac
+  return 1
+}
+
 ftctl_blockcopy_state_write() {
   local vm="${1-}"
   shift
@@ -321,9 +374,13 @@ ftctl_blockcopy_refresh_status_progress() {
     copying|mirroring|syncing)
       ftctl_blockcopy_progress_refresh_from_qmp "${vm}" "${vm}" "${FTCTL_PROFILE_PRIMARY_URI}" "forward" "mirror" "blockcopy.progress" >/dev/null 2>&1 || true
       ;;
-    reverse_syncing|reverse_sync_ready)
-      active_vm="$(ftctl_blockcopy_active_domain_on_secondary "${vm}")"
-      ftctl_blockcopy_progress_refresh_from_qmp "${vm}" "${active_vm}" "${FTCTL_PROFILE_SECONDARY_URI}" "reverse" "failback" "reverse_sync.progress" >/dev/null 2>&1 || true
+    reverse_syncing|reverse_sync_ready|reverse_sync_cutback_required)
+      ftctl_blockcopy_refresh_reverse_jobs "${vm}" >/dev/null 2>&1 || true
+      ;;
+    failed_over|unknown|"")
+      if ftctl_blockcopy_promote_stale_reverse_sync "${vm}"; then
+        ftctl_blockcopy_refresh_reverse_jobs "${vm}" >/dev/null 2>&1 || true
+      fi
       ;;
   esac
 }
@@ -2774,7 +2831,7 @@ ftctl_blockcopy_refresh_reverse_jobs() {
   ftctl_blockcopy_progress_refresh_from_qmp "${vm}" "${active_vm}" "${FTCTL_PROFILE_SECONDARY_URI}" "reverse" "failback" "reverse_sync.progress" >/dev/null 2>&1 || true
 
   if [[ "${all_ready}" == "1" && "${rc_any}" == "0" ]]; then
-    ftctl_state_set "${vm}" "transport_state=reverse_sync_ready" "last_sync_ts=$(ftctl_now_iso8601)"
+    ftctl_state_set "${vm}" "transport_state=reverse_sync_ready" "last_sync_ts=$(ftctl_now_iso8601)" "last_error="
     return 0
   fi
 
@@ -3303,6 +3360,9 @@ ftctl_blockcopy_refresh_and_classify() {
   local transport_state=""
 
   transport_state="$(ftctl_state_get "${vm}" "transport_state" 2>/dev/null || true)"
+  if ftctl_blockcopy_promote_stale_reverse_sync "${vm}"; then
+    transport_state="reverse_syncing"
+  fi
   case "${transport_state}" in
     reverse_syncing|reverse_sync_ready|reverse_sync_cutback_required)
       ftctl_blockcopy_refresh_reverse_jobs "${vm}" || rc=$?
