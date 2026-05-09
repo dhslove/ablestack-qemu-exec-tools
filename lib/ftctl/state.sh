@@ -441,9 +441,6 @@ ftctl_state_print_one() {
     fi
     return 1
   }
-  if declare -F ftctl_blockcopy_refresh_status_progress >/dev/null 2>&1; then
-    ftctl_blockcopy_refresh_status_progress "${vm}" >/dev/null 2>&1 || true
-  fi
   if [[ "${json}" == "1" ]]; then
     ftctl_state_emit_json_one "${vm}" "ok"
   else

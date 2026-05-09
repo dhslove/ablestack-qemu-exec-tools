@@ -330,7 +330,7 @@ except Exception:
     sys.exit(1)
 percent = float(data.get("percent") or 0)
 ready = bool(data.get("ready"))
-bucket = 100 if ready or percent >= 100 else int(math.floor(percent / 5.0) * 5)
+bucket = 100 if ready or percent >= 100 else int(math.floor(percent))
 print(bucket)
 ' <<< "${progress_json}" 2>/dev/null || true)"
   [[ "${bucket}" =~ ^[0-9]+$ ]] || return 0
@@ -349,16 +349,18 @@ try:
 except Exception:
     sys.exit(1)
 print(
-    "direction={direction} percent={percent} copied_bytes={copied} total_bytes={total} ready={ready} disks={disks}".format(
+    "direction={direction} stage={stage} percent={percent} copied_bytes={copied} total_bytes={total} ready={ready} disks={disks} updated={updated}".format(
         direction=data.get("direction") or "",
+        stage=sys.argv[1],
         percent=data.get("percent") or 0,
         copied=data.get("copied_bytes") or 0,
         total=data.get("total_bytes") or 0,
         ready=str(bool(data.get("ready"))).lower(),
         disks=len(data.get("disks") or []),
+        updated=data.get("updated") or "",
     )
 )
-' <<< "${progress_json}" 2>/dev/null || true)"
+' "${stage}" <<< "${progress_json}" 2>/dev/null || true)"
   [[ -n "${details}" ]] || return 0
   printf '%s\n' "${bucket_key}" > "${state_path}" 2>/dev/null || true
   chmod 0644 "${state_path}" 2>/dev/null || true
