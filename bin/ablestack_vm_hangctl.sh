@@ -47,6 +47,7 @@ _load_libs() {
   [[ -f "${LIBDIR}/hangctl/config.sh"  ]] || _die_load "missing: ${LIBDIR}/hangctl/config.sh"
   [[ -f "${LIBDIR}/hangctl/logging.sh" ]] || _die_load "missing: ${LIBDIR}/hangctl/logging.sh"
   [[ -f "${LIBDIR}/hangctl/libvirt_wrap.sh" ]] || _die_load "missing: ${LIBDIR}/hangctl/libvirt_wrap.sh"
+  [[ -f "${LIBDIR}/hangctl/ftctl_guard.sh" ]] || _die_load "missing: ${LIBDIR}/hangctl/ftctl_guard.sh"
   [[ -f "${LIBDIR}/hangctl/storage_guard.sh" ]] || _die_load "missing: ${LIBDIR}/hangctl/storage_guard.sh"
   [[ -f "${LIBDIR}/hangctl/state_cache.sh" ]] || _die_load "missing: ${LIBDIR}/hangctl/state_cache.sh"
   [[ -f "${LIBDIR}/hangctl/detect.sh" ]] || _die_load "missing: ${LIBDIR}/hangctl/detect.sh"
@@ -61,6 +62,8 @@ _load_libs() {
   source "${LIBDIR}/hangctl/logging.sh"
   # shellcheck source=/dev/null
   source "${LIBDIR}/hangctl/libvirt_wrap.sh"
+  # shellcheck source=/dev/null
+  source "${LIBDIR}/hangctl/ftctl_guard.sh"
   # shellcheck source=/dev/null
   source "${LIBDIR}/hangctl/storage_guard.sh"
   # shellcheck source=/dev/null
@@ -292,6 +295,15 @@ hangctl_detect_probe_maybe_act_one_vm() {
 
   hangctl_log_event "detect" "vm.decision" "ok" "${vm}" "" "" \
     "final=${final_decision} reason=${confirm_reason} domstate=${domstate_full} stuck_sec=${stuck_sec}"
+
+  if [[ "${final_decision}" == "confirmed" ]]; then
+    local guard_reason="" guard_detail=""
+    if hangctl_ftctl_guard_should_skip_action "${vm}" "${confirm_reason}" guard_reason guard_detail; then
+      hangctl_state_touch_heartbeat "${vm}"
+      hangctl_log_event "detect" "vm.action_guard" "skip" "${vm}" "" "" "reason=${guard_reason} ${guard_detail}"
+      return 0
+    fi
+  fi
 
   # 최종 결정이 clear 또는 normal이면 조치 없이 종료
   if [[ "${final_decision}" == "clear" || "${final_decision}" == "normal" ]]; then
