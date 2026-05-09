@@ -3320,6 +3320,36 @@ ftctl_blockcopy_refresh_and_classify() {
   local vm="${1-}"
   local rc=0
   local last_error=""
+  local transport_state=""
+
+  transport_state="$(ftctl_state_get "${vm}" "transport_state" 2>/dev/null || true)"
+  case "${transport_state}" in
+    reverse_syncing|reverse_sync_ready|reverse_sync_cutback_required)
+      ftctl_blockcopy_refresh_reverse_jobs "${vm}" || rc=$?
+      case "${rc}" in
+        0|23)
+          return 0
+          ;;
+        11)
+          return 11
+          ;;
+        21|22)
+          return "${rc}"
+          ;;
+        *)
+          last_error="$(ftctl_state_get "${vm}" "last_error" 2>/dev/null || true)"
+          if [[ -z "${last_error}" || "${last_error}" == "reverse_sync_pending" ]]; then
+            ftctl_state_set "${vm}" \
+              "protection_state=error" \
+              "transport_state=reverse_sync_failed" \
+              "last_error=reverse_sync_refresh_failed"
+          fi
+          return 12
+          ;;
+      esac
+      ;;
+  esac
+
   ftctl_blockcopy_refresh_vm_jobs "${vm}" || rc=$?
   case "${rc}" in
     0)

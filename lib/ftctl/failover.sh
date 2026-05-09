@@ -454,27 +454,14 @@ ftctl_failback_sync_for_cloud_cutback() {
     ftctl_failback_reverse_sync_fail "${vm}" "failback.sync" "${reason}" "${reverse_error}" ""
     return $?
   fi
-  if ! ftctl_blockcopy_wait_reverse_sync_ready "${vm}" "${FTCTL_FAILBACK_REVERSE_SYNC_TIMEOUT_SEC:-600}"; then
-    reverse_error="$(ftctl_state_get "${vm}" "last_error" 2>/dev/null || true)"
-    [[ -n "${reverse_error}" && "${reverse_error}" != "reverse_sync_pending" ]] || reverse_error="reverse_sync_timeout"
-    ftctl_failback_reverse_sync_fail "${vm}" "failback.sync" "${reason}" "${reverse_error}" ""
-    return $?
-  fi
 
   ftctl_state_set "${vm}" \
     "protection_state=failing_back" \
-    "transport_state=reverse_sync_ready" \
-    "last_error="
+    "transport_state=reverse_syncing" \
+    "last_error=reverse_sync_pending"
 
-  if [[ "${FTCTL_PROFILE_BACKEND_MODE}" == "remote-nbd" ]]; then
-    ftctl_blockcopy_stop_primary_reverse_nbd_exports "${vm}" || true
-    sleep 2
-  fi
-
-  local sync_state
-  sync_state="$(ftctl_state_get "${vm}" "transport_state" 2>/dev/null || echo "ready")"
   ftctl_log_event "failback" "failback.sync" "ok" "${vm}" "" \
-    "reason=${reason} reverse_sync=${sync_state}"
+    "reason=${reason} reverse_sync=started"
 }
 
 ftctl_failback_finalize_after_cloud_secondary_stop() {
