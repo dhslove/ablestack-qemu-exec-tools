@@ -21,11 +21,11 @@ Cloud UI는 화면 표시와 사용자 명령 전달만 담당한다.
 - `pause`, `resume`, `failover`, `failback`, `fence confirm/clear`, `release` 같은 명령을 Cloud API로 전달한다.
 - FTCTL 상태 머신을 직접 계산하거나 보정하지 않는다.
 
-Cloud backend는 Cloud 자원 관리와 FTCTL snapshot 캐시를 담당한다.
+Cloud backend는 Cloud 자원 관리, FTCTL 상태 snapshot 캐시, qemu FTCTL 이벤트 조회 중계를 담당한다.
 
 - Cloud가 소유한 VM, volume, NIC 작업만 직접 수행한다.
 - Mold Agent로 FTCTL 명령을 전달한다.
-- FTCTL 엔진이 반환한 상태와 이벤트를 조회/캐시하여 API 응답으로 제공한다.
+- FTCTL 엔진이 반환한 상태 snapshot은 필요 시 캐시하고, 작업성 이벤트는 qemu `events.log`를 원본으로 조회해 API 응답으로 제공한다.
 - `reverse_syncing`, `reverse_sync_ready`, `finalizing`, `protected` 같은 FTCTL 고유 상태를 임의로 생산하지 않는다.
 
 Mold Agent는 명령 전달 계층이다.
@@ -134,22 +134,22 @@ Cloud API는 보호 관계 정보와 FTCTL snapshot cache를 조합해 응답한
 - `lib/ftctl/state.sh`, `lib/ftctl/orchestrator.sh`, `lib/ftctl/libvirt_wrap.sh`, `lib/ftctl/events.sh`
   - UI/Cloud 조회용 live probe가 아니라 engine-recorded snapshot을 생성하도록 보완
   - VM별 runtime/check/progress snapshot과 host health snapshot을 원자적으로 기록
-  - 이벤트 동기화용 `event_seq` 또는 cursor 계약 추가
+  - `${FTCTL_EVENTS_LOG}` JSONL을 작업 이벤트의 단일 원본으로 유지
 - `bin/ablestack_vm_ftctl.sh`
-  - Cloud 비UI 동기화가 사용할 read-only snapshot export 명령 추가
+  - Cloud가 사용할 read-only snapshot/event export 명령 유지
   - snapshot export는 이미 기록된 파일만 읽고 libvirt/QMP를 호출하지 않음
 - `bin/ablestack_vm_ftctl_selftest.sh`
   - QMP progress ready 기반 failback reverse sync 전이 selftest 추가
-  - snapshot export가 live probe 없이 기록된 state/check/health/progress/event만 반환하는지 검증
+  - snapshot/event export가 live probe 없이 기록된 state/check/health/progress/event만 반환하는지 검증
 
 `ablestack-cloud`
 
 - `plugins/integrations/ftctl-service/src/main/java/com/cloud/ftctl/FtctlServiceImpl.java`
   - cloud-managed failback 중간 단계에서 Cloud가 FTCTL 상태를 직접 생산하던 경로 제거
   - Cloud-owned VM 작업은 이벤트로만 기록
-  - 조회 API에서 Agent/host FTCTL을 동기 호출하는 경로 제거
+  - 조회 API에서 host libvirt/QMP/FTCTL engine 작업을 동기 호출하는 경로 제거
   - `getFtctlProtection`의 `refreshruntime` 경로 제거 또는 무시
-  - `getFtctlCheck`, `getFtctlHealth`, `getFtctlEvents`를 DB/cache 기반 응답으로 전환
+  - `getFtctlCheck`, `getFtctlHealth`는 DB/cache 기반 응답으로 유지하고, `getFtctlEvents`는 Agent를 통해 qemu `events.log`를 read-only로 조회하도록 전환
 - `ui/src/views/compute/FtctlTab.vue`
   - 장애 보호 탭 전체 background refresh 추가
   - progress-only polling을 cache-only protection/check/health/event 갱신으로 확장
@@ -204,8 +204,8 @@ Cloud API는 보호 관계 정보와 FTCTL snapshot cache를 조합해 응답한
 조회 경로의 원칙은 다음과 같다.
 
 - UI는 host libvirt, QMP, FTCTL 엔진을 직접 또는 조회 API를 통해 동기 호출하지 않는다.
-- UI는 Cloud API가 DB/cache에서 읽어 제공하는 protection/check/health/event snapshot만 표시한다.
-- progress 갱신은 FTCTL 엔진이 수행한 작업 및 이벤트 기록의 결과가 DB/cache로 동기화된 값을 표시한다.
+- UI는 Cloud API가 제공하는 protection/check/health snapshot과 qemu `events.log` 기반 event/progress 응답만 표시한다.
+- progress 갱신은 FTCTL 엔진이 `events.log`에 기록한 `blockcopy.progress` / `reverse_sync.progress` 이벤트를 Cloud가 read-only로 읽어 전달한 값을 표시한다.
 - `refreshruntime=true` 같은 UI-triggered runtime refresh 파라미터는 사용하지 않는다.
 
 소스 검토에서 확인된 원칙 위반 후보:
@@ -221,27 +221,34 @@ Cloud API는 보호 관계 정보와 FTCTL snapshot cache를 조합해 응답한
    - `populateRuntimeStateFromAgent`는 `FtctlStatusCommand`를 Agent로 보내 host의 `ablestack_vm_ftctl status --json`을 실행한다.
    - 조회 API에서 이 동기 host 호출 경로는 제거하거나 무시해야 한다.
 
-3. Cloud API `getFtctlCheck`, `getFtctlHealth`, `getFtctlEvents`
-   - 현재 구현은 각각 `FtctlCheckCommand`, `FtctlHealthCommand`, `FtctlEventsCommand`를 Agent로 보내 host FTCTL 명령을 실행한다.
+3. Cloud API `getFtctlCheck`, `getFtctlHealth`
+   - 현재 구현은 각각 `FtctlCheckCommand`, `FtctlHealthCommand`를 Agent로 보내 host FTCTL 명령을 실행한다.
    - UI background refresh가 이 API들을 호출하면 조회 화면이 host FTCTL 조회를 직접 유발한다.
-   - 이 API들은 DB/cache 기반 응답으로 전환해야 한다.
+   - check/health API는 DB/cache 기반 응답으로 전환해야 한다.
+
+4. Cloud API `getFtctlEvents`
+   - 이벤트는 qemu FTCTL의 `/var/log/ablestack-vm-ftctl/events.log` JSONL이 원본이다.
+   - 이 일시 작업 이벤트를 Cloud DB에 다시 저장하지 않는다.
+   - `getFtctlEvents`는 Agent를 통해 `ablestack_vm_ftctl events --vm <vm> --limit <n> --json`을 실행하되, 이 명령은 libvirt/QMP 상태를 계산하지 않고 이미 기록된 로그 파일만 읽어야 한다.
+   - 응답에는 qemu FTCTL 이벤트 목록과 최신 `blockcopy.progress` 또는 `reverse_sync.progress`를 함께 포함한다.
 
 보완 설계:
 
-1. UI 조회는 DB/cache API만 사용한다.
+1. UI 조회는 Cloud API만 사용한다.
    - `FtctlTab.vue`에서 `refreshRuntime` 옵션과 `refreshruntime=true` 파라미터 전달을 제거한다.
    - `fetchSyncProgress`는 별도 runtime refresh가 아니라 `fetchAll({ silent: true })` 또는 cache-only protection 조회로 통합한다.
-   - UI polling은 host 최신화를 요청하지 않고, 이미 동기화된 snapshot의 변경분만 표시한다.
+   - UI polling은 host libvirt/QMP 최신화를 요청하지 않고, Cloud API가 제공한 snapshot 및 qemu event log 응답의 변경분만 표시한다.
 
-2. Cloud 조회 API는 Agent 호출을 하지 않는다.
+2. Cloud 상태 조회 API는 Agent 호출을 하지 않는다.
    - `getFtctlProtection`은 `ftctl_protection`, VM detail, runtime snapshot cache만 읽는다.
    - `refreshruntime` 파라미터는 제거하거나 하위 호환 기간 동안 무시한다.
-   - `getFtctlCheck`, `getFtctlHealth`, `getFtctlEvents`는 cached check/health/event 테이블 또는 VM detail snapshot에서 응답한다.
+   - `getFtctlCheck`, `getFtctlHealth`는 cached check/health 테이블 또는 VM detail snapshot에서 응답한다.
    - cache가 없거나 오래된 경우에도 조회 API가 host FTCTL을 즉시 호출하지 않고 `stale`, `unknown`, `not_available` 같은 snapshot 상태를 반환한다.
 
-3. FTCTL runtime/progress/event 동기화는 UI와 분리한다.
+3. FTCTL runtime/progress/event 소유권은 qemu FTCTL에 둔다.
    - FTCTL 엔진이 실제 작업, progress, event를 서버 측 원본으로 기록한다.
-   - Cloud backend 또는 Mold Agent의 비UI 동기화 경로가 이 원본을 DB/cache로 반영한다.
+   - runtime/check/health snapshot은 Cloud backend 또는 Mold Agent의 비UI 동기화 경로가 DB/cache로 반영할 수 있다.
+   - 작업성 event/progress는 Cloud DB에 중복 저장하지 않고 qemu `events.log`를 read-only 원본으로 사용한다.
    - 동기화 주기는 FTCTL timer, 작업 완료 callback, 별도 backend scheduler 중 하나로 운영하되 UI 요청에 의해 즉시 host 조회가 발생하지 않게 한다.
    - action API는 명령 전달이 목적이므로 Agent 호출이 허용되지만, 응답에 포함되는 상태도 FTCTL이 기록한 결과 또는 동기화된 snapshot을 기준으로 한다.
 
@@ -257,7 +264,7 @@ Cloud API는 보호 관계 정보와 FTCTL snapshot cache를 조합해 응답한
 
 ## FTCTL 엔진 기록 및 동기화 보완 설계
 
-UI가 DB/cache만 조회하려면 qemu host에서 실행되는 FTCTL 엔진이 화면에 필요한 값을 사전에 기록해야 한다. Cloud가 화면 조회 시점에 host libvirt 또는 FTCTL 엔진을 호출하지 않도록, 엔진 기록과 Cloud 동기화는 다음 계약을 따라야 한다.
+UI가 Cloud API만 조회하고 host libvirt/QMP 상태를 직접 계산하지 않으려면 qemu host에서 실행되는 FTCTL 엔진이 화면에 필요한 값을 사전에 기록해야 한다. Cloud가 화면 조회 시점에 host libvirt 또는 FTCTL 엔진 작업을 호출하지 않도록, 엔진 기록과 Cloud 조회/동기화는 다음 계약을 따라야 한다.
 
 현재 qemu FTCTL에서 이미 제공되는 기록:
 
@@ -271,8 +278,8 @@ UI가 DB/cache만 조회하려면 qemu host에서 실행되는 FTCTL 엔진이 �
 
 - `ablestack_vm_ftctl check --json`은 실행 시점에 inventory를 다시 계산해 출력하지만, 별도 check snapshot 파일로 영속 기록하지 않는다.
 - `ablestack_vm_ftctl health --json`은 실행 시점에 libvirt health를 확인하고 이벤트만 남기며, UI가 읽을 수 있는 health snapshot을 별도로 남기지 않는다.
-- `ablestack_vm_ftctl events --json`은 host 로그 파일을 직접 읽는 명령이다. UI 조회 경로에서 이 명령을 호출하면 원칙에 어긋난다.
-- progress JSON은 기록되어 있지만, Cloud DB/cache와의 동기화 cursor 또는 event sequence 계약이 명확하지 않다.
+- `ablestack_vm_ftctl events --json`은 host 로그 파일을 직접 읽는 read-only 명령이다. 이 명령은 UI가 직접 호출하지 않고 Cloud가 Agent를 통해 중계한다.
+- progress JSON은 기록되어 있지만, UI가 `events.log` 기반 최신 진행율을 우선 적용하는 응답 계약이 필요하다.
 
 보완해야 할 FTCTL 엔진 기록:
 
@@ -305,24 +312,27 @@ UI가 DB/cache만 조회하려면 qemu host에서 실행되는 FTCTL 엔진이 �
      - `host_id` 또는 `host_name`을 식별할 수 있는 값
    - `health --json`은 live probe 명령으로 남기더라도 UI 조회 경로에서는 DB/cache에 동기화된 health snapshot만 사용한다.
 
-4. event sync cursor
+4. event/progress 원본 로그
    - 기존 `${FTCTL_EVENTS_LOG}`는 원본 이벤트 로그로 유지한다.
-   - 각 이벤트에 `event_seq` 또는 `event_id`를 추가하거나, Cloud sync가 파일 offset과 timestamp를 cursor로 관리할 수 있게 한다.
-   - Cloud DB에는 이벤트를 중복 삽입하지 않도록 `(host, vm, event_seq)` 또는 이에 준하는 idempotency key를 둔다.
+   - Cloud DB에는 동일 이벤트를 중복 저장하지 않는다.
+   - Cloud `getFtctlEvents`는 Agent를 통해 이 파일을 read-only로 조회하고, 응답 시 최신 `blockcopy.progress` 또는 `reverse_sync.progress`를 `latestprogress`로 함께 반환한다.
+   - forward와 reverse progress는 같은 JSON schema를 사용하고 `direction` 및 event name으로 구분한다.
 
-5. read-only snapshot export
+5. read-only snapshot/event export
    - Mold Agent가 비UI 동기화 작업에서 호출할 수 있는 read-only export 명령을 둔다.
    - 이 명령은 libvirt/QMP/FTCTL 작업을 수행하지 않고, 이미 기록된 state/check/health/progress/event 파일만 읽어 JSON으로 반환한다.
    - 예: `ablestack_vm_ftctl snapshot --vm <vm> --json`, `ablestack_vm_ftctl snapshot --all --json`
-   - 기존 `status/check/health/events` 명령이 live probe 의미를 유지한다면 Cloud UI 조회 API에서는 사용하지 않는다.
+   - `events --json`은 `events.log` 파일만 읽는 read-only 명령이므로 Cloud event API에서 사용할 수 있다.
+   - 기존 `status/check/health` 명령이 live probe 의미를 유지한다면 Cloud UI 조회 API에서는 사용하지 않는다.
 
-Cloud 동기화 계약:
+Cloud 동기화/조회 계약:
 
-- Cloud backend 또는 Mold Agent scheduler는 UI 요청과 무관하게 read-only snapshot export를 주기적으로 수집한다.
-- 수집 결과를 Cloud DB/cache에 저장한다.
-- UI 조회 API는 이 DB/cache만 읽는다.
+- Cloud backend 또는 Mold Agent scheduler는 UI 요청과 무관하게 read-only snapshot export를 주기적으로 수집할 수 있다.
+- runtime/check/health 수집 결과는 Cloud DB/cache에 저장한다.
+- event/progress는 qemu `events.log`가 단일 원본이므로 Cloud DB에 복제하지 않는다.
+- UI 조회 API는 protection/check/health는 DB/cache에서 읽고, event/progress는 Cloud가 Agent를 통해 `events.log`를 read-only로 읽어 반환한다.
 - action API가 FTCTL 명령을 실행한 직후에도 화면 응답은 live 재조회가 아니라 명령 결과와 이후 동기화된 snapshot을 기준으로 갱신한다.
-- snapshot이 오래되었으면 UI에는 `stale` 또는 `updated` 시각을 표시하고, 조회 API가 host에 즉시 재조회하지 않는다.
+- snapshot이 오래되었으면 UI에는 `stale` 또는 `updated` 시각을 표시하고, 상태 조회 API가 host에 즉시 재조회하지 않는다.
 
 ## HA-RKY 테스트 자동화 보완
 
@@ -376,7 +386,8 @@ Cloud backend:
 - Cloud는 FTCTL 고유 상태를 직접 만들지 않는다.
 - Cloud-owned VM 작업은 그대로 수행하되 FTCTL 상태 전이는 엔진 snapshot을 따른다.
 - Cloud-managed failback 중 standby stop, NIC handoff, primary start 결과는 FTCTL ack/snapshot으로 동기화한다.
-- UI 조회 API는 host 호출 없이 Cloud DB/cache만 읽어야 한다.
+- 상태 조회 API는 host 호출 없이 Cloud DB/cache만 읽어야 한다.
+- 이벤트 조회 API는 qemu `events.log`를 Agent로 read-only 조회해 UI에 전달하되, Cloud DB에 중복 기록하지 않는다.
 - Cloud의 비UI 동기화 경로만 read-only snapshot export를 호출할 수 있다.
 
 UI:
@@ -385,8 +396,9 @@ UI:
 - background refresh 중 기존 화면이 사라지거나 깜빡이지 않는다.
 - 액션 버튼 loading은 버튼 단위로만 표시된다.
 - UI는 `refreshruntime=true` 또는 이에 준하는 host runtime refresh를 호출하지 않는다.
-- forward와 reverse progress는 같은 schema로 표시하되, 실제 refresh와 기록은 FTCTL 엔진 및 비UI 동기화 경로가 수행해야 한다.
-- `getFtctlProtection`, `getFtctlCheck`, `getFtctlHealth`, `getFtctlEvents`는 UI 조회 경로에서 DB/cache 응답만 반환해야 한다.
+- forward와 reverse progress는 같은 schema로 표시하되, 실제 기록은 FTCTL 엔진의 `events.log`에 남긴 값을 사용해야 한다.
+- `getFtctlProtection`, `getFtctlCheck`, `getFtctlHealth`는 UI 조회 경로에서 DB/cache 응답만 반환해야 한다.
+- `getFtctlEvents`는 qemu FTCTL event log와 latest progress를 반환해야 하며 Cloud 이벤트 테이블을 사용하지 않아야 한다.
 
 HA-RKY:
 
