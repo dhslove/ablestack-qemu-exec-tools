@@ -1089,6 +1089,74 @@ ftctl_blockcopy_rbd_du_used_bytes_primary() {
   [[ -n "${used}" ]]
 }
 
+ftctl_blockcopy_path_head_sha256_primary() {
+  local path="${1-}"
+  local bytes="${2-4096}"
+  local out_var="${3}"
+  local q_path="" out="" err="" rc=0 hash=""
+
+  [[ -n "${path}" && "${bytes}" =~ ^[1-9][0-9]*$ ]] || return 1
+  printf -v q_path '%q' "${path}"
+  ftctl_blockcopy_rbd_run_on_primary "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC}" out err rc \
+    "test -b ${q_path} && dd if=${q_path} bs=${bytes} count=1 status=none | sha256sum | awk '{print \$1}'" || true
+  : "${err}"
+  [[ "${rc}" == "0" ]] || return "${rc}"
+  hash="$(awk 'NF {print $1; exit}' <<< "${out}")"
+  [[ "${hash}" =~ ^[0-9a-fA-F]{64}$ ]] || return 1
+  printf -v "${out_var}" '%s' "${hash}"
+}
+
+ftctl_blockcopy_zero_sha256() {
+  local bytes="${1-4096}"
+  local out_var="${2}"
+  local hash=""
+
+  [[ "${bytes}" =~ ^[1-9][0-9]*$ ]] || return 1
+  hash="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(bytes(int(sys.argv[1]))).hexdigest())' "${bytes}" 2>/dev/null || true)"
+  [[ "${hash}" =~ ^[0-9a-fA-F]{64}$ ]] || return 1
+  printf -v "${out_var}" '%s' "${hash}"
+}
+
+ftctl_blockcopy_verify_target_materialized() {
+  local vm="${1-}"
+  local target="${2-}"
+  local source_path="${3-}"
+  local dest_path="${4-}"
+  local source_spec="" dest_spec="" source_used="" dest_used=""
+  local verify_bytes="${FTCTL_BLOCKCOPY_VERIFY_BYTES:-4096}"
+  local source_hash="" dest_hash="" zero_hash=""
+
+  [[ "${FTCTL_BLOCKCOPY_VERIFY_TARGET:-1}" == "1" ]] || return 0
+  ftctl_blockcopy_rbd_spec_from_path "${dest_path}" dest_spec || return 0
+  ftctl_blockcopy_rbd_spec_from_path "${source_path}" source_spec || source_spec=""
+
+  if [[ -n "${source_spec}" ]]; then
+    ftctl_blockcopy_rbd_du_used_bytes_primary "${source_spec}" source_used || source_used=""
+  fi
+  ftctl_blockcopy_rbd_du_used_bytes_primary "${dest_spec}" dest_used || dest_used=""
+
+  if [[ "${source_used}" =~ ^[1-9][0-9]*$ && "${dest_used}" == "0" ]]; then
+    ftctl_log_event "mirror" "blockcopy.verify" "fail" "${vm}" "" \
+      "target=${target} reason=target_empty source=${source_spec} source_used=${source_used} dest=${dest_spec} dest_used=${dest_used}"
+    return 21
+  fi
+
+  ftctl_blockcopy_path_head_sha256_primary "${dest_path}" "${verify_bytes}" dest_hash || dest_hash=""
+
+  if [[ -n "${source_spec}" ]]; then
+    ftctl_blockcopy_zero_sha256 "${verify_bytes}" zero_hash || zero_hash=""
+    ftctl_blockcopy_path_head_sha256_primary "${source_path}" "${verify_bytes}" source_hash || source_hash=""
+    if [[ -n "${source_hash}" && -n "${dest_hash}" && -n "${zero_hash}" && "${source_hash}" != "${zero_hash}" && "${source_hash}" != "${dest_hash}" ]]; then
+      ftctl_log_event "mirror" "blockcopy.verify" "fail" "${vm}" "" \
+        "target=${target} reason=head_hash_mismatch source=${source_spec} dest=${dest_spec} source_hash=${source_hash} dest_hash=${dest_hash} bytes=${verify_bytes}"
+      return 23
+    fi
+  fi
+
+  ftctl_log_event "mirror" "blockcopy.verify" "ok" "${vm}" "" \
+    "target=${target} source=${source_spec} source_used=${source_used} dest=${dest_spec} dest_used=${dest_used} bytes=${verify_bytes}"
+}
+
 ftctl_blockcopy_prepare_primary_rbd_thin_for_protect() {
   local vm="${1-}"
   local target="${2-}"
@@ -1786,6 +1854,7 @@ ftctl_blockcopy_start_shared_xml_job() {
   local out_var="${6-}"
   local err_var="${7-}"
   local rc_var="${8-}"
+  local force_reuse="${9-0}"
   local out err rc
   local args=()
 
@@ -1795,6 +1864,9 @@ ftctl_blockcopy_start_shared_xml_job() {
   fi
   if [[ "${FTCTL_BLOCKCOPY_SYNC_WRITES}" == "1" ]]; then
     args+=(--synchronous-writes)
+  fi
+  if [[ "${force_reuse}" == "1" ]]; then
+    args+=(--reuse-external)
   fi
 
   out=""
@@ -2277,6 +2349,7 @@ ftctl_blockcopy_refresh_vm_jobs() {
   local all_ready="1"
   local rc_any=0
   local missing_targets=""
+  local verify_failed_targets="" verify_record verify_target verify_source verify_dest verify_format verify_job_state verify_ready verify_secondary_dest
 
   ftctl_inventory_collect_vm_disks "${vm}" disks || return $?
 
@@ -2350,6 +2423,28 @@ ftctl_blockcopy_refresh_vm_jobs() {
 
   if [[ "${all_ready}" == "1" && "${rc_any}" == "0" ]]; then
     ftctl_state_set "${vm}" \
+      "protection_state=syncing" \
+      "transport_state=verifying" \
+      "last_sync_ts=$(ftctl_now_iso8601)"
+    for verify_record in "${records[@]}"; do
+      verify_target=""; verify_source=""; verify_dest=""; verify_format=""; verify_job_state=""; verify_ready=""; verify_secondary_dest=""
+      IFS='|' read -r verify_target verify_source verify_dest verify_format verify_job_state verify_ready verify_secondary_dest <<< "${verify_record}"
+      : "${verify_format}${verify_job_state}${verify_ready}${verify_secondary_dest}"
+      if ! ftctl_blockcopy_verify_target_materialized "${vm}" "${verify_target}" "${verify_source}" "${verify_dest}"; then
+        verify_failed_targets="${verify_failed_targets}${verify_failed_targets:+,}${verify_target}"
+      fi
+    done
+    if [[ -n "${verify_failed_targets}" ]]; then
+      ftctl_state_set "${vm}" \
+        "protection_state=error" \
+        "transport_state=failed" \
+        "last_sync_ts=$(ftctl_now_iso8601)" \
+        "last_error=blockcopy_target_not_materialized:${verify_failed_targets}"
+      ftctl_log_event "mirror" "blockcopy.verify" "fail" "${vm}" "" \
+        "targets=${verify_failed_targets}"
+      return 1
+    fi
+    ftctl_state_set "${vm}" \
       "protection_state=protected" \
       "transport_state=mirroring" \
       "last_sync_ts=$(ftctl_now_iso8601)" \
@@ -2375,7 +2470,7 @@ ftctl_blockcopy_refresh_vm_jobs() {
 ftctl_blockcopy_plan_protect() {
   local vm="${1-}"
   local disks=()
-  local line target source format dest secondary_dest remote_xml shared_xml export_name export_port
+  local line target source format dest secondary_dest remote_xml shared_xml export_name export_port shared_reuse shared_cmd
   local xml_bundle_dir primary_xml_backup standby_xml_seed persistence
   local out err rc job_state ready
   local records=()
@@ -2497,8 +2592,13 @@ xml=${remote_xml}"
       ftctl_blockcopy_build_shared_dest_xml \
         "${vm}" "${target}" "${format}" "${dest}" "${primary_xml_backup}" shared_xml
       ftctl_blockcopy_write_debug_file "${vm}" "${target}" "shared-blockcopy-dest.xml" "$(cat "${shared_xml}")"
-      ftctl_blockcopy_write_debug_file "${vm}" "${target}" "primary-blockcopy-command.txt" \
-        "env LC_ALL=C LANG=C virsh -c ${FTCTL_PROFILE_PRIMARY_URI@Q} blockcopy ${vm@Q} ${target@Q} --xml ${shared_xml@Q}$( [[ \"${persistence}\" == \"yes\" ]] && printf ' --transient-job' || true )$( [[ \"${FTCTL_BLOCKCOPY_SYNC_WRITES}\" == \"1\" ]] && printf ' --synchronous-writes' || true )"
+      shared_reuse="0"
+      ftctl_blockcopy_is_cloud_managed && shared_reuse="1"
+      shared_cmd="env LC_ALL=C LANG=C virsh -c ${FTCTL_PROFILE_PRIMARY_URI@Q} blockcopy ${vm@Q} ${target@Q} --xml ${shared_xml@Q}"
+      [[ "${persistence}" == "yes" ]] && shared_cmd+=" --transient-job"
+      [[ "${FTCTL_BLOCKCOPY_SYNC_WRITES}" == "1" ]] && shared_cmd+=" --synchronous-writes"
+      [[ "${shared_reuse}" == "1" ]] && shared_cmd+=" --reuse-external"
+      ftctl_blockcopy_write_debug_file "${vm}" "${target}" "primary-blockcopy-command.txt" "${shared_cmd}"
       ftctl_blockcopy_start_shared_xml_job \
         "${FTCTL_PROFILE_PRIMARY_URI}" \
         "${vm}" \
@@ -2507,7 +2607,8 @@ xml=${remote_xml}"
         "${shared_xml}" \
         out \
         err \
-        rc || true
+        rc \
+        "${shared_reuse}" || true
     fi
     if [[ "${rc}" != "0" ]]; then
       ftctl_state_set "${vm}" \
@@ -2673,7 +2774,7 @@ ftctl_blockcopy_start_reverse_sync() {
   local vm="${1-}"
   local path line target source dest format secondary_path guest_size target_size rc_any=0 payload state ready query_rc i
   local persistence out err rc
-  local active_vm export_name export_port export_addr reverse_xml source_xml
+  local active_vm export_name export_port export_addr reverse_xml source_xml shared_reuse
 
   ftctl_blockcopy_prepare_reverse_sync_plan "${vm}" || {
     ftctl_state_set "${vm}" "last_error=reverse_sync_plan_failed"
@@ -2728,6 +2829,8 @@ ftctl_blockcopy_start_reverse_sync() {
       source_xml="$(ftctl_state_get "${vm}" "standby_xml_seed" 2>/dev/null || true)"
       ftctl_blockcopy_build_shared_dest_xml \
         "${vm}" "${target}" "${format}" "${dest}" "${source_xml}" reverse_xml
+      shared_reuse="0"
+      ftctl_blockcopy_is_cloud_managed && shared_reuse="1"
       ftctl_blockcopy_start_shared_xml_job \
         "${FTCTL_PROFILE_SECONDARY_URI}" \
         "${active_vm}" \
@@ -2736,7 +2839,8 @@ ftctl_blockcopy_start_reverse_sync() {
         "${reverse_xml}" \
         out \
         err \
-        rc || true
+        rc \
+        "${shared_reuse}" || true
     fi
     payload="${out}"$'\n'"${err}"
     if [[ "${rc}" == "0" ]] && ftctl_blockcopy_payload_indicates_start_failure "${payload}"; then

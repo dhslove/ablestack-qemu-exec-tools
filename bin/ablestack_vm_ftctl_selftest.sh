@@ -527,6 +527,105 @@ selftest_case_blockcopy_progress_status() (
   selftest_assert_contains "${out}" '"copied_bytes":16106127360' "status includes copied bytes"
 )
 
+selftest_case_shared_xml_reuse_external() (
+  selftest_reset_env
+  selftest_info "shared XML blockcopy uses reuse-external for existing targets"
+
+  local xml_path="${SELFTEST_ROOT}/shared.xml"
+  local args_file="${SELFTEST_ROOT}/virsh.args"
+  local out="" err="" rc=0
+
+  cat > "${xml_path}" <<EOF
+<disk type='block' device='disk'>
+  <driver name='qemu' type='raw'/>
+  <source dev='/dev/rbd/rbd/dst'/>
+  <target dev='vda' bus='scsi'/>
+</disk>
+EOF
+
+  # shellcheck disable=SC2317
+  ftctl_virsh() {
+    local out_var="${2}"
+    local err_var="${3}"
+    local rc_var="${4}"
+    shift 5
+    printf '%s\n' "$*" > "${args_file}"
+    printf -v "${out_var}" '%s' ""
+    printf -v "${err_var}" '%s' ""
+    printf -v "${rc_var}" '%s' "0"
+  }
+
+  ftctl_blockcopy_start_shared_xml_job "qemu:///system" "vm1" "vda" "unknown" "${xml_path}" out err rc "1"
+  selftest_assert_eq "${rc}" "0" "shared xml blockcopy rc"
+  selftest_assert_file_contains "${args_file}" "--reuse-external"
+)
+
+selftest_case_blockcopy_target_empty_verify() (
+  selftest_reset_env
+  selftest_info "blockcopy target materialization detects empty RBD target"
+
+  local vm="verify-empty"
+  ftctl_state_init_vm "${vm}"
+
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_rbd_du_used_bytes_primary() {
+    case "${1-}" in
+      rbd/source) printf -v "$2" '%s' "4096" ;;
+      rbd/dest) printf -v "$2" '%s' "0" ;;
+      *) printf -v "$2" '%s' "" ; return 1 ;;
+    esac
+  }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_path_head_sha256_primary() {
+    return 1
+  }
+
+  if ftctl_blockcopy_verify_target_materialized "${vm}" "vda" "/dev/rbd/rbd/source" "/dev/rbd/rbd/dest"; then
+    selftest_fail "empty RBD target should fail materialization verification"
+  fi
+  selftest_assert_file_contains "${FTCTL_EVENTS_LOG}" "target_empty"
+)
+
+selftest_case_blockcopy_verify_blocks_mirroring() (
+  selftest_reset_env
+  selftest_info "blockcopy verify failure blocks protected/mirroring"
+
+  local vm="verify-blocks"
+  FTCTL_PROFILE_BACKEND_MODE="shared-blockcopy"
+  FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
+  ftctl_state_init_vm "${vm}"
+
+  # shellcheck disable=SC2317
+  ftctl_inventory_collect_vm_disks() {
+    local out_array_name="${2}"
+    eval "${out_array_name}=(\"vda|/dev/rbd/rbd/source|raw\")"
+  }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_resolve_dest() {
+    printf '%s\n' "/dev/rbd/rbd/dest"
+  }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_job_query() {
+    printf -v "$3" '%s' "copy"
+    printf -v "$4" '%s' "yes"
+  }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_progress_refresh_from_qmp() {
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_verify_target_materialized() {
+    return 21
+  }
+
+  if ftctl_blockcopy_refresh_vm_jobs "${vm}"; then
+    selftest_fail "verify failure should make refresh fail"
+  fi
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "protection_state")" "error" "verify failure protection state"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "transport_state")" "failed" "verify failure transport state"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" "blockcopy_target_not_materialized:vda" "verify failure last_error"
+)
+
 selftest_case_reconcile_and_fencing() {
   selftest_reset_env
   selftest_info "reconcile/fencing state machine"
@@ -1179,6 +1278,9 @@ selftest_main() {
   selftest_case_backend_validation
   selftest_case_blockcopy_missing_job_state
   selftest_case_blockcopy_progress_status
+  selftest_case_shared_xml_reuse_external
+  selftest_case_blockcopy_target_empty_verify
+  selftest_case_blockcopy_verify_blocks_mirroring
   selftest_case_reconcile_and_fencing
   selftest_case_failover_blocks_copying_transport
   selftest_case_xcolo_and_xml
