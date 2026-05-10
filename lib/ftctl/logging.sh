@@ -67,7 +67,7 @@ ftctl_log_event() {
   local vm="${4-}"
   local rc="${5-}"
   local details_kv="${6-}"
-  local ts scan_id json details_json parent
+  local ts scan_id json details_json parent event_seq
 
   ts="$(ftctl_now_iso8601)"
   scan_id="$(ftctl_get_scan_id)"
@@ -76,9 +76,18 @@ ftctl_log_event() {
     ftctl_set_scan_id "${scan_id}"
   fi
 
+  parent="$(dirname "${FTCTL_EVENTS_LOG}")"
+  [[ -d "${parent}" ]] || mkdir -p "${parent}" 2>/dev/null || true
+  if [[ -f "${FTCTL_EVENTS_LOG}" ]]; then
+    event_seq="$(( $(wc -l < "${FTCTL_EVENTS_LOG}" 2>/dev/null || echo 0) + 1 ))"
+  else
+    event_seq="1"
+  fi
+
   json="{"
   json+="\"ts\":\"$(ftctl__json_escape "${ts}")\""
   json+=",\"scan_id\":\"$(ftctl__json_escape "${scan_id}")\""
+  json+=",\"event_seq\":${event_seq}"
   if [[ -n "${vm}" ]]; then
     json+=",\"vm\":\"$(ftctl__json_escape "${vm}")\""
   fi
@@ -94,7 +103,5 @@ ftctl_log_event() {
   fi
   json+="}"
 
-  parent="$(dirname "${FTCTL_EVENTS_LOG}")"
-  [[ -d "${parent}" ]] || mkdir -p "${parent}" 2>/dev/null || true
   printf "%s\n" "${json}" >> "${FTCTL_EVENTS_LOG}"
 }

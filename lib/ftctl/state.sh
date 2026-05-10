@@ -25,6 +25,15 @@ ftctl_state_path() {
   echo "${FTCTL_STATE_DIR}/$(ftctl_state_vm_key "${vm}").state"
 }
 
+ftctl_state_check_path() {
+  local vm="${1-}"
+  echo "$(ftctl_state_path "${vm}").check.json"
+}
+
+ftctl_state_health_path() {
+  echo "${FTCTL_STATE_DIR}/health.json"
+}
+
 ftctl_state_read_kv() {
   local path="${1-}"
   local key="${2-}"
@@ -41,6 +50,19 @@ ftctl_state_write_kv_all() {
     printf "%s\n" "$1" >> "${tmp}"
     shift
   done
+  mv -f "${tmp}" "${path}"
+  chmod 0644 "${path}" 2>/dev/null || true
+}
+
+ftctl_state_write_json_file() {
+  local path="${1-}"
+  local json="${2-}"
+  local tmp parent
+  [[ -n "${path}" ]] || return 1
+  parent="$(dirname "${path}")"
+  [[ -d "${parent}" ]] || mkdir -p "${parent}" 2>/dev/null || true
+  tmp="$(mktemp -t ftctl.state.json.XXXXXX)"
+  printf "%s\n" "${json}" > "${tmp}"
   mv -f "${tmp}" "${path}"
   chmod 0644 "${path}" 2>/dev/null || true
 }
@@ -426,6 +448,81 @@ ftctl_state_emit_json_one() {
     printf ',"vm":"%s"' "$(ftctl__json_escape "${vm}")"
   fi
   printf '}\n'
+}
+
+ftctl_state_emit_json_file_or_null() {
+  local path="${1-}"
+  if [[ -f "${path}" ]] && python3 -m json.tool "${path}" >/dev/null 2>&1; then
+    cat "${path}"
+  else
+    printf 'null'
+  fi
+}
+
+ftctl_state_emit_snapshot_one() {
+  local vm="${1-}"
+  local limit="${2-}"
+  local line first count
+  printf '{"command":"snapshot","result":"ok","vm":"%s","status":' "$(ftctl__json_escape "${vm}")"
+  ftctl_state_emit_json_one "${vm}" "$([[ -f "$(ftctl_state_path "${vm}")" ]] && echo ok || echo not_found)" | tr -d '\r\n'
+  printf ',"check":'
+  ftctl_state_emit_json_file_or_null "$(ftctl_state_check_path "${vm}")" | tr -d '\r\n'
+  printf ',"health":'
+  ftctl_state_emit_json_file_or_null "$(ftctl_state_health_path)" | tr -d '\r\n'
+  printf ',"events":['
+  first="1"
+  count=0
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] || continue
+    if [[ "${first}" == "1" ]]; then
+      first="0"
+    else
+      printf ','
+    fi
+    printf '%s' "${line}"
+    count=$((count + 1))
+  done < <(ftctl_events_collect_lines "${vm}" "${limit}")
+  printf '],"event_count":%s}\n' "${count}"
+}
+
+ftctl_state_print_snapshot() {
+  local vm="${1-}"
+  local json="${2-0}"
+  local limit="${3-}"
+  local f name first count
+
+  if [[ "${json}" != "1" ]]; then
+    if [[ -n "${vm}" ]]; then
+      ftctl_state_print_one "${vm}" "0"
+      printf 'check_snapshot=%s health_snapshot=%s\n' "$(ftctl_state_check_path "${vm}")" "$(ftctl_state_health_path)"
+    else
+      ftctl_state_print_status "" "0"
+      printf 'health_snapshot=%s\n' "$(ftctl_state_health_path)"
+    fi
+    return 0
+  fi
+
+  if [[ -n "${vm}" ]]; then
+    ftctl_state_emit_snapshot_one "${vm}" "${limit}"
+    return 0
+  fi
+
+  shopt -s nullglob
+  first="1"
+  count=0
+  printf '{"command":"snapshot","result":"ok","items":['
+  for f in "${FTCTL_STATE_DIR}"/*.state; do
+    name="$(basename "${f}" .state)"
+    if [[ "${first}" == "1" ]]; then
+      first="0"
+    else
+      printf ','
+    fi
+    ftctl_state_emit_snapshot_one "${name}" "${limit}" | tr -d '\r\n'
+    count=$((count + 1))
+  done
+  printf '],"count":%s}\n' "${count}"
+  shopt -u nullglob
 }
 
 ftctl_state_print_one() {

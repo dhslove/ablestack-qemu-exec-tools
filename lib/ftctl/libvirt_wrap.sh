@@ -196,7 +196,7 @@ ftctl_virsh() {
 
 ftctl_local_health() {
   local json="${1-0}"
-  local out err rc result
+  local out err rc result snapshot
   out=""
   err=""
   rc=0
@@ -204,9 +204,14 @@ ftctl_local_health() {
   : "${out}${err}"
   result="$(ftctl_result_from_rc "${rc}")"
   ftctl_log_event "health" "libvirt.local" "${result}" "" "${rc}" "uri=${FTCTL_DEFAULT_PRIMARY_URI}"
+  snapshot="$(printf '{"command":"health","result":"%s","uri":"%s","rc":%s,"updated":"%s"}' \
+    "$(ftctl__json_escape "${result}")" \
+    "$(ftctl__json_escape "${FTCTL_DEFAULT_PRIMARY_URI}")" \
+    "${rc}" \
+    "$(ftctl__json_escape "$(ftctl_now_iso8601)")")"
+  ftctl_state_write_json_file "$(ftctl_state_health_path)" "${snapshot}"
   if [[ "${json}" == "1" ]]; then
-    printf '{"command":"health","result":"%s","uri":"%s","rc":%s}\n' \
-      "${result}" "${FTCTL_DEFAULT_PRIMARY_URI}" "${rc}"
+    printf '%s\n' "${snapshot}"
   else
     printf 'libvirt.local: %s (%s)\n' "${result}" "${FTCTL_DEFAULT_PRIMARY_URI}"
   fi

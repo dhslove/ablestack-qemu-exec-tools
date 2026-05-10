@@ -181,6 +181,7 @@ Commands:
   check              Probe VM/profile/peer reachability
   health             Check local libvirt health only
   events             Show recent FTCTL events
+  snapshot           Show recorded FTCTL state/check/health/events only
   config             Manage cluster/host inventory
 
 Global options:
@@ -250,7 +251,7 @@ parse_args() {
         print_version
         exit "${EXIT_OK}"
         ;;
-      protect|status|reconcile|failover|failover-prepare|failback|failback-sync|failback-finalize|failback-reprotect|unprotect|fence-confirm|fence-clear|pause-protection|resume-protection|check|health|events|config)
+      protect|status|reconcile|failover|failover-prepare|failback|failback-sync|failback-finalize|failback-reprotect|unprotect|fence-confirm|fence-clear|pause-protection|resume-protection|check|health|events|snapshot|config)
         [[ -z "${CLI_COMMAND}" ]] || {
           echo "ERROR: multiple commands specified" >&2
           exit "${EXIT_USAGE}"
@@ -754,6 +755,9 @@ dispatch() {
       ;;
     events)
       ftctl_events_print "${CLI_VM}" "${CLI_LIMIT}" "${CLI_JSON}"
+      ;;
+    snapshot)
+      ftctl_state_print_snapshot "${CLI_VM}" "${CLI_JSON}" "${CLI_LIMIT}"
       ;;
     "")
       usage

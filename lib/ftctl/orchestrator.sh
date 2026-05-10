@@ -185,17 +185,24 @@ ftctl_orchestrator_protect() {
 ftctl_orchestrator_check_vm() {
   local vm="${1-}"
   local json="${2-0}"
-  local probe local_rc peer_rc result peer_domain_expected standby_domain_state
+  local probe local_rc peer_rc result peer_domain_expected standby_domain_state snapshot
   probe="$(ftctl_inventory_check_vm "${vm}")"
   read -r local_rc peer_rc result peer_domain_expected standby_domain_state <<< "${probe}"
   peer_domain_expected="${peer_domain_expected:-true}"
   standby_domain_state="${standby_domain_state:-}"
+  snapshot="$(printf '{"command":"check","vm":"%s","result":"ok","inventory_result":"%s","primary_rc":%s,"peer_rc":%s,"peer_domain_expected":%s,"standby_domain_state":"%s","provisioning_backend":"%s","updated":"%s"}' \
+    "$(ftctl__json_escape "${vm}")" \
+    "$(ftctl__json_escape "${result}")" \
+    "${local_rc}" \
+    "${peer_rc}" \
+    "${peer_domain_expected}" \
+    "$(ftctl__json_escape "${standby_domain_state}")" \
+    "$(ftctl__json_escape "${FTCTL_PROFILE_PROVISIONING_BACKEND:-libvirt-managed}")" \
+    "$(ftctl__json_escape "$(ftctl_now_iso8601)")")"
+  ftctl_state_write_json_file "$(ftctl_state_check_path "${vm}")" "${snapshot}"
 
   if [[ "${json}" == "1" ]]; then
-    printf '{"command":"check","vm":"%s","result":"ok","inventory_result":"%s","primary_rc":%s,"peer_rc":%s,"peer_domain_expected":%s,"standby_domain_state":"%s","provisioning_backend":"%s"}\n' \
-      "${vm}" "${result}" "${local_rc}" "${peer_rc}" "${peer_domain_expected}" \
-      "$(ftctl__json_escape "${standby_domain_state}")" \
-      "$(ftctl__json_escape "${FTCTL_PROFILE_PROVISIONING_BACKEND:-libvirt-managed}")"
+    printf '%s\n' "${snapshot}"
   else
     printf '%s inventory=%s primary_rc=%s peer_rc=%s peer_domain_expected=%s standby_domain_state=%s provisioning_backend=%s\n' \
       "${vm}" "${result}" "${local_rc}" "${peer_rc}" "${peer_domain_expected}" "${standby_domain_state}" \
@@ -392,10 +399,15 @@ ftctl_orchestrator_reconcile() {
   local f name lock_file
   if [[ -n "${vm}" ]]; then
     ftctl_orchestrator_reconcile_one "${vm}"
+    if ftctl_profile_load_vm "${vm}" 2>/dev/null; then
+      ftctl_orchestrator_check_vm "${vm}" "1" >/dev/null || true
+    fi
+    ftctl_local_health "1" >/dev/null || true
     ftctl_state_print_one "${vm}" "${json}"
     return 0
   fi
 
+  ftctl_local_health "1" >/dev/null || true
   shopt -s nullglob
   for f in "${FTCTL_STATE_DIR}"/*.state; do
     name="$(basename "${f}" .state)"
@@ -406,6 +418,9 @@ ftctl_orchestrator_reconcile() {
       continue
     }
     ftctl_orchestrator_reconcile_one "${name}"
+    if ftctl_profile_load_vm "${name}" 2>/dev/null; then
+      ftctl_orchestrator_check_vm "${name}" "1" >/dev/null || true
+    fi
     ftctl_lock_release
     if [[ "${json}" == "1" ]]; then
       ftctl_state_emit_json "${name}"
