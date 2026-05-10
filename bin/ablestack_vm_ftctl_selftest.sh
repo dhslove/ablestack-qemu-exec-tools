@@ -1208,6 +1208,40 @@ EOF
   selftest_assert_file_contains "${FTCTL_EVENTS_LOG}" "reverse_sync.finalize"
 )
 
+selftest_case_failback_shared_reverse_finalize() (
+  selftest_reset_env
+  selftest_info "failback shared reverse finalize"
+
+  local vm="shared-reverse-finalize"
+  FTCTL_PROFILE_BACKEND_MODE="shared-blockcopy"
+  ftctl_state_init_vm "${vm}"
+  ftctl_state_set "${vm}" \
+    "active_side=secondary" \
+    "protection_state=failing_back" \
+    "transport_state=reverse_sync_ready" \
+    "last_error=reverse_sync_pending"
+  ftctl_blockcopy_state_write_reverse "${vm}" \
+    "vda|/dev/rbd/rbd/${vm}-standby-root|/dev/rbd/rbd/${vm}-root|raw||1024|1024"
+
+  cat > "$(ftctl_blockcopy_progress_path "${vm}")" <<EOF
+{"direction":"reverse","ready":true,"disks":[{"target":"vda","ready":true,"status":"ready","offset":1024,"len":1024,"guest_virtual_size":1024,"target_size":1024}]}
+EOF
+
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_secondary_domain_state() { return 1; }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_local_path_virtual_size_bytes() {
+    printf -v "$2" '%s' "1024"
+  }
+
+  ftctl_blockcopy_finalize_reverse_sync "${vm}"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "transport_state")" "cutback_ready" "shared reverse finalize transport"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" "" "shared reverse finalize clears error"
+  [[ ! -f "$(ftctl_blockcopy_reverse_state_path "${vm}")" ]] || selftest_fail "shared reverse state should be removed after finalize"
+  selftest_assert_file_contains "${FTCTL_EVENTS_LOG}" '"backend":"shared-blockcopy"'
+  selftest_assert_file_contains "${FTCTL_EVENTS_LOG}" "reverse_sync.finalize"
+)
+
 selftest_case_failback_reverse_progress_ready() (
   selftest_reset_env
   selftest_info "failback reverse progress ready"
@@ -1246,6 +1280,48 @@ EOF
   selftest_assert_eq "$(ftctl_state_get "${vm}" "transport_state")" "reverse_sync_ready" "reverse QMP progress ready transport"
   selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" "" "reverse QMP progress ready clears error"
   selftest_assert_file_contains "${FTCTL_EVENTS_LOG}" "reverse_sync.ready"
+)
+
+selftest_case_reconcile_preserves_cloud_failback_failure() (
+  selftest_reset_env
+  selftest_info "reconcile preserves cloud failback failure"
+
+  local vm="cloud-failback-failed"
+  FTCTL_PROFILE_PROVISIONING_BACKEND="cloud-managed"
+  ftctl_state_init_vm "${vm}"
+  ftctl_state_set "${vm}" \
+    "mode=ha" \
+    "active_side=secondary" \
+    "protection_state=error" \
+    "transport_state=reverse_sync_failed" \
+    "last_error=reverse_finalize_unsupported_backend:shared-blockcopy" \
+    "rearm_count=0"
+  ftctl_blockcopy_state_write_reverse "${vm}" \
+    "vda|/dev/rbd/rbd/${vm}-standby-root|/dev/rbd/rbd/${vm}-root|raw|||"
+
+  # shellcheck disable=SC2317
+  ftctl_profile_load_vm() { :; }
+  # shellcheck disable=SC2317
+  ftctl_profile_apply_cli() { :; }
+  # shellcheck disable=SC2317
+  ftctl_profile_validate() { :; }
+  # shellcheck disable=SC2317
+  ftctl_cluster_load() { :; }
+  # shellcheck disable=SC2317
+  ftctl_orchestrator_probe_peer() {
+    printf -v "$1" '%s' "peer-1"
+    printf -v "$2" '%s' "10.0.0.12"
+    printf -v "$3" '%s' "reachable"
+  }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_rearm() {
+    selftest_fail "cloud-managed failed failback must not auto-rearm"
+  }
+
+  ftctl_orchestrator_reconcile_one "${vm}"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "transport_state")" "reverse_sync_failed" "failed failback transport preserved"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "rearm_count")" "0" "failed failback must not increment rearm"
+  selftest_assert_file_contains "${FTCTL_EVENTS_LOG}" "cloud_failback_failure_preserved"
 )
 
 selftest_case_failback_reprotect_clears_standby_verify_state() (
@@ -1332,7 +1408,9 @@ selftest_main() {
   selftest_case_unprotect_releases_remote_nbd_exports
   selftest_case_unprotect_fails_when_remote_nbd_release_fails
   selftest_case_failback_reverse_finalize
+  selftest_case_failback_shared_reverse_finalize
   selftest_case_failback_reverse_progress_ready
+  selftest_case_reconcile_preserves_cloud_failback_failure
   selftest_case_failback_reprotect_clears_standby_verify_state
   selftest_case_events_json
   selftest_info "all checks passed"

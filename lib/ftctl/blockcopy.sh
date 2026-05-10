@@ -2898,6 +2898,12 @@ ftctl_blockcopy_refresh_reverse_jobs() {
   active_vm="$(ftctl_blockcopy_active_domain_on_secondary "${vm}")"
   domain_state=""
   if ! ftctl_blockcopy_secondary_domain_state "${vm}" domain_state; then
+    if ftctl_blockcopy_reverse_progress_ready "${vm}"; then
+      ftctl_state_set "${vm}" "transport_state=reverse_sync_ready" "last_sync_ts=$(ftctl_now_iso8601)" "last_error="
+      ftctl_log_event "failback" "reverse_sync.ready" "ok" "${vm}" "" \
+        "reason=qmp_progress_ready_after_secondary_stop active_vm=${active_vm} state=${domain_state:-not-found}"
+      return 0
+    fi
     ftctl_state_set "${vm}" \
       "protection_state=error" \
       "transport_state=reverse_sync_failed" \
@@ -2911,6 +2917,12 @@ ftctl_blockcopy_refresh_reverse_jobs() {
     running|running\ \(*)
       ;;
     *)
+      if ftctl_blockcopy_reverse_progress_ready "${vm}"; then
+        ftctl_state_set "${vm}" "transport_state=reverse_sync_ready" "last_sync_ts=$(ftctl_now_iso8601)" "last_error="
+        ftctl_log_event "failback" "reverse_sync.ready" "ok" "${vm}" "" \
+          "reason=qmp_progress_ready_after_secondary_stop active_vm=${active_vm} state=${domain_state}"
+        return 0
+      fi
       ftctl_state_set "${vm}" \
         "protection_state=error" \
         "transport_state=reverse_sync_failed" \
@@ -3027,6 +3039,159 @@ for disk in disks:
         raise SystemExit(1)
 raise SystemExit(0)
 PY
+}
+
+ftctl_blockcopy_shared_reverse_finalize_validate_progress() {
+  local vm="${1-}"
+  local reverse_path progress_path
+
+  reverse_path="$(ftctl_blockcopy_reverse_state_path "${vm}")"
+  progress_path="$(ftctl_blockcopy_progress_path "${vm}")"
+  [[ -s "${reverse_path}" ]] || {
+    ftctl_state_set "${vm}" "last_error=reverse_finalize_missing_state"
+    return 1
+  }
+  [[ -s "${progress_path}" ]] || {
+    ftctl_state_set "${vm}" "last_error=reverse_finalize_progress_not_ready"
+    return 2
+  }
+
+  python3 - "${reverse_path}" "${progress_path}" <<'PY'
+import json
+import sys
+
+reverse_path, progress_path = sys.argv[1:3]
+
+records = {}
+try:
+    with open(reverse_path, "r", encoding="utf-8") as fh:
+        for raw in fh:
+            raw = raw.rstrip("\n")
+            if not raw:
+                continue
+            parts = raw.split("|")
+            while len(parts) < 7:
+                parts.append("")
+            target, source, dest, _fmt, _secondary, guest_size, target_size = parts[:7]
+            if not target or not source or not dest:
+                print("reverse_finalize_shared_target_invalid:%s" % (target or "unknown"))
+                raise SystemExit(10)
+            if source == dest:
+                print("reverse_finalize_shared_target_invalid:%s" % target)
+                raise SystemExit(10)
+            records[target] = {
+                "source": source,
+                "dest": dest,
+                "guest_size": int(guest_size) if guest_size.isdigit() else 0,
+                "target_size": int(target_size) if target_size.isdigit() else 0,
+            }
+except SystemExit:
+    raise
+except Exception:
+    print("reverse_finalize_missing_state")
+    raise SystemExit(1)
+
+if not records:
+    print("reverse_finalize_missing_state")
+    raise SystemExit(1)
+
+try:
+    with open(progress_path, "r", encoding="utf-8") as fh:
+        progress = json.load(fh)
+except Exception:
+    print("reverse_finalize_progress_not_ready")
+    raise SystemExit(2)
+
+if progress.get("direction") != "reverse" or progress.get("ready") is not True:
+    print("reverse_finalize_progress_not_ready")
+    raise SystemExit(2)
+
+disks = progress.get("disks") or []
+if not disks:
+    print("reverse_finalize_progress_not_ready")
+    raise SystemExit(2)
+
+by_target = {str(d.get("target") or ""): d for d in disks if d.get("target")}
+for target, record in records.items():
+    disk = by_target.get(target)
+    if not disk:
+        print("reverse_finalize_disk_not_ready:%s" % target)
+        raise SystemExit(11)
+    if disk.get("ready") is not True:
+        print("reverse_finalize_disk_not_ready:%s" % target)
+        raise SystemExit(11)
+    if str(disk.get("status") or "").lower() not in ("ready", "concluded"):
+        print("reverse_finalize_disk_not_ready:%s" % target)
+        raise SystemExit(11)
+
+    offset = int(disk.get("offset") or 0)
+    length = int(disk.get("len") or 0)
+    progress_target_size = int(disk.get("target_size") or 0)
+    progress_guest_size = int(disk.get("guest_virtual_size") or 0)
+    expected_sizes = [x for x in (
+        record["target_size"],
+        record["guest_size"],
+        progress_target_size,
+        progress_guest_size,
+    ) if x > 0]
+
+    if length <= 0 or offset <= 0:
+        print("reverse_finalize_disk_not_ready:%s" % target)
+        raise SystemExit(11)
+    if offset < length:
+        print("reverse_finalize_disk_not_ready:%s" % target)
+        raise SystemExit(11)
+    if expected_sizes and any(size != expected_sizes[0] for size in expected_sizes):
+        print("reverse_finalize_size_mismatch:%s:%s" % (target, ":".join(str(x) for x in expected_sizes)))
+        raise SystemExit(12)
+    if expected_sizes and offset < expected_sizes[0]:
+        print("reverse_finalize_size_mismatch:%s:%s:%s" % (target, expected_sizes[0], offset))
+        raise SystemExit(12)
+
+raise SystemExit(0)
+PY
+}
+
+ftctl_blockcopy_finalize_reverse_sync_shared() {
+  local vm="${1-}"
+  local path="${2-}"
+  local line target source dest format secondary_path guest_size target_size
+  local target_size_actual="" validate_error=""
+
+  validate_error="$(ftctl_blockcopy_shared_reverse_finalize_validate_progress "${vm}" 2>/dev/null)" || {
+    [[ -n "${validate_error}" ]] || validate_error="$(ftctl_state_get "${vm}" "last_error" 2>/dev/null || echo "reverse_finalize_progress_not_ready")"
+    ftctl_state_set "${vm}" "last_error=${validate_error}"
+    ftctl_log_event "failback" "reverse_sync.finalize" "fail" "${vm}" "" \
+      "backend=shared-blockcopy reason=${validate_error}"
+    return 2
+  }
+
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] || continue
+    target=""; source=""; dest=""; format=""; secondary_path=""; guest_size=""; target_size=""
+    IFS='|' read -r target source dest format secondary_path guest_size target_size <<< "${line}"
+    : "${format}${secondary_path}${guest_size}"
+    if ! ftctl_blockcopy_local_path_virtual_size_bytes "${dest}" target_size_actual; then
+      ftctl_state_set "${vm}" "last_error=reverse_finalize_shared_target_invalid:${target}"
+      ftctl_log_event "failback" "reverse_sync.finalize" "fail" "${vm}" "" \
+        "backend=shared-blockcopy target=${target} dest=${dest} reason=target_size_unavailable"
+      return 2
+    fi
+    if [[ "${target_size}" =~ ^[1-9][0-9]*$ && "${target_size_actual}" != "${target_size}" ]]; then
+      ftctl_state_set "${vm}" "last_error=reverse_finalize_size_mismatch:${target}:${target_size}:${target_size_actual}"
+      ftctl_log_event "failback" "reverse_sync.finalize" "fail" "${vm}" "" \
+        "backend=shared-blockcopy target=${target} dest=${dest} expected_size=${target_size} actual_size=${target_size_actual}"
+      return 2
+    fi
+    ftctl_log_event "failback" "reverse_sync.finalize" "ok" "${vm}" "" \
+      "backend=shared-blockcopy target=${target} source=${source} dest=${dest} target_size=${target_size_actual}"
+  done < "${path}"
+
+  rm -f -- "${path}" 2>/dev/null || true
+  ftctl_state_set "${vm}" \
+    "transport_state=cutback_ready" \
+    "last_sync_ts=$(ftctl_now_iso8601)" \
+    "last_error="
 }
 
 ftctl_blockcopy_wait_forward_sync_ready() {
@@ -3242,6 +3407,11 @@ ftctl_blockcopy_finalize_reverse_sync() {
         return 22
         ;;
     esac
+  fi
+
+  if [[ "${FTCTL_PROFILE_BACKEND_MODE:-}" == "shared-blockcopy" ]]; then
+    ftctl_blockcopy_finalize_reverse_sync_shared "${vm}" "${path}"
+    return $?
   fi
 
   [[ "${FTCTL_PROFILE_BACKEND_MODE:-}" == "remote-nbd" ]] || {

@@ -405,3 +405,186 @@ HA-RKY:
 - full-chain PASS는 clean start에서 `HA-RKY-01`부터 `HA-RKY-15`까지 모두 통과해야 한다.
 - 중간 수동 보정이나 서비스 재시작 뒤 성공한 결과는 full-chain PASS로 기록하지 않는다.
 - `manual-block` 정책에서는 failover의 `confirmFtctlFence`와 failback 이후의 `clearFtctlFence`를 모두 UI 작업으로 검증한다.
+
+## 2026-05-11 HA-RKY failback 실패 확정 분석 및 개선 확정안
+
+이 섹션은 2026-05-11 HA-RKY 수동 UI 재시험에서 확인한 결과를 기준으로 하며, 위의 이전 failback/fence 순서 설명보다 우선 적용한다.
+
+### 확인된 실패 흐름
+
+수동 UI 절차에서 다음 순서까지는 정상 진행되었다.
+
+1. UI `clearFtctlFence` 실행.
+2. `fencing_state=clear` 확인.
+3. UI `failbackFtctlProtection` 실행.
+4. reverse block copy 진행.
+5. reverse progress가 `direction=reverse`, `percent=100.0`, `ready=true`로 도달.
+6. Cloud-managed failback monitor가 secondary VM `i-2-373-VM`을 정지.
+7. primary VM `i-2-348-VM`이 기동되지 않고 최종 상태가 `rearm_exhausted`로 전이.
+
+현재 DB와 runtime 상태는 다음과 일치했다.
+
+- `ftctl_protection` active row `72`
+  - `protection_state=error`
+  - `transport_state=rearm_exhausted`
+  - `active_side=secondary`
+  - `fencing_state=clear`
+  - `last_error=rearm_attempts_exhausted`
+- primary VM `i-2-348-VM`: `Stopped`
+- secondary VM `i-2-373-VM`: `Stopped`
+- standby volumes `465`, `466`: active `Ready`
+- qemu FTCTL progress file: reverse 100%, ready true
+
+### 직접 원인
+
+직접 원인은 primary VM start 코드 부재가 아니라, Cloud failback workflow가 primary start 단계까지 도달하지 못한 것이다.
+
+Cloud failback cutback 구현 순서는 다음과 같다.
+
+1. reverse sync ready 확인.
+2. `stopSecondaryVmForCloudManagedFailback`.
+3. `FAILBACK_FINALIZE` agent action 호출.
+4. NIC identity handoff.
+5. `startPrimaryVmForCloudManagedFailback`.
+6. `FAILBACK_REPROTECT`.
+
+이번 실패에서는 3단계에서 중단되었다. host 설치본 `/usr/local/lib/ablestack-qemu-exec-tools/ftctl/blockcopy.sh`의 `ftctl_blockcopy_finalize_reverse_sync()`는 현재 다음 조건으로 `shared-blockcopy` backend를 거부한다.
+
+```bash
+[[ "${FTCTL_PROFILE_BACKEND_MODE:-}" == "remote-nbd" ]] || {
+  ftctl_state_set "${vm}" "last_error=reverse_finalize_unsupported_backend:${FTCTL_PROFILE_BACKEND_MODE:-}"
+  return 2
+}
+```
+
+따라서 Cloud log와 qemu events.log는 다음 실패를 기록했다.
+
+- `FAILBACK_FINALIZE` result: fail
+- `last_error=reverse_finalize_unsupported_backend:shared-blockcopy`
+- qemu event: `failback.finalize fail`
+
+이 예외 때문에 Cloud는 `handoffNicIdentityToPrimary()`와 `startPrimaryVmForCloudManagedFailback()`를 실행하지 못했다.
+
+### rearm_exhausted의 성격
+
+`rearm_exhausted`는 1차 원인이 아니라 후속 상태 오염이다.
+
+`FAILBACK_FINALIZE` 실패 후 secondary VM은 이미 Cloud에 의해 정지되었고, primary VM은 아직 시작되지 않았다. 이 중간 상태에서 qemu FTCTL timer/reconcile이 계속 실행되면서 다음처럼 판단했다.
+
+- `primary_domain_state=not-found`
+- `standby_domain_state=not-found`
+- `active_side=secondary`
+- `peer_domain_expected=true`
+
+그 결과 auto-rearm을 반복했고, `FTCTL_MAX_REARM_ATTEMPTS=5`에 도달하여 다음 상태로 덮었다.
+
+- `protection_state=error`
+- `transport_state=rearm_exhausted`
+- `last_error=rearm_attempts_exhausted`
+
+따라서 최종 UI의 `rearm_exhausted`만 보면 원인을 오해할 수 있다. 실제 최초 실패 지점은 `reverse_finalize_unsupported_backend:shared-blockcopy`이다.
+
+### 확정 개선 방향
+
+#### 1. qemu FTCTL: shared-blockcopy reverse finalize 지원
+
+`ftctl_blockcopy_finalize_reverse_sync()`는 backend별 finalize 전략을 분리해야 한다.
+
+- `remote-nbd`
+  - 기존 `qemu-img convert` 기반 finalize 경로 유지.
+- `shared-blockcopy`
+  - reverse progress JSON이 `ready=true`이고 모든 disk가 ready인지 확인.
+  - reverse state file의 source/dest가 primary RBD target과 standby RBD source를 정확히 가리키는지 확인.
+  - primary RBD target size와 reverse progress total/target size 정합성 확인.
+  - standby domain이 stopped 또는 not-defined 상태인지 확인.
+  - shared RBD reverse blockcopy가 이미 target에 materialize된 것으로 확정되면 remote-nbd 전용 convert를 수행하지 않는다.
+  - reverse state artifact를 정리하고 `transport_state=cutback_ready` 또는 다음 Cloud cutback 가능 상태로 전이한다.
+  - `last_error`를 비운다.
+  - `failback.reverse_finalize.shared` 또는 `reverse_sync.finalize` ok 이벤트를 남긴다.
+
+검증 실패 시에는 구체적인 원인을 남긴다.
+
+- `reverse_finalize_missing_state`
+- `reverse_finalize_progress_not_ready`
+- `reverse_finalize_disk_not_ready:<target>`
+- `reverse_finalize_size_mismatch:<target>:<expected>:<actual>`
+- `reverse_finalize_secondary_running`
+- `reverse_finalize_shared_target_invalid:<target>`
+
+#### 2. qemu FTCTL: Cloud-managed failback cutback 중 auto-rearm 억제
+
+Cloud-managed failback의 cutback 구간은 일반 장애 복구 rearm 대상이 아니다.
+
+FTCTL reconcile은 다음 상태에서는 auto-rearm을 수행하지 않아야 한다.
+
+- `transport_state=reverse_sync_ready`
+- `transport_state=reverse_sync_cutback_required`
+- `transport_state=secondary_stopping`
+- `transport_state=finalizing`
+- `transport_state=cutback_ready`
+- `transport_state=primary_restoring`
+- `last_error=reverse_sync_pending`
+
+특히 standby domain이 Cloud에 의해 정지된 직후에는 `standby_domain_state=not-found`가 정상 중간 상태일 수 있다. 이 경우 `rearm_count`를 증가시키거나 `rearm_exhausted`로 전이하면 안 된다.
+
+권장 상태 전이는 다음과 같다.
+
+- reverse ready 이후: `failing_back / reverse_sync_ready / secondary`
+- secondary stop 이후: `failing_back / secondary_stopping` 또는 `failing_back / finalizing`
+- shared finalize 성공 이후: `failing_back / cutback_ready`
+- Cloud primary start 중: `failing_back / primary_restoring`
+- reprotect 성공 이후: `protected / mirroring / primary`
+
+#### 3. Cloud: FAILBACK_FINALIZE 실패 시 primary start로 진행하지 않는다
+
+Cloud는 지금처럼 `FAILBACK_FINALIZE` 실패 시 primary start로 진행하지 않는 것이 맞다. reverse finalize 실패 상태에서 primary를 시작하면 데이터 정합성을 보장할 수 없다.
+
+다만 실패를 명확히 보존해야 한다.
+
+- Cloud는 `FAILBACK_FINALIZE` 실패 원문을 `cloud_managed_failback_failed:<reason>` 형태로 보존한다.
+- 이후 runtime sync가 `rearm_exhausted`로 원인을 덮어쓰지 않도록 FTCTL engine이 cutback 상태에서 rearm을 억제해야 한다.
+- UI는 최종 `rearm_exhausted`만 표시하지 말고 qemu events.log의 최초 failback failure 이벤트도 함께 보여야 한다.
+
+#### 4. Cloud: primary start 코드 보강은 보조 개선
+
+primary start 코드 자체는 존재하지만, 다음 보강은 필요하다.
+
+- `startPrimaryVmForCloudManagedFailback()` 호출 전후에 명확한 FTCTL/Cloud 이벤트를 남긴다.
+- start 실패 시 `Unable to start FTCTL primary VM ...` 원문, host id, CloudStack async job id, VM state를 보존한다.
+- primary start 실패와 qemu finalize 실패를 구분해서 UI에 표시한다.
+
+이번 실패에는 primary start 실패 로그가 없었다. 따라서 primary start code path 자체까지 도달하지 못한 것으로 판단한다.
+
+### manual fence 순서 확정
+
+HA-RKY `manual-block` 정책의 failback 순서는 다음으로 확정한다.
+
+1. failover 완료.
+2. operator가 primary host/storage 복구를 확인.
+3. UI `clearFtctlFence` 실행.
+4. `fencing_state=clear` 확인.
+5. UI `failbackFtctlProtection` 실행.
+6. reverse block copy 진행 및 완료.
+7. Cloud-managed cutback:
+   - secondary stop
+   - FTCTL finalize
+   - NIC handoff
+   - primary start
+   - reprotect
+8. primary guest/QGA/NIC 확인.
+9. release 및 residual cleanup.
+
+즉 `clearFtctlFence`는 reverse block copy/failback 이전에 수행한다. failback 이후 fence clear를 수행한다는 이전 자동화 설명은 폐기한다.
+
+### 테스트 기준
+
+수정 후 HA-RKY full-chain PASS 기준은 다음이다.
+
+- clean start에서 보호 설정부터 release까지 단일 체인으로 진행한다.
+- `clearFtctlFence`가 `failbackFtctlProtection`보다 먼저 호출된 증거가 UI/API artifact에 남아야 한다.
+- reverse progress가 UI에 계속 표시되어야 하며, 값은 qemu events.log 기반이어야 한다.
+- `FAILBACK_FINALIZE`가 `shared-blockcopy`에서 성공해야 한다.
+- secondary stop 이후에도 `rearm_count`가 증가하지 않아야 한다.
+- primary VM이 Cloud에 의해 원래 primary host에서 Running 상태로 복구되어야 한다.
+- 최종 상태는 `protected / mirroring / primary / clear`이어야 한다.
+- release 후 active protection, ftctl details, standby VM, standby volumes, blockjobs, stale RBD maps가 남지 않아야 한다.

@@ -247,7 +247,7 @@ ftctl_orchestrator_is_cloud_failback_transition() {
       ;;
   esac
   case "${transport_state}" in
-    reverse_syncing|reverse_sync_ready|reverse_sync_cutback_required|secondary_stopping|finalizing|primary_restoring|cutback_ready|cutback_switching)
+    reverse_syncing|reverse_sync_ready|reverse_sync_cutback_required|reverse_sync_failed|secondary_stopping|finalizing|primary_restoring|cutback_ready|cutback_switching|failback_failed)
       return 0
       ;;
     failed_over|unknown|"")
@@ -327,6 +327,12 @@ ftctl_orchestrator_reconcile_one() {
             return 0
             ;;
         esac
+        ;;
+      reverse_sync_failed)
+        ftctl_state_set "${vm}" "last_healthy_ts=$(ftctl_now_iso8601)"
+        ftctl_log_event "failback" "reconcile.defer" "warn" "${vm}" "" \
+          "reason=cloud_failback_failure_preserved transport=${transport}"
+        return 0
         ;;
       *)
         ftctl_state_set "${vm}" "last_healthy_ts=$(ftctl_now_iso8601)"
