@@ -2941,6 +2941,13 @@ ftctl_blockcopy_refresh_reverse_jobs() {
     return 0
   fi
 
+  if ftctl_blockcopy_reverse_progress_ready "${vm}"; then
+    ftctl_state_set "${vm}" "transport_state=reverse_sync_ready" "last_sync_ts=$(ftctl_now_iso8601)" "last_error="
+    ftctl_log_event "failback" "reverse_sync.ready" "ok" "${vm}" "" \
+      "reason=qmp_progress_ready"
+    return 0
+  fi
+
   if [[ "${rc_any}" == "0" ]] && ftctl_blockcopy_reverse_cutback_ready "${vm}"; then
     ftctl_state_set "${vm}" "transport_state=reverse_sync_cutback_required" "last_sync_ts=$(ftctl_now_iso8601)" "last_error="
     ftctl_log_event "failback" "reverse_sync.cutback-ready" "ok" "${vm}" "" \
@@ -2950,6 +2957,39 @@ ftctl_blockcopy_refresh_reverse_jobs() {
 
   ftctl_state_set "${vm}" "transport_state=reverse_syncing" "last_sync_ts=$(ftctl_now_iso8601)"
   return 11
+}
+
+ftctl_blockcopy_reverse_progress_ready() {
+  local vm="${1-}"
+  local progress_path
+
+  progress_path="$(ftctl_blockcopy_progress_path "${vm}")"
+  [[ -f "${progress_path}" ]] || return 1
+  python3 - "${progress_path}" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+try:
+    with open(path, "r", encoding="utf-8") as fh:
+        data = json.load(fh)
+except Exception:
+    raise SystemExit(1)
+
+if data.get("direction") != "reverse":
+    raise SystemExit(1)
+if data.get("ready") is not True:
+    raise SystemExit(1)
+disks = data.get("disks") or []
+if not disks:
+    raise SystemExit(1)
+for disk in disks:
+    if disk.get("ready") is not True:
+        raise SystemExit(1)
+    if str(disk.get("status") or "").lower() not in ("ready", "concluded"):
+        raise SystemExit(1)
+raise SystemExit(0)
+PY
 }
 
 ftctl_blockcopy_reverse_cutback_ready() {

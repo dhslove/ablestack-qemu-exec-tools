@@ -1208,6 +1208,46 @@ EOF
   selftest_assert_file_contains "${FTCTL_EVENTS_LOG}" "reverse_sync.finalize"
 )
 
+selftest_case_failback_reverse_progress_ready() (
+  selftest_reset_env
+  selftest_info "failback reverse progress ready"
+
+  local vm="reverse-progress-ready"
+  FTCTL_PROFILE_BACKEND_MODE="shared-blockcopy"
+  FTCTL_PROFILE_SECONDARY_URI="qemu+ssh://10.0.0.12/system"
+  ftctl_state_init_vm "${vm}"
+  ftctl_state_set "${vm}" \
+    "active_side=secondary" \
+    "protection_state=failing_back" \
+    "transport_state=reverse_syncing" \
+    "secondary_vm_name=${vm}-standby" \
+    "last_error=reverse_sync_pending"
+  ftctl_blockcopy_state_write_reverse "${vm}" \
+    "vda|/dev/rbd/rbd/${vm}-standby-root|/dev/rbd/rbd/${vm}-root|raw|||"
+
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_active_domain_on_secondary() { echo "${vm}-standby"; }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_secondary_domain_state() { printf -v "$2" '%s' "running"; return 0; }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_reverse_job_query() {
+    printf -v "$3" '%s' "unknown"
+    printf -v "$4" '%s' "unknown"
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_progress_refresh_from_qmp() {
+    cat > "$(ftctl_blockcopy_progress_path "${vm}")" <<EOF
+{"direction":"reverse","ready":true,"disks":[{"target":"vda","ready":true,"status":"ready","offset":1073741824,"len":1073741824}]}
+EOF
+  }
+
+  ftctl_blockcopy_refresh_reverse_jobs "${vm}"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "transport_state")" "reverse_sync_ready" "reverse QMP progress ready transport"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" "" "reverse QMP progress ready clears error"
+  selftest_assert_file_contains "${FTCTL_EVENTS_LOG}" "reverse_sync.ready"
+)
+
 selftest_case_failback_reprotect_clears_standby_verify_state() (
   selftest_reset_env
   selftest_info "failback reprotect clears stale standby verification state"
@@ -1292,6 +1332,7 @@ selftest_main() {
   selftest_case_unprotect_releases_remote_nbd_exports
   selftest_case_unprotect_fails_when_remote_nbd_release_fails
   selftest_case_failback_reverse_finalize
+  selftest_case_failback_reverse_progress_ready
   selftest_case_failback_reprotect_clears_standby_verify_state
   selftest_case_events_json
   selftest_info "all checks passed"
