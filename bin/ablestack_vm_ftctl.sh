@@ -41,6 +41,7 @@ CLI_POLICY=""
 CLI_DRY_RUN=""
 CLI_JSON="0"
 CLI_FORCE="0"
+CLI_FORCE_CLEANUP="0"
 CLI_CLUSTER_NAME=""
 CLI_LOCAL_HOST_ID=""
 CLI_HOST_ID=""
@@ -196,6 +197,8 @@ Global options:
       --dry-run      Do not perform actions
       --json         JSON output where supported
       --force        Acknowledge risky transition commands
+      --force-cleanup
+                     Best-effort unprotect cleanup; continue after release errors
       --cluster-name NAME
       --local-host-id ID
       --host-id ID
@@ -302,6 +305,10 @@ parse_args() {
         ;;
       --force)
         CLI_FORCE="1"
+        shift
+        ;;
+      --force-cleanup)
+        CLI_FORCE_CLEANUP="1"
         shift
         ;;
       --cluster-name)
@@ -705,7 +712,7 @@ dispatch() {
         exit "${EXIT_USAGE}"
       }
       ftctl_profile_load_vm "${CLI_VM}" 2>/dev/null || true
-      ftctl_state_unprotect_vm "${CLI_VM}" "${CLI_JSON}"
+      ftctl_state_unprotect_vm "${CLI_VM}" "${CLI_JSON}" "${CLI_FORCE_CLEANUP}"
       ;;
     fence-confirm)
       require_vm

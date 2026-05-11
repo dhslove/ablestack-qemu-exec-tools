@@ -376,28 +376,113 @@ ftctl_state_remove_runtime_files() {
   rm -f /tmp/ftctl_* 2>/dev/null || true
 }
 
+ftctl_state_unprotect_add_warning() {
+  local target_var="${1-}"
+  local warning="${2-}"
+  local current="${!target_var:-}"
+
+  [[ -n "${target_var}" && -n "${warning}" ]] || return 0
+  if [[ -n "${current}" ]]; then
+    printf -v "${target_var}" '%s\n%s' "${current}" "${warning}"
+  else
+    printf -v "${target_var}" '%s' "${warning}"
+  fi
+}
+
+ftctl_state_unprotect_warnings_json() {
+  local warnings="${1-}"
+  local line first="1"
+
+  printf '['
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] || continue
+    [[ "${first}" == "1" ]] || printf ','
+    first="0"
+    printf '"%s"' "$(ftctl__json_escape "${line}")"
+  done <<< "${warnings}"
+  printf ']'
+}
+
+ftctl_state_unprotect_log_warnings() {
+  local vm="${1-}"
+  local warnings="${2-}"
+  local line
+
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] || continue
+    ftctl_log_event "state" "protection.unprotect.force-cleanup-warning" "warn" "${vm}" "" "warning=${line}"
+  done <<< "${warnings}"
+}
+
 ftctl_state_unprotect_vm() {
   local vm="${1-}"
   local json="${2-0}"
-  local canceled unmapped remote_nbd_required remote_nbd_released
+  local force_cleanup="${3-0}"
+  local canceled unmapped remote_nbd_required remote_nbd_released result warnings rc forced_json warnings_json
 
   canceled="$(ftctl_state_cancel_block_jobs "${vm}" 2>/dev/null || echo 0)"
-  ftctl_state_wait_block_jobs_released "${vm}"
-  ftctl_state_wait_qmp_destinations_released "${vm}"
+  if ftctl_state_wait_block_jobs_released "${vm}"; then
+    :
+  else
+    rc=$?
+    if [[ "${force_cleanup}" == "1" ]]; then
+      ftctl_state_unprotect_add_warning warnings "block_jobs_release_timeout"
+    else
+      return "${rc}"
+    fi
+  fi
+  if ftctl_state_wait_qmp_destinations_released "${vm}"; then
+    :
+  else
+    rc=$?
+    if [[ "${force_cleanup}" == "1" ]]; then
+      ftctl_state_unprotect_add_warning warnings "qmp_destinations_release_timeout"
+    else
+      return "${rc}"
+    fi
+  fi
   remote_nbd_required="false"
   [[ "${FTCTL_PROFILE_BACKEND_MODE:-}" == "remote-nbd" ]] && remote_nbd_required="true"
-  remote_nbd_released="$(ftctl_state_release_remote_nbd_exports "${vm}")" || return $?
-  unmapped="$(ftctl_state_unmap_local_krbd_destinations "${vm}")"
+  if remote_nbd_released="$(ftctl_state_release_remote_nbd_exports "${vm}")"; then
+    :
+  else
+    rc=$?
+    if [[ "${force_cleanup}" == "1" ]]; then
+      remote_nbd_released="false"
+      ftctl_state_unprotect_add_warning warnings "remote_nbd_release_failed"
+    else
+      return "${rc}"
+    fi
+  fi
+  if unmapped="$(ftctl_state_unmap_local_krbd_destinations "${vm}")"; then
+    :
+  else
+    rc=$?
+    if [[ "${force_cleanup}" == "1" ]]; then
+      unmapped="0"
+      ftctl_state_unprotect_add_warning warnings "rbd_unmap_failed"
+    else
+      return "${rc}"
+    fi
+  fi
   ftctl_state_remove_runtime_files "${vm}"
-  ftctl_log_event "state" "protection.unprotect" "ok" "${vm}" "" "block_jobs_cancelled=${canceled} rbd_unmapped=${unmapped} remote_nbd_required=${remote_nbd_required} remote_nbd_released=${remote_nbd_released}"
+  result="ok"
+  [[ -n "${warnings}" ]] && result="warn"
+  [[ "${force_cleanup}" == "1" ]] && forced_json="true" || forced_json="false"
+  warnings_json="$(ftctl_state_unprotect_warnings_json "${warnings}")"
+  ftctl_state_unprotect_log_warnings "${vm}" "${warnings}"
+  ftctl_log_event "state" "protection.unprotect" "${result}" "${vm}" "" "force_cleanup=${force_cleanup} block_jobs_cancelled=${canceled} rbd_unmapped=${unmapped} remote_nbd_required=${remote_nbd_required} remote_nbd_released=${remote_nbd_released}"
 
   if [[ "${json}" == "1" ]]; then
-    printf '{"command":"unprotect","result":"ok","vm":"%s","block_jobs_cancelled":%s,"rbd_unmapped":%s,"remote_nbd_required":%s,"remote_nbd_released":%s}\n' \
+    printf '{"command":"unprotect","result":"%s","vm":"%s","forced":%s,"block_jobs_cancelled":%s,"rbd_unmapped":%s,"remote_nbd_required":%s,"remote_nbd_released":%s,"warnings":%s}\n' \
+      "${result}" \
       "$(ftctl__json_escape "${vm}")" \
+      "${forced_json}" \
       "${canceled}" \
       "${unmapped}" \
       "${remote_nbd_required}" \
-      "${remote_nbd_released}"
+      "${remote_nbd_released}" \
+      "${warnings_json}"
   else
     printf '%s: protection runtime removed\n' "${vm}"
   fi

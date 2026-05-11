@@ -1146,6 +1146,45 @@ EOF
   [[ -f "$(ftctl_blockcopy_state_path "${vm}")" ]] || selftest_fail "blockcopy state should remain after failed remote-nbd release"
 )
 
+selftest_case_unprotect_force_cleanup_warns_when_remote_nbd_release_fails() (
+  selftest_reset_env
+  selftest_info "unprotect force cleanup warns when remote-nbd release fails"
+
+  local vm="unprotect-remote-nbd-force"
+  FTCTL_PROFILE_BACKEND_MODE="remote-nbd"
+  FTCTL_PROFILE_REMOTE_NBD_EXPORT_NAME="${vm}"
+  FTCTL_UNPROTECT_RELEASE_TIMEOUT_SEC="1"
+  FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC="1"
+  ftctl_state_init_vm "${vm}"
+  cat > "$(ftctl_blockcopy_state_path "${vm}")" <<EOF
+vdb|/dev/rbd/rbd/${vm}-source|nbd://10.0.0.12:10824/${vm}-vdb|raw|copy|yes|/var/lib/libvirt/images/${vm}-vdb
+EOF
+
+  # shellcheck disable=SC2317
+  ftctl_virsh() {
+    local out_var="${2}"
+    local err_var="${3}"
+    local rc_var="${4}"
+    printf -v "${out_var}" '%s' '{"return":[]}'
+    printf -v "${err_var}" '%s' ""
+    printf -v "${rc_var}" '%s' "0"
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_stop_remote_nbd_exports() { :; }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_wait_remote_nbd_release() { return 99; }
+
+  local out=""
+  out="$(ftctl_state_unprotect_vm "${vm}" 1 1)"
+  selftest_assert_contains "${out}" '"result":"warn"' "force cleanup warning result"
+  selftest_assert_contains "${out}" '"forced":true' "force cleanup forced flag"
+  selftest_assert_contains "${out}" '"remote_nbd_released":false' "force cleanup records remote-nbd release failure"
+  selftest_assert_contains "${out}" '"remote_nbd_release_failed"' "force cleanup warning details"
+  [[ ! -f "$(ftctl_blockcopy_state_path "${vm}")" ]] || selftest_fail "blockcopy state should be removed after forced cleanup"
+  selftest_assert_file_contains "${FTCTL_EVENTS_LOG}" "protection.unprotect.force-cleanup-warning"
+)
+
 selftest_case_failback_reverse_finalize() (
   selftest_reset_env
   selftest_info "failback reverse finalize"
@@ -1452,6 +1491,7 @@ selftest_main() {
   selftest_case_unprotect_releases_blockcopy_targets
   selftest_case_unprotect_releases_remote_nbd_exports
   selftest_case_unprotect_fails_when_remote_nbd_release_fails
+  selftest_case_unprotect_force_cleanup_warns_when_remote_nbd_release_fails
   selftest_case_failback_reverse_finalize
   selftest_case_failback_shared_reverse_finalize
   selftest_case_failback_reverse_progress_ready

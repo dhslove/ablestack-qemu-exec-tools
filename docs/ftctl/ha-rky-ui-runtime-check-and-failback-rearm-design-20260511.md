@@ -138,6 +138,35 @@ Change the FTCTL tab as follows:
 - Keep Health as the host/libvirt health view.
 - Continue async refresh without section flicker.
 
+### Forced Protection Release
+
+Add an explicit operator recovery path without adding a separate admin-only action button:
+
+- Keep the existing `Release Protection` button.
+- When clicked, open a release confirmation modal instead of running the action directly.
+- Default to normal release. Normal release is allowed only when the current state is stable on the primary side.
+- Keep the button available while a protection row exists, including abnormal VM/FTCTL states, so the modal can be used for recovery.
+- In abnormal states, the same modal exposes a `Force release protection` checkbox and a second acknowledgement checkbox.
+- Send `releaseFtctlProtection(force=true)` only when the user explicitly selects and acknowledges forced release.
+
+Cloud semantics:
+
+- The Cloud API keeps `force` as the user-facing forced release flag.
+- Normal release keeps strict validation and must fail if host-side cleanup, remote-NBD cleanup verification, or cloud-managed standby cleanup fails.
+- Forced release changes release to best-effort recovery:
+  - request host-side unprotect with forced cleanup semantics;
+  - continue Cloud row/detail removal even if host-side cleanup verification fails;
+  - continue protection row removal even if cloud-managed standby cleanup fails;
+  - return `result=warn` and publish warning events when any cleanup step is not fully verified.
+- Forced release must not persist transient host runtime facts into Cloud DB. It only removes Cloud FTCTL protection rows/details and records Cloud action events.
+
+qemu FTCTL semantics:
+
+- Keep `--force` as the existing risky transition acknowledgement required by `unprotect`.
+- Add `--force-cleanup` as the actual forced cleanup mode.
+- In forced cleanup mode, `unprotect` removes the FTCTL runtime/profile files even when blockjob release, QMP destination release, remote-NBD release, or RBD unmap verification fails.
+- Emit `protection.unprotect.force-cleanup-warning` events and return JSON with `result=warn`, `forced=true`, and `warnings=[...]` when cleanup is not fully verified.
+
 ## Acceptance Criteria
 
 - After fence release, qemu FTCTL does not auto-rearm in the cloud-managed HA failback-ready state.
@@ -148,3 +177,7 @@ Change the FTCTL tab as follows:
 - The top UI summary no longer duplicates VM state.
 - Protection Details still shows primary and secondary VM state.
 - Check still shows runtime execution state without relying on stale Cloud DB detail keys.
+- `Release Protection` remains a single UI button and opens a modal with explicit forced release selection.
+- Normal release remains strict and fails on unverified runtime/standby cleanup.
+- Forced release returns warning status while allowing Cloud FTCTL protection rows/details to be removed.
+- qemu `unprotect --force-cleanup --json` reports `result=warn`, `forced=true`, and warning details when cleanup is best-effort.
