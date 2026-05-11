@@ -1324,6 +1324,51 @@ selftest_case_reconcile_preserves_cloud_failback_failure() (
   selftest_assert_file_contains "${FTCTL_EVENTS_LOG}" "cloud_failback_failure_preserved"
 )
 
+selftest_case_reconcile_waits_for_cloud_failback_after_fence_clear() (
+  selftest_reset_env
+  selftest_info "reconcile waits for cloud failback command after manual fence release"
+
+  local vm="cloud-failback-await"
+  FTCTL_PROFILE_PROVISIONING_BACKEND="cloud-managed"
+  ftctl_state_init_vm "${vm}"
+  ftctl_state_set "${vm}" \
+    "mode=ha" \
+    "active_side=secondary" \
+    "protection_state=failed_over" \
+    "transport_state=failed_over" \
+    "fencing_state=clear" \
+    "rearm_count=0"
+
+  # shellcheck disable=SC2317
+  ftctl_profile_load_vm() { :; }
+  # shellcheck disable=SC2317
+  ftctl_profile_apply_cli() { :; }
+  # shellcheck disable=SC2317
+  ftctl_profile_validate() { :; }
+  # shellcheck disable=SC2317
+  ftctl_cluster_load() { :; }
+  # shellcheck disable=SC2317
+  ftctl_orchestrator_probe_peer() {
+    printf -v "$1" '%s' "peer-1"
+    printf -v "$2" '%s' "10.0.0.12"
+    printf -v "$3" '%s' "reachable"
+  }
+  # shellcheck disable=SC2317
+  ftctl_inventory_check_vm() {
+    selftest_fail "cloud-managed failback-ready state must not run inventory before FAILBACK_SYNC"
+  }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_rearm() {
+    selftest_fail "cloud-managed failback-ready state must not auto-rearm"
+  }
+
+  ftctl_orchestrator_reconcile_one "${vm}"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "protection_state")" "failed_over" "await command protection preserved"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "transport_state")" "failed_over" "await command transport preserved"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "rearm_count")" "0" "await command must not increment rearm"
+  selftest_assert_file_contains "${FTCTL_EVENTS_LOG}" "failback.await-command"
+)
+
 selftest_case_failback_reprotect_clears_standby_verify_state() (
   selftest_reset_env
   selftest_info "failback reprotect clears stale standby verification state"
@@ -1411,6 +1456,7 @@ selftest_main() {
   selftest_case_failback_shared_reverse_finalize
   selftest_case_failback_reverse_progress_ready
   selftest_case_reconcile_preserves_cloud_failback_failure
+  selftest_case_reconcile_waits_for_cloud_failback_after_fence_clear
   selftest_case_failback_reprotect_clears_standby_verify_state
   selftest_case_events_json
   selftest_info "all checks passed"

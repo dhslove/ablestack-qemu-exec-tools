@@ -260,6 +260,26 @@ ftctl_orchestrator_is_cloud_failback_transition() {
   return 1
 }
 
+ftctl_orchestrator_is_cloud_failback_awaiting_command() {
+  local mode="${1-}"
+  local active_side="${2-}"
+  local protection_state="${3-}"
+  local transport_state="${4-}"
+  local fencing_state="${5-}"
+
+  [[ "${FTCTL_PROFILE_PROVISIONING_BACKEND:-libvirt-managed}" == "cloud-managed" ]] || return 1
+  [[ "${mode}" == "ha" ]] || return 1
+  [[ "${active_side}" == "secondary" ]] || return 1
+  [[ "${protection_state}" == "failed_over" ]] || return 1
+  [[ "${transport_state}" == "failed_over" ]] || return 1
+  case "${fencing_state}" in
+    clear|cleared)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
 ftctl_orchestrator_reconcile_one() {
   local vm="${1-}"
   local admin mode transport refresh_rc peer_host_id peer_mgmt_ip peer_reach active_side
@@ -304,6 +324,13 @@ ftctl_orchestrator_reconcile_one() {
   protection_state="$(ftctl_state_get "${vm}" "protection_state" 2>/dev/null || echo "${protection_state}")"
   transport="$(ftctl_state_get "${vm}" "transport_state" 2>/dev/null || echo "${transport}")"
   active_side="$(ftctl_state_get "${vm}" "active_side" 2>/dev/null || echo "${active_side}")"
+  fencing_state="$(ftctl_state_get "${vm}" "fencing_state" 2>/dev/null || echo "${fencing_state}")"
+  if ftctl_orchestrator_is_cloud_failback_awaiting_command "${mode}" "${active_side}" "${protection_state}" "${transport}" "${fencing_state}"; then
+    ftctl_state_set "${vm}" "last_healthy_ts=$(ftctl_now_iso8601)"
+    ftctl_log_event "failback" "failback.await-command" "ok" "${vm}" "" \
+      "reason=cloud_managed_manual_fence_released active_side=${active_side} protection=${protection_state} transport=${transport} fencing=${fencing_state}"
+    return 0
+  fi
   if [[ "${mode}" != "ft" ]] && ftctl_orchestrator_is_cloud_failback_transition "${vm}" "${protection_state}" "${transport}"; then
     case "${transport}" in
       reverse_syncing|reverse_sync_ready|reverse_sync_cutback_required|failed_over|unknown|"")
@@ -408,12 +435,12 @@ ftctl_orchestrator_reconcile() {
     if ftctl_profile_load_vm "${vm}" 2>/dev/null; then
       ftctl_orchestrator_check_vm "${vm}" "1" >/dev/null || true
     fi
-    ftctl_local_health "1" >/dev/null || true
+    ftctl_local_health "1" "${vm}" >/dev/null || true
     ftctl_state_print_one "${vm}" "${json}"
     return 0
   fi
 
-  ftctl_local_health "1" >/dev/null || true
+  ftctl_local_health "1" "${vm}" >/dev/null || true
   shopt -s nullglob
   for f in "${FTCTL_STATE_DIR}"/*.state; do
     name="$(basename "${f}" .state)"
