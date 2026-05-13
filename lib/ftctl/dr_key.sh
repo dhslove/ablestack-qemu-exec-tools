@@ -29,6 +29,41 @@ ftctl_dr_key_comment() {
   printf 'ftctl-dr:%s' "$(ftctl_dr_key_profile "${profile}")"
 }
 
+ftctl_dr_key_private_key_path() {
+  local profile="${1-}"
+  local normalized key_path
+
+  normalized="$(ftctl_dr_key_profile "${profile}")"
+  key_path="${FTCTL_DR_KEY_ROOT}/${normalized}/id_ed25519"
+  [[ -s "${key_path}" ]] || return 1
+  printf '%s' "${key_path}"
+}
+
+ftctl_dr_key_uri_with_keyfile() {
+  local uri="${1-}"
+  local profile="${2-}"
+  local key_path separator
+
+  [[ "${uri}" == qemu+ssh://* ]] || {
+    printf '%s' "${uri}"
+    return 0
+  }
+  [[ "${uri}" == *\?keyfile=* || "${uri}" == *\&keyfile=* ]] && {
+    printf '%s' "${uri}"
+    return 0
+  }
+
+  key_path="$(ftctl_dr_key_private_key_path "${profile}" 2>/dev/null || true)"
+  [[ -n "${key_path}" ]] || {
+    printf '%s' "${uri}"
+    return 0
+  }
+
+  separator="?"
+  [[ "${uri}" == *\?* ]] && separator="&"
+  printf '%s%skeyfile=%s' "${uri}" "${separator}" "${key_path}"
+}
+
 ftctl_dr_key_emit() {
   local command="${1-}"
   local result="${2-}"

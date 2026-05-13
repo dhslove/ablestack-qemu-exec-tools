@@ -41,6 +41,8 @@ source "${LIB_BASE}/ftctl/cluster.sh"
 # shellcheck source=/dev/null
 source "${LIB_BASE}/ftctl/blockcopy.sh"
 # shellcheck source=/dev/null
+source "${LIB_BASE}/ftctl/dr_key.sh"
+# shellcheck source=/dev/null
 source "${LIB_BASE}/ftctl/standby.sh"
 # shellcheck source=/dev/null
 source "${LIB_BASE}/ftctl/xcolo.sh"
@@ -443,6 +445,33 @@ EOF
   (( chosen_port >= FTCTL_REMOTE_NBD_PORT_BASE && chosen_port < FTCTL_REMOTE_NBD_PORT_BASE + FTCTL_REMOTE_NBD_PORT_COUNT )) || \
     selftest_fail "remote-nbd port out of range"
 }
+
+selftest_case_dr_remote_key_connectivity_args() (
+  selftest_reset_env
+  selftest_info "DR remote key connectivity arguments"
+
+  local vm="i-2-381-VM"
+  local uri keyed_uri identity_args existing_key_uri
+  FTCTL_DR_KEY_ROOT="${SELFTEST_ROOT}/ssh/ftctl-dr"
+  CLI_VM="${vm}"
+  FTCTL_PROFILE_MODE="dr"
+  ftctl_dr_key_ensure "${vm}" >/dev/null
+
+  uri="qemu+ssh://root@10.0.0.12:22/system"
+  keyed_uri="$(ftctl_dr_key_uri_with_keyfile "${uri}" "${vm}")"
+  selftest_assert_eq "${keyed_uri}" "${uri}?keyfile=${FTCTL_DR_KEY_ROOT}/${vm}/id_ed25519" "DR qemu+ssh keyfile URI"
+
+  keyed_uri="$(ftctl_dr_key_uri_with_keyfile "${uri}?no_verify=1" "${vm}")"
+  selftest_assert_eq "${keyed_uri}" "${uri}?no_verify=1&keyfile=${FTCTL_DR_KEY_ROOT}/${vm}/id_ed25519" "DR qemu+ssh keyfile URI with existing query"
+
+  existing_key_uri="${uri}?keyfile=/root/.ssh/custom"
+  keyed_uri="$(ftctl_dr_key_uri_with_keyfile "${existing_key_uri}" "${vm}")"
+  selftest_assert_eq "${keyed_uri}" "${existing_key_uri}" "existing qemu+ssh keyfile is preserved"
+
+  ftctl_blockcopy_dr_ssh_identity_args identity_args "${vm}"
+  selftest_assert_contains "${identity_args}" "-i ${FTCTL_DR_KEY_ROOT}/${vm}/id_ed25519" "DR ssh identity key"
+  selftest_assert_contains "${identity_args}" "-o IdentitiesOnly=yes" "DR ssh identities only"
+)
 
 selftest_case_blockcopy_missing_job_state() (
   selftest_reset_env
@@ -1476,6 +1505,7 @@ selftest_main() {
   selftest_case_libvirt_managed_peer_krbd_map
   selftest_case_standby_activate_already_exists
   selftest_case_backend_validation
+  selftest_case_dr_remote_key_connectivity_args
   selftest_case_blockcopy_missing_job_state
   selftest_case_blockcopy_progress_status
   selftest_case_shared_xml_reuse_external

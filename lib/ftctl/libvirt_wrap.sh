@@ -189,9 +189,21 @@ ftctl_virsh() {
   local out_var="${2}"
   local err_var="${3}"
   local rc_var="${4}"
+  local args=()
+  local i profile effective_uri
   shift 4
   [[ "${1-}" == "--" ]] && shift
-  ftctl_cmd_run "${timeout_sec}" "${out_var}" "${err_var}" "${rc_var}" -- env LC_ALL=C LANG=C virsh "$@" || return $?
+  args=("$@")
+  if [[ "${FTCTL_PROFILE_MODE:-}" == "dr" ]] && declare -F ftctl_dr_key_uri_with_keyfile >/dev/null 2>&1; then
+    profile="${CLI_PROFILE:-${CLI_VM:-}}"
+    for ((i = 0; i < ${#args[@]} - 1; i++)); do
+      if [[ "${args[$i]}" == "-c" && "${args[$((i + 1))]}" == qemu+ssh://* ]]; then
+        effective_uri="$(ftctl_dr_key_uri_with_keyfile "${args[$((i + 1))]}" "${profile}")"
+        args[i + 1]="${effective_uri}"
+      fi
+    done
+  fi
+  ftctl_cmd_run "${timeout_sec}" "${out_var}" "${err_var}" "${rc_var}" -- env LC_ALL=C LANG=C virsh "${args[@]}" || return $?
 }
 
 ftctl_local_health() {

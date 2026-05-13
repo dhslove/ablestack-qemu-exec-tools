@@ -790,6 +790,20 @@ ftctl_blockcopy_remote_nbd_progress_looks_alive() {
   ftctl_blockcopy_remote_path_exists "${host}" "${user}" "${secondary_path}"
 }
 
+ftctl_blockcopy_dr_ssh_identity_args() {
+  local out_var="${1}"
+  local profile="${2-}"
+  local key_path=""
+
+  printf -v "${out_var}" '%s' ""
+  [[ "${FTCTL_PROFILE_MODE:-}" == "dr" ]] || return 0
+  declare -F ftctl_dr_key_private_key_path >/dev/null 2>&1 || return 0
+  [[ -n "${profile}" ]] || profile="${CLI_PROFILE:-${CLI_VM:-}}"
+  key_path="$(ftctl_dr_key_private_key_path "${profile}" 2>/dev/null || true)"
+  [[ -n "${key_path}" ]] || return 0
+  printf -v "${out_var}" -- '-i %q -o IdentitiesOnly=yes ' "${key_path}"
+}
+
 ftctl_blockcopy_remote_preflight_emit() {
   local vm="${1-}"
   local json="${2-0}"
@@ -1525,7 +1539,7 @@ ftctl_blockcopy_remote_exec() {
   local remote_cmd="${6-}"
   local tmp_cmd=""
   local local_wrapper=""
-  local ssh_host="" ssh_port="" ssh_port_args=""
+  local ssh_host="" ssh_port="" ssh_port_args="" ssh_identity_args=""
   [[ -n "${host}" ]] || {
     printf -v "${out_var}" '%s' ""
     printf -v "${err_var}" '%s' "missing_remote_host"
@@ -1538,6 +1552,7 @@ ftctl_blockcopy_remote_exec() {
   if [[ -n "${ssh_port}" ]]; then
     printf -v ssh_port_args -- '-p %q ' "${ssh_port}"
   fi
+  ftctl_blockcopy_dr_ssh_identity_args ssh_identity_args "${CLI_PROFILE:-${CLI_VM:-}}" || true
   [[ -n "${remote_cmd}" ]] || {
     printf -v "${out_var}" '%s' ""
     printf -v "${err_var}" '%s' "missing_remote_command"
@@ -1548,16 +1563,18 @@ ftctl_blockcopy_remote_exec() {
   printf '%s\n' "${remote_cmd}" > "${tmp_cmd}"
   chmod 0600 "${tmp_cmd}" 2>/dev/null || true
   if [[ -n "${FTCTL_SSH_PASSWORD:-}" ]] && command -v sshpass >/dev/null 2>&1; then
-    printf -v local_wrapper 'sshpass -p %q ssh %s-o StrictHostKeyChecking=no -o ConnectTimeout=%q %q %q < %q' \
+    printf -v local_wrapper 'sshpass -p %q ssh %s%s-o StrictHostKeyChecking=no -o ConnectTimeout=%q %q %q < %q' \
       "${FTCTL_SSH_PASSWORD}" \
       "${ssh_port_args}" \
+      "${ssh_identity_args}" \
       "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC}" \
       "${user}@${ssh_host}" \
       "bash -s" \
       "${tmp_cmd}"
   else
-    printf -v local_wrapper 'ssh %s-o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=%q %q %q < %q' \
+    printf -v local_wrapper 'ssh %s%s-o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=%q %q %q < %q' \
       "${ssh_port_args}" \
+      "${ssh_identity_args}" \
       "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC}" \
       "${user}@${ssh_host}" \
       "bash -s" \
