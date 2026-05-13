@@ -60,15 +60,35 @@ firewalld_running() {
   systemctl is-active --quiet firewalld
 }
 
+firewalld_target_zones() {
+  local zones=() zone default_zone active_line
+  default_zone="$(firewall-cmd --get-default-zone 2>/dev/null || true)"
+  [[ -n "${default_zone}" ]] && zones+=("${default_zone}")
+  while IFS= read -r active_line; do
+    [[ "${active_line}" == *":" ]] || continue
+    zone="${active_line%:}"
+    [[ -n "${zone}" ]] && zones+=("${zone}")
+  done < <(firewall-cmd --get-active-zones 2>/dev/null || true)
+  printf '%s\n' "${zones[@]}" | awk 'NF && !seen[$0]++'
+}
+
+add_service_to_zone() {
+  local zone="${1-}"
+  [[ -n "${zone}" ]] || return 0
+  firewall-cmd --permanent --zone="${zone}" --add-service="${SERVICE_NAME}" >/dev/null 2>&1 || true
+  if firewalld_running; then
+    firewall-cmd --zone="${zone}" --add-service="${SERVICE_NAME}" >/dev/null 2>&1 || true
+  fi
+}
+
 apply_service() {
   write_service_file
   if command -v firewall-cmd >/dev/null 2>&1; then
     firewall-cmd --reload >/dev/null 2>&1 || true
-    firewall-cmd --permanent --add-service="${SERVICE_NAME}" >/dev/null 2>&1 || true
-    if firewalld_running; then
-      firewall-cmd --add-service="${SERVICE_NAME}" >/dev/null 2>&1 || true
-      firewall-cmd --reload >/dev/null 2>&1 || true
-    fi
+    while IFS= read -r zone; do
+      add_service_to_zone "${zone}"
+    done < <(firewalld_target_zones)
+    firewall-cmd --reload >/dev/null 2>&1 || true
   fi
   echo "[INFO] Firewalld service ensured: ${SERVICE_NAME} (x-colo proxy ${FTCTL_XCOLO_PROXY_PORT}/tcp, migrate ${FTCTL_XCOLO_MIGRATE_PORT}/tcp, mirror ${FTCTL_XCOLO_MIRROR_PORT}/tcp, compare ${FTCTL_XCOLO_COMPARE_PORT}/tcp; remote-nbd ${FTCTL_REMOTE_NBD_PORT_BASE}-${range_end}/tcp)"
 }
@@ -85,6 +105,33 @@ remove_service() {
   echo "[INFO] Firewalld service removed: ${SERVICE_NAME}"
 }
 
+status_service() {
+  local zone query_rc=1
+  echo "service_file=${SERVICE_PATH}"
+  [[ -f "${SERVICE_PATH}" ]] && echo "service_file_present=true" || echo "service_file_present=false"
+  if ! command -v firewall-cmd >/dev/null 2>&1; then
+    echo "firewall_cmd=false"
+    return 0
+  fi
+  echo "firewall_cmd=true"
+  firewalld_running && echo "firewalld=active" || echo "firewalld=inactive"
+  while IFS= read -r zone; do
+    [[ -n "${zone}" ]] || continue
+    if firewall-cmd --zone="${zone}" --query-service="${SERVICE_NAME}" >/dev/null 2>&1; then
+      query_rc=0
+      echo "runtime_zone_${zone}=enabled"
+    else
+      echo "runtime_zone_${zone}=disabled"
+    fi
+    if firewall-cmd --permanent --zone="${zone}" --query-service="${SERVICE_NAME}" >/dev/null 2>&1; then
+      echo "permanent_zone_${zone}=enabled"
+    else
+      echo "permanent_zone_${zone}=disabled"
+    fi
+  done < <(firewalld_target_zones)
+  return "${query_rc}"
+}
+
 case "${ACTION}" in
   apply)
     apply_service
@@ -92,8 +139,11 @@ case "${ACTION}" in
   remove)
     remove_service
     ;;
+  status)
+    status_service
+    ;;
   *)
-    echo "Usage: $0 [apply|remove]" >&2
+    echo "Usage: $0 [apply|remove|status]" >&2
     exit 2
     ;;
 esac

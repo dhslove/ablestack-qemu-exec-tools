@@ -817,7 +817,7 @@ ftctl_blockcopy_remote_preflight_emit() {
 ftctl_blockcopy_remote_preflight() {
   local vm="${1-}"
   local json="${2-0}"
-  local remote_host="" remote_user="" out="" err="" rc=0 reason=""
+  local remote_host="" remote_user="" out="" err="" rc=0 reason="" remote_port=""
 
   if [[ "${FTCTL_PROFILE_BACKEND_MODE:-}" != "remote-nbd" ]]; then
     reason="unsupported_backend"
@@ -866,6 +866,19 @@ ftctl_blockcopy_remote_preflight() {
     fi
     ftctl_blockcopy_remote_preflight_emit "${vm}" "${json}" "fail" "${reason}" "${FTCTL_PROFILE_SECONDARY_URI}" "${remote_host}" "${remote_user}" "${rc}"
     return "${rc}"
+  fi
+
+  if ftctl_blockcopy_remote_nbd_port_extract_from_uri "nbd://${FTCTL_PROFILE_REMOTE_NBD_EXPORT_ADDR:-}/x" remote_port 2>/dev/null && [[ -n "${remote_port}" ]]; then
+    out=""
+    err=""
+    rc=0
+    ftctl_blockcopy_remote_exec "${remote_host}" "${remote_user}" out err rc \
+      "if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then firewall-cmd --query-service=ablestack-vm-ftctl-remote-nbd >/dev/null 2>&1 || firewall-cmd --query-port=${remote_port}/tcp >/dev/null 2>&1; fi" || true
+    if [[ "${rc}" != "0" ]]; then
+      reason="remote_nbd_firewall_closed"
+      ftctl_blockcopy_remote_preflight_emit "${vm}" "${json}" "fail" "${reason}" "${FTCTL_PROFILE_SECONDARY_URI}" "${remote_host}" "${remote_user}" "${rc}"
+      return "${rc}"
+    fi
   fi
 
   ftctl_blockcopy_remote_preflight_emit "${vm}" "${json}" "ok" "ok" "${FTCTL_PROFILE_SECONDARY_URI}" "${remote_host}" "${remote_user}" 0

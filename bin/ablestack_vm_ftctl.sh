@@ -75,6 +75,9 @@ CLI_XCOLO_PROXY_ENDPOINT=""
 CLI_XCOLO_NBD_ENDPOINT=""
 CLI_XCOLO_MIGRATE_URI=""
 CLI_LIMIT=""
+CLI_PUBLIC_KEY=""
+CLI_KEY_COMMENT=""
+CLI_SSH_USER=""
 
 FTCTL_LIB_BASE=""
 
@@ -112,6 +115,7 @@ ftctl_load_libs() {
     inventory.sh
     cluster.sh
     blockcopy.sh
+    dr_key.sh
     standby.sh
     xcolo.sh
     fencing.sh
@@ -143,6 +147,8 @@ ftctl_load_libs() {
   source "${FTCTL_LIB_BASE}/ftctl/cluster.sh"
   # shellcheck source=/dev/null
   source "${FTCTL_LIB_BASE}/ftctl/blockcopy.sh"
+  # shellcheck source=/dev/null
+  source "${FTCTL_LIB_BASE}/ftctl/dr_key.sh"
   # shellcheck source=/dev/null
   source "${FTCTL_LIB_BASE}/ftctl/standby.sh"
   # shellcheck source=/dev/null
@@ -180,6 +186,9 @@ Commands:
   pause-protection   Pause reconciliation for a VM
   resume-protection  Resume reconciliation for a VM
   preflight-remote   Validate remote DR qemu+ssh execution path
+  dr-key-ensure      Create or return the local DR SSH public key
+  dr-key-install     Install a DR SSH public key on this host
+  dr-key-remove      Remove an installed DR SSH public key from this host
   check              Probe VM/profile/peer reachability
   health             Check local libvirt health only
   events             Show recent FTCTL events
@@ -209,6 +218,9 @@ Global options:
       --blockcopy-ip ADDR
       --xcolo-control-ip ADDR
       --xcolo-data-ip ADDR
+      --public-key KEY
+      --key-comment COMMENT
+      --ssh-user USER
       --limit N       Limit items for commands that support it
       --secondary-vm-name NAME
       --active-side SIDE
@@ -255,7 +267,7 @@ parse_args() {
         print_version
         exit "${EXIT_OK}"
         ;;
-      protect|status|reconcile|failover|failover-prepare|failback|failback-sync|failback-finalize|failback-reprotect|unprotect|fence-confirm|fence-clear|pause-protection|resume-protection|preflight-remote|check|health|events|snapshot|config)
+      protect|status|reconcile|failover|failover-prepare|failback|failback-sync|failback-finalize|failback-reprotect|unprotect|fence-confirm|fence-clear|pause-protection|resume-protection|preflight-remote|dr-key-ensure|dr-key-install|dr-key-remove|check|health|events|snapshot|config)
         [[ -z "${CLI_COMMAND}" ]] || {
           echo "ERROR: multiple commands specified" >&2
           exit "${EXIT_USAGE}"
@@ -438,6 +450,18 @@ parse_args() {
         ;;
       --xcolo-migrate-uri)
         CLI_XCOLO_MIGRATE_URI="${2-}"
+        shift 2
+        ;;
+      --public-key)
+        CLI_PUBLIC_KEY="${2-}"
+        shift 2
+        ;;
+      --key-comment)
+        CLI_KEY_COMMENT="${2-}"
+        shift 2
+        ;;
+      --ssh-user)
+        CLI_SSH_USER="${2-}"
         shift 2
         ;;
       --limit)
@@ -754,6 +778,19 @@ dispatch() {
       FTCTL_PROFILE_REMOTE_NBD_EXPORT_ADDR="${CLI_REMOTE_NBD_EXPORT_ADDR}"
       FTCTL_PROFILE_REMOTE_NBD_EXPORT_NAME="${CLI_VM}"
       ftctl_blockcopy_remote_preflight "${CLI_VM}" "${CLI_JSON}"
+      ;;
+    dr-key-ensure)
+      ftctl_dr_key_ensure "${CLI_PROFILE:-${CLI_VM:-}}"
+      ;;
+    dr-key-install)
+      [[ -n "${CLI_PUBLIC_KEY}" ]] || {
+        echo "ERROR: dr-key-install requires --public-key" >&2
+        exit "${EXIT_USAGE}"
+      }
+      ftctl_dr_key_install "${CLI_PROFILE:-${CLI_VM:-}}" "${CLI_PUBLIC_KEY}" "${CLI_KEY_COMMENT}" "${CLI_SSH_USER:-root}"
+      ;;
+    dr-key-remove)
+      ftctl_dr_key_remove "${CLI_PROFILE:-${CLI_VM:-}}" "${CLI_KEY_COMMENT}" "${CLI_SSH_USER:-root}"
       ;;
     check)
       require_vm
