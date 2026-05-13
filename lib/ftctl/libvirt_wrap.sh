@@ -110,7 +110,7 @@ ftctl_command_requires_lock() {
   local command="${1-}"
   local action="${2-}"
   case "${command}" in
-    status|check|health|events)
+    status|check|health|events|preflight-remote)
       return 1
       ;;
     config)

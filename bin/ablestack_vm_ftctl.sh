@@ -179,6 +179,7 @@ Commands:
   fence-clear        Clear fencing state
   pause-protection   Pause reconciliation for a VM
   resume-protection  Resume reconciliation for a VM
+  preflight-remote   Validate remote DR qemu+ssh execution path
   check              Probe VM/profile/peer reachability
   health             Check local libvirt health only
   events             Show recent FTCTL events
@@ -254,7 +255,7 @@ parse_args() {
         print_version
         exit "${EXIT_OK}"
         ;;
-      protect|status|reconcile|failover|failover-prepare|failback|failback-sync|failback-finalize|failback-reprotect|unprotect|fence-confirm|fence-clear|pause-protection|resume-protection|check|health|events|snapshot|config)
+      protect|status|reconcile|failover|failover-prepare|failback|failback-sync|failback-finalize|failback-reprotect|unprotect|fence-confirm|fence-clear|pause-protection|resume-protection|preflight-remote|check|health|events|snapshot|config)
         [[ -z "${CLI_COMMAND}" ]] || {
           echo "ERROR: multiple commands specified" >&2
           exit "${EXIT_USAGE}"
@@ -737,6 +738,22 @@ dispatch() {
       ftctl_profile_load_vm "${CLI_VM}"
       ftctl_profile_validate "${CLI_VM}"
       ftctl_state_resume_vm "${CLI_VM}"
+      ;;
+    preflight-remote)
+      require_vm
+      require_mode
+      [[ -n "${CLI_PEER}" ]] || {
+        echo "ERROR: preflight-remote requires --peer" >&2
+        exit "${EXIT_USAGE}"
+      }
+      FTCTL_PROFILE_MODE="${CLI_MODE}"
+      FTCTL_PROFILE_SECONDARY_URI="${CLI_PEER}"
+      FTCTL_PROFILE_BACKEND_MODE="remote-nbd"
+      FTCTL_PROFILE_TARGET_STORAGE_SCOPE="secondary-local"
+      FTCTL_PROFILE_SECONDARY_TARGET_DIR="${CLI_SECONDARY_TARGET_DIR}"
+      FTCTL_PROFILE_REMOTE_NBD_EXPORT_ADDR="${CLI_REMOTE_NBD_EXPORT_ADDR}"
+      FTCTL_PROFILE_REMOTE_NBD_EXPORT_NAME="${CLI_VM}"
+      ftctl_blockcopy_remote_preflight "${CLI_VM}" "${CLI_JSON}"
       ;;
     check)
       require_vm

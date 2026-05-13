@@ -669,11 +669,16 @@ ftctl_blockcopy_parse_ssh_target_from_uri() {
   printf -v "${user_var}" '%s' "${user_value}"
 }
 
+ftctl_blockcopy_ssh_host_has_explicit_port() {
+  local host="${1-}"
+  [[ "${host}" =~ ^\[[^]]+\]:[0-9]+$ || "${host}" =~ ^[^:]+:[0-9]+$ ]]
+}
+
 ftctl_blockcopy_remote_target_host_user() {
   local host_var="${1}"
   local user_var="${2}"
   local record="" host_id="" role="" mgmt_ip="" libvirt_uri="" blockcopy_ip="" xcolo_ctrl="" xcolo_data=""
-  local resolved_host="" resolved_user=""
+  local resolved_host="" resolved_user="" uri_host="" uri_user=""
 
   ftctl_cluster_load || true
   resolved_user="${FTCTL_PROFILE_FENCING_SSH_USER:-root}"
@@ -696,12 +701,39 @@ ftctl_blockcopy_remote_target_host_user() {
     ftctl_cluster_parse_record "${record}" host_id role mgmt_ip libvirt_uri blockcopy_ip xcolo_ctrl xcolo_data
     : "${host_id}${role}${libvirt_uri}${blockcopy_ip}${xcolo_ctrl}${xcolo_data}"
     resolved_host="${mgmt_ip}"
+    if [[ -n "${libvirt_uri}" ]] &&
+        ftctl_blockcopy_parse_ssh_target_from_uri "${libvirt_uri}" uri_host uri_user 2>/dev/null; then
+      if ftctl_blockcopy_ssh_host_has_explicit_port "${uri_host}"; then
+        resolved_host="${uri_host}"
+      fi
+      if [[ -n "${uri_user}" && "${uri_user}" != "${FTCTL_PROFILE_FENCING_SSH_USER:-root}" ]]; then
+        resolved_user="${uri_user}"
+      fi
+    fi
   fi
   if [[ -z "${resolved_host}" ]]; then
     ftctl_blockcopy_parse_ssh_target_from_uri "${FTCTL_PROFILE_SECONDARY_URI}" resolved_host resolved_user || return 2
   fi
   printf -v "${host_var}" '%s' "${resolved_host}"
   printf -v "${user_var}" '%s' "${resolved_user}"
+}
+
+ftctl_blockcopy_split_ssh_host_port() {
+  local host_spec="${1-}"
+  local host_var="${2}"
+  local port_var="${3}"
+  local host="${host_spec}"
+  local port=""
+
+  if [[ "${host_spec}" =~ ^\[([^]]+)\]:([0-9]+)$ ]]; then
+    host="${BASH_REMATCH[1]}"
+    port="${BASH_REMATCH[2]}"
+  elif [[ "${host_spec}" =~ ^([^:]+):([0-9]+)$ ]]; then
+    host="${BASH_REMATCH[1]}"
+    port="${BASH_REMATCH[2]}"
+  fi
+  printf -v "${host_var}" '%s' "${host}"
+  printf -v "${port_var}" '%s' "${port}"
 }
 
 ftctl_blockcopy_remote_nbd_port_in_use() {
@@ -756,6 +788,87 @@ ftctl_blockcopy_remote_nbd_progress_looks_alive() {
   ftctl_blockcopy_remote_nbd_port_in_use "${host}" "${user}" "${port}" || return 1
   [[ -n "${secondary_path}" ]] || return 0
   ftctl_blockcopy_remote_path_exists "${host}" "${user}" "${secondary_path}"
+}
+
+ftctl_blockcopy_remote_preflight_emit() {
+  local vm="${1-}"
+  local json="${2-0}"
+  local result="${3-}"
+  local reason="${4-}"
+  local peer_uri="${5-}"
+  local remote_host="${6-}"
+  local remote_user="${7-}"
+  local rc="${8-0}"
+  if [[ "${json}" == "1" ]]; then
+    printf '{"command":"preflight-remote","result":"%s","vm":"%s","reason":"%s","peer_uri":"%s","remote_host":"%s","remote_user":"%s","exit_code":%s}\n' \
+      "$(ftctl__json_escape "${result}")" \
+      "$(ftctl__json_escape "${vm}")" \
+      "$(ftctl__json_escape "${reason}")" \
+      "$(ftctl__json_escape "${peer_uri}")" \
+      "$(ftctl__json_escape "${remote_host}")" \
+      "$(ftctl__json_escape "${remote_user}")" \
+      "${rc}"
+  else
+    printf 'preflight-remote result=%s vm=%s reason=%s peer_uri=%s remote_host=%s remote_user=%s exit_code=%s\n' \
+      "${result}" "${vm}" "${reason}" "${peer_uri}" "${remote_host}" "${remote_user}" "${rc}"
+  fi
+}
+
+ftctl_blockcopy_remote_preflight() {
+  local vm="${1-}"
+  local json="${2-0}"
+  local remote_host="" remote_user="" out="" err="" rc=0 reason=""
+
+  if [[ "${FTCTL_PROFILE_BACKEND_MODE:-}" != "remote-nbd" ]]; then
+    reason="unsupported_backend"
+    ftctl_blockcopy_remote_preflight_emit "${vm}" "${json}" "fail" "${reason}" "${FTCTL_PROFILE_SECONDARY_URI}" "" "" 2
+    return 2
+  fi
+  if [[ -z "${FTCTL_PROFILE_SECONDARY_URI:-}" ]]; then
+    reason="missing_peer_uri"
+    ftctl_blockcopy_remote_preflight_emit "${vm}" "${json}" "fail" "${reason}" "" "" "" 2
+    return 2
+  fi
+  ftctl_blockcopy_parse_ssh_target_from_uri "${FTCTL_PROFILE_SECONDARY_URI}" remote_host remote_user || {
+    rc=$?
+    reason="remote_ssh_uri_invalid"
+    ftctl_blockcopy_remote_preflight_emit "${vm}" "${json}" "fail" "${reason}" "${FTCTL_PROFILE_SECONDARY_URI}" "" "" "${rc}"
+    return "${rc}"
+  }
+
+  out=""
+  err=""
+  rc=0
+  ftctl_blockcopy_remote_exec "${remote_host}" "${remote_user}" out err rc "true" || true
+  if [[ "${rc}" != "0" ]]; then
+    reason="remote_ssh_auth_failed"
+    if grep -Eiq "connection refused" <<< "${out}${err}"; then
+      reason="remote_ssh_port_refused"
+    elif grep -Eiq "host key verification failed|REMOTE HOST IDENTIFICATION HAS CHANGED" <<< "${out}${err}"; then
+      reason="remote_ssh_host_key_mismatch"
+    fi
+    ftctl_blockcopy_remote_preflight_emit "${vm}" "${json}" "fail" "${reason}" "${FTCTL_PROFILE_SECONDARY_URI}" "${remote_host}" "${remote_user}" "${rc}"
+    return "${rc}"
+  fi
+
+  out=""
+  err=""
+  rc=0
+  ftctl_virsh "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC}" out err rc -- -c "${FTCTL_PROFILE_SECONDARY_URI}" list --all || true
+  if [[ "${rc}" != "0" ]]; then
+    reason="remote_libvirt_unreachable"
+    if grep -Eiq "connection refused" <<< "${out}${err}"; then
+      reason="remote_ssh_port_refused"
+    elif grep -Eiq "permission denied|publickey" <<< "${out}${err}"; then
+      reason="remote_ssh_auth_failed"
+    elif grep -Eiq "host key verification failed|REMOTE HOST IDENTIFICATION HAS CHANGED" <<< "${out}${err}"; then
+      reason="remote_ssh_host_key_mismatch"
+    fi
+    ftctl_blockcopy_remote_preflight_emit "${vm}" "${json}" "fail" "${reason}" "${FTCTL_PROFILE_SECONDARY_URI}" "${remote_host}" "${remote_user}" "${rc}"
+    return "${rc}"
+  fi
+
+  ftctl_blockcopy_remote_preflight_emit "${vm}" "${json}" "ok" "ok" "${FTCTL_PROFILE_SECONDARY_URI}" "${remote_host}" "${remote_user}" 0
 }
 
 ftctl_blockcopy_remote_nbd_active_count() {
@@ -1399,6 +1512,7 @@ ftctl_blockcopy_remote_exec() {
   local remote_cmd="${6-}"
   local tmp_cmd=""
   local local_wrapper=""
+  local ssh_host="" ssh_port="" ssh_port_args=""
   [[ -n "${host}" ]] || {
     printf -v "${out_var}" '%s' ""
     printf -v "${err_var}" '%s' "missing_remote_host"
@@ -1406,6 +1520,11 @@ ftctl_blockcopy_remote_exec() {
     return 2
   }
   [[ -n "${user}" ]] || user="root"
+  ftctl_blockcopy_split_ssh_host_port "${host}" ssh_host ssh_port
+  [[ -n "${ssh_host}" ]] || ssh_host="${host}"
+  if [[ -n "${ssh_port}" ]]; then
+    printf -v ssh_port_args -- '-p %q ' "${ssh_port}"
+  fi
   [[ -n "${remote_cmd}" ]] || {
     printf -v "${out_var}" '%s' ""
     printf -v "${err_var}" '%s' "missing_remote_command"
@@ -1416,16 +1535,18 @@ ftctl_blockcopy_remote_exec() {
   printf '%s\n' "${remote_cmd}" > "${tmp_cmd}"
   chmod 0600 "${tmp_cmd}" 2>/dev/null || true
   if [[ -n "${FTCTL_SSH_PASSWORD:-}" ]] && command -v sshpass >/dev/null 2>&1; then
-    printf -v local_wrapper 'sshpass -p %q ssh -o StrictHostKeyChecking=no -o ConnectTimeout=%q %q %q < %q' \
+    printf -v local_wrapper 'sshpass -p %q ssh %s-o StrictHostKeyChecking=no -o ConnectTimeout=%q %q %q < %q' \
       "${FTCTL_SSH_PASSWORD}" \
+      "${ssh_port_args}" \
       "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC}" \
-      "${user}@${host}" \
+      "${user}@${ssh_host}" \
       "bash -s" \
       "${tmp_cmd}"
   else
-    printf -v local_wrapper 'ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=%q %q %q < %q' \
+    printf -v local_wrapper 'ssh %s-o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=%q %q %q < %q' \
+      "${ssh_port_args}" \
       "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC}" \
-      "${user}@${host}" \
+      "${user}@${ssh_host}" \
       "bash -s" \
       "${tmp_cmd}"
   fi
