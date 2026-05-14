@@ -298,7 +298,7 @@ ftctl_orchestrator_reconcile_one() {
   fencing_state="$(ftctl_state_get "${vm}" "fencing_state" 2>/dev/null || echo "clear")"
   failover_ready="$(ftctl_state_get "${vm}" "failover_ready" 2>/dev/null || echo "")"
 
-  if [[ "${mode}" == "ha" && "${active_side}" == "primary" && "${protection_state}" == "failing_over" ]]; then
+  if [[ ( "${mode}" == "ha" || "${mode}" == "dr" ) && "${active_side}" == "primary" && "${protection_state}" == "failing_over" ]]; then
     case "${fencing_state}" in
       required|manual-required|manual-fenced)
         case "${failover_ready}" in

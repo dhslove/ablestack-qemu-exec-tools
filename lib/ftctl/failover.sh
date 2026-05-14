@@ -18,7 +18,10 @@
 ftctl_failover_requires_blockcopy_ready() {
   local mode="${1-}"
 
-  [[ "${mode}" == "ha" ]] || return 1
+  case "${mode}" in
+    ha|dr) ;;
+    *) return 1 ;;
+  esac
   case "${FTCTL_PROFILE_BACKEND_MODE:-}" in
     remote-nbd|shared-blockcopy) return 0 ;;
     *) return 1 ;;
