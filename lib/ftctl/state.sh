@@ -420,6 +420,7 @@ ftctl_state_unprotect_vm() {
   local force_cleanup="${3-0}"
   local canceled unmapped remote_nbd_required remote_nbd_released result warnings rc forced_json warnings_json
 
+  warnings=""
   canceled="$(ftctl_state_cancel_block_jobs "${vm}" 2>/dev/null || echo 0)"
   if ftctl_state_wait_block_jobs_released "${vm}"; then
     :
