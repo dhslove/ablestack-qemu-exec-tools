@@ -4,7 +4,9 @@ Date: 2026-05-13
 
 ## 1. Purpose
 
-DR protection can replicate data to a remote site whose Mold management system is different from the source site. In that case, Cloud must be able to look up the remote host and storage from the remote Mold API, but the actual data transfer still runs from the source qemu FTCTL host to the remote qemu/libvirt/NBD path.
+DR protection can replicate data to a remote site whose Mold management system is different from the source site. In that case, Cloud must be able to look up the remote host and storage from the remote Mold API, and the actual data transfer still runs from the source qemu FTCTL host to the remote qemu/libvirt/NBD path.
+
+This document is limited to SSH, libvirt, and remote-NBD transfer preflight/key setup. Cloud-managed remote replica VM and volume ownership is specified by [201. DR Remote Mold Cloud-Managed Resource Ownership Design](201-dr-remote-mold-cloud-managed-resource-ownership-design-20260514.md). If this document appears to imply that qemu FTCTL may create Cloud-managed replica VMs, volumes, RBD images, or remote-nbd targets, the 201 ownership design supersedes that interpretation.
 
 This design fixes the current DR-WIN failure mode where protection registration can create Cloud and host-side FTCTL state even though the source host cannot reach the remote host over non-interactive SSH or the remote NBD firewall path is not ready.
 
@@ -38,6 +40,7 @@ Observed state after failed registration:
   - Mold Agent delivers commands to qemu FTCTL and returns logs/status.
   - Actual HA/DR/FT actions remain in qemu FTCTL.
 - Cloud must not directly SSH to qemu hosts, call host libvirt, or perform blockcopy itself.
+- For Cloud-managed DR, qemu FTCTL must receive explicit Cloud-created target paths and must not create or format replica VM/volume/RBD/remote-nbd targets.
 - Remote Mold API key and secret are lookup-only inputs and must not be persisted in VM details, FTCTL profiles, host files, or logs.
 - DR registration must fail before creating durable protection state when the remote transfer path is not ready.
 - Private SSH keys must not be uploaded to Cloud or stored in Cloud DB.
@@ -121,17 +124,21 @@ Deployment verification must fail if management logs show these as unknown param
 
 ### 6.2 Registration Order
 
-For `mode=dr`, `drpeersitetype=remote-mold`, and `backendmode=remote-nbd`, the registration sequence becomes:
+For `mode=dr`, `drpeersitetype=remote-mold`, `provisioningbackend=cloud-managed`, and `backendmode=remote-nbd`, the transfer-preflight portion of registration becomes:
 
 1. Validate remote Mold lookup fields.
 2. Resolve remote host and storage information.
 3. Resolve SSH user, SSH port, libvirt URI, and remote NBD export address.
 4. If automatic key setup is enabled, send key setup commands through source and remote Mold Agent paths.
 5. Run source-host remote execution preflight through Mold Agent/qemu FTCTL.
-6. Only after preflight succeeds, create or update Cloud protection rows, protection volume rows, VM details, and host FTCTL profile.
-7. Send qemu FTCTL `protect`.
+6. Only after preflight succeeds, Cloud calls remote Mold Cloud provisioning to create the replica VM and replica volumes.
+7. Cloud waits for remote Cloud-created replica volume paths and builds an explicit disk map.
+8. Cloud creates or updates source-side protection rows, protection volume mappings, VM details, and host FTCTL profile.
+9. Cloud sends qemu FTCTL `protect`.
 
-If steps 4 or 5 fail, Cloud must return a clear API error and must not leave active FTCTL protection state.
+If steps 4 or 5 fail, Cloud must return a clear API error and must not leave active FTCTL protection state or remote replica resources.
+
+If steps 6 or 7 fail after remote resources are partially created, cleanup must be performed through Cloud APIs or the failure state must preserve enough remote Cloud object IDs for a later Cloud-owned cleanup.
 
 ### 6.3 Agent Command Path
 
@@ -141,6 +148,8 @@ Cloud sends commands only through Mold Agent:
 - remote host: install/remove public key and apply firewall service
 
 Cloud does not run SSH or libvirt locally.
+
+Mold Agent does not create replica VMs or volumes. Remote replica VM and volume lifecycle is handled by Cloud APIs as described in document 201.
 
 ### 6.4 Error Mapping
 
@@ -211,6 +220,7 @@ Protection release must clean up:
 - remote NBD exports
 - FTCTL profile/state files
 - Cloud DB rows/details
+- remote Cloud-created replica VM/volume resources through Cloud APIs when remote Mold DR used Cloud-managed provisioning
 - automatically installed SSH public key, only when auto setup was used
 
 If key removal fails during forced release, the warning must be explicit and include the target host and key comment. It must not remove unrelated `authorized_keys` content.
@@ -236,6 +246,7 @@ qemu verification:
 - `ablestack_vm_ftctl_firewalld status` reports `10809-10872/tcp` runtime/permanent availability.
 - a negative preflight fails before creating protection rows.
 - a positive preflight proceeds to `protect`.
+- Cloud-managed remote-nbd rejects missing or `auto` disk maps and does not create or format Cloud-managed targets.
 
 ## 10. Test Plan
 
@@ -248,8 +259,8 @@ Negative tests:
 
 Positive tests:
 
-- user-prepared SSH path: registration succeeds and reaches mirroring.
-- automatic key setup path: key is generated, public key installed, preflight succeeds, registration reaches mirroring.
+- user-prepared SSH path: preflight succeeds, remote Cloud provisioning creates replica resources, registration reaches mirroring.
+- automatic key setup path: key is generated, public key installed, preflight succeeds, remote Cloud provisioning creates replica resources, registration reaches mirroring.
 - release after automatic key setup removes only the FTCTL public key comment.
 
 Regression tests:
@@ -262,9 +273,11 @@ Regression tests:
 
 1. Fix Cloud registration order and actually call remote preflight before durable protection state is created.
 2. Add API parameter and deployment metadata verification for SSH fields.
-3. Add qemu FTCTL key management commands.
-4. Add Cloud/Mold Agent commands for source key creation and remote public key install/remove.
-5. Harden `ablestack_vm_ftctl_firewalld apply/status` for the remote NBD service.
-6. Build, deploy, and verify both clusters.
-7. Clean the current failed `dr-w22-01` protection state.
-8. Re-run DR-WIN registration first with negative preflight, then with automatic key setup enabled.
+3. Add remote Mold Cloud-managed replica VM/volume provisioning per document 201.
+4. Add qemu cloud-managed remote-nbd guards so qemu never creates or formats Cloud-managed targets.
+5. Add qemu FTCTL key management commands.
+6. Add Cloud/Mold Agent commands for source key creation and remote public key install/remove.
+7. Harden `ablestack_vm_ftctl_firewalld apply/status` for the remote NBD service.
+8. Build, deploy, and verify both clusters.
+9. Clean the current failed `dr-w22-01` protection state.
+10. Re-run DR-WIN registration first with negative preflight, then with automatic key setup enabled.

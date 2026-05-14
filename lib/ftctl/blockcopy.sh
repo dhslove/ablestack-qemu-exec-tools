@@ -1874,6 +1874,10 @@ if [[ -b "${secondary_path}" && "${secondary_path}" != /dev/rbd/* ]]; then
   if [[ "\${target_format}" != "raw" ]]; then
     current_format="\$(qemu-img info --force-share --output=json "${secondary_path}" 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get(\"format\",\"\"))' 2>/dev/null || true)"
     if [[ "\${current_format}" != "\${target_format}" ]]; then
+      if [[ "\${cloud_managed}" == "1" ]]; then
+        echo "cloud_managed_format_mismatch:${secondary_path}:\${current_format}:\${target_format}" >&2
+        exit 96
+      fi
       qemu-img create -f "\${target_format}" "${secondary_path}" "${size}"
     fi
   fi
@@ -1881,6 +1885,10 @@ elif [[ -b "${secondary_path}" && "${secondary_path}" == /dev/rbd/* ]]; then
   if [[ "\${target_format}" != "raw" ]]; then
     current_format="\$(qemu-img info --force-share --output=json "${secondary_path}" 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get(\"format\",\"\"))' 2>/dev/null || true)"
     if [[ "\${current_format}" != "\${target_format}" ]]; then
+      if [[ "\${cloud_managed}" == "1" ]]; then
+        echo "cloud_managed_format_mismatch:${secondary_path}:\${current_format}:\${target_format}" >&2
+        exit 96
+      fi
       qemu-img create -f "\${target_format}" "${secondary_path}" "${size}"
     fi
   fi
@@ -2690,15 +2698,20 @@ ftctl_blockcopy_plan_protect() {
         "${FTCTL_PROFILE_REMOTE_NBD_EXPORT_ADDR}" "${export_port}" "${export_name}" \
         "${primary_xml_backup}" remote_xml
       {
-        local remote_host="" remote_user="" debug_remote_cmd="" debug_size="" debug_bind_addr="" debug_target_format=""
+        local remote_host="" remote_user="" debug_remote_cmd="" debug_size="" debug_bind_addr="" debug_target_format="" debug_cloud_managed="0"
         ftctl_blockcopy_remote_target_host_user remote_host remote_user || true
         ftctl_blockcopy_remote_nbd_host_only "${FTCTL_PROFILE_REMOTE_NBD_EXPORT_ADDR}" debug_bind_addr || debug_bind_addr="${FTCTL_PROFILE_REMOTE_NBD_EXPORT_ADDR}"
         ftctl_blockcopy_remote_nbd_target_format "${secondary_dest}" "${format}" debug_target_format
         ftctl_blockcopy_source_virtual_size_bytes "${vm}" "${target}" "${source}" debug_size || true
+        ftctl_blockcopy_is_cloud_managed && debug_cloud_managed="1"
         debug_remote_cmd="$(cat <<EOF
 set -euo pipefail
 mkdir -p "$(dirname "${secondary_dest}")" /run/ablestack-vm-ftctl
-if [[ ! -f "${secondary_dest}" ]]; then
+if [[ "${debug_cloud_managed}" == "1" && ! -e "${secondary_dest}" ]]; then
+  echo "cloud_managed_target_missing:${secondary_dest}" >&2
+  exit 95
+fi
+if [[ "${debug_cloud_managed}" != "1" && ! -f "${secondary_dest}" ]]; then
   qemu-img create -f "${debug_target_format}" "${secondary_dest}" "${debug_size}"
 fi
 nbd_thin_opts=()

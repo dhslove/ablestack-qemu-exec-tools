@@ -278,7 +278,8 @@ Every `Test ID` should end with:
   - Result: `PASS` with `remote-nbd` backend mode
   - Observation:
     - The DR baseline on non-shared local qcow2 storage followed the same secondary-local transport model as the HA baseline.
-    - `mode=dr` did not require additional backend changes once the remote-nbd path was in place.
+    - `mode=dr` did not require additional backend changes once the remote-nbd path was in place for standalone qemu coverage.
+    - This observation does not apply to Cloud-managed remote Mold DR, which must use Cloud-created remote replica VM/volume resources and explicit disk maps.
   - Follow-up improvement:
     - Validate DR transient and persistent image-behavior cases.
     - Validate DR site failover and reverse-sync/failback exercises.

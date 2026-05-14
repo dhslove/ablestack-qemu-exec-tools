@@ -339,6 +339,7 @@ Completed items:
     - `10809-10872/tcp` opened on both hosts
     - `krbd` secondary-target prepare to skip LVM-specific handoff steps and only perform idempotent `rbd map` plus target-format initialization
   - In the current multi-disk `krbd + remote-nbd` implementation, only explicitly mapped targets stay on `/dev/rbd/...`; unmapped secondary data disks fall back to file targets under `/var/lib/ablestack-vm-ftctl/remote-nbd-targets/...`, which is acceptable for current coverage but should be tightened if full per-disk krbd ownership is required.
+  - That fallback is valid only for qemu standalone/non-Cloud-managed coverage. Cloud-managed remote Mold DR must use Cloud-created replica VM/volume resources and explicit disk maps as defined in `201-dr-remote-mold-cloud-managed-resource-ownership-design-20260514.md`.
   - NFS-backed DR filesystem cases are skipped in the current environment because GFS2 shared-visible filesystem validation is treated as equivalent coverage.
   - The remaining HA priorities are persistent local-block/raw variants and shared/multipath variants.
 
