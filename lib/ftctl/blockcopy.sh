@@ -540,6 +540,19 @@ EOF
   fi
 }
 
+ftctl_blockcopy_map_primary_krbd_path() {
+  local path="${1-}"
+  local host="" user=""
+
+  if ftctl_blockcopy_primary_uri_is_local_system; then
+    ftctl_blockcopy_krbd_map_local "${path}"
+    return $?
+  fi
+
+  ftctl_blockcopy_primary_target_host_user host user || return $?
+  ftctl_blockcopy_map_remote_krbd_path "${host}" "${user}" "${path}"
+}
+
 ftctl_blockcopy_payload_indicates_start_failure() {
   local payload="${1-}"
   grep -Eiq \
@@ -1702,7 +1715,18 @@ ftctl_blockcopy_primary_nbd_prepare_target() {
   remote_cmd=$(cat <<EOF
 set -euo pipefail
 mkdir -p /run/ablestack-vm-ftctl
-if [[ -b "${primary_path}" && "${primary_path}" != /dev/rbd/* ]]; then
+if [[ "${primary_path}" == /dev/rbd/* ]]; then
+  krbd_spec="${primary_path#/dev/rbd/}"
+  if [[ ! -b "${primary_path}" ]]; then
+    command -v rbd >/dev/null 2>&1
+    rbd map "\${krbd_spec}" >/dev/null
+    udevadm settle >/dev/null 2>&1 || true
+  fi
+  if [[ ! -b "${primary_path}" ]]; then
+    echo "reverse_primary_rbd_map_failed:${primary_path}" >&2
+    exit 97
+  fi
+elif [[ -b "${primary_path}" ]]; then
   primary_real="\$(readlink -f "${primary_path}" 2>/dev/null || true)"
   stale_map=""
   if [[ -n "\${primary_real}" ]]; then
@@ -1723,11 +1747,6 @@ if [[ -b "${primary_path}" && "${primary_path}" != /dev/rbd/* ]]; then
   vgscan --mknodes >/dev/null 2>&1 || true
   lvchange -ay "${primary_path}"
   udevadm settle >/dev/null 2>&1 || true
-elif [[ -b "${primary_path}" && "${primary_path}" == /dev/rbd/* ]]; then
-  if [[ ! -b "${primary_path}" ]]; then
-    rbd map "${primary_path#/dev/rbd/}" >/dev/null
-    udevadm settle >/dev/null 2>&1 || true
-  fi
 else
   mkdir -p "$(dirname "${primary_path}")"
   if [[ ! -f "${primary_path}" ]]; then
@@ -2303,6 +2322,19 @@ ftctl_blockcopy_map_reverse_krbd_destinations() {
 
   ftctl_blockcopy_reverse_krbd_paths "${vm}" paths
   ((${#paths[@]} > 0)) || return 0
+
+  if [[ "${FTCTL_PROFILE_BACKEND_MODE:-}" == "remote-nbd" ]]; then
+    for path in "${paths[@]}"; do
+      if ! ftctl_blockcopy_map_primary_krbd_path "${path}"; then
+        ftctl_log_event "failback" "reverse_sync.primary-rbd-map" "fail" "${vm}" "" \
+          "site=primary path=${path} primary_uri=${FTCTL_PROFILE_PRIMARY_URI} secondary_uri=${FTCTL_PROFILE_SECONDARY_URI}"
+        return 1
+      fi
+    done
+    ftctl_log_event "failback" "reverse_sync.primary-rbd-map" "ok" "${vm}" "" \
+      "site=primary count=${#paths[@]} primary_uri=${FTCTL_PROFILE_PRIMARY_URI} secondary_uri=${FTCTL_PROFILE_SECONDARY_URI}"
+    return 0
+  fi
 
   if ftctl_blockcopy_secondary_uri_is_local_system; then
     for path in "${paths[@]}"; do
