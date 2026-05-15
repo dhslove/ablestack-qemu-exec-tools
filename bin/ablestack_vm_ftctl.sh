@@ -70,6 +70,7 @@ CLI_FENCING_IPMI_SECONDARY_USER=""
 CLI_FENCING_IPMI_SECONDARY_PASSWORD=""
 CLI_FENCING_IPMI_SECONDARY_INTERFACE=""
 CLI_SECONDARY_TARGET_DIR=""
+CLI_SECONDARY_SSH_KEY_FILE=""
 CLI_REMOTE_NBD_EXPORT_ADDR=""
 CLI_XCOLO_PROXY_ENDPOINT=""
 CLI_XCOLO_NBD_ENDPOINT=""
@@ -436,6 +437,10 @@ parse_args() {
         CLI_SECONDARY_TARGET_DIR="${2-}"
         shift 2
         ;;
+      --secondary-ssh-key-file)
+        CLI_SECONDARY_SSH_KEY_FILE="${2-}"
+        shift 2
+        ;;
       --remote-nbd-export-addr)
         CLI_REMOTE_NBD_EXPORT_ADDR="${2-}"
         shift 2
@@ -613,7 +618,8 @@ dispatch() {
             "${CLI_FENCING_IPMI_PRIMARY_HOST}" "${CLI_FENCING_IPMI_PRIMARY_PORT}" \
             "${CLI_FENCING_IPMI_PRIMARY_USER}" "${CLI_FENCING_IPMI_PRIMARY_PASSWORD}" "${CLI_FENCING_IPMI_PRIMARY_INTERFACE}" \
             "${CLI_FENCING_IPMI_SECONDARY_HOST}" "${CLI_FENCING_IPMI_SECONDARY_PORT}" \
-            "${CLI_FENCING_IPMI_SECONDARY_USER}" "${CLI_FENCING_IPMI_SECONDARY_PASSWORD}" "${CLI_FENCING_IPMI_SECONDARY_INTERFACE}"
+            "${CLI_FENCING_IPMI_SECONDARY_USER}" "${CLI_FENCING_IPMI_SECONDARY_PASSWORD}" "${CLI_FENCING_IPMI_SECONDARY_INTERFACE}" \
+            "${CLI_SECONDARY_SSH_KEY_FILE}"
           ftctl_profile_show_vm "${CLI_VM}" "${CLI_JSON}"
           ;;
         profile-remove)
@@ -770,13 +776,23 @@ dispatch() {
         echo "ERROR: preflight-remote requires --peer" >&2
         exit "${EXIT_USAGE}"
       }
+      # shellcheck disable=SC2034
       FTCTL_PROFILE_MODE="${CLI_MODE}"
+      # shellcheck disable=SC2034
       FTCTL_PROFILE_SECONDARY_URI="${CLI_PEER}"
+      # shellcheck disable=SC2034
       FTCTL_PROFILE_BACKEND_MODE="remote-nbd"
+      # shellcheck disable=SC2034
       FTCTL_PROFILE_TARGET_STORAGE_SCOPE="secondary-local"
+      # shellcheck disable=SC2034
       FTCTL_PROFILE_SECONDARY_TARGET_DIR="${CLI_SECONDARY_TARGET_DIR}"
+      # shellcheck disable=SC2034
+      FTCTL_PROFILE_SECONDARY_SSH_KEY_FILE="${CLI_SECONDARY_SSH_KEY_FILE}"
+      # shellcheck disable=SC2034
       FTCTL_PROFILE_REMOTE_NBD_EXPORT_ADDR="${CLI_REMOTE_NBD_EXPORT_ADDR}"
+      # shellcheck disable=SC2034
       FTCTL_PROFILE_REMOTE_NBD_EXPORT_NAME="${CLI_VM}"
+      ftctl_profile_materialize_dr_ssh_keyfile "${CLI_VM}"
       ftctl_blockcopy_remote_preflight "${CLI_VM}" "${CLI_JSON}"
       ;;
     dr-key-ensure)

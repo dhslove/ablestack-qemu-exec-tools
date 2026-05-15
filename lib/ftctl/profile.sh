@@ -26,6 +26,7 @@ FTCTL_PROFILE_PROVISIONING_STATE=""
 FTCTL_PROFILE_TARGET_STORAGE_SCOPE=""
 FTCTL_PROFILE_SECONDARY_VM_NAME=""
 FTCTL_PROFILE_SECONDARY_TARGET_DIR=""
+FTCTL_PROFILE_SECONDARY_SSH_KEY_FILE=""
 FTCTL_PROFILE_REMOTE_NBD_EXPORT_ADDR=""
 FTCTL_PROFILE_REMOTE_NBD_EXPORT_PORT=""
 FTCTL_PROFILE_REMOTE_NBD_EXPORT_NAME=""
@@ -73,6 +74,7 @@ ftctl_profile_reset() {
   FTCTL_PROFILE_TARGET_STORAGE_SCOPE="shared"
   FTCTL_PROFILE_SECONDARY_VM_NAME=""
   FTCTL_PROFILE_SECONDARY_TARGET_DIR=""
+  FTCTL_PROFILE_SECONDARY_SSH_KEY_FILE=""
   FTCTL_PROFILE_REMOTE_NBD_EXPORT_ADDR=""
   FTCTL_PROFILE_REMOTE_NBD_EXPORT_PORT="auto"
   FTCTL_PROFILE_REMOTE_NBD_EXPORT_NAME=""
@@ -129,6 +131,7 @@ ftctl_profile_load_vm() {
     FTCTL_PROFILE_TARGET_STORAGE_SCOPE="${FTCTL_PROFILE_TARGET_STORAGE_SCOPE:-shared}"
     FTCTL_PROFILE_SECONDARY_VM_NAME="${FTCTL_PROFILE_SECONDARY_VM_NAME:-${vm}-standby}"
     FTCTL_PROFILE_SECONDARY_TARGET_DIR="${FTCTL_PROFILE_SECONDARY_TARGET_DIR:-}"
+    FTCTL_PROFILE_SECONDARY_SSH_KEY_FILE="${FTCTL_PROFILE_SECONDARY_SSH_KEY_FILE:-}"
     FTCTL_PROFILE_REMOTE_NBD_EXPORT_ADDR="${FTCTL_PROFILE_REMOTE_NBD_EXPORT_ADDR:-}"
     FTCTL_PROFILE_REMOTE_NBD_EXPORT_PORT="${FTCTL_PROFILE_REMOTE_NBD_EXPORT_PORT:-auto}"
     FTCTL_PROFILE_REMOTE_NBD_EXPORT_NAME="${FTCTL_PROFILE_REMOTE_NBD_EXPORT_NAME:-${vm}}"
@@ -166,6 +169,7 @@ ftctl_profile_load_vm() {
   fi
   FTCTL_PROFILE_SECONDARY_VM_NAME="${FTCTL_PROFILE_SECONDARY_VM_NAME:-${vm}-standby}"
   FTCTL_PROFILE_REMOTE_NBD_EXPORT_NAME="${FTCTL_PROFILE_REMOTE_NBD_EXPORT_NAME:-${vm}}"
+  ftctl_profile_materialize_dr_ssh_keyfile "${vm}"
 }
 
 ftctl_profile_secondary_vm_name_resolved() {
@@ -189,6 +193,23 @@ ftctl_profile_write_assignment() {
   printf '%s=' "${name}"
   printf '%q' "${value}"
   printf '\n'
+}
+
+ftctl_profile_materialize_dr_ssh_keyfile() {
+  local vm="${1-}"
+  local key_path=""
+
+  [[ "${FTCTL_PROFILE_MODE:-}" == "dr" ]] || return 0
+  [[ "${FTCTL_PROFILE_SECONDARY_URI:-}" == qemu+ssh://* ]] || return 0
+  if declare -F ftctl_dr_key_private_key_path >/dev/null 2>&1; then
+    key_path="$(ftctl_dr_key_private_key_path "${vm}" 2>/dev/null || true)"
+    if [[ -n "${key_path}" ]]; then
+      FTCTL_PROFILE_SECONDARY_SSH_KEY_FILE="${key_path}"
+    fi
+  fi
+  if declare -F ftctl_dr_key_uri_with_keyfile >/dev/null 2>&1; then
+    FTCTL_PROFILE_SECONDARY_URI="$(ftctl_dr_key_uri_with_keyfile "${FTCTL_PROFILE_SECONDARY_URI}" "${vm}")"
+  fi
 }
 
 ftctl_profile_write_vm() {
@@ -218,6 +239,7 @@ ftctl_profile_write_vm() {
   local fencing_ipmi_secondary_user="${24-}"
   local fencing_ipmi_secondary_password="${25-}"
   local fencing_ipmi_secondary_interface="${26-}"
+  local secondary_ssh_key_file="${27-}"
   local path tmp
 
   [[ -n "${vm}" ]] || {
@@ -245,6 +267,7 @@ ftctl_profile_write_vm() {
   [[ -n "${secondary_vm_name}" ]] && FTCTL_PROFILE_SECONDARY_VM_NAME="${secondary_vm_name}"
   [[ -n "${fencing_policy}" ]] && FTCTL_PROFILE_FENCING_POLICY="${fencing_policy}"
   [[ -n "${secondary_target_dir}" ]] && FTCTL_PROFILE_SECONDARY_TARGET_DIR="${secondary_target_dir}"
+  [[ -n "${secondary_ssh_key_file}" ]] && FTCTL_PROFILE_SECONDARY_SSH_KEY_FILE="${secondary_ssh_key_file}"
   [[ -n "${remote_nbd_export_addr}" ]] && FTCTL_PROFILE_REMOTE_NBD_EXPORT_ADDR="${remote_nbd_export_addr}"
   FTCTL_PROFILE_REMOTE_NBD_EXPORT_NAME="${FTCTL_PROFILE_REMOTE_NBD_EXPORT_NAME:-${vm}}"
   [[ -n "${xcolo_proxy_endpoint}" ]] && FTCTL_PROFILE_XCOLO_PROXY_ENDPOINT="${xcolo_proxy_endpoint}"
@@ -260,6 +283,7 @@ ftctl_profile_write_vm() {
   [[ -n "${fencing_ipmi_secondary_user}" ]] && FTCTL_PROFILE_FENCING_IPMI_SECONDARY_USER="${fencing_ipmi_secondary_user}"
   [[ -n "${fencing_ipmi_secondary_password}" ]] && FTCTL_PROFILE_FENCING_IPMI_SECONDARY_PASSWORD="${fencing_ipmi_secondary_password}"
   [[ -n "${fencing_ipmi_secondary_interface}" ]] && FTCTL_PROFILE_FENCING_IPMI_SECONDARY_INTERFACE="${fencing_ipmi_secondary_interface}"
+  ftctl_profile_materialize_dr_ssh_keyfile "${vm}"
   ftctl_profile_validate "${vm}" || return $?
 
   path="$(ftctl_profile_path "${vm}")"
@@ -323,6 +347,9 @@ ftctl_profile_write_vm() {
     if [[ -n "${secondary_target_dir}" ]]; then
       printf 'FTCTL_PROFILE_SECONDARY_TARGET_DIR="%s"\n' "${FTCTL_PROFILE_SECONDARY_TARGET_DIR}"
     fi
+    if [[ -n "${FTCTL_PROFILE_SECONDARY_SSH_KEY_FILE}" ]]; then
+      ftctl_profile_write_assignment "FTCTL_PROFILE_SECONDARY_SSH_KEY_FILE" "${FTCTL_PROFILE_SECONDARY_SSH_KEY_FILE}"
+    fi
     if [[ -n "${remote_nbd_export_addr}" ]]; then
       printf 'FTCTL_PROFILE_REMOTE_NBD_EXPORT_ADDR="%s"\n' "${FTCTL_PROFILE_REMOTE_NBD_EXPORT_ADDR}"
       printf 'FTCTL_PROFILE_REMOTE_NBD_EXPORT_NAME="%s"\n' "${FTCTL_PROFILE_REMOTE_NBD_EXPORT_NAME}"
@@ -367,7 +394,7 @@ ftctl_profile_show_vm() {
 
   ftctl_profile_load_vm "${vm}"
   if [[ "${json}" == "1" ]]; then
-    printf '{"command":"config.profile-show","result":"ok","vm":"%s","path":"%s","profile":"%s","mode":"%s","peer_uri":"%s","disk_map":"%s","backend_mode":"%s","provisioning_backend":"%s","provisioning_state":"%s","target_storage_scope":"%s","secondary_vm_name":"%s","fencing_policy":"%s","secondary_target_dir":"%s","remote_nbd_export_addr":"%s","xcolo_proxy_endpoint":"%s","xcolo_nbd_endpoint":"%s","xcolo_migrate_uri":"%s"}\n' \
+    printf '{"command":"config.profile-show","result":"ok","vm":"%s","path":"%s","profile":"%s","mode":"%s","peer_uri":"%s","disk_map":"%s","backend_mode":"%s","provisioning_backend":"%s","provisioning_state":"%s","target_storage_scope":"%s","secondary_vm_name":"%s","fencing_policy":"%s","secondary_target_dir":"%s","secondary_ssh_key_file":"%s","remote_nbd_export_addr":"%s","xcolo_proxy_endpoint":"%s","xcolo_nbd_endpoint":"%s","xcolo_migrate_uri":"%s"}\n' \
       "${vm}" \
       "$(ftctl__json_escape "${path}")" \
       "$(ftctl__json_escape "${FTCTL_PROFILE_NAME}")" \
@@ -381,12 +408,13 @@ ftctl_profile_show_vm() {
       "$(ftctl__json_escape "${FTCTL_PROFILE_SECONDARY_VM_NAME}")" \
       "$(ftctl__json_escape "${FTCTL_PROFILE_FENCING_POLICY}")" \
       "$(ftctl__json_escape "${FTCTL_PROFILE_SECONDARY_TARGET_DIR}")" \
+      "$(ftctl__json_escape "${FTCTL_PROFILE_SECONDARY_SSH_KEY_FILE}")" \
       "$(ftctl__json_escape "${FTCTL_PROFILE_REMOTE_NBD_EXPORT_ADDR}")" \
       "$(ftctl__json_escape "${FTCTL_PROFILE_XCOLO_PROXY_ENDPOINT}")" \
       "$(ftctl__json_escape "${FTCTL_PROFILE_XCOLO_NBD_ENDPOINT}")" \
       "$(ftctl__json_escape "${FTCTL_PROFILE_XCOLO_MIGRATE_URI}")"
   else
-    printf '%s profile=%s mode=%s peer_uri=%s disk_map=%s backend_mode=%s provisioning_backend=%s provisioning_state=%s target_storage_scope=%s secondary_vm_name=%s fencing_policy=%s secondary_target_dir=%s remote_nbd_export_addr=%s xcolo_proxy_endpoint=%s xcolo_nbd_endpoint=%s xcolo_migrate_uri=%s\n' \
+    printf '%s profile=%s mode=%s peer_uri=%s disk_map=%s backend_mode=%s provisioning_backend=%s provisioning_state=%s target_storage_scope=%s secondary_vm_name=%s fencing_policy=%s secondary_target_dir=%s secondary_ssh_key_file=%s remote_nbd_export_addr=%s xcolo_proxy_endpoint=%s xcolo_nbd_endpoint=%s xcolo_migrate_uri=%s\n' \
       "${vm}" \
       "${FTCTL_PROFILE_NAME}" \
       "${FTCTL_PROFILE_MODE}" \
@@ -399,6 +427,7 @@ ftctl_profile_show_vm() {
       "${FTCTL_PROFILE_SECONDARY_VM_NAME}" \
       "${FTCTL_PROFILE_FENCING_POLICY}" \
       "${FTCTL_PROFILE_SECONDARY_TARGET_DIR}" \
+      "${FTCTL_PROFILE_SECONDARY_SSH_KEY_FILE}" \
       "${FTCTL_PROFILE_REMOTE_NBD_EXPORT_ADDR}" \
       "${FTCTL_PROFILE_XCOLO_PROXY_ENDPOINT}" \
       "${FTCTL_PROFILE_XCOLO_NBD_ENDPOINT}" \
@@ -415,6 +444,7 @@ ftctl_profile_apply_cli() {
   [[ -n "${mode}" ]] && FTCTL_PROFILE_MODE="${mode}"
   [[ -n "${peer}" ]] && FTCTL_PROFILE_SECONDARY_URI="${peer}"
   [[ -n "${FTCTL_PROFILE_MODE}" ]] || FTCTL_PROFILE_MODE="ha"
+  ftctl_profile_materialize_dr_ssh_keyfile "${vm}"
   case "${FTCTL_PROFILE_MODE}" in
     ha|dr|ft) ;;
     *)

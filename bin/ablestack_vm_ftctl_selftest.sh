@@ -471,6 +471,12 @@ selftest_case_dr_remote_key_connectivity_args() (
   ftctl_blockcopy_dr_ssh_identity_args identity_args "${vm}"
   selftest_assert_contains "${identity_args}" "-i ${FTCTL_DR_KEY_ROOT}/${vm}/id_ed25519" "DR ssh identity key"
   selftest_assert_contains "${identity_args}" "-o IdentitiesOnly=yes" "DR ssh identities only"
+
+  FTCTL_PROFILE_SECONDARY_URI="${uri}"
+  FTCTL_PROFILE_SECONDARY_SSH_KEY_FILE=""
+  ftctl_profile_materialize_dr_ssh_keyfile "${vm}"
+  selftest_assert_eq "${FTCTL_PROFILE_SECONDARY_SSH_KEY_FILE}" "${FTCTL_DR_KEY_ROOT}/${vm}/id_ed25519" "DR profile keyfile materialized"
+  selftest_assert_contains "${FTCTL_PROFILE_SECONDARY_URI}" "keyfile=${FTCTL_DR_KEY_ROOT}/${vm}/id_ed25519" "DR profile URI keyfile materialized"
 )
 
 selftest_case_blockcopy_missing_job_state() (
@@ -993,6 +999,46 @@ selftest_case_reconcile_secondary_steady_skips_primary_disks() (
   selftest_assert_file_not_contains "${FTCTL_EVENTS_LOG}" 'inventory.disks'
 )
 
+selftest_case_reconcile_cloud_managed_reports_failover_candidate() (
+  selftest_reset_env
+  selftest_info "reconcile reports cloud-managed failover candidate without executing qemu failover"
+
+  local vm="cloud-managed-auto-candidate"
+
+  FTCTL_PROFILE_MODE="dr"
+  FTCTL_PROFILE_PROVISIONING_BACKEND="cloud-managed"
+  ftctl_state_init_vm "${vm}"
+  ftctl_state_set "${vm}" \
+    "mode=dr" \
+    "active_side=primary" \
+    "protection_state=protected" \
+    "transport_state=mirroring" \
+    "fencing_state=clear"
+
+  # shellcheck disable=SC2317
+  ftctl_profile_load_vm() { :; }
+  # shellcheck disable=SC2317
+  ftctl_profile_apply_cli() { :; }
+  # shellcheck disable=SC2317
+  ftctl_profile_validate() { :; }
+  # shellcheck disable=SC2317
+  ftctl_cluster_load() { :; }
+  # shellcheck disable=SC2317
+  ftctl_orchestrator_probe_peer() { printf -v "$1" '%s' 'host-02'; printf -v "$2" '%s' '10.0.0.12'; printf -v "$3" '%s' 'reachable'; }
+  # shellcheck disable=SC2317
+  ftctl_inventory_check_vm() { printf '1 0 ok true not-defined-expected\n'; }
+  # shellcheck disable=SC2317
+  ftctl_failover_request() { selftest_fail "cloud-managed automatic candidate must be handled by Cloud, not qemu ftctl"; }
+
+  ftctl_orchestrator_reconcile_one "${vm}"
+
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "protection_state")" "protected" "cloud candidate protection state preserved"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "transport_state")" "mirroring" "cloud candidate transport state preserved"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" "cloud_managed_failover_candidate" "cloud candidate last_error"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "failover_candidate_reason")" "primary_domain_missing" "cloud candidate reason"
+  selftest_assert_file_contains "${FTCTL_EVENTS_LOG}" '"event":"cloud_managed.failover_candidate"'
+)
+
 selftest_case_reconcile_defers_manual_fence_pending() (
   selftest_reset_env
   selftest_info "reconcile defers manual fence pending state"
@@ -1437,6 +1483,51 @@ selftest_case_reconcile_waits_for_cloud_failback_after_fence_clear() (
   selftest_assert_file_contains "${FTCTL_EVENTS_LOG}" "failback.await-command"
 )
 
+selftest_case_reconcile_waits_for_cloud_dr_failback_after_fence_clear() (
+  selftest_reset_env
+  selftest_info "DR reconcile waits for cloud failback command after manual fence release"
+
+  local vm="cloud-dr-failback-await"
+  FTCTL_PROFILE_PROVISIONING_BACKEND="cloud-managed"
+  ftctl_state_init_vm "${vm}"
+  ftctl_state_set "${vm}" \
+    "mode=dr" \
+    "active_side=secondary" \
+    "protection_state=failed_over" \
+    "transport_state=failed_over" \
+    "fencing_state=clear" \
+    "rearm_count=0"
+
+  # shellcheck disable=SC2317
+  ftctl_profile_load_vm() { :; }
+  # shellcheck disable=SC2317
+  ftctl_profile_apply_cli() { :; }
+  # shellcheck disable=SC2317
+  ftctl_profile_validate() { :; }
+  # shellcheck disable=SC2317
+  ftctl_cluster_load() { :; }
+  # shellcheck disable=SC2317
+  ftctl_orchestrator_probe_peer() {
+    printf -v "$1" '%s' "peer-1"
+    printf -v "$2" '%s' "10.0.0.12"
+    printf -v "$3" '%s' "reachable"
+  }
+  # shellcheck disable=SC2317
+  ftctl_inventory_check_vm() {
+    selftest_fail "cloud-managed DR failback-ready state must not run inventory before Cloud recovery"
+  }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_rearm() {
+    selftest_fail "cloud-managed DR failback-ready state must not auto-rearm"
+  }
+
+  ftctl_orchestrator_reconcile_one "${vm}"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "protection_state")" "failed_over" "DR await command protection preserved"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "transport_state")" "failed_over" "DR await command transport preserved"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "rearm_count")" "0" "DR await command must not increment rearm"
+  selftest_assert_file_contains "${FTCTL_EVENTS_LOG}" "failback.await-command"
+)
+
 selftest_case_failback_reprotect_clears_standby_verify_state() (
   selftest_reset_env
   selftest_info "failback reprotect clears stale standby verification state"
@@ -1517,6 +1608,7 @@ selftest_main() {
   selftest_case_json_and_locking
   selftest_case_check_secondary_active_side
   selftest_case_reconcile_secondary_steady_skips_primary_disks
+  selftest_case_reconcile_cloud_managed_reports_failover_candidate
   selftest_case_reconcile_defers_manual_fence_pending
   selftest_case_unprotect_releases_blockcopy_targets
   selftest_case_unprotect_releases_remote_nbd_exports
@@ -1527,6 +1619,7 @@ selftest_main() {
   selftest_case_failback_reverse_progress_ready
   selftest_case_reconcile_preserves_cloud_failback_failure
   selftest_case_reconcile_waits_for_cloud_failback_after_fence_clear
+  selftest_case_reconcile_waits_for_cloud_dr_failback_after_fence_clear
   selftest_case_failback_reprotect_clears_standby_verify_state
   selftest_case_events_json
   selftest_info "all checks passed"

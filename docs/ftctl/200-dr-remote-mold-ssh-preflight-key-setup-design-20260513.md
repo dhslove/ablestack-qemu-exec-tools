@@ -6,7 +6,7 @@ Date: 2026-05-13
 
 DR protection can replicate data to a remote site whose Mold management system is different from the source site. In that case, Cloud must be able to look up the remote host and storage from the remote Mold API, and the actual data transfer still runs from the source qemu FTCTL host to the remote qemu/libvirt/NBD path.
 
-This document is limited to SSH, libvirt, and remote-NBD transfer preflight/key setup. Cloud-managed remote replica VM and volume ownership is specified by [201. DR Remote Mold Cloud-Managed Resource Ownership Design](201-dr-remote-mold-cloud-managed-resource-ownership-design-20260514.md). If this document appears to imply that qemu FTCTL may create Cloud-managed replica VMs, volumes, RBD images, or remote-nbd targets, the 201 ownership design supersedes that interpretation.
+This document is limited to SSH, libvirt, and remote-NBD transfer preflight/key setup. Cloud-managed remote replica VM and volume ownership is specified by [201. DR Remote Mold Cloud-Managed Resource Ownership Design](201-dr-remote-mold-cloud-managed-resource-ownership-design-20260514.md). Cloud-managed automatic fencing ownership is specified by [202. Cloud-Managed HA/DR Automatic Fencing qemu Contract Design](202-cloud-managed-ha-dr-automatic-fencing-qemu-contract-design-20260514.md). If this document appears to imply that qemu FTCTL may create Cloud-managed replica VMs, volumes, RBD images, remote-nbd targets, or own Cloud-managed automatic failover decisions, the later ownership documents supersede that interpretation.
 
 This design fixes the current DR-WIN failure mode where protection registration can create Cloud and host-side FTCTL state even though the source host cannot reach the remote host over non-interactive SSH or the remote NBD firewall path is not ready.
 
@@ -38,7 +38,8 @@ Observed state after failed registration:
 - Keep the HA ownership model intact:
   - Cloud creates original/replica VM and disk resources through Cloud APIs and reads asynchronous state from events, logs, or the database.
   - Mold Agent delivers commands to qemu FTCTL and returns logs/status.
-  - Actual HA/DR/FT actions remain in qemu FTCTL.
+  - Replication and explicit data-plane HA/DR/FT actions remain in qemu FTCTL.
+  - Cloud-managed automatic fencing decisions and VM lifecycle orchestration remain in Cloud.
 - Cloud must not directly SSH to qemu hosts, call host libvirt, or perform blockcopy itself.
 - For Cloud-managed DR, qemu FTCTL must receive explicit Cloud-created target paths and must not create or format replica VM/volume/RBD/remote-nbd targets.
 - Remote Mold API key and secret are lookup-only inputs and must not be persisted in VM details, FTCTL profiles, host files, or logs.

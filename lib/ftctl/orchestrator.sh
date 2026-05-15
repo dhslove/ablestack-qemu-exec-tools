@@ -268,7 +268,7 @@ ftctl_orchestrator_is_cloud_failback_awaiting_command() {
   local fencing_state="${5-}"
 
   [[ "${FTCTL_PROFILE_PROVISIONING_BACKEND:-libvirt-managed}" == "cloud-managed" ]] || return 1
-  [[ "${mode}" == "ha" ]] || return 1
+  [[ "${mode}" == "ha" || "${mode}" == "dr" ]] || return 1
   [[ "${active_side}" == "secondary" ]] || return 1
   [[ "${protection_state}" == "failed_over" ]] || return 1
   [[ "${transport_state}" == "failed_over" ]] || return 1
@@ -383,6 +383,18 @@ ftctl_orchestrator_reconcile_one() {
     ftctl_log_event "failover" "failover.steady" "ok" "${vm}" "" \
       "reason=source_fenced active_side=secondary standby=${_standby_domain_state:-unknown}"
     return 0
+  fi
+
+  if [[ ( "${mode}" == "ha" || "${mode}" == "dr" ) && "${active_side}" == "primary" && "${local_rc}" != "0" ]]; then
+    if [[ "${FTCTL_PROFILE_PROVISIONING_BACKEND:-libvirt-managed}" == "cloud-managed" ]]; then
+      ftctl_state_set "${vm}" \
+        "last_error=cloud_managed_failover_candidate" \
+        "failover_candidate_reason=primary_domain_missing" \
+        "failover_candidate_ts=$(ftctl_now_iso8601)"
+      ftctl_log_event "failover" "cloud_managed.failover_candidate" "warn" "${vm}" "" \
+        "reason=primary_domain_missing mode=${mode} peer_host=${peer_host_id} controller=cloud"
+      return 0
+    fi
   fi
 
   if [[ "${mode}" == "ha" && "${active_side}" == "primary" && "${local_rc}" != "0" ]]; then

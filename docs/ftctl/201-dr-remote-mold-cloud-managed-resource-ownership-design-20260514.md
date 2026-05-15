@@ -8,7 +8,7 @@ DR remote Mold protection must preserve the ownership model already proven by th
 
 The current DR remote Mold implementation can resolve a remote Mold host and storage pool, then pass the selected remote path to qemu FTCTL. That leaves room for qemu FTCTL to create or format remote-nbd/RBD targets. This is not acceptable for Cloud-integrated DR because Cloud must own virtual machine and volume lifecycle.
 
-This design changes DR remote Mold registration so the remote Cloud management system creates and owns the replica virtual machine and replica volumes. qemu FTCTL receives only the Cloud-created target paths and performs replication/disaster-recovery data-plane actions.
+This design changes DR remote Mold registration so the remote Cloud management system creates and owns the replica virtual machine and replica volumes. qemu FTCTL receives only the Cloud-created target paths and performs replication and Cloud-requested disaster-recovery data-plane actions.
 
 ## 2. Non-Negotiable Ownership Rules
 
@@ -17,7 +17,8 @@ This design changes DR remote Mold registration so the remote Cloud management s
 - Remote Mold Cloud creates remote replica VM and remote replica volumes when `drpeersitetype=remote-mold`.
 - Cloud may query asynchronous state from Cloud APIs, the database, qemu FTCTL events, qemu FTCTL logs, or Mold Agent responses.
 - Mold Agent only delivers commands to qemu FTCTL and returns logs/status/events.
-- qemu FTCTL owns replication, blockcopy, remote-nbd export handling, failover data-plane checks, reverse sync, and failback data-plane work.
+- qemu FTCTL owns replication, blockcopy, remote-nbd export handling, Cloud-requested failover data-plane checks, reverse sync, and failback data-plane work.
+- Cloud owns Cloud-managed automatic fencing decisions and VM lifecycle orchestration. qemu FTCTL must not be the Cloud-managed automatic failover controller. See [202. Cloud-Managed HA/DR Automatic Fencing qemu Contract Design](202-cloud-managed-ha-dr-automatic-fencing-qemu-contract-design-20260514.md).
 - qemu FTCTL must not create, define, attach, detach, start, stop, delete, or resize Cloud-managed VMs or Cloud-managed volumes.
 - For `provisioningbackend=cloud-managed`, qemu FTCTL must never create or implicitly format a remote-nbd target. The target must already exist and must be supplied through an explicit disk map.
 - Cloud registration defaults to `cloud-managed` for both local/current Mold and remote Mold. `libvirt-managed` remains an explicit legacy/standalone path, not the implicit Cloud UI/API behavior.
@@ -192,11 +193,13 @@ Non-Cloud-managed qemu standalone tests may keep their existing target creation 
 
 ### 8.2 Failover
 
-- qemu performs data-plane checks and remote-nbd export release/finalization.
+- qemu performs Cloud-requested data-plane checks and remote-nbd export release/finalization.
 - Cloud starts the remote replica VM through remote Mold API.
 - Source Cloud exposes remote VM state by querying remote Mold or cached remote metadata.
 
 qemu must not start the remote Cloud-owned replica VM through libvirt as the primary lifecycle mechanism.
+
+For automatic Cloud-managed failover, Cloud must also own the fencing decision and standby/replica VM start orchestration. qemu may report a candidate/runtime evidence event, but it must not decide automatic failover from a single libvirt/domain observation.
 
 ### 8.3 Failback
 
@@ -253,6 +256,7 @@ qemu checks:
 - cloud-managed remote-nbd rejects a missing destination mapping.
 - cloud-managed remote-nbd fails when the Cloud-created target path is absent.
 - cloud-managed remote-nbd does not execute `qemu-img create` for existing block/RBD targets.
+- cloud-managed qemu reconcile does not own automatic failover from a single missing domain.
 - non-cloud-managed remote-nbd keeps existing standalone behavior.
 
 End-to-end DR-WIN checks:

@@ -33,6 +33,12 @@ ftctl_dr_key_private_key_path() {
   local profile="${1-}"
   local normalized key_path
 
+  if [[ -n "${FTCTL_PROFILE_SECONDARY_SSH_KEY_FILE:-}" ]]; then
+    [[ -s "${FTCTL_PROFILE_SECONDARY_SSH_KEY_FILE}" ]] || return 1
+    printf '%s' "${FTCTL_PROFILE_SECONDARY_SSH_KEY_FILE}"
+    return 0
+  fi
+
   normalized="$(ftctl_dr_key_profile "${profile}")"
   key_path="${FTCTL_DR_KEY_ROOT}/${normalized}/id_ed25519"
   [[ -s "${key_path}" ]] || return 1
@@ -71,14 +77,20 @@ ftctl_dr_key_emit() {
   local public_key="${4-}"
   local key_comment="${5-}"
   local rc="${6-0}"
+  local private_key_path=""
+
+  if [[ -n "${profile}" ]]; then
+    private_key_path="${FTCTL_DR_KEY_ROOT}/$(ftctl_dr_key_profile "${profile}")/id_ed25519"
+  fi
 
   if [[ "${CLI_JSON:-0}" == "1" ]]; then
-    printf '{"command":"%s","result":"%s","profile":"%s","public_key":"%s","key_comment":"%s","exit_code":%s}\n' \
+    printf '{"command":"%s","result":"%s","profile":"%s","public_key":"%s","key_comment":"%s","private_key_path":"%s","exit_code":%s}\n' \
       "$(ftctl__json_escape "${command}")" \
       "$(ftctl__json_escape "${result}")" \
       "$(ftctl__json_escape "${profile}")" \
       "$(ftctl__json_escape "${public_key}")" \
       "$(ftctl__json_escape "${key_comment}")" \
+      "$(ftctl__json_escape "${private_key_path}")" \
       "${rc}"
   else
     printf '%s result=%s profile=%s key_comment=%s exit_code=%s\n' \

@@ -2053,7 +2053,7 @@ ftctl_blockcopy_write_remote_nbd_repro() {
   local remote_user="${5-}"
   local remote_cmd="${6-}"
   local persistence="${7-}"
-  local cmd script
+  local cmd script ssh_identity_args=""
 
   cmd="env LC_ALL=C LANG=C virsh -c ${FTCTL_PROFILE_PRIMARY_URI@Q} blockcopy ${vm@Q} ${target@Q} --xml ${xml_path@Q}"
   if [[ "${persistence}" == "yes" ]]; then
@@ -2063,12 +2063,13 @@ ftctl_blockcopy_write_remote_nbd_repro() {
     cmd+=" --synchronous-writes"
   fi
 
+  ftctl_blockcopy_dr_ssh_identity_args ssh_identity_args "${CLI_PROFILE:-${CLI_VM:-${vm}}}" || true
   script=$(cat <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 
 echo "[REPRO] remote prepare on secondary host"
-ssh -o BatchMode=yes -o StrictHostKeyChecking=no "${remote_user}@${remote_host}" bash -lc $(printf '%q' "${remote_cmd}")
+ssh -o BatchMode=yes -o StrictHostKeyChecking=no ${ssh_identity_args}"${remote_user}@${remote_host}" bash -lc $(printf '%q' "${remote_cmd}")
 
 echo "[REPRO] blockcopy command on primary host"
 ${cmd}
