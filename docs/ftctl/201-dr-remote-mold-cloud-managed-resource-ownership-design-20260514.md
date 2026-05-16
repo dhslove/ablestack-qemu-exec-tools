@@ -10,7 +10,7 @@ The current DR remote Mold implementation can resolve a remote Mold host and sto
 
 This design changes DR remote Mold registration so the remote Cloud management system creates and owns the replica virtual machine and replica volumes. qemu FTCTL receives only the Cloud-created target paths and performs replication and Cloud-requested disaster-recovery data-plane actions.
 
-Failback-time target Mold selection is defined separately in [206. DR Cloud-Managed Failback Target Mold Design](206-dr-cloud-managed-failback-target-mold-design-20260516.md). Registration-time remote Mold ownership does not imply that failback must return to the original source Mold.
+Failback-time target Mold selection is defined separately in [206. DR Cloud-Managed Failback Target Mold Design](206-dr-cloud-managed-failback-target-mold-design-20260516.md). The long-running failback credential/context model is defined in [207. DR Cloud-Managed Failback Async Context Design](207-dr-cloud-managed-failback-async-context-design-20260516.md). Registration-time remote Mold ownership does not imply that failback must return to the original source Mold.
 
 ## 2. Non-Negotiable Ownership Rules
 
@@ -214,6 +214,8 @@ For automatic Cloud-managed failover, Cloud must also own the fencing decision a
 
 The detailed failback state machine, target Mold credential handling, and new-primary-Mold handoff rules are specified in document 206.
 
+The normal DR failback path must remain one logical Cloud operation after the operator starts failback. If reverse sync takes time, Cloud may keep the target/remote Mold credentials only in a bounded in-memory failback operation context so that reverse-sync-ready cutback can proceed automatically. `Continue failback` is reserved for context loss, expiry, management restart, or explicit operator retry. The in-memory context rule and recovery behavior are specified in document 207.
+
 ## 9. UI Impact
 
 The DR protection dialog must make remote Mold resource ownership explicit without exposing qemu-only target creation controls for Cloud-managed DR.
@@ -245,6 +247,7 @@ If defaults are used, the defaults must be resolved by Cloud and shown as Cloud-
 - qemu standalone remote-nbd tests can continue to validate qemu-created targets when `provisioningbackend` is not `cloud-managed`.
 - Cloud-managed DR must always use Cloud-created replica resources and explicit disk maps.
 - Cloud-managed DR failback must not assume that the original source Mold is the failback target.
+- Cloud-managed DR failback must not require `Continue failback` as the normal path after a successful first failback request; that button is a recovery path when the transient in-memory operation context is unavailable.
 
 ## 11. Verification Plan
 
@@ -255,6 +258,8 @@ Cloud unit and integration checks:
 - registration fails if remote Cloud does not return a complete VM/volume/disk-map response.
 - `FtctlProtectionResponse` includes remote replica VM/volume metadata with null local secondary IDs.
 - release/forced-release cleans remote Cloud-created resources through Cloud APIs.
+- a first DR remote-Mold failback request can automatically continue cutback after reverse sync ready without persisting API keys or secret keys.
+- missing or expired in-memory failback context leaves the state resumable through `Continue failback`.
 - HA/local-Mold tests continue to pass unchanged.
 
 qemu checks:

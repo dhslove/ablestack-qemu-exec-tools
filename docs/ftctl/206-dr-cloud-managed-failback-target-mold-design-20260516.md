@@ -27,8 +27,11 @@ This document extends and supersedes conflicting failback wording in:
 - [201. DR Remote Mold Cloud-Managed Resource Ownership Design](201-dr-remote-mold-cloud-managed-resource-ownership-design-20260514.md)
 - [202. Cloud-Managed HA/DR Automatic Fencing qemu Contract Design](202-cloud-managed-ha-dr-automatic-fencing-qemu-contract-design-20260514.md)
 - [205. DR Fence Clear Re-arm And SSH Key Binding Design](205-dr-fence-clear-rearm-ssh-key-binding-design-20260515.md)
+- [207. DR Cloud-Managed Failback Async Context Design](207-dr-cloud-managed-failback-async-context-design-20260516.md)
 
 If an earlier document implies that Cloud-managed DR failback must return to the original source Mold or may use local secondary VM database IDs for remote-Mold DR cutback, this document supersedes that interpretation.
+
+Document 207 further refines this document by requiring that the first failback request keep a short-lived in-memory operation context so reverse-sync completion can automatically proceed to Cloud lifecycle cutback without forcing a normal operator to click `Continue failback`.
 
 ## 3. Non-Negotiable Principles
 
@@ -39,6 +42,7 @@ If an earlier document implies that Cloud-managed DR failback must return to the
 - qemu FTCTL owns blockcopy, reverse sync, remote-NBD export handling, finalize, reprotect, and other data-plane actions requested by Cloud.
 - qemu FTCTL must not create, define, start, stop, delete, attach, detach, resize, or format Cloud-managed VMs or volumes.
 - Remote or target Mold API keys and secret keys are transient operator inputs. They must not be persisted in Cloud DB, VM details, qemu profiles, host files, or logs.
+- The initial failback request may keep remote or target Mold credentials only in a bounded in-memory operation context while the same failback operation is active, as defined in document 207.
 - Already validated HA Cloud-managed behavior must not be regressed.
 
 ## 4. Failback Target Mold Types
@@ -134,6 +138,8 @@ UI action labels:
 
 The UI must not require a cleanup/re-register cycle when reverse sync is already ready.
 
+`Continue failback` is a recovery/resume action. In the normal path, the first `Failback` action keeps a transient in-memory operation context and Cloud continues automatically after qemu reports reverse sync ready. The UI should show `Continue failback` only when the backend reports that the operation context is missing, expired, invalid, or requires fresh operator credentials.
+
 ## 7. Backend State Machine
 
 ### 7.1 Start Failback
@@ -152,8 +158,9 @@ Backend sequence:
 1. Resolve and validate the failback target Mold context.
 2. Provision or validate target primary VM and target volumes through the target Mold.
 3. Build explicit disk maps for qemu.
-4. Send `FAILBACK_SYNC` to the correct qemu FTCTL execution host.
-5. Persist non-secret failback session metadata.
+4. Create a short-lived in-memory failback operation context containing the one-time Mold credentials required for cutback.
+5. Send `FAILBACK_SYNC` to the correct qemu FTCTL execution host.
+6. Persist non-secret failback session metadata.
 
 ### 7.2 Continue Failback After Reverse Sync
 
@@ -168,14 +175,15 @@ fencing_state=clear
 
 Backend sequence:
 
-1. Re-resolve the failback target Mold context.
-2. If target credentials are unavailable or expired, keep the state and ask the UI to collect credentials again.
-3. Stop the current active DR replica VM through its owning Mold.
-4. Send `FAILBACK_FINALIZE` to qemu FTCTL.
-5. Start the target primary VM through the target Mold.
-6. Send `FAILBACK_REPROTECT` to qemu FTCTL.
-7. Update the protection state to `protected / mirroring / primary / clear`.
-8. Mark the old active DR resources as standby, transferred, or cleanup candidates according to the selected policy.
+1. Load the in-memory failback operation context created by the start request.
+2. If the context is present and valid, continue automatically without requiring another UI action.
+3. If target credentials are unavailable or expired, keep the state and ask the UI to collect credentials again through `Continue failback`.
+4. Stop the current active DR replica VM through its owning Mold.
+5. Send `FAILBACK_FINALIZE` to qemu FTCTL.
+6. Start the target primary VM through the target Mold.
+7. Send `FAILBACK_REPROTECT` to qemu FTCTL.
+8. Update the protection state to `protected / mirroring / primary / clear`.
+9. Mark the old active DR resources as standby, transferred, or cleanup candidates according to the selected policy.
 
 ### 7.3 Failure Handling
 
@@ -231,7 +239,7 @@ Allowed:
 - use API URL, API key, and secret key to list target resources.
 - use credentials to create or validate target primary resources.
 - use credentials to stop/start VMs during the same failback request.
-- keep credentials in a bounded in-memory context while an async cutback is actively running.
+- keep credentials in a bounded in-memory context while an async failback operation is actively running, from `FAILBACK_SYNC` start through reverse-sync-ready cutback.
 
 Forbidden:
 

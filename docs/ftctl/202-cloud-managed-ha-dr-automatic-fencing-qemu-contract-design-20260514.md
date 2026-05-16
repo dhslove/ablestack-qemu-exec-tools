@@ -84,6 +84,8 @@ Manual HA/DR flows remain valid:
 
 For DR failback, Cloud must also own target Mold selection and target primary VM lifecycle. The target Mold may be the current Mold, the original primary Mold, or a newly installed Mold, as defined in [206. DR Cloud-Managed Failback Target Mold Design](206-dr-cloud-managed-failback-target-mold-design-20260516.md).
 
+If failback reverse sync is long-running, Cloud may keep the selected target/remote Mold credentials only in a bounded in-memory operation context so the same failback operation can automatically continue cutback after qemu reports `reverse_sync_ready`. That context model is defined in [207. DR Cloud-Managed Failback Async Context Design](207-dr-cloud-managed-failback-async-context-design-20260516.md). qemu FTCTL must never receive or persist those Mold credentials.
+
 ## 7. Verification
 
 Implementation verification must show:
@@ -94,3 +96,4 @@ Implementation verification must show:
 - qemu events show candidate/data-plane evidence only.
 - Cloud starts Cloud-managed standby VMs through Cloud APIs, not through qemu libvirt lifecycle control.
 - DR failback starts target primary VMs through the selected target Mold API, not through qemu libvirt lifecycle control.
+- DR remote/new Mold failback can automatically continue after reverse sync ready when the Cloud in-memory operation context is still valid.

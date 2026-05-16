@@ -30,6 +30,7 @@ This document extends these existing designs:
 - `201-dr-remote-mold-cloud-managed-resource-ownership-design-20260514.md`
 - `202-cloud-managed-ha-dr-automatic-fencing-qemu-contract-design-20260514.md`
 - `206-dr-cloud-managed-failback-target-mold-design-20260516.md`
+- `207-dr-cloud-managed-failback-async-context-design-20260516.md`
 
 If an older document implies that fence clear should immediately let qemu auto-rearm a Cloud-managed failed-over DR protection, this document supersedes that interpretation.
 
@@ -229,6 +230,8 @@ Remote-Mold DR must additionally:
 - use the FTCTL-generated SSH key path for source-host to remote-host execution.
 - query or project remote VM state through Cloud, not through UI direct host access.
 - require explicit target Mold context again when DR failback starts or continues, because the failback target may be the current Mold, the original primary Mold, or a newly installed Mold.
+- allow Cloud to keep that explicit target/remote Mold context only as a bounded in-memory operation context during the active failback, so a normal reverse-sync-ready transition can cut back automatically without a second operator click.
+- show `Continue failback` only when that in-memory context is missing, expired, invalid, or intentionally replaced by the operator.
 
 The same public `getFtctlProtection` response should be valid for both paths.
 
@@ -298,6 +301,7 @@ End-to-end DR-WIN retest:
 7. Verify no `degraded`, `rearm_pending`, or `rearm_exhausted` transition occurs.
 8. Start failback, continue failback, or reprotect through the Cloud-managed recovery flow.
 9. During DR failback, select the target Mold explicitly per document 206.
+10. Verify that the first failback request automatically continues after reverse sync ready when the in-memory context is still valid, per document 207.
 
 ## 11. Non-Goals
 
