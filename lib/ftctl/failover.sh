@@ -419,7 +419,7 @@ ftctl_failback_sync_for_cloud_cutback() {
   local vm="${1-}"
   local reason="${2-manual}"
   local mode="${FTCTL_PROFILE_MODE:-ha}"
-  local active_side primary_xml reverse_error
+  local active_side primary_xml reverse_error transport_state
 
   if [[ "${mode}" == "ft" ]]; then
     echo "ERROR: failback-sync is not supported for FT mode" >&2
@@ -432,6 +432,50 @@ ftctl_failback_sync_for_cloud_cutback() {
       "reason=${reason} state=already_primary"
     return 0
   fi
+
+  transport_state="$(ftctl_state_get "${vm}" "transport_state" 2>/dev/null || true)"
+  case "${transport_state}" in
+    reverse_sync_ready|reverse_sync_cutback_required)
+      ftctl_state_set "${vm}" \
+        "protection_state=failing_back" \
+        "transport_state=reverse_sync_ready" \
+        "last_error="
+      ftctl_log_event "failback" "failback.sync" "ok" "${vm}" "" \
+        "reason=${reason} reverse_sync=already_ready"
+      return 0
+      ;;
+    reverse_syncing)
+      ftctl_blockcopy_refresh_and_classify "${vm}" >/dev/null 2>&1 || true
+      transport_state="$(ftctl_state_get "${vm}" "transport_state" 2>/dev/null || echo "reverse_syncing")"
+      case "${transport_state}" in
+        reverse_sync_ready|reverse_sync_cutback_required)
+          ftctl_state_set "${vm}" \
+            "protection_state=failing_back" \
+            "transport_state=reverse_sync_ready" \
+            "last_error="
+          ftctl_log_event "failback" "failback.sync" "ok" "${vm}" "" \
+            "reason=${reason} reverse_sync=already_ready_after_refresh"
+          return 0
+          ;;
+        reverse_syncing)
+          ftctl_log_event "failback" "failback.sync" "ok" "${vm}" "" \
+            "reason=${reason} reverse_sync=already_running"
+          return 0
+          ;;
+      esac
+      ;;
+    reverse_sync_failed)
+      if ftctl_blockcopy_reverse_progress_ready "${vm}"; then
+        ftctl_state_set "${vm}" \
+          "protection_state=failing_back" \
+          "transport_state=reverse_sync_ready" \
+          "last_error="
+        ftctl_log_event "failback" "failback.sync" "ok" "${vm}" "" \
+          "reason=${reason} reverse_sync=recovered_ready_from_progress"
+        return 0
+      fi
+      ;;
+  esac
 
   if ! ftctl_verify_failback_ready "${vm}"; then
     ftctl_state_set "${vm}" \

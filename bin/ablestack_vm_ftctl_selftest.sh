@@ -1471,6 +1471,66 @@ EOF
   selftest_assert_file_contains "${FTCTL_EVENTS_LOG}" "reverse_sync.ready"
 )
 
+selftest_case_failback_sync_idempotent_when_reverse_ready() (
+  selftest_reset_env
+  selftest_info "failback-sync is idempotent when reverse sync is ready"
+
+  local vm="reverse-sync-ready-idempotent"
+  FTCTL_PROFILE_MODE="dr"
+  FTCTL_PROFILE_BACKEND_MODE="remote-nbd"
+  ftctl_state_init_vm "${vm}"
+  ftctl_state_set "${vm}" \
+    "active_side=secondary" \
+    "protection_state=failing_back" \
+    "transport_state=reverse_sync_ready" \
+    "secondary_vm_name=${vm}-standby" \
+    "last_error="
+  ftctl_blockcopy_state_write_reverse "${vm}" \
+    "vda|/dev/rbd/rbd/${vm}-standby-root|/dev/rbd/rbd/${vm}-root|raw|/dev/rbd/rbd/${vm}-standby-root||"
+
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_start_reverse_sync() {
+    selftest_fail "FAILBACK_SYNC must not restart reverse block jobs once ready"
+  }
+
+  ftctl_failback_sync_for_cloud_cutback "${vm}" "manual"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "transport_state")" "reverse_sync_ready" "ready failback-sync keeps ready transport"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" "" "ready failback-sync keeps last_error clear"
+  selftest_assert_file_contains "${FTCTL_EVENTS_LOG}" '"reverse_sync":"already_ready"'
+)
+
+selftest_case_failback_sync_recovers_failed_ready_progress() (
+  selftest_reset_env
+  selftest_info "failback-sync recovers reverse ready progress after failed retry"
+
+  local vm="reverse-sync-failed-ready-progress"
+  FTCTL_PROFILE_MODE="dr"
+  FTCTL_PROFILE_BACKEND_MODE="remote-nbd"
+  ftctl_state_init_vm "${vm}"
+  ftctl_state_set "${vm}" \
+    "active_side=secondary" \
+    "protection_state=error" \
+    "transport_state=reverse_sync_failed" \
+    "secondary_vm_name=${vm}-standby" \
+    "last_error=reverse_sync_start_failed"
+  ftctl_blockcopy_state_write_reverse "${vm}" \
+    "vda|/dev/rbd/rbd/${vm}-standby-root|/dev/rbd/rbd/${vm}-root|raw|/dev/rbd/rbd/${vm}-standby-root||"
+  cat > "$(ftctl_blockcopy_progress_path "${vm}")" <<EOF
+{"direction":"reverse","ready":true,"disks":[{"target":"vda","ready":true,"status":"ready","offset":1073741824,"len":1073741824}]}
+EOF
+
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_start_reverse_sync() {
+    selftest_fail "FAILBACK_SYNC must recover ready progress instead of restarting block jobs"
+  }
+
+  ftctl_failback_sync_for_cloud_cutback "${vm}" "manual"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "protection_state")" "failing_back" "failed ready progress returns to failing_back"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "transport_state")" "reverse_sync_ready" "failed ready progress recovers ready transport"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" "" "failed ready progress clears last_error"
+  selftest_assert_file_contains "${FTCTL_EVENTS_LOG}" '"reverse_sync":"recovered_ready_from_progress"'
+)
+
 selftest_case_reconcile_preserves_cloud_failback_failure() (
   selftest_reset_env
   selftest_info "reconcile preserves cloud failback failure"
@@ -1694,6 +1754,8 @@ selftest_main() {
   selftest_case_dr_remote_failback_maps_reverse_rbd_on_primary
   selftest_case_dr_remote_primary_nbd_prepare_maps_unmapped_rbd
   selftest_case_failback_reverse_progress_ready
+  selftest_case_failback_sync_idempotent_when_reverse_ready
+  selftest_case_failback_sync_recovers_failed_ready_progress
   selftest_case_reconcile_preserves_cloud_failback_failure
   selftest_case_reconcile_waits_for_cloud_failback_after_fence_clear
   selftest_case_reconcile_waits_for_cloud_dr_failback_after_fence_clear
