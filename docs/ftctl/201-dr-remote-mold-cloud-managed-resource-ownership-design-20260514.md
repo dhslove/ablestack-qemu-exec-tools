@@ -10,6 +10,8 @@ The current DR remote Mold implementation can resolve a remote Mold host and sto
 
 This design changes DR remote Mold registration so the remote Cloud management system creates and owns the replica virtual machine and replica volumes. qemu FTCTL receives only the Cloud-created target paths and performs replication and Cloud-requested disaster-recovery data-plane actions.
 
+Failback-time target Mold selection is defined separately in [206. DR Cloud-Managed Failback Target Mold Design](206-dr-cloud-managed-failback-target-mold-design-20260516.md). Registration-time remote Mold ownership does not imply that failback must return to the original source Mold.
+
 ## 2. Non-Negotiable Ownership Rules
 
 - Cloud owns virtual machine and volume lifecycle.
@@ -203,9 +205,14 @@ For automatic Cloud-managed failover, Cloud must also own the fencing decision a
 
 ### 8.3 Failback
 
-- qemu performs reverse sync and data-plane finalization.
-- Cloud controls VM stop/start transitions through source and remote Mold APIs.
-- Cloud remains responsible for cleanup of Cloud-created replica resources.
+- DR failback must receive an explicit target Mold context at failback time.
+- The target Mold may be the current Mold, the original primary Mold, or a newly installed Mold.
+- qemu performs reverse sync and data-plane finalization into explicit Cloud-created target paths.
+- Cloud controls VM stop/start transitions through the Mold that owns each VM.
+- For remote or new Mold targets, Cloud must use external UUID/name/instance identifiers rather than local numeric secondary VM IDs.
+- Cloud remains responsible for cleanup or transfer of Cloud-created replica resources.
+
+The detailed failback state machine, target Mold credential handling, and new-primary-Mold handoff rules are specified in document 206.
 
 ## 9. UI Impact
 
@@ -237,6 +244,7 @@ If defaults are used, the defaults must be resolved by Cloud and shown as Cloud-
 - DR local Mold must continue to work without remote Mold credentials.
 - qemu standalone remote-nbd tests can continue to validate qemu-created targets when `provisioningbackend` is not `cloud-managed`.
 - Cloud-managed DR must always use Cloud-created replica resources and explicit disk maps.
+- Cloud-managed DR failback must not assume that the original source Mold is the failback target.
 
 ## 11. Verification Plan
 

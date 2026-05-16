@@ -29,6 +29,7 @@ This document extends these existing designs:
 - `200-dr-remote-mold-ssh-preflight-key-setup-design-20260513.md`
 - `201-dr-remote-mold-cloud-managed-resource-ownership-design-20260514.md`
 - `202-cloud-managed-ha-dr-automatic-fencing-qemu-contract-design-20260514.md`
+- `206-dr-cloud-managed-failback-target-mold-design-20260516.md`
 
 If an older document implies that fence clear should immediately let qemu auto-rearm a Cloud-managed failed-over DR protection, this document supersedes that interpretation.
 
@@ -203,7 +204,7 @@ In that state, qemu must:
 Cloud must:
 
 - display this as a recovery-ready state, not as a protection error.
-- enable the appropriate failback or reprotect action.
+- enable the appropriate failback, continue-failback, or reprotect action.
 - keep Cloud-managed VM lifecycle orchestration in Cloud.
 - request explicit qemu data-plane actions only when the operator or Cloud reconciler starts recovery.
 
@@ -227,6 +228,7 @@ Remote-Mold DR must additionally:
 - persist only sanitized remote replica metadata.
 - use the FTCTL-generated SSH key path for source-host to remote-host execution.
 - query or project remote VM state through Cloud, not through UI direct host access.
+- require explicit target Mold context again when DR failback starts or continues, because the failback target may be the current Mold, the original primary Mold, or a newly installed Mold.
 
 The same public `getFtctlProtection` response should be valid for both paths.
 
@@ -249,9 +251,10 @@ The same public `getFtctlProtection` response should be valid for both paths.
 2. Pass the key path into qemu profile creation/update without storing private key content.
 3. For both current-Mold and remote-Mold DR, persist only non-secret connection metadata required for display and command reconstruction.
 4. Treat `failed_over / failed_over / secondary / clear` as failback-ready for Cloud-managed DR.
-5. Do not classify the state as degraded solely because the primary libvirt domain is absent after failover.
-6. Keep remote Mold API credentials transient.
-7. Ensure UI action gating enables the next recovery action from the recovery-ready state.
+5. Treat `failing_back / reverse_sync_ready / secondary / clear` and `failing_back / reverse_sync_cutback_required / secondary / clear` as continue-failback states for Cloud-managed DR.
+6. Do not classify the state as degraded solely because the primary libvirt domain is absent after failover.
+7. Keep remote Mold and target Mold API credentials transient.
+8. Ensure UI action gating enables the next recovery action from the recovery-ready or continue-failback state.
 
 ## 9. Recovery Handling For Existing Failed Runs
 
@@ -293,7 +296,8 @@ End-to-end DR-WIN retest:
 5. Verify remote Mold starts the replica VM.
 6. Clear fence.
 7. Verify no `degraded`, `rearm_pending`, or `rearm_exhausted` transition occurs.
-8. Start failback or reprotect through Cloud-managed recovery flow.
+8. Start failback, continue failback, or reprotect through the Cloud-managed recovery flow.
+9. During DR failback, select the target Mold explicitly per document 206.
 
 ## 11. Non-Goals
 
@@ -301,4 +305,5 @@ End-to-end DR-WIN retest:
 - Do not let qemu create Cloud-managed replica VMs or volumes.
 - Do not let qemu start or stop Cloud-managed replica VMs directly.
 - Do not make remote Mold one-time UI credentials durable automation credentials.
+- Do not assume DR failback always returns to the original primary Mold.
 - Do not change the validated HA manual-block behavior except to share the same Cloud-managed fence-clear rearm guard where applicable.

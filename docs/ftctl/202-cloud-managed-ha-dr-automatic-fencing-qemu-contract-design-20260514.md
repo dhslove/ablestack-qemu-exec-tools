@@ -6,7 +6,7 @@ Date: 2026-05-14
 
 This document records the qemu-side contract for Cloud-managed HA/DR automatic fencing.
 
-When `FTCTL_PROFILE_PROVISIONING_BACKEND=cloud-managed`, qemu FTCTL is not the automatic failover controller. Cloud owns the automatic fencing decision, VM lifecycle orchestration, host placement, target network/storage selection, and current/remote Mold API calls.
+When `FTCTL_PROFILE_PROVISIONING_BACKEND=cloud-managed`, qemu FTCTL is not the automatic failover controller. Cloud owns the automatic fencing decision, VM lifecycle orchestration, host placement, target network/storage selection, and current/remote/new Mold API calls.
 
 qemu FTCTL remains the replication and data-plane executor.
 
@@ -82,6 +82,8 @@ Manual HA/DR flows remain valid:
 - Cloud starts the standby/replica VM through local or remote Mold APIs.
 - qemu finalizes the data-plane transition after Cloud lifecycle work is complete.
 
+For DR failback, Cloud must also own target Mold selection and target primary VM lifecycle. The target Mold may be the current Mold, the original primary Mold, or a newly installed Mold, as defined in [206. DR Cloud-Managed Failback Target Mold Design](206-dr-cloud-managed-failback-target-mold-design-20260516.md).
+
 ## 7. Verification
 
 Implementation verification must show:
@@ -91,3 +93,4 @@ Implementation verification must show:
 - manual-fence DR and HA flows still preserve failover state.
 - qemu events show candidate/data-plane evidence only.
 - Cloud starts Cloud-managed standby VMs through Cloud APIs, not through qemu libvirt lifecycle control.
+- DR failback starts target primary VMs through the selected target Mold API, not through qemu libvirt lifecycle control.
