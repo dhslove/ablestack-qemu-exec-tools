@@ -1316,10 +1316,59 @@ EOF
   selftest_assert_eq "$(ftctl_state_get "${vm}" "transport_state")" "cutback_ready" "reverse finalize transport"
   selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" "" "reverse finalize clears error"
   selftest_assert_file_contains "${call_log}" "qemu-img convert -p -n"
-  selftest_assert_file_contains "${call_log}" "-S 4k"
+  selftest_assert_file_contains "${call_log}" '-S "4k"'
   selftest_assert_file_contains "${call_log}" "SPARSIFY:vda:/dev/rbd/rbd/${vm}-root"
   selftest_assert_file_contains "${call_log}" "nbd://10.0.0.11:10821/${vm}-vda-reverse"
   selftest_assert_file_contains "${FTCTL_EVENTS_LOG}" "reverse_sync.finalize"
+)
+
+selftest_case_failback_reverse_finalize_uses_rbd_uri_source() (
+  selftest_reset_env
+  selftest_info "failback reverse finalize uses stable RBD URI source"
+
+  local vm="reverse-finalize-rbd-uri"
+  local call_log="${SELFTEST_ROOT}/reverse-finalize-rbd-uri-calls.log"
+  FTCTL_PROFILE_BACKEND_MODE="remote-nbd"
+  FTCTL_PROFILE_FAILBACK_DISK_MAP="source"
+  FTCTL_PROFILE_REMOTE_NBD_EXPORT_NAME="${vm}"
+  ftctl_state_init_vm "${vm}"
+  ftctl_state_set "${vm}" "active_side=secondary"
+  ftctl_blockcopy_state_write_reverse "${vm}" \
+    "vda|nbd://10.0.0.12:10820/${vm}-vda|/dev/rbd/rbd/${vm}-root|raw|/dev/rbd/rbd/${vm}-standby-root|1024|1024"
+
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_secondary_domain_state() { return 1; }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_remote_target_host_user() { printf -v "$1" '%s' '10.0.0.12'; printf -v "$2" '%s' 'root'; }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_primary_export_addr() { printf -v "$1" '%s' '10.0.0.11'; }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_primary_nbd_pick_port() { printf -v "$3" '%s' '10821'; }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_prepare_rbd_target_for_sparse_finalize() { :; }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_primary_nbd_prepare_target() {
+    printf 'PREPARE:%s:%s:%s:%s:%s\n' "$2" "$3" "$4" "$6" "$7" >> "${call_log}"
+  }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_remote_exec() {
+    local out_var="$3" err_var="$4" rc_var="$5" cmd="$6"
+    printf '%s\n' "${cmd}" >> "${call_log}"
+    printf -v "${out_var}" '%s' ""
+    printf -v "${err_var}" '%s' ""
+    printf -v "${rc_var}" '%s' "0"
+  }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_stop_primary_reverse_nbd_exports() { :; }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_sparsify_rbd_target_after_finalize() { :; }
+
+  ftctl_blockcopy_finalize_reverse_sync "${vm}"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "transport_state")" "cutback_ready" "reverse RBD finalize transport"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" "" "reverse RBD finalize clears error"
+  selftest_assert_file_contains "${call_log}" "secondary_path=rbd:rbd/${vm}-standby-root"
+  selftest_assert_file_contains "${call_log}" "qemu-img convert -p -n"
+  selftest_assert_file_contains "${FTCTL_EVENTS_LOG}" "source\":\"rbd:rbd/${vm}-standby-root"
 )
 
 selftest_case_failback_shared_reverse_finalize() (
@@ -1386,6 +1435,31 @@ selftest_case_dr_remote_failback_maps_reverse_rbd_on_primary() (
   selftest_assert_file_not_contains "${call_log}" "UNEXPECTED_SECONDARY_MAP"
   selftest_assert_file_contains "${FTCTL_EVENTS_LOG}" "reverse_sync.primary-rbd-map"
   selftest_assert_file_contains "${FTCTL_EVENTS_LOG}" "site\":\"primary"
+)
+
+selftest_case_dr_remote_reverse_plan_stores_rbd_uri_source() (
+  selftest_reset_env
+  selftest_info "DR remote-nbd reverse plan stores stable RBD URI source"
+
+  local vm="dr-remote-reverse-rbd-source"
+  FTCTL_PROFILE_BACKEND_MODE="remote-nbd"
+  FTCTL_PROFILE_FAILBACK_DISK_MAP="source"
+  ftctl_state_init_vm "${vm}"
+  ftctl_blockcopy_state_write "${vm}" \
+    "sda|/dev/rbd/rbd/${vm}-primary-root|nbd://10.10.32.1:10816/${vm}-sda|raw|copy|yes|/dev/rbd/rbd/${vm}-standby-root"
+
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_remote_target_host_user() { printf -v "$1" '%s' '10.10.32.1'; printf -v "$2" '%s' 'root'; }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_remote_path_virtual_size_bytes() {
+    [[ "$3" == "rbd:rbd/${vm}-standby-root" ]] || selftest_fail "reverse plan should size stable RBD URI, got $3"
+    printf -v "$4" '%s' "1024"
+  }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_local_path_virtual_size_bytes() { printf -v "$2" '%s' "1024"; }
+
+  ftctl_blockcopy_prepare_reverse_sync_plan "${vm}"
+  selftest_assert_file_contains "$(ftctl_blockcopy_reverse_state_path "${vm}")" "rbd:rbd/${vm}-standby-root|1024|1024"
 )
 
 selftest_case_dr_remote_primary_nbd_prepare_maps_unmapped_rbd() (
@@ -1750,8 +1824,10 @@ selftest_main() {
   selftest_case_unprotect_fails_when_remote_nbd_release_fails
   selftest_case_unprotect_force_cleanup_warns_when_remote_nbd_release_fails
   selftest_case_failback_reverse_finalize
+  selftest_case_failback_reverse_finalize_uses_rbd_uri_source
   selftest_case_failback_shared_reverse_finalize
   selftest_case_dr_remote_failback_maps_reverse_rbd_on_primary
+  selftest_case_dr_remote_reverse_plan_stores_rbd_uri_source
   selftest_case_dr_remote_primary_nbd_prepare_maps_unmapped_rbd
   selftest_case_failback_reverse_progress_ready
   selftest_case_failback_sync_idempotent_when_reverse_ready
