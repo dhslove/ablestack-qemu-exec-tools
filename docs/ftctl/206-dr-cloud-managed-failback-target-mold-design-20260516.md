@@ -4,7 +4,7 @@ Date: 2026-05-16
 
 ## 1. Purpose
 
-This document defines the Cloud-managed DR failback model when the failback target Mold may be different from both the original primary Mold and the current disaster-recovery Mold.
+This document defines the Cloud-managed DR failback model when the Mold receiving the failback request can still access the source-side FTCTL protection record, but the failback target Mold may be different from both the original primary Mold and the current disaster-recovery Mold.
 
 The immediate DR-WIN failure showed a protection stuck at:
 
@@ -18,7 +18,9 @@ fencing_state=clear
 
 qemu FTCTL had completed reverse sync and reported 100 percent ready, but Cloud did not run the follow-up cutback. The direct code cause was that the Cloud-managed failback monitor accepted only `mode=ha`. The broader design gap is that DR failback was still modeled as returning to the original primary Mold. That is not valid for disaster recovery.
 
-In DR, the original primary Mold may be unavailable, rebuilt, replaced, or intentionally bypassed. Failback must therefore accept an explicit target Mold at failback time.
+In DR, the original primary site or primary VM may be unavailable, rebuilt, replaced, or intentionally bypassed. Failback must therefore accept an explicit target Mold at failback time.
+
+This document does not cover the case where the source Mold itself is destroyed and cannot orchestrate failback. In that case the replica Mold must become the recovery controller, as defined in [208. DR Replica-Site Disaster Failback And Adoption Design](208-dr-replica-site-disaster-failback-and-adoption-design-20260517.md).
 
 ## 2. Related Designs
 
@@ -28,8 +30,11 @@ This document extends and supersedes conflicting failback wording in:
 - [202. Cloud-Managed HA/DR Automatic Fencing qemu Contract Design](202-cloud-managed-ha-dr-automatic-fencing-qemu-contract-design-20260514.md)
 - [205. DR Fence Clear Re-arm And SSH Key Binding Design](205-dr-fence-clear-rearm-ssh-key-binding-design-20260515.md)
 - [207. DR Cloud-Managed Failback Async Context Design](207-dr-cloud-managed-failback-async-context-design-20260516.md)
+- [208. DR Replica-Site Disaster Failback And Adoption Design](208-dr-replica-site-disaster-failback-and-adoption-design-20260517.md)
 
-If an earlier document implies that Cloud-managed DR failback must return to the original source Mold or may use local secondary VM database IDs for remote-Mold DR cutback, this document supersedes that interpretation.
+If an earlier document implies that Cloud-managed DR failback must return to the original source Mold or may use local secondary VM database IDs for remote-Mold DR cutback, this document supersedes that interpretation for source-controller failback.
+
+Document 208 supersedes this document for full source Mold loss, replica-site disaster failback, and replica-site forced release/adoption.
 
 Document 207 further refines this document by requiring that the first failback request keep a short-lived in-memory operation context so reverse-sync completion can automatically proceed to Cloud lifecycle cutback without forcing a normal operator to click `Continue failback`.
 
@@ -37,6 +42,7 @@ Document 207 further refines this document by requiring that the first failback 
 
 - DR failback always has an explicit failback target Mold context.
 - The failback target Mold may be the current Mold, the original primary Mold, or a newly installed Mold.
+- The Mold receiving this request must still be able to load the source-side protection row. If it cannot, the replica-site controller model in document 208 applies.
 - Cloud owns VM, volume, network, storage, host placement, and lifecycle APIs.
 - Mold Agent delivers explicit FTCTL commands and returns qemu FTCTL status, logs, events, and command results.
 - qemu FTCTL owns blockcopy, reverse sync, remote-NBD export handling, finalize, reprotect, and other data-plane actions requested by Cloud.
@@ -77,9 +83,9 @@ qemu behavior:
 - Use explicit Cloud-created disk maps.
 - Do not assume the target host is the original primary host.
 
-### 4.3 New Primary Mold
+### 4.3 New Primary Mold From A Source Controller
 
-The original primary Mold is not available or is no longer trusted. The operator supplies a new Mold at failback time.
+The original primary resources are not reusable, or the operator intentionally chooses a newly installed target Mold. The Mold receiving the failback request is still available as the source-side controller and can read the source-side protection row.
 
 Cloud behavior:
 
@@ -88,6 +94,7 @@ Cloud behavior:
 - Ask the new Mold to create a stopped target primary VM and target primary volumes.
 - Persist only non-secret external identities in the current control context.
 - Transfer the post-failback protection authority to the new Mold after successful reprotect, or leave a documented handoff record if full transfer is implemented later.
+- If the source Mold is gone and cannot act as this controller, use the replica-site disaster failback model in document 208 instead.
 
 qemu behavior:
 
@@ -159,7 +166,7 @@ Backend sequence:
 2. Provision or validate target primary VM and target volumes through the target Mold.
 3. Build explicit disk maps for qemu.
 4. Create a short-lived in-memory failback operation context containing the one-time Mold credentials required for cutback.
-5. Send `FAILBACK_SYNC` to the correct qemu FTCTL execution host.
+5. Send `FAILBACK_SYNC` to the correct qemu FTCTL execution host known by the source-controller protection context.
 6. Persist non-secret failback session metadata.
 
 ### 7.2 Continue Failback After Reverse Sync
@@ -279,7 +286,8 @@ Runtime checks:
 
 - Current-Mold DR failback can start and continue.
 - Original-primary-Mold DR failback can reuse the original primary VM when available.
-- New-Mold DR failback can provision a target primary VM and continue to cutback.
+- New-Mold DR failback can provision a target primary VM and continue to cutback while a source-controller Mold is available.
+- Full source Mold loss uses replica-site disaster failback from document 208, not this source-controller flow.
 - A stuck `reverse_sync_ready` DR row can continue without cleanup.
 - Remote active replica VM is stopped through its owning Mold.
 - Target primary VM is started through the target Mold.

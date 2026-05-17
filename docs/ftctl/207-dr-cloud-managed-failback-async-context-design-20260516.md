@@ -6,6 +6,8 @@ Date: 2026-05-16
 
 This document fixes the DR-WIN failback behavior where the first failback request starts reverse sync, reverse sync reaches ready state, but Cloud does not continue the VM lifecycle cutback and the UI enables `Continue failback`.
 
+This document applies to the source-controller failback model: the Mold receiving `failbackFtctlProtection` can still load the source-side `ftctl_protection` row and can reach the qemu FTCTL execution context for that protection. Full source Mold loss is handled by [208. DR Replica-Site Disaster Failback And Adoption Design](208-dr-replica-site-disaster-failback-and-adoption-design-20260517.md).
+
 The observed state was:
 
 ```text
@@ -35,8 +37,11 @@ This document extends and takes precedence over conflicting failback wording in:
 - [202. Cloud-Managed HA/DR Automatic Fencing qemu Contract Design](202-cloud-managed-ha-dr-automatic-fencing-qemu-contract-design-20260514.md)
 - [205. DR Fence Clear Re-arm And SSH Key Binding Design](205-dr-fence-clear-rearm-ssh-key-binding-design-20260515.md)
 - [206. DR Cloud-Managed Failback Target Mold Design](206-dr-cloud-managed-failback-target-mold-design-20260516.md)
+- [208. DR Replica-Site Disaster Failback And Adoption Design](208-dr-replica-site-disaster-failback-and-adoption-design-20260517.md)
 
-Document 206 defines failback target Mold selection. This document defines how the selected target and remote Mold credentials survive a long-running reverse sync without being persisted.
+Document 206 defines failback target Mold selection for source-controller failback. This document defines how the selected target and remote Mold credentials survive a long-running reverse sync without being persisted.
+
+Document 208 defines the separate replica-controller path for source Mold loss. That path uses a durable non-secret replica-site recovery session and does not rely on this source-controller in-memory context.
 
 ## 3. Root Cause
 
@@ -258,12 +263,14 @@ This is a recovery path, not the expected steady-state path.
 
 ## 9. Same-Mold And Remote-Mold Coverage
 
-The same model applies to all DR peer-site types:
+The same source-controller async model applies to all DR peer-site types when the source-side protection row is still available:
 
 - current Mold DR
 - original-primary Mold failback
 - remote Mold DR
 - new Mold failback
+
+It does not apply when the source Mold is destroyed or cannot act as the controller. In that case the replica Mold must use the recovery-session model from document 208.
 
 For same/current Mold cases, the context may contain no remote secret credentials because the current authenticated Cloud session or local service calls can own lifecycle operations. The state machine remains the same.
 

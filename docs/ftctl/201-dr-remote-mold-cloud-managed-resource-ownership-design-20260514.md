@@ -10,7 +10,7 @@ The current DR remote Mold implementation can resolve a remote Mold host and sto
 
 This design changes DR remote Mold registration so the remote Cloud management system creates and owns the replica virtual machine and replica volumes. qemu FTCTL receives only the Cloud-created target paths and performs replication and Cloud-requested disaster-recovery data-plane actions.
 
-Failback-time target Mold selection is defined separately in [206. DR Cloud-Managed Failback Target Mold Design](206-dr-cloud-managed-failback-target-mold-design-20260516.md). The long-running failback credential/context model is defined in [207. DR Cloud-Managed Failback Async Context Design](207-dr-cloud-managed-failback-async-context-design-20260516.md). Registration-time remote Mold ownership does not imply that failback must return to the original source Mold.
+Failback-time target Mold selection for source-controller failback is defined separately in [206. DR Cloud-Managed Failback Target Mold Design](206-dr-cloud-managed-failback-target-mold-design-20260516.md). The long-running failback credential/context model for that source-controller path is defined in [207. DR Cloud-Managed Failback Async Context Design](207-dr-cloud-managed-failback-async-context-design-20260516.md). Replica-site disaster failback and non-destructive replica adoption/release are defined in [208. DR Replica-Site Disaster Failback And Adoption Design](208-dr-replica-site-disaster-failback-and-adoption-design-20260517.md). Registration-time remote Mold ownership does not imply that failback must return to the original source Mold or that source Mold recovery is required before the replica site can make disaster recovery decisions.
 
 ## 2. Non-Negotiable Ownership Rules
 
@@ -212,9 +212,11 @@ For automatic Cloud-managed failover, Cloud must also own the fencing decision a
 - For remote or new Mold targets, Cloud must use external UUID/name/instance identifiers rather than local numeric secondary VM IDs.
 - Cloud remains responsible for cleanup or transfer of Cloud-created replica resources.
 
-The detailed failback state machine, target Mold credential handling, and new-primary-Mold handoff rules are specified in document 206.
+The source-controller failback state machine, target Mold credential handling, and new-primary-Mold handoff rules are specified in document 206.
 
 The normal DR failback path must remain one logical Cloud operation after the operator starts failback. If reverse sync takes time, Cloud may keep the target/remote Mold credentials only in a bounded in-memory failback operation context so that reverse-sync-ready cutback can proceed automatically. `Continue failback` is reserved for context loss, expiry, management restart, or explicit operator retry. The in-memory context rule and recovery behavior are specified in document 207.
+
+If the source Mold is destroyed, unavailable, or intentionally abandoned, document 208 takes over: the replica Mold keeps a non-secret recovery session, may fail back to a restored or new target Mold, and may non-destructively release/adopt the running replica VM for long-term production use.
 
 ## 9. UI Impact
 
@@ -248,6 +250,7 @@ If defaults are used, the defaults must be resolved by Cloud and shown as Cloud-
 - Cloud-managed DR must always use Cloud-created replica resources and explicit disk maps.
 - Cloud-managed DR failback must not assume that the original source Mold is the failback target.
 - Cloud-managed DR failback must not require `Continue failback` as the normal path after a successful first failback request; that button is a recovery path when the transient in-memory operation context is unavailable.
+- Cloud-managed remote-Mold DR must support a future replica-site recovery session so disaster failback or replica adoption does not depend on source Mold recovery.
 
 ## 11. Verification Plan
 
