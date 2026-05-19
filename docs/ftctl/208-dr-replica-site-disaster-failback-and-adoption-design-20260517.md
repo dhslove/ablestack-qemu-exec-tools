@@ -24,6 +24,8 @@ This document extends and supersedes conflicting wording in:
 
 If an earlier document says that a remote Mold standby page is always read-only or that DR failback must be initiated by the source Mold, read that statement as applying only while the source Mold remains available and authoritative. After disaster failover, the replica Mold may become the active DR controller.
 
+The adopted-replica re-protection follow-up is [209. DR Adopted Replica Re-protection Readiness Design](209-dr-adopted-replica-reprotect-readiness-design-20260519.md).
+
 ## 3. Non-Negotiable Principles
 
 - Cloud owns Cloud-managed VM, volume, network, storage, host placement, and lifecycle APIs.
@@ -169,10 +171,12 @@ cleanupTransport=true
 3. If `cleanupTransport=true`, ask qemu FTCTL on the replica execution host to release session-specific NBD exports, locks, temporary state, and generated key material.
 4. Remove or archive `ftctl.remote.replica.*` and `ftctl.standby.vm` markers from the replica VM according to the chosen policy.
 5. Preserve replica VM NICs, volumes, account ownership, service offering, and Cloud lifecycle state.
-6. Mark the recovery session as `adopted` or `released`.
+6. Close the recovery session as `adopted` or `released`, then let Cloud remove protection-blocking `ftctl.*` VM details from the replica VM so it is immediately eligible for a new protection registration.
 7. Optionally call the source Mold to mark its protection row released. Failure to reach source Mold records `source_abandoned` but does not fail the adoption.
 
 The operation must not call `destroyVirtualMachine`, `expunge`, `deleteVolume`, or detach replica volumes unless the operator explicitly selected a destructive cleanup mode.
+
+Adoption/release is terminal for the old DR relationship. qemu cleanup must remove only old session transport/runtime state; Cloud must not keep stale `ftctl.last.*` VM details that make the adopted VM appear protected when no active protection row exists.
 
 ## 8. qemu FTCTL Contract
 
@@ -230,5 +234,6 @@ Design-level verification:
 - replica-site disaster failback creates target VM/volumes through target Mold APIs.
 - qemu events show only data-plane copy/finalize/cleanup work.
 - forced replica release/adoption preserves the running replica VM and volumes.
+- adopted/released replica VM can be protected again as a normal primary candidate.
 - source Mold credentials are optional and best-effort during adoption.
 - no API key or secret key is persisted.
