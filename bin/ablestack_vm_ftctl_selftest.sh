@@ -1087,6 +1087,55 @@ selftest_case_reconcile_defers_manual_fence_pending() (
   selftest_assert_file_contains "${FTCTL_EVENTS_LOG}" 'manual_fence_in_progress'
 )
 
+selftest_case_global_reconcile_skips_missing_profile_state() (
+  selftest_reset_env
+  selftest_info "global reconcile skips stale state without profile"
+
+  local stale_vm="stale-profile-vm"
+  local live_vm="live-profile-vm"
+  local call_log="${SELFTEST_ROOT}/global-reconcile-calls.log"
+
+  ftctl_state_init_vm "${stale_vm}"
+  ftctl_state_set "${stale_vm}" \
+    "mode=dr" \
+    "protection_state=syncing" \
+    "transport_state=copying" \
+    "active_side=primary"
+
+  ftctl_state_init_vm "${live_vm}"
+  ftctl_state_set "${live_vm}" \
+    "mode=dr" \
+    "protection_state=syncing" \
+    "transport_state=copying" \
+    "active_side=primary"
+
+  cat > "$(ftctl_profile_path "${live_vm}")" <<EOF
+FTCTL_PROFILE_MODE="dr"
+FTCTL_PROFILE_SECONDARY_URI="qemu+ssh://10.0.0.2/system"
+FTCTL_PROFILE_BACKEND_MODE="remote-nbd"
+FTCTL_PROFILE_TARGET_STORAGE_SCOPE="secondary-local"
+FTCTL_PROFILE_SECONDARY_TARGET_DIR="/dev/rbd/rbd/${live_vm}"
+FTCTL_PROFILE_REMOTE_NBD_EXPORT_ADDR="10.0.0.2:10809"
+EOF
+
+  # shellcheck disable=SC2317
+  ftctl_orchestrator_reconcile_one() {
+    printf '%s\n' "${1-}" >> "${call_log}"
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_orchestrator_check_vm() { return 0; }
+  # shellcheck disable=SC2317
+  ftctl_local_health() { return 0; }
+
+  ftctl_orchestrator_reconcile "" "0" >/dev/null
+
+  [[ -f "${call_log}" ]] || selftest_fail "global reconcile should process live VM"
+  selftest_assert_file_not_contains "${call_log}" "${stale_vm}"
+  selftest_assert_file_contains "${call_log}" "${live_vm}"
+  selftest_assert_file_contains "${FTCTL_EVENTS_LOG}" 'missing_profile'
+)
+
 selftest_case_unprotect_releases_blockcopy_targets() (
   selftest_reset_env
   selftest_info "unprotect releases blockcopy targets"
@@ -1824,6 +1873,7 @@ selftest_main() {
   selftest_case_reconcile_secondary_steady_skips_primary_disks
   selftest_case_reconcile_cloud_managed_reports_failover_candidate
   selftest_case_reconcile_defers_manual_fence_pending
+  selftest_case_global_reconcile_skips_missing_profile_state
   selftest_case_unprotect_releases_blockcopy_targets
   selftest_case_unprotect_releases_remote_nbd_exports
   selftest_case_unprotect_fails_when_remote_nbd_release_fails
