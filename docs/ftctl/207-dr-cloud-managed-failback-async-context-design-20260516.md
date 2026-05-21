@@ -39,7 +39,7 @@ This document extends and takes precedence over conflicting failback wording in:
 - [206. DR Cloud-Managed Failback Target Mold Design](206-dr-cloud-managed-failback-target-mold-design-20260516.md)
 - [208. DR Replica-Site Disaster Failback And Adoption Design](208-dr-replica-site-disaster-failback-and-adoption-design-20260517.md)
 
-Document 206 defines failback target Mold selection for source-controller failback. This document defines how the selected target and remote Mold credentials survive a long-running reverse sync without being persisted.
+Document 206 defines the source-controller target Mold capability model. Document 211 defines the operator-facing UI rule: the primary-side failback dialog does not expose a target-Mold selector for the currently implemented source-controller path. This document defines how the internal target context and remote Mold credentials survive a long-running reverse sync without being persisted.
 
 Document 208 defines the separate replica-controller path for source Mold loss. That path uses a durable non-secret replica-site recovery session and does not rely on this source-controller in-memory context.
 
@@ -135,7 +135,7 @@ Suggested context fields:
 - protection id
 - primary VM uuid and instance name
 - active DR replica external uuid/name/instance name
-- failback target Mold type
+- failback target Mold type, currently `original-primary` for the implemented primary-side source-controller UI
 - remote active Mold API URL, API key, and secret key when needed to stop the active DR replica
 - target Mold API URL, API key, and secret key when needed to start or validate the target primary
 - non-secret target VM and volume identities
@@ -274,12 +274,14 @@ It does not apply when the source Mold is destroyed or cannot act as the control
 
 For same/current Mold cases, the context may contain no remote secret credentials because the current authenticated Cloud session or local service calls can own lifecycle operations. The state machine remains the same.
 
-For remote/new Mold cases, the context may contain one-time API credentials for:
+For remote/new Mold capability cases, the context may contain one-time API credentials for:
 
 - stopping the active DR replica through its owning Mold.
 - validating or starting the target primary through the selected target Mold.
 
 Remote/new Mold credentials remain transient and must be absent from durable state.
+
+The current primary-side UI supplies only remote replica Mold credentials for remote-Mold DR cutback. It must not duplicate the same operator input into `targetmold*` fields unless a future target-Mold provisioning path explicitly needs those credentials.
 
 ## 10. UI Contract
 

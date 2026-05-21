@@ -229,7 +229,7 @@ Remote-Mold DR must additionally:
 - persist only sanitized remote replica metadata.
 - use the FTCTL-generated SSH key path for source-host to remote-host execution.
 - query or project remote VM state through Cloud, not through UI direct host access.
-- require explicit target Mold context again when DR failback starts or continues, because the failback target may be the current Mold, the original primary Mold, or a newly installed Mold.
+- require the explicit internal target Mold context again when DR failback starts or continues. In the implemented primary-side source-controller UI this remains the original-primary/source context, while restored/new Mold targets require the replica-controller workflow or a future source-controller provisioning implementation.
 - allow Cloud to keep that explicit target/remote Mold context only as a bounded in-memory operation context during the active failback, so a normal reverse-sync-ready transition can cut back automatically without a second operator click.
 - show `Continue failback` only when that in-memory context is missing, expired, invalid, or intentionally replaced by the operator.
 
@@ -300,7 +300,7 @@ End-to-end DR-WIN retest:
 6. Clear fence.
 7. Verify no `degraded`, `rearm_pending`, or `rearm_exhausted` transition occurs.
 8. Start failback, continue failback, or reprotect through the Cloud-managed recovery flow.
-9. During DR failback, select the target Mold explicitly per document 206.
+9. During primary-side source-controller DR failback, enter the required remote replica Mold credentials without selecting a target-Mold type, per documents 206 and 211.
 10. Verify that the first failback request automatically continues after reverse sync ready when the in-memory context is still valid, per document 207.
 
 ## 11. Non-Goals

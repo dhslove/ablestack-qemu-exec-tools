@@ -26,6 +26,8 @@ If an earlier document says that a remote Mold standby page is always read-only 
 
 The adopted-replica re-protection follow-up is [209. DR Adopted Replica Re-protection Readiness Design](209-dr-adopted-replica-reprotect-readiness-design-20260519.md).
 
+The operator-facing action model is refined by [211. DR Failback Action UX And Controller Model Design](211-dr-failback-action-ux-controller-model-design-20260521.md). In short, replica-site `Failback` and `Adopt replica` are distinct actions, while `Release replica protection` is not shown as a duplicate top-level action in the normal replica recovery view.
+
 ## 3. Non-Negotiable Principles
 
 - Cloud owns Cloud-managed VM, volume, network, storage, host placement, and lifecycle APIs.
@@ -98,11 +100,16 @@ Forbidden durable fields:
 
 When a remote Mold VM is marked as an FTCTL DR replica, the UI normally shows a projection view. After the replica is running and the source side is unavailable, the UI must offer a controlled disaster-recovery action set:
 
-- `Disaster failback`
+- `Failback`
 - `Adopt replica as primary`
-- `Forced protection release`
 
-The disaster failback dialog collects:
+`Failback` is the replica-controller data-copy recovery path to a restored original Mold or newly installed Mold. It is not implemented by adopting the replica.
+
+`Adopt replica as primary` keeps the current replica VM as the production workload and removes FTCTL standby semantics so it can be protected again later.
+
+Forced protection release is an advanced recovery policy, not a duplicate top-level action beside adoption. It may be exposed inside an explicit recovery/release dialog only when the operator chooses to abandon the source relationship without using the replica as a protected production workload.
+
+The replica-site failback dialog collects:
 
 - target Mold type:
   - current Mold
@@ -230,10 +237,11 @@ Design-level verification:
 
 - source-controller DR failback still follows documents 206 and 207.
 - remote standby page is read-only while `standby` and source protection is healthy.
-- after failover/source unavailable, remote standby page exposes disaster failback and adoption actions.
+- after failover/source unavailable, remote standby page exposes failback and adoption actions without presenting adoption and release as duplicate primary buttons.
 - replica-site disaster failback creates target VM/volumes through target Mold APIs.
 - qemu events show only data-plane copy/finalize/cleanup work.
-- forced replica release/adoption preserves the running replica VM and volumes.
+- replica adoption preserves the running replica VM and volumes.
+- forced replica release, when explicitly selected as an advanced recovery policy, preserves the running replica VM and volumes unless destructive cleanup is explicitly chosen.
 - adopted/released replica VM can be protected again as a normal primary candidate.
 - source Mold credentials are optional and best-effort during adoption.
 - no API key or secret key is persisted.

@@ -205,8 +205,9 @@ For automatic Cloud-managed failover, Cloud must also own the fencing decision a
 
 ### 8.3 Failback
 
-- DR failback must receive an explicit target Mold context at failback time.
-- The target Mold may be the current Mold, the original primary Mold, or a newly installed Mold.
+- DR failback must receive an explicit target Mold context inside Cloud orchestration.
+- In the implemented source-controller UI, the primary/source-side failback action uses the original-primary context and does not expose `current Mold` versus `original primary Mold` as an operator choice.
+- A restored or newly installed Mold target is a future source-controller provisioning path or the replica-controller path from document 208, not a synonym for replica adoption.
 - qemu performs reverse sync and data-plane finalization into explicit Cloud-created target paths.
 - Cloud controls VM stop/start transitions through the Mold that owns each VM.
 - For remote or new Mold targets, Cloud must use external UUID/name/instance identifiers rather than local numeric secondary VM IDs.
@@ -249,6 +250,7 @@ If defaults are used, the defaults must be resolved by Cloud and shown as Cloud-
 - qemu standalone remote-nbd tests can continue to validate qemu-created targets when `provisioningbackend` is not `cloud-managed`.
 - Cloud-managed DR must always use Cloud-created replica resources and explicit disk maps.
 - Cloud-managed DR failback must not assume that the original source Mold is the failback target.
+- Cloud-managed source-controller failback UI must not expose a target-Mold selector until Cloud can provision and transfer ownership to that selected target.
 - Cloud-managed DR failback must not require `Continue failback` as the normal path after a successful first failback request; that button is a recovery path when the transient in-memory operation context is unavailable.
 - Cloud-managed remote-Mold DR must support a future replica-site recovery session so disaster failback or replica adoption does not depend on source Mold recovery.
 

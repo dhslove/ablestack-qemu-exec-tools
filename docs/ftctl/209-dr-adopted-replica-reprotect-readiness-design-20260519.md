@@ -13,9 +13,12 @@ The qemu FTCTL side must support that transition by cleaning only the old DR ses
 This document extends:
 
 - [208. DR Replica-Site Disaster Failback And Adoption Design](208-dr-replica-site-disaster-failback-and-adoption-design-20260517.md)
+- [211. DR Failback Action UX And Controller Model Design](211-dr-failback-action-ux-controller-model-design-20260521.md)
 - Cloud companion document `207-dr-adopted-replica-reprotect-readiness-design-20260519.md`
 
 It supersedes any wording that could be read as keeping an adopted replica under the old DR protection relationship after adoption/release.
+
+Adoption/release is not replica-site failback to a restored or new Mold. Adoption keeps the replica VM as the production workload. Replica-site failback is a separate data-copy workflow defined in document 208 and refined in document 211.
 
 ## 3. Principles
 
@@ -27,7 +30,7 @@ It supersedes any wording that could be read as keeping an adopted replica under
 
 ## 4. qemu Runtime Cleanup Contract
 
-For `adoptFtctlDrReplica` and `releaseFtctlDrReplicaProtection`, Cloud may ask the replica execution host to run forced session cleanup.
+For `adoptFtctlDrReplica` and the advanced `releaseFtctlDrReplicaProtection` recovery policy, Cloud may ask the replica execution host to run forced session cleanup. The normal replica recovery UI should present adoption as the primary conversion action and must not show release as a duplicate top-level action beside adoption.
 
 The qemu cleanup must remove only session-specific artifacts for the old DR protection:
 

@@ -4,7 +4,9 @@ Date: 2026-05-16
 
 ## 1. Purpose
 
-This document defines the Cloud-managed DR failback model when the Mold receiving the failback request can still access the source-side FTCTL protection record, but the failback target Mold may be different from both the original primary Mold and the current disaster-recovery Mold.
+This document defines the Cloud-managed DR failback model when the Mold receiving the failback request can still access the source-side FTCTL protection record.
+
+This is the source-controller failback path. The UI action is issued from the original/source protection context, so the normal implemented target is the original primary context owned by that source-side protection record. A future source-controller path may provision to a different current or newly installed Mold, but that must not be exposed as a selectable UI option until Cloud implements the matching VM, volume, network, and ownership handoff workflow.
 
 The immediate DR-WIN failure showed a protection stuck at:
 
@@ -18,7 +20,7 @@ fencing_state=clear
 
 qemu FTCTL had completed reverse sync and reported 100 percent ready, but Cloud did not run the follow-up cutback. The direct code cause was that the Cloud-managed failback monitor accepted only `mode=ha`. The broader design gap is that DR failback was still modeled as returning to the original primary Mold. That is not valid for disaster recovery.
 
-In DR, the original primary site or primary VM may be unavailable, rebuilt, replaced, or intentionally bypassed. Failback must therefore accept an explicit target Mold at failback time.
+In DR, the original primary site or primary VM may be unavailable, rebuilt, replaced, or intentionally bypassed. Source-controller failback must therefore keep an explicit internal target Mold context, but the primary-side UI must not imply that arbitrary target Mold switching is available before the Cloud lifecycle path exists.
 
 This document does not cover the case where the source Mold itself is destroyed and cannot orchestrate failback. In that case the replica Mold must become the recovery controller, as defined in [208. DR Replica-Site Disaster Failback And Adoption Design](208-dr-replica-site-disaster-failback-and-adoption-design-20260517.md).
 
@@ -38,10 +40,13 @@ Document 208 supersedes this document for full source Mold loss, replica-site di
 
 Document 207 further refines this document by requiring that the first failback request keep a short-lived in-memory operation context so reverse-sync completion can automatically proceed to Cloud lifecycle cutback without forcing a normal operator to click `Continue failback`.
 
+Document 211 refines the operator-facing UI: primary-side failback hides the target-Mold selector and collects only the one-time replica/remote Mold credentials needed for the implemented source-controller cutback.
+
 ## 3. Non-Negotiable Principles
 
-- DR failback always has an explicit failback target Mold context.
-- The failback target Mold may be the current Mold, the original primary Mold, or a newly installed Mold.
+- DR failback always has an explicit failback target Mold context inside Cloud orchestration.
+- The currently implemented source-controller UI path targets the original primary/source context and does not expose a target-Mold selector.
+- A future source-controller path may target the current Mold or a newly installed Mold only after Cloud implements target VM/volume/network provisioning, identity handoff, and protection ownership transfer.
 - The Mold receiving this request must still be able to load the source-side protection row. If it cannot, the replica-site controller model in document 208 applies.
 - Cloud owns VM, volume, network, storage, host placement, and lifecycle APIs.
 - Mold Agent delivers explicit FTCTL commands and returns qemu FTCTL status, logs, events, and command results.
@@ -119,23 +124,14 @@ For remote or new Mold resources, store external UUIDs, names, and instance name
 
 ## 6. UI Contract
 
-For DR Cloud-managed failback, the UI must open a failback target dialog.
+For source-controller DR Cloud-managed failback, the UI must open a failback dialog from the primary/source protection view.
 
 The dialog collects:
 
-- target Mold type:
-  - current Mold
-  - original primary Mold
-  - new Mold
-- target Mold API URL when not using the current authenticated Mold.
-- target Mold API key and secret key.
-- target zone, if more than one valid zone is returned.
-- target host.
-- target storage pool.
-- target network or networks.
-- service offering and disk offering policy when defaults cannot be resolved.
+- no target-Mold type selector in the implemented primary-side flow.
+- one-time replica/remote Mold API URL, API key, and secret key when the active DR replica is owned by a remote Mold and must be stopped during cutback.
 
-Single-result lookup fields may be auto-selected and hidden or shown read-only to reduce noise.
+The primary-side dialog must not show `current Mold`, `original primary Mold`, and `new Mold` as mutually exclusive choices while only original-primary source-controller cutback is implemented. Those choices are capability-model terms, not the current operator-facing UI contract.
 
 UI action labels:
 
@@ -270,7 +266,7 @@ is recoverable without cleanup when:
 - target primary volumes exist and match the failback disk map.
 - qemu status still reports a healthy failback session.
 
-After implementation, the UI must expose `Continue failback`, collect target Mold context, and run the cutback stage from the existing state.
+After implementation, the UI must expose `Continue failback`, collect the needed one-time replica/remote Mold credentials, and run the cutback stage from the existing state. It must not require the operator to pick between `current Mold` and `original primary Mold` for a primary-side source-controller failback because those are the same operational authority in the implemented path.
 
 ## 12. Verification Plan
 
@@ -286,7 +282,7 @@ Runtime checks:
 
 - Current-Mold DR failback can start and continue.
 - Original-primary-Mold DR failback can reuse the original primary VM when available.
-- New-Mold DR failback can provision a target primary VM and continue to cutback while a source-controller Mold is available.
+- New-Mold DR failback remains a future source-controller capability until Cloud implements target VM, volume, network, ownership, and protection handoff provisioning.
 - Full source Mold loss uses replica-site disaster failback from document 208, not this source-controller flow.
 - A stuck `reverse_sync_ready` DR row can continue without cleanup.
 - Remote active replica VM is stopped through its owning Mold.
