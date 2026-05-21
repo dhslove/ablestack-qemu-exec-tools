@@ -45,29 +45,71 @@ ftctl_dr_key_private_key_path() {
   printf '%s' "${key_path}"
 }
 
+ftctl_dr_key_uri_query_escape() {
+  local input="${1-}"
+  local out="" ch hex i
+
+  LC_ALL=C
+  for ((i = 0; i < ${#input}; i++)); do
+    ch="${input:i:1}"
+    case "${ch}" in
+      [A-Za-z0-9._~-])
+        out+="${ch}"
+        ;;
+      *)
+        printf -v hex '%02X' "'${ch}"
+        out+="%${hex}"
+        ;;
+    esac
+  done
+  printf '%s' "${out}"
+}
+
+ftctl_dr_key_uri_has_query_param() {
+  local uri="${1-}"
+  local name="${2-}"
+
+  [[ -n "${name}" ]] || return 1
+  [[ "${uri}" == *\?"${name}"=* || "${uri}" == *\&"${name}"=* ]]
+}
+
+ftctl_dr_key_uri_append_query_param() {
+  local uri="${1-}"
+  local name="${2-}"
+  local value="${3-}"
+  local separator="?"
+
+  [[ "${uri}" == *\?* ]] && separator="&"
+  printf '%s%s%s=%s' "${uri}" "${separator}" "${name}" "${value}"
+}
+
 ftctl_dr_key_uri_with_keyfile() {
   local uri="${1-}"
   local profile="${2-}"
-  local key_path separator
+  local key_path result
 
   [[ "${uri}" == qemu+ssh://* ]] || {
     printf '%s' "${uri}"
     return 0
   }
-  [[ "${uri}" == *\?keyfile=* || "${uri}" == *\&keyfile=* ]] && {
-    printf '%s' "${uri}"
-    return 0
-  }
+
+  result="${uri}"
+
+  if ! ftctl_dr_key_uri_has_query_param "${result}" "no_verify" && \
+     ! ftctl_dr_key_uri_has_query_param "${result}" "known_hosts"; then
+    result="$(ftctl_dr_key_uri_append_query_param "${result}" "no_verify" "1")"
+  fi
 
   key_path="$(ftctl_dr_key_private_key_path "${profile}" 2>/dev/null || true)"
   [[ -n "${key_path}" ]] || {
-    printf '%s' "${uri}"
+    printf '%s' "${result}"
     return 0
   }
 
-  separator="?"
-  [[ "${uri}" == *\?* ]] && separator="&"
-  printf '%s%skeyfile=%s' "${uri}" "${separator}" "${key_path}"
+  if ! ftctl_dr_key_uri_has_query_param "${result}" "keyfile"; then
+    result="$(ftctl_dr_key_uri_append_query_param "${result}" "keyfile" "$(ftctl_dr_key_uri_query_escape "${key_path}")")"
+  fi
+  printf '%s' "${result}"
 }
 
 ftctl_dr_key_emit() {

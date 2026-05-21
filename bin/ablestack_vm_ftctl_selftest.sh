@@ -451,22 +451,26 @@ selftest_case_dr_remote_key_connectivity_args() (
   selftest_info "DR remote key connectivity arguments"
 
   local vm="i-2-381-VM"
-  local uri keyed_uri identity_args existing_key_uri
+  local uri keyed_uri identity_args existing_key_uri encoded_key_path
   FTCTL_DR_KEY_ROOT="${SELFTEST_ROOT}/ssh/ftctl-dr"
   CLI_VM="${vm}"
   FTCTL_PROFILE_MODE="dr"
   ftctl_dr_key_ensure "${vm}" >/dev/null
+  encoded_key_path="$(ftctl_dr_key_uri_query_escape "${FTCTL_DR_KEY_ROOT}/${vm}/id_ed25519")"
 
   uri="qemu+ssh://root@10.0.0.12:22/system"
   keyed_uri="$(ftctl_dr_key_uri_with_keyfile "${uri}" "${vm}")"
-  selftest_assert_eq "${keyed_uri}" "${uri}?keyfile=${FTCTL_DR_KEY_ROOT}/${vm}/id_ed25519" "DR qemu+ssh keyfile URI"
+  selftest_assert_eq "${keyed_uri}" "${uri}?no_verify=1&keyfile=${encoded_key_path}" "DR qemu+ssh keyfile URI"
 
   keyed_uri="$(ftctl_dr_key_uri_with_keyfile "${uri}?no_verify=1" "${vm}")"
-  selftest_assert_eq "${keyed_uri}" "${uri}?no_verify=1&keyfile=${FTCTL_DR_KEY_ROOT}/${vm}/id_ed25519" "DR qemu+ssh keyfile URI with existing query"
+  selftest_assert_eq "${keyed_uri}" "${uri}?no_verify=1&keyfile=${encoded_key_path}" "DR qemu+ssh keyfile URI with existing no_verify"
+
+  keyed_uri="$(ftctl_dr_key_uri_with_keyfile "${uri}?transport=ssh" "${vm}")"
+  selftest_assert_eq "${keyed_uri}" "${uri}?transport=ssh&no_verify=1&keyfile=${encoded_key_path}" "DR qemu+ssh keyfile URI with existing query"
 
   existing_key_uri="${uri}?keyfile=/root/.ssh/custom"
   keyed_uri="$(ftctl_dr_key_uri_with_keyfile "${existing_key_uri}" "${vm}")"
-  selftest_assert_eq "${keyed_uri}" "${existing_key_uri}" "existing qemu+ssh keyfile is preserved"
+  selftest_assert_eq "${keyed_uri}" "${existing_key_uri}&no_verify=1" "existing qemu+ssh keyfile is preserved"
 
   ftctl_blockcopy_dr_ssh_identity_args identity_args "${vm}"
   selftest_assert_contains "${identity_args}" "-i ${FTCTL_DR_KEY_ROOT}/${vm}/id_ed25519" "DR ssh identity key"
@@ -476,7 +480,8 @@ selftest_case_dr_remote_key_connectivity_args() (
   FTCTL_PROFILE_SECONDARY_SSH_KEY_FILE=""
   ftctl_profile_materialize_dr_ssh_keyfile "${vm}"
   selftest_assert_eq "${FTCTL_PROFILE_SECONDARY_SSH_KEY_FILE}" "${FTCTL_DR_KEY_ROOT}/${vm}/id_ed25519" "DR profile keyfile materialized"
-  selftest_assert_contains "${FTCTL_PROFILE_SECONDARY_URI}" "keyfile=${FTCTL_DR_KEY_ROOT}/${vm}/id_ed25519" "DR profile URI keyfile materialized"
+  selftest_assert_contains "${FTCTL_PROFILE_SECONDARY_URI}" "no_verify=1" "DR profile URI no_verify materialized"
+  selftest_assert_contains "${FTCTL_PROFILE_SECONDARY_URI}" "keyfile=${encoded_key_path}" "DR profile URI keyfile materialized"
 )
 
 selftest_case_blockcopy_missing_job_state() (

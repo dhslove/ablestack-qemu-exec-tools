@@ -871,7 +871,7 @@ ftctl_blockcopy_remote_preflight() {
     reason="remote_ssh_auth_failed"
     if grep -Eiq "connection refused" <<< "${out}${err}"; then
       reason="remote_ssh_port_refused"
-    elif grep -Eiq "host key verification failed|REMOTE HOST IDENTIFICATION HAS CHANGED" <<< "${out}${err}"; then
+    elif grep -Eiq "host key verification failed|REMOTE HOST IDENTIFICATION HAS CHANGED|Host key for .* has changed" <<< "${out}${err}"; then
       reason="remote_ssh_host_key_mismatch"
     fi
     ftctl_blockcopy_remote_preflight_emit "${vm}" "${json}" "fail" "${reason}" "${FTCTL_PROFILE_SECONDARY_URI}" "${remote_host}" "${remote_user}" "${rc}"
@@ -888,7 +888,7 @@ ftctl_blockcopy_remote_preflight() {
       reason="remote_ssh_port_refused"
     elif grep -Eiq "permission denied|publickey" <<< "${out}${err}"; then
       reason="remote_ssh_auth_failed"
-    elif grep -Eiq "host key verification failed|REMOTE HOST IDENTIFICATION HAS CHANGED" <<< "${out}${err}"; then
+    elif grep -Eiq "host key verification failed|REMOTE HOST IDENTIFICATION HAS CHANGED|Host key for .* has changed" <<< "${out}${err}"; then
       reason="remote_ssh_host_key_mismatch"
     fi
     ftctl_blockcopy_remote_preflight_emit "${vm}" "${json}" "fail" "${reason}" "${FTCTL_PROFILE_SECONDARY_URI}" "${remote_host}" "${remote_user}" "${rc}"
