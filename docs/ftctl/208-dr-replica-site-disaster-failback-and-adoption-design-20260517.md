@@ -28,6 +28,8 @@ The adopted-replica re-protection follow-up is [209. DR Adopted Replica Re-prote
 
 The operator-facing action model is refined by [211. DR Failback Action UX And Controller Model Design](211-dr-failback-action-ux-controller-model-design-20260521.md). In short, replica-site `Failback` and `Adopt replica` are distinct actions, while `Release replica protection` is not shown as a duplicate top-level action in the normal replica recovery view.
 
+The first implemented replica-side failback action is the delegated source-controller path in [212. DR Replica-Side Delegated Failback Design](212-dr-replica-side-delegated-failback-design-20260521.md). That path applies only when the source Mold remains reachable and still owns the source-side protection row. It does not replace the full replica-controller disaster failback model in this document.
+
 ## 3. Non-Negotiable Principles
 
 - Cloud owns Cloud-managed VM, volume, network, storage, host placement, and lifecycle APIs.
@@ -65,6 +67,8 @@ The replica Mold must be able to:
 - prepare a target Mold and target primary VM/volumes for disaster failback.
 - instruct the replica-side qemu FTCTL host to copy data from the active replica disks to Cloud-created target disks.
 - perform forced protection release/adoption without contacting the source Mold.
+
+If the source Mold is still reachable and authoritative, the replica Mold may instead delegate failback to the source Mold as defined in document 212. In that case the replica Mold does not create target resources or run qemu data-plane failback directly.
 
 ## 5. Durable Replica-Site Recovery Session
 
@@ -104,6 +108,8 @@ When a remote Mold VM is marked as an FTCTL DR replica, the UI normally shows a 
 - `Adopt replica as primary`
 
 `Failback` is the replica-controller data-copy recovery path to a restored original Mold or newly installed Mold. It is not implemented by adopting the replica.
+
+When the source Mold is reachable and the source-side protection row still exists, `Failback` may first use the delegated source-controller path from document 212. The dialog must make that authority clear by asking for target/source Mold credentials and current replica Mold credentials. If validation proves that the source Mold cannot serve as controller, the UI/backend must fail clearly instead of falling through to adoption.
 
 `Adopt replica as primary` keeps the current replica VM as the production workload and removes FTCTL standby semantics so it can be protected again later.
 

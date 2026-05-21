@@ -11,6 +11,7 @@ The observed confusion is:
 - the primary-side `Failback` dialog offers `current Mold`, `original primary Mold`, and `new Mold`, even though primary-side source-controller failback currently returns to the source/original primary context.
 - the replica-side recovery view shows both `Adopt replica` and `Release replica protection`, which look like duplicate ways to keep the replica running.
 - true replica-site failback to a restored or newly installed Mold is a separate replica-controller workflow and must not be represented by the adoption action.
+- replica-side failback has two different meanings that must not be mixed: delegated source-controller failback when the source Mold still owns the source protection row, and full replica-controller disaster failback when the source Mold is gone or replaced.
 
 ## 2. Related Designs
 
@@ -21,6 +22,7 @@ This document refines operator-facing behavior from:
 - [207. DR Cloud-Managed Failback Async Context Design](207-dr-cloud-managed-failback-async-context-design-20260516.md)
 - [208. DR Replica-Site Disaster Failback And Adoption Design](208-dr-replica-site-disaster-failback-and-adoption-design-20260517.md)
 - [209. DR Adopted Replica Re-protection Readiness Design](209-dr-adopted-replica-reprotect-readiness-design-20260519.md)
+- [212. DR Replica-Side Delegated Failback Design](212-dr-replica-side-delegated-failback-design-20260521.md)
 
 If earlier wording implies that the current UI should always expose a target-Mold selector, this document supersedes that UI interpretation. The backend capability model may still keep target-Mold types for future workflows.
 
@@ -43,7 +45,25 @@ Cloud rules:
 - Credentials remain request-scoped or bounded in-memory operation context only.
 - qemu FTCTL performs reverse copy, finalize, and reprotect only after Cloud requests those data-plane actions.
 
-### 3.2 Replica-Controller Failback
+### 3.2 Replica-Side Delegated Source-Controller Failback
+
+The operator is viewing the running replica VM in the replica Mold, but the original/source Mold is reachable and still owns the active source-side `ftctl_protection` row.
+
+Operator-facing rules:
+
+- The replica-side view may expose `Failback`.
+- The dialog must not ask the operator to choose between `current Mold`, `original Mold`, and `new Mold`.
+- The dialog collects target/source Mold credentials plus current replica Mold credentials.
+- Target/source credentials let the replica Mold start `failbackFtctlProtection` on the source Mold.
+- Current replica credentials are passed to the source Mold so the existing source-controller cutback can stop the active replica VM.
+
+Cloud rules:
+
+- The replica Mold is only a delegator.
+- The source Mold remains the failback controller.
+- If the source VM or source protection row cannot be validated, this delegated path must fail with an explicit message directing the operator to full replica-controller recovery.
+
+### 3.3 Full Replica-Controller Failback
 
 The source Mold is destroyed, unavailable, or intentionally abandoned. The Mold that owns the running replica VM becomes the recovery controller.
 
@@ -56,7 +76,7 @@ Operator-facing rules:
 
 Cloud rules:
 
-- Replica-site failback needs its own backend API and recovery-session workflow.
+- Full replica-controller failback needs its own backend API and recovery-session workflow.
 - The target Mold must create or validate target VM, target volumes, host, storage, and network selections through Cloud APIs before qemu FTCTL receives disk paths.
 - New-Mold failback is not implemented by `Adopt replica`; adoption is an exit path, not a data-copy failback.
 
@@ -74,7 +94,9 @@ The current UI must therefore:
 - hide the primary-side target-Mold selector.
 - send `failbacktargetmoldtype=original-primary` as an internal compatibility value.
 - send only `remotemoldapiurl`, `remotemoldapikey`, and `remotemoldsecretkey` for remote-Mold DR failback.
-- show replica-side `Failback` as unavailable until the replica-controller backend exists, with an explicit disabled reason.
+- show replica-side `Failback` when the delegated source-controller backend command is available.
+- make the replica-side `Failback` dialog collect both target/source Mold credentials and current replica Mold credentials.
+- reject delegated replica-side failback when the target/source Mold does not have an active source-side DR protection row.
 - keep `Adopt replica` as the active long-term operation conversion path.
 
 ## 5. Verification Requirements
@@ -83,5 +105,6 @@ The current UI must therefore:
 - Primary-side failback modal has no target-Mold selector.
 - Replica-side recovery view does not show two main buttons that both appear to release protection.
 - Replica-side `Adopt replica` still runs the existing non-destructive adoption command.
-- Replica-side `Failback` is visibly distinct from adoption and cannot call an unimplemented backend path.
+- Replica-side `Failback` is visibly distinct from adoption and calls only the delegated source-controller path unless the future full replica-controller workflow is implemented.
+- Missing source protection on the target/source Mold produces an actionable error instead of silently treating adoption as failback.
 - English and Korean locale keys describe the same behavior.

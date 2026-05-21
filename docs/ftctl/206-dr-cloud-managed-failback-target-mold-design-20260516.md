@@ -24,6 +24,8 @@ In DR, the original primary site or primary VM may be unavailable, rebuilt, repl
 
 This document does not cover the case where the source Mold itself is destroyed and cannot orchestrate failback. In that case the replica Mold must become the recovery controller, as defined in [208. DR Replica-Site Disaster Failback And Adoption Design](208-dr-replica-site-disaster-failback-and-adoption-design-20260517.md).
 
+If the operator starts from the replica Mold UI while the source Mold is still available and still owns the source-side protection row, the replica Mold may delegate back to this source-controller path as defined in [212. DR Replica-Side Delegated Failback Design](212-dr-replica-side-delegated-failback-design-20260521.md).
+
 ## 2. Related Designs
 
 This document extends and supersedes conflicting failback wording in:
@@ -33,6 +35,7 @@ This document extends and supersedes conflicting failback wording in:
 - [205. DR Fence Clear Re-arm And SSH Key Binding Design](205-dr-fence-clear-rearm-ssh-key-binding-design-20260515.md)
 - [207. DR Cloud-Managed Failback Async Context Design](207-dr-cloud-managed-failback-async-context-design-20260516.md)
 - [208. DR Replica-Site Disaster Failback And Adoption Design](208-dr-replica-site-disaster-failback-and-adoption-design-20260517.md)
+- [212. DR Replica-Side Delegated Failback Design](212-dr-replica-side-delegated-failback-design-20260521.md)
 
 If an earlier document implies that Cloud-managed DR failback must return to the original source Mold or may use local secondary VM database IDs for remote-Mold DR cutback, this document supersedes that interpretation for source-controller failback.
 
@@ -41,6 +44,8 @@ Document 208 supersedes this document for full source Mold loss, replica-site di
 Document 207 further refines this document by requiring that the first failback request keep a short-lived in-memory operation context so reverse-sync completion can automatically proceed to Cloud lifecycle cutback without forcing a normal operator to click `Continue failback`.
 
 Document 211 refines the operator-facing UI: primary-side failback hides the target-Mold selector and collects only the one-time replica/remote Mold credentials needed for the implemented source-controller cutback.
+
+Document 212 adds a replica-side entry point to the same source-controller failback when the source Mold and source protection row still exist.
 
 ## 3. Non-Negotiable Principles
 
