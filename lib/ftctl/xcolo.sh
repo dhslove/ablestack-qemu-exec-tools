@@ -540,7 +540,7 @@ ftctl_xcolo_prepare_block_generated_xmls() {
   local disk_format="${6-}"
   local primary_args="${7-}"
   local secondary_args="${8-}"
-  local primary_generated_xml standby_generated_xml standby_vm_name
+  local primary_generated_xml standby_generated_xml standby_vm_name disk_metadata=""
 
   [[ -n "${primary_xml_backup}" && -f "${primary_xml_backup}" ]] || return 1
   [[ -n "${standby_xml_seed}" && -f "${standby_xml_seed}" ]] || return 1
@@ -563,7 +563,8 @@ ftctl_xcolo_prepare_block_generated_xmls() {
   if [[ "${FTCTL_PROFILE_DISK_MAP}" == "auto" ]]; then
     ftctl_xml_rewrite_first_disk_block_runtime "${standby_generated_xml}" "${secondary_dest}" "${disk_format}" "rw" "9" || return 1
   else
-    ftctl_xml_rewrite_disk_map_block_runtime "${standby_generated_xml}" "${FTCTL_PROFILE_DISK_MAP}" "${disk_format}" "rw" "9" || return 1
+    ftctl_xcolo_disk_map_runtime_metadata "${FTCTL_PROFILE_DISK_MAP}" disk_metadata || return 1
+    ftctl_xml_rewrite_disk_map_block_runtime "${standby_generated_xml}" "${FTCTL_PROFILE_DISK_MAP}" "${disk_format}" "rw" "9" "${disk_metadata}" || return 1
   fi
   ftctl_xml_apply_qemu_commandline "${primary_generated_xml}" "${primary_args}" || return 1
   ftctl_xml_apply_qemu_commandline "${standby_generated_xml}" "${secondary_args}" || return 1
@@ -651,6 +652,78 @@ EOF
   : "${out}${err}"
   [[ "${rc}" == "0" ]] || return 1
   printf '%s|%s\n' "${hidden}" "${active}"
+}
+
+ftctl_xcolo_disk_map_runtime_metadata() {
+  local disk_map="${1-}"
+  local out_var="${2}"
+  local host="" user="" out="" err="" rc=0 remote_cmd="" q_disk_map=""
+
+  [[ -n "${disk_map}" && "${disk_map}" != "auto" ]] || return 1
+  if [[ -n "${FTCTL_PROFILE_XCOLO_DISK_MAP_METADATA:-}" ]]; then
+    printf -v "${out_var}" '%s' "${FTCTL_PROFILE_XCOLO_DISK_MAP_METADATA}"
+    return 0
+  fi
+
+  ftctl_blockcopy_remote_target_host_user host user || return 1
+  printf -v q_disk_map '%q' "${disk_map}"
+  remote_cmd="$(cat <<EOF
+set -euo pipefail
+disk_map=${q_disk_map}
+python3 - <<'PY' "\${disk_map}"
+import shlex
+import subprocess
+import sys
+
+disk_map = sys.argv[1]
+entries = [entry for entry in disk_map.split(";") if entry]
+for entry in entries:
+    if "=" not in entry:
+        raise SystemExit(f"invalid disk map entry: {entry}")
+    target, path = entry.split("=", 1)
+    if not target or not path:
+        raise SystemExit(f"invalid disk map entry: {entry}")
+
+    info = subprocess.run(
+        ["qemu-img", "info", "--force-share", "--output=json", path],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if info.returncode != 0:
+        sys.stderr.write(info.stderr)
+        raise SystemExit(info.returncode)
+    fmt = subprocess.run(
+        ["python3", "-c", "import json,sys; print(json.load(sys.stdin).get('format',''))"],
+        input=info.stdout,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if fmt.returncode != 0:
+        sys.stderr.write(fmt.stderr)
+        raise SystemExit(fmt.returncode)
+    disk_format = fmt.stdout.strip() or "raw"
+
+    stat = subprocess.run(["test", "-b", path])
+    if stat.returncode == 0:
+        disk_type = "block"
+        source_attr = "dev"
+    else:
+        disk_type = "file"
+        source_attr = "file"
+    print(f"{target}={path}|{disk_format}|{source_attr}|{disk_type}")
+PY
+EOF
+)"
+  ftctl_blockcopy_remote_exec "${host}" "${user}" out err rc "${remote_cmd}" || true
+  if [[ "${rc}" != "0" ]]; then
+    echo "ERROR: remote disk image metadata probe failed: ${err}" >&2
+    return "${rc}"
+  fi
+  out="$(printf '%s\n' "${out}" | sed '/^[[:space:]]*$/d' | paste -sd ';' -)"
+  [[ -n "${out}" ]] || return 1
+  printf -v "${out_var}" '%s' "${out}"
 }
 
 ftctl_xcolo_disk_virtual_size_bytes() {

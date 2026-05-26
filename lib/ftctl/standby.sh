@@ -493,19 +493,21 @@ ftctl_xml_rewrite_disk_map_block_runtime() {
   local disk_format="${3-qcow2}"
   local disk_mode="${4-rw}"
   local boot_order="${5-}"
+  local disk_metadata="${6-}"
 
   command -v python3 >/dev/null 2>&1 || {
     echo "ERROR: python3 is required for block-backed runtime XML rewrite" >&2
     return 2
   }
 
-  XML_PATH="${xml_path}" DISK_MAP="${disk_map}" DISK_FORMAT="${disk_format}" DISK_MODE="${disk_mode}" BOOT_ORDER="${boot_order}" python3 - <<'PY'
+  XML_PATH="${xml_path}" DISK_MAP="${disk_map}" DISK_METADATA="${disk_metadata}" DISK_FORMAT="${disk_format}" DISK_MODE="${disk_mode}" BOOT_ORDER="${boot_order}" python3 - <<'PY'
 import os
 import sys
 import xml.etree.ElementTree as ET
 
 xml_path = os.environ["XML_PATH"]
 disk_map_raw = os.environ["DISK_MAP"]
+disk_metadata_raw = os.environ.get("DISK_METADATA", "")
 disk_format = os.environ["DISK_FORMAT"] or ""
 disk_mode = os.environ["DISK_MODE"] or "rw"
 boot_order = os.environ.get("BOOT_ORDER", "")
@@ -528,6 +530,29 @@ for entry in disk_map_raw.split(";"):
 if not disk_map:
     print("empty disk map", file=sys.stderr)
     raise SystemExit(2)
+
+disk_metadata = {}
+for entry in disk_metadata_raw.split(";"):
+    if not entry:
+        continue
+    if "=" not in entry:
+        print(f"invalid disk metadata entry: {entry}", file=sys.stderr)
+        raise SystemExit(2)
+    target, rest = entry.split("=", 1)
+    parts = rest.split("|")
+    if len(parts) != 4:
+        print(f"invalid disk metadata entry: {entry}", file=sys.stderr)
+        raise SystemExit(2)
+    dest, fmt, source_attr, disk_type = [part.strip() for part in parts]
+    if not target or not dest or not fmt or source_attr not in {"dev", "file"} or disk_type not in {"block", "file"}:
+        print(f"invalid disk metadata entry: {entry}", file=sys.stderr)
+        raise SystemExit(2)
+    disk_metadata[target.strip()] = {
+        "dest": dest,
+        "format": fmt,
+        "source_attr": source_attr,
+        "disk_type": disk_type,
+    }
 
 tree = ET.parse(xml_path)
 root = tree.getroot()
@@ -553,14 +578,22 @@ for disk in devices.findall("disk"):
     seen_targets.add(target_dev)
     if target_dev not in disk_map:
         raise SystemExit(f"disk target missing from FTCTL_PROFILE_DISK_MAP: {target_dev}")
+    meta = disk_metadata.get(target_dev) or {
+        "dest": disk_map[target_dev],
+        "format": disk_format or "qcow2",
+        "source_attr": "dev",
+        "disk_type": "block",
+    }
+    if meta["dest"] != disk_map[target_dev]:
+        raise SystemExit(f"disk metadata destination mismatch for {target_dev}")
 
-    disk.set("type", "block")
+    disk.set("type", meta["disk_type"])
     driver = disk.find("driver")
     if driver is None:
         driver = ET.Element("driver")
         disk.insert(0, driver)
     driver.set("name", "qemu")
-    driver.set("type", disk_format or driver.get("type") or "qcow2")
+    driver.set("type", meta["format"])
     driver.set("discard", "unmap")
 
     source = disk.find("source")
@@ -568,7 +601,7 @@ for disk in devices.findall("disk"):
         source = ET.Element("source")
         disk.insert(1, source)
     source.attrib.clear()
-    source.set("dev", disk_map[target_dev])
+    source.set(meta["source_attr"], meta["dest"])
 
     if not target.get("bus"):
         target.set("bus", "scsi")

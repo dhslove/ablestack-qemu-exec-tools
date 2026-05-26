@@ -862,6 +862,7 @@ EOF
   ftctl_profile_reset
   FTCTL_PROFILE_SECONDARY_VM_NAME="${vm}-standby"
   FTCTL_PROFILE_DISK_MAP="sda=/var/lib/libvirt/images/${vm}-root;sdb=/var/lib/libvirt/images/${vm}-data"
+  FTCTL_PROFILE_XCOLO_DISK_MAP_METADATA="sda=/var/lib/libvirt/images/${vm}-root|qcow2|file|file;sdb=/var/lib/libvirt/images/${vm}-data|qcow2|file|file"
   ftctl_xcolo_prepare_block_generated_xmls "${vm}" \
     "${bundle}/primary.xml" "${bundle}/standby.xml" \
     "/dev/rbd/rbd/${vm}-root" "/var/lib/libvirt/images/${vm}-root" \
@@ -873,6 +874,10 @@ EOF
   selftest_assert_file_contains "${primary_generated}" '<target dev="sdb" bus="scsi"'
   selftest_assert_file_contains "${standby_generated}" '<target dev="sda" bus="scsi"'
   selftest_assert_file_contains "${standby_generated}" '<target dev="sdb" bus="scsi"'
+  selftest_assert_file_contains "${standby_generated}" '<disk type="file" device="disk"'
+  selftest_assert_file_contains "${standby_generated}" '<driver name="qemu" type="qcow2"'
+  selftest_assert_file_contains "${standby_generated}" '<source file="/var/lib/libvirt/images/block-ftvm-root"'
+  selftest_assert_file_contains "${standby_generated}" '<source file="/var/lib/libvirt/images/block-ftvm-data"'
   selftest_assert_file_contains "${standby_generated}" '/var/lib/libvirt/images/block-ftvm-root'
   selftest_assert_file_contains "${standby_generated}" '/var/lib/libvirt/images/block-ftvm-data'
   if grep -q '/dev/rbd/rbd/block-ftvm-data' "${standby_generated}"; then
