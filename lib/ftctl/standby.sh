@@ -452,8 +452,10 @@ target = disk.find("target")
 if target is None:
     target = ET.Element("target")
     disk.append(target)
-target.set("dev", "sdb")
-target.set("bus", "scsi")
+target_dev = target.get("dev") or "sda"
+target_bus = target.get("bus") or "scsi"
+target.set("dev", target_dev)
+target.set("bus", target_bus)
 
 for child in list(disk):
     if child.tag in {"readonly", "shareable", "boot", "alias", "address"}:
@@ -482,6 +484,54 @@ if not has_scsi:
     devices.insert(1, controller)
 
 tree.write(xml_path, encoding="unicode")
+PY
+}
+
+ftctl_xml_validate_unique_disk_targets() {
+  local xml_path="${1-}"
+
+  command -v python3 >/dev/null 2>&1 || {
+    echo "ERROR: python3 is required for disk target XML validation" >&2
+    return 2
+  }
+
+  XML_PATH="${xml_path}" python3 - <<'PY'
+import os
+import sys
+import xml.etree.ElementTree as ET
+
+xml_path = os.environ["XML_PATH"]
+tree = ET.parse(xml_path)
+root = tree.getroot()
+devices = root.find("devices")
+if devices is None:
+    raise SystemExit("missing <devices> in xml")
+
+seen = {}
+duplicates = []
+for disk in devices.findall("disk"):
+    if disk.get("device") != "disk":
+        continue
+    target = disk.find("target")
+    if target is None:
+        continue
+    dev = target.get("dev", "")
+    bus = target.get("bus", "")
+    if not dev:
+        continue
+    key = (dev, bus)
+    source = disk.find("source")
+    source_repr = ""
+    if source is not None:
+        source_repr = source.get("dev") or source.get("file") or source.get("name") or ""
+    if key in seen:
+        duplicates.append(f"{dev}/{bus or '-'}:{seen[key]}:{source_repr}")
+    else:
+        seen[key] = source_repr
+
+if duplicates:
+    print("duplicate disk target(s): " + "; ".join(duplicates), file=sys.stderr)
+    raise SystemExit(1)
 PY
 }
 

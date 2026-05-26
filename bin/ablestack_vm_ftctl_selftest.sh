@@ -832,6 +832,67 @@ EOF
   selftest_assert_eq "$(ftctl_state_get "${vm}" "active_side")" "secondary" "xcolo failover side"
 }
 
+selftest_case_xcolo_block_xml_preserves_disk_targets() {
+  selftest_reset_env
+  selftest_info "block-backed FT generated XML preserves disk targets"
+
+  local vm="block-ftvm"
+  local bundle="${SELFTEST_ROOT}/xml/${vm}"
+  local primary_generated standby_generated duplicate_xml
+  mkdir -p "${bundle}"
+  cat > "${bundle}/primary.xml" <<EOF
+<domain type='kvm'>
+  <name>${vm}</name>
+  <devices>
+    <disk type='block' device='disk'>
+      <driver name='qemu' type='raw'/>
+      <source dev='/dev/rbd/rbd/${vm}-root'/>
+      <target dev='sda' bus='scsi'/>
+    </disk>
+    <disk type='block' device='disk'>
+      <driver name='qemu' type='raw'/>
+      <source dev='/dev/rbd/rbd/${vm}-data'/>
+      <target dev='sdb' bus='scsi'/>
+    </disk>
+  </devices>
+</domain>
+EOF
+  cp "${bundle}/primary.xml" "${bundle}/standby.xml"
+
+  ftctl_profile_reset
+  FTCTL_PROFILE_SECONDARY_VM_NAME="${vm}-standby"
+  ftctl_xcolo_prepare_block_generated_xmls "${vm}" \
+    "${bundle}/primary.xml" "${bundle}/standby.xml" \
+    "/dev/rbd/rbd/${vm}-root" "/var/lib/libvirt/images/${vm}-root" \
+    "raw" "" ""
+
+  primary_generated="$(ftctl_state_get "${vm}" "primary_xml_generated")"
+  standby_generated="$(ftctl_state_get "${vm}" "standby_xml_generated")"
+  selftest_assert_file_contains "${primary_generated}" '<target dev="sda" bus="scsi"'
+  selftest_assert_file_contains "${primary_generated}" '<target dev="sdb" bus="scsi"'
+  selftest_assert_file_contains "${standby_generated}" '<target dev="sda" bus="scsi"'
+  selftest_assert_file_contains "${standby_generated}" '<target dev="sdb" bus="scsi"'
+  ftctl_xml_validate_unique_disk_targets "${primary_generated}"
+  ftctl_xml_validate_unique_disk_targets "${standby_generated}"
+
+  duplicate_xml="${bundle}/duplicate.xml"
+  cp "${standby_generated}" "${duplicate_xml}"
+  python3 - <<'PY' "${duplicate_xml}"
+import sys
+import xml.etree.ElementTree as ET
+
+xml_path = sys.argv[1]
+tree = ET.parse(xml_path)
+root = tree.getroot()
+disks = [d for d in root.find("devices").findall("disk") if d.get("device") == "disk"]
+disks[0].find("target").set("dev", "sdb")
+tree.write(xml_path, encoding="unicode")
+PY
+  if ftctl_xml_validate_unique_disk_targets "${duplicate_xml}" >/dev/null 2>&1; then
+    selftest_fail "duplicate disk target validator should fail"
+  fi
+}
+
 selftest_case_json_and_locking() {
   selftest_reset_env
   selftest_info "json output and lock behavior"
@@ -1868,6 +1929,7 @@ selftest_main() {
   selftest_case_reconcile_and_fencing
   selftest_case_failover_blocks_copying_transport
   selftest_case_xcolo_and_xml
+  selftest_case_xcolo_block_xml_preserves_disk_targets
   selftest_case_json_and_locking
   selftest_case_check_secondary_active_side
   selftest_case_reconcile_secondary_steady_skips_primary_disks
