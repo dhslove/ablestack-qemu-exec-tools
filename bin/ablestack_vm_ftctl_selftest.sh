@@ -860,6 +860,9 @@ selftest_case_xcolo_block_xml_preserves_disk_targets() {
       <target dev='vnet0'/>
       <model type='virtio'/>
     </interface>
+    <graphics type='vnc' port='5904' autoport='no' listen='172.16.20.11'>
+      <listen type='address' address='172.16.20.11'/>
+    </graphics>
   </devices>
 </domain>
 EOF
@@ -896,6 +899,16 @@ for xml_path in sys.argv[1:]:
     driver = iface.find("driver")
     if driver is None or driver.get("name") != "qemu":
         raise SystemExit(f"interface driver is not qemu in {xml_path}")
+
+standby_root = ET.parse(sys.argv[2]).getroot()
+graphics = standby_root.find("./devices/graphics")
+if graphics is None:
+    raise SystemExit("missing standby graphics")
+if graphics.get("listen") != "0.0.0.0":
+    raise SystemExit(f"standby graphics listen was not normalized: {graphics.get('listen')}")
+listen = graphics.find("listen")
+if listen is None or listen.get("address") != "0.0.0.0":
+    raise SystemExit("standby graphics listen child was not normalized")
 PY
   selftest_assert_file_contains "${standby_generated}" '/var/lib/libvirt/images/block-ftvm-root'
   selftest_assert_file_contains "${standby_generated}" '/var/lib/libvirt/images/block-ftvm-data'

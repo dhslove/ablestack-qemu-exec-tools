@@ -568,6 +568,7 @@ ftctl_xcolo_prepare_block_generated_xmls() {
   fi
   ftctl_xml_apply_xcolo_network_runtime "${primary_generated_xml}" || return 1
   ftctl_xml_apply_xcolo_network_runtime "${standby_generated_xml}" || return 1
+  ftctl_xml_apply_standby_host_runtime "${standby_generated_xml}" || return 1
   ftctl_xml_apply_qemu_commandline "${primary_generated_xml}" "${primary_args}" || return 1
   ftctl_xml_apply_qemu_commandline "${standby_generated_xml}" "${secondary_args}" || return 1
   ftctl_xml_validate_unique_disk_targets "${primary_generated_xml}" || return 1
