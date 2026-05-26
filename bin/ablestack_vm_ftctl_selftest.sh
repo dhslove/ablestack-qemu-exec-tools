@@ -854,6 +854,12 @@ selftest_case_xcolo_block_xml_preserves_disk_targets() {
       <source dev='/dev/rbd/rbd/${vm}-data'/>
       <target dev='sdb' bus='scsi'/>
     </disk>
+    <interface type='bridge'>
+      <mac address='52:54:00:12:34:56'/>
+      <source bridge='bridge0'/>
+      <target dev='vnet0'/>
+      <model type='virtio'/>
+    </interface>
   </devices>
 </domain>
 EOF
@@ -878,6 +884,19 @@ EOF
   selftest_assert_file_contains "${standby_generated}" '<driver name="qemu" type="qcow2"'
   selftest_assert_file_contains "${standby_generated}" '<source file="/var/lib/libvirt/images/block-ftvm-root"'
   selftest_assert_file_contains "${standby_generated}" '<source file="/var/lib/libvirt/images/block-ftvm-data"'
+  python3 - <<'PY' "${primary_generated}" "${standby_generated}"
+import sys
+import xml.etree.ElementTree as ET
+
+for xml_path in sys.argv[1:]:
+    root = ET.parse(xml_path).getroot()
+    iface = root.find("./devices/interface")
+    if iface is None:
+        raise SystemExit(f"missing interface in {xml_path}")
+    driver = iface.find("driver")
+    if driver is None or driver.get("name") != "qemu":
+        raise SystemExit(f"interface driver is not qemu in {xml_path}")
+PY
   selftest_assert_file_contains "${standby_generated}" '/var/lib/libvirt/images/block-ftvm-root'
   selftest_assert_file_contains "${standby_generated}" '/var/lib/libvirt/images/block-ftvm-data'
   if grep -q '/dev/rbd/rbd/block-ftvm-data' "${standby_generated}"; then

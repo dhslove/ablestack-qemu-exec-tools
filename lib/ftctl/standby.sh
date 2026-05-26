@@ -390,6 +390,44 @@ tree.write(xml_path, encoding="unicode")
 PY
 }
 
+ftctl_xml_apply_xcolo_network_runtime() {
+  local xml_path="${1-}"
+
+  command -v python3 >/dev/null 2>&1 || {
+    echo "ERROR: python3 is required for x-colo network XML rewrite" >&2
+    return 2
+  }
+
+  XML_PATH="${xml_path}" python3 - <<'PY'
+import os
+import xml.etree.ElementTree as ET
+
+xml_path = os.environ["XML_PATH"]
+
+tree = ET.parse(xml_path)
+root = tree.getroot()
+devices = root.find("devices")
+if devices is None:
+    raise SystemExit("missing <devices> in xml")
+
+for iface in devices.findall("interface"):
+    model = iface.find("model")
+    if model is None or model.get("type") != "virtio":
+        continue
+    driver = iface.find("driver")
+    if driver is None:
+        driver = ET.Element("driver")
+        insert_at = 0
+        for idx, child in enumerate(list(iface)):
+            if child.tag in {"mac", "source", "target", "model"}:
+                insert_at = idx + 1
+        iface.insert(insert_at, driver)
+    driver.set("name", "qemu")
+
+tree.write(xml_path, encoding="unicode")
+PY
+}
+
 ftctl_xml_rewrite_first_disk_block_runtime() {
   local xml_path="${1-}"
   local dest_path="${2-}"
