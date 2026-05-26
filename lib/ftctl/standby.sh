@@ -487,6 +487,130 @@ tree.write(xml_path, encoding="unicode")
 PY
 }
 
+ftctl_xml_rewrite_disk_map_block_runtime() {
+  local xml_path="${1-}"
+  local disk_map="${2-}"
+  local disk_format="${3-qcow2}"
+  local disk_mode="${4-rw}"
+  local boot_order="${5-}"
+
+  command -v python3 >/dev/null 2>&1 || {
+    echo "ERROR: python3 is required for block-backed runtime XML rewrite" >&2
+    return 2
+  }
+
+  XML_PATH="${xml_path}" DISK_MAP="${disk_map}" DISK_FORMAT="${disk_format}" DISK_MODE="${disk_mode}" BOOT_ORDER="${boot_order}" python3 - <<'PY'
+import os
+import sys
+import xml.etree.ElementTree as ET
+
+xml_path = os.environ["XML_PATH"]
+disk_map_raw = os.environ["DISK_MAP"]
+disk_format = os.environ["DISK_FORMAT"] or ""
+disk_mode = os.environ["DISK_MODE"] or "rw"
+boot_order = os.environ.get("BOOT_ORDER", "")
+
+disk_map = {}
+for entry in disk_map_raw.split(";"):
+    if not entry:
+        continue
+    if "=" not in entry:
+        print(f"invalid disk map entry: {entry}", file=sys.stderr)
+        raise SystemExit(2)
+    target, dest = entry.split("=", 1)
+    target = target.strip()
+    dest = dest.strip()
+    if not target or not dest:
+        print(f"invalid disk map entry: {entry}", file=sys.stderr)
+        raise SystemExit(2)
+    disk_map[target] = dest
+
+if not disk_map:
+    print("empty disk map", file=sys.stderr)
+    raise SystemExit(2)
+
+tree = ET.parse(xml_path)
+root = tree.getroot()
+devices = root.find("devices")
+if devices is None:
+    raise SystemExit("missing <devices> in xml")
+os_node = root.find("os")
+if os_node is not None and boot_order:
+    for child in list(os_node):
+        if child.tag == "boot":
+            os_node.remove(child)
+
+seen_targets = set()
+rewritten = 0
+boot_written = False
+for disk in devices.findall("disk"):
+    if disk.get("device") != "disk":
+        continue
+    target = disk.find("target")
+    if target is None or not target.get("dev"):
+        raise SystemExit("disk target is missing in xml")
+    target_dev = target.get("dev")
+    seen_targets.add(target_dev)
+    if target_dev not in disk_map:
+        raise SystemExit(f"disk target missing from FTCTL_PROFILE_DISK_MAP: {target_dev}")
+
+    disk.set("type", "block")
+    driver = disk.find("driver")
+    if driver is None:
+        driver = ET.Element("driver")
+        disk.insert(0, driver)
+    driver.set("name", "qemu")
+    driver.set("type", disk_format or driver.get("type") or "qcow2")
+    driver.set("discard", "unmap")
+
+    source = disk.find("source")
+    if source is None:
+        source = ET.Element("source")
+        disk.insert(1, source)
+    source.attrib.clear()
+    source.set("dev", disk_map[target_dev])
+
+    if not target.get("bus"):
+        target.set("bus", "scsi")
+
+    for child in list(disk):
+        if child.tag in {"readonly", "shareable", "boot", "alias", "address"}:
+            disk.remove(child)
+
+    if disk_mode in {"ro", "ro-shareable"}:
+        disk.append(ET.Element("readonly"))
+    if disk_mode in {"shareable", "ro-shareable"}:
+        disk.append(ET.Element("shareable"))
+    if boot_order and not boot_written:
+        boot = ET.Element("boot")
+        boot.set("order", boot_order)
+        disk.append(boot)
+        boot_written = True
+    rewritten += 1
+
+missing = sorted(set(disk_map) - seen_targets)
+if missing:
+    raise SystemExit("FTCTL_PROFILE_DISK_MAP target not found in xml: " + ",".join(missing))
+if rewritten == 0:
+    raise SystemExit("no disk devices rewritten")
+
+has_scsi = False
+for controller in devices.findall("controller"):
+    if controller.get("type") == "scsi":
+        controller.set("model", "virtio-scsi")
+        has_scsi = True
+        break
+if not has_scsi:
+    controller = ET.Element("controller")
+    controller.set("type", "scsi")
+    controller.set("index", "0")
+    controller.set("model", "virtio-scsi")
+    devices.insert(1, controller)
+
+tree.write(xml_path, encoding="unicode")
+PY
+}
+
 ftctl_xml_validate_unique_disk_targets() {
   local xml_path="${1-}"
 

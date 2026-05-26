@@ -861,6 +861,7 @@ EOF
 
   ftctl_profile_reset
   FTCTL_PROFILE_SECONDARY_VM_NAME="${vm}-standby"
+  FTCTL_PROFILE_DISK_MAP="sda=/var/lib/libvirt/images/${vm}-root;sdb=/var/lib/libvirt/images/${vm}-data"
   ftctl_xcolo_prepare_block_generated_xmls "${vm}" \
     "${bundle}/primary.xml" "${bundle}/standby.xml" \
     "/dev/rbd/rbd/${vm}-root" "/var/lib/libvirt/images/${vm}-root" \
@@ -872,6 +873,11 @@ EOF
   selftest_assert_file_contains "${primary_generated}" '<target dev="sdb" bus="scsi"'
   selftest_assert_file_contains "${standby_generated}" '<target dev="sda" bus="scsi"'
   selftest_assert_file_contains "${standby_generated}" '<target dev="sdb" bus="scsi"'
+  selftest_assert_file_contains "${standby_generated}" '/var/lib/libvirt/images/block-ftvm-root'
+  selftest_assert_file_contains "${standby_generated}" '/var/lib/libvirt/images/block-ftvm-data'
+  if grep -q '/dev/rbd/rbd/block-ftvm-data' "${standby_generated}"; then
+    selftest_fail "standby generated XML kept original data disk source"
+  fi
   ftctl_xml_validate_unique_disk_targets "${primary_generated}"
   ftctl_xml_validate_unique_disk_targets "${standby_generated}"
 

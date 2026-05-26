@@ -560,7 +560,11 @@ ftctl_xcolo_prepare_block_generated_xmls() {
   ftctl_xml_remove_qemu_commandline "${primary_generated_xml}" || true
   ftctl_xml_remove_qemu_commandline "${standby_generated_xml}" || true
   ftctl_xml_rewrite_first_disk_block_runtime "${primary_generated_xml}" "${primary_source}" "${disk_format}" "ro-shareable" "9" || return 1
-  ftctl_xml_rewrite_first_disk_block_runtime "${standby_generated_xml}" "${secondary_dest}" "${disk_format}" "rw" "9" || return 1
+  if [[ "${FTCTL_PROFILE_DISK_MAP}" == "auto" ]]; then
+    ftctl_xml_rewrite_first_disk_block_runtime "${standby_generated_xml}" "${secondary_dest}" "${disk_format}" "rw" "9" || return 1
+  else
+    ftctl_xml_rewrite_disk_map_block_runtime "${standby_generated_xml}" "${FTCTL_PROFILE_DISK_MAP}" "${disk_format}" "rw" "9" || return 1
+  fi
   ftctl_xml_apply_qemu_commandline "${primary_generated_xml}" "${primary_args}" || return 1
   ftctl_xml_apply_qemu_commandline "${standby_generated_xml}" "${secondary_args}" || return 1
   ftctl_xml_validate_unique_disk_targets "${primary_generated_xml}" || return 1
