@@ -365,10 +365,12 @@ ftctl_state_remove_runtime_files() {
 
   rm -f "$(ftctl_profile_path "${vm}")" 2>/dev/null || true
   rm -f "${FTCTL_STATE_DIR}/${key}.state" \
+    "${FTCTL_STATE_DIR}/${key}.state.check.json" \
     "${FTCTL_STATE_DIR}/${key}.state.blockcopy" \
     "${FTCTL_STATE_DIR}/${key}.state.blockcopy.reverse" \
     "${FTCTL_STATE_DIR}/${key}.state.blockcopy.progress" \
-    "${FTCTL_STATE_DIR}/${key}.state.blockcopy.progress.event" 2>/dev/null || true
+    "${FTCTL_STATE_DIR}/${key}.state.blockcopy.progress.event" \
+    "${FTCTL_STATE_DIR}/${key}.state.xcolo" 2>/dev/null || true
   rm -rf "${FTCTL_RUN_DIR}/debug/blockcopy/${key}" 2>/dev/null || true
   rm -f "${FTCTL_RUN_DIR}/xml/${key}-"*.xml 2>/dev/null || true
   rm -rf "${FTCTL_XML_BACKUP_DIR}/${key}" 2>/dev/null || true

@@ -1506,6 +1506,8 @@ selftest_case_unprotect_releases_blockcopy_targets() (
   FTCTL_UNPROTECT_RELEASE_TIMEOUT_SEC="5"
   FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC="1"
   ftctl_state_init_vm "${vm}"
+  printf '%s\n' '{"inventory_result":"ok"}' > "$(ftctl_state_path "${vm}").check.json"
+  printf '%s\n' 'mode=cold-conversion' > "$(ftctl_state_path "${vm}").xcolo"
   cat > "$(ftctl_blockcopy_state_path "${vm}")" <<EOF
 vdb|/dev/rbd/rbd/${vm}-source|/dev/rbd/rbd/${vm}-mirror|raw|copy|yes
 EOF
@@ -1546,6 +1548,8 @@ EOF
   selftest_assert_contains "${out}" '"block_jobs_cancelled":1' "unprotect cancels job"
   selftest_assert_contains "${out}" '"remote_nbd_required":false' "shared unprotect does not require remote nbd"
   [[ ! -f "$(ftctl_blockcopy_state_path "${vm}")" ]] || selftest_fail "blockcopy state should be removed after release"
+  [[ ! -f "$(ftctl_state_path "${vm}").check.json" ]] || selftest_fail "check state should be removed after release"
+  [[ ! -f "$(ftctl_state_path "${vm}").xcolo" ]] || selftest_fail "xcolo state should be removed after release"
   selftest_assert_file_contains "${call_log}" "block-job-cancel"
   selftest_assert_file_contains "${call_log}" "query-named-block-nodes"
   selftest_assert_file_contains "${FTCTL_EVENTS_LOG}" "protection.unprotect.block-jobs-released"
