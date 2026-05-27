@@ -16,6 +16,8 @@ Observed evidence:
 
 This confirms the Cloud lifecycle guard is working: the system no longer reports `colo_running/mirroring` when COLO did not converge. The remaining fault is in qemu FTCTL's COLO channel convergence and post-handshake validation window.
 
+Later validation found an earlier generated-primary failure class where libvirt rejected a raw `qemu:commandline` iothread before the COLO handshake could start. That contract is handled separately by [301. FT X-COLO Libvirt Iothread Contract Design](301-ft-xcolo-libvirt-iothread-contract-design-20260527.md). When a run fails at `primary.create_generated`, apply the 301 contract first; this runtime convergence document applies only after both generated domains are accepted and QMP handshake is attempted.
+
 ## Design Principles
 
 1. Do not weaken the Cloud-managed ownership boundary.

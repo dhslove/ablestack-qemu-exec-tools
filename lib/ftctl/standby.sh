@@ -390,6 +390,146 @@ tree.write(xml_path, encoding="unicode")
 PY
 }
 
+ftctl_xml_ensure_iothread_id() {
+  local xml_path="${1-}"
+  local iothread_id="${2-1}"
+
+  command -v python3 >/dev/null 2>&1 || {
+    echo "ERROR: python3 is required for iothread XML rewrite" >&2
+    return 2
+  }
+
+  XML_PATH="${xml_path}" IOTHREAD_ID="${iothread_id}" python3 - <<'PY'
+import os
+import xml.etree.ElementTree as ET
+
+xml_path = os.environ["XML_PATH"]
+iothread_id = os.environ.get("IOTHREAD_ID", "1") or "1"
+
+tree = ET.parse(xml_path)
+root = tree.getroot()
+
+def local_name(tag):
+    return tag.rsplit("}", 1)[-1] if tag.startswith("{") else tag
+
+children = list(root)
+names = [local_name(child.tag) for child in children]
+
+def find_child(name):
+    for child in children:
+        if local_name(child.tag) == name:
+            return child
+    return None
+
+def insert_after_domain_identity(node):
+    preferred_before = {"os", "features", "cpu", "clock", "on_poweroff", "on_reboot", "on_crash", "pm", "devices"}
+    insert_at = len(list(root))
+    for idx, child in enumerate(list(root)):
+        if local_name(child.tag) in preferred_before:
+            insert_at = idx
+            break
+    root.insert(insert_at, node)
+
+iothreads = find_child("iothreads")
+if iothreads is None:
+    iothreads = ET.Element("iothreads")
+    insert_after_domain_identity(iothreads)
+
+iothreadids = find_child("iothreadids")
+if iothreadids is None:
+    iothreadids = ET.Element("iothreadids")
+    root.insert(list(root).index(iothreads) + 1, iothreadids)
+
+ids = []
+for child in list(iothreadids):
+    if local_name(child.tag) != "iothread":
+        continue
+    value = child.get("id")
+    if value:
+        ids.append(value)
+
+if iothread_id not in ids:
+    node = ET.Element("iothread")
+    node.set("id", iothread_id)
+    iothreadids.append(node)
+    ids.append(iothread_id)
+
+try:
+    current_count = int((iothreads.text or "0").strip() or "0")
+except ValueError:
+    current_count = 0
+required_count = max(current_count, len(set(ids)), int(iothread_id))
+iothreads.text = str(required_count)
+
+tree.write(xml_path, encoding="unicode")
+PY
+}
+
+ftctl_xml_validate_xcolo_iothread_contract() {
+  local xml_path="${1-}"
+
+  command -v python3 >/dev/null 2>&1 || {
+    echo "ERROR: python3 is required for iothread XML validation" >&2
+    return 2
+  }
+
+  XML_PATH="${xml_path}" python3 - <<'PY'
+import os
+import sys
+import xml.etree.ElementTree as ET
+
+xml_path = os.environ["XML_PATH"]
+qemu_ns = "http://libvirt.org/schemas/domain/qemu/1.0"
+
+tree = ET.parse(xml_path)
+root = tree.getroot()
+
+def local_name(tag):
+    return tag.rsplit("}", 1)[-1] if tag.startswith("{") else tag
+
+args = [
+    node.get("value", "")
+    for node in root.findall(f".//{{{qemu_ns}}}arg")
+]
+
+for value in args:
+    if value.startswith("iothread") and "id=iothread" in value:
+        print("x-colo iothread must be declared through libvirt native XML, not qemu:commandline", file=sys.stderr)
+        raise SystemExit(1)
+
+needs_iothread1 = any("iothread=iothread1" in value for value in args)
+if not needs_iothread1:
+    raise SystemExit(0)
+
+iothreads = None
+iothreadids = None
+for child in list(root):
+    name = local_name(child.tag)
+    if name == "iothreads":
+        iothreads = child
+    elif name == "iothreadids":
+        iothreadids = child
+
+native_count = 0
+if iothreads is not None:
+    try:
+        native_count = int((iothreads.text or "0").strip() or "0")
+    except ValueError:
+        native_count = 0
+
+has_id1 = False
+if iothreadids is not None:
+    for child in list(iothreadids):
+        if local_name(child.tag) == "iothread" and child.get("id") == "1":
+            has_id1 = True
+            break
+
+if native_count < 1 or not has_id1:
+    print("colo-compare references iothread1 but native libvirt iothread id=1 is missing", file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
 ftctl_xml_apply_xcolo_network_runtime() {
   local xml_path="${1-}"
 
@@ -774,7 +914,11 @@ ftctl_standby_materialize_primary_xml() {
   ftctl_ensure_dir "$(dirname "${generated}")" "0755"
   cp -f "${primary_xml}" "${generated}"
   if [[ "${FTCTL_PROFILE_MODE}" == "ft" && -n "${FTCTL_PROFILE_XCOLO_QEMU_ARGS_PRIMARY}" ]]; then
+    if [[ "${FTCTL_PROFILE_XCOLO_QEMU_ARGS_PRIMARY}" == *"iothread=iothread1"* ]]; then
+      ftctl_xml_ensure_iothread_id "${generated}" "1" || return 1
+    fi
     ftctl_xml_apply_qemu_commandline "${generated}" "${FTCTL_PROFILE_XCOLO_QEMU_ARGS_PRIMARY}"
+    ftctl_xml_validate_xcolo_iothread_contract "${generated}" || return 1
   fi
   ftctl_state_set "${vm}" "primary_xml_generated=${generated}"
 }

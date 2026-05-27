@@ -610,7 +610,7 @@ ftctl_xcolo_build_primary_qemu_args() {
 
   # The cloud-managed cold-start path starts the secondary first; keep mirror0 blocking by default
   # so guest packets cannot reach filter-mirror before the secondary redirector is attached.
-  printf '%s\n' "-S;-chardev;socket,id=mirror0,host=0.0.0.0,port=${mirror_port},server=on,wait=${mirror_wait};-chardev;socket,id=compare1,host=0.0.0.0,port=${compare_port},server=on,wait=on;-chardev;socket,id=compare0,host=127.0.0.1,port=${compare_local_port},server=on,wait=off;-chardev;socket,id=compare0-0,host=127.0.0.1,port=${compare_local_port};-chardev;socket,id=compare_out,host=127.0.0.1,port=${compare_out_port},server=on,wait=off;-chardev;socket,id=compare_out0,host=127.0.0.1,port=${compare_out_port};-object;filter-mirror,id=m0,netdev=hostnet0,queue=tx,outdev=mirror0;-object;filter-redirector,id=redire0,netdev=hostnet0,queue=rx,indev=compare_out;-object;filter-redirector,id=redire1,netdev=hostnet0,queue=rx,outdev=compare0;-object;iothread,id=iothread1;-object;colo-compare,id=comp0,primary_in=compare0-0,secondary_in=compare1,outdev=compare_out0,iothread=iothread1"
+  printf '%s\n' "-S;-chardev;socket,id=mirror0,host=0.0.0.0,port=${mirror_port},server=on,wait=${mirror_wait};-chardev;socket,id=compare1,host=0.0.0.0,port=${compare_port},server=on,wait=on;-chardev;socket,id=compare0,host=127.0.0.1,port=${compare_local_port},server=on,wait=off;-chardev;socket,id=compare0-0,host=127.0.0.1,port=${compare_local_port};-chardev;socket,id=compare_out,host=127.0.0.1,port=${compare_out_port},server=on,wait=off;-chardev;socket,id=compare_out0,host=127.0.0.1,port=${compare_out_port};-object;filter-mirror,id=m0,netdev=hostnet0,queue=tx,outdev=mirror0;-object;filter-redirector,id=redire0,netdev=hostnet0,queue=rx,indev=compare_out;-object;filter-redirector,id=redire1,netdev=hostnet0,queue=rx,outdev=compare0;-object;colo-compare,id=comp0,primary_in=compare0-0,secondary_in=compare1,outdev=compare_out0,iothread=iothread1"
 }
 
 ftctl_xcolo_build_secondary_qemu_args() {
@@ -743,10 +743,14 @@ ftctl_xcolo_prepare_block_generated_xmls() {
   ftctl_xml_apply_xcolo_network_runtime "${primary_generated_xml}" || return 1
   ftctl_xml_apply_xcolo_network_runtime "${standby_generated_xml}" || return 1
   ftctl_xml_apply_standby_host_runtime "${standby_generated_xml}" || return 1
+  if [[ "${primary_args}" == *"iothread=iothread1"* ]]; then
+    ftctl_xml_ensure_iothread_id "${primary_generated_xml}" "1" || return 1
+  fi
   ftctl_xml_apply_qemu_commandline "${primary_generated_xml}" "${primary_args}" || return 1
   ftctl_xml_apply_qemu_commandline "${standby_generated_xml}" "${secondary_args}" || return 1
   ftctl_xml_validate_unique_disk_targets "${primary_generated_xml}" || return 1
   ftctl_xml_validate_unique_disk_targets "${standby_generated_xml}" || return 1
+  ftctl_xml_validate_xcolo_iothread_contract "${primary_generated_xml}" || return 1
 
   ftctl_state_set "${vm}" \
     "primary_xml_generated=${primary_generated_xml}" \
@@ -1214,6 +1218,10 @@ ftctl_xcolo_create_primary_generated() {
   local out err rc
 
   [[ -n "${generated_xml}" && -f "${generated_xml}" ]] || return 1
+  ftctl_xml_validate_xcolo_iothread_contract "${generated_xml}" || {
+    ftctl_log_event "colo" "primary.create_generated.iothread-contract" "fail" "${vm}" "" "path=${generated_xml}"
+    return 1
+  }
   ftctl_primary_map_local_krbd_paths_from_xml "${vm}" "${generated_xml}" || {
     ftctl_log_event "colo" "primary.create_generated.rbd-map" "fail" "${vm}" "" "path=${generated_xml}"
     return 1
@@ -1228,6 +1236,32 @@ ftctl_xcolo_create_primary_generated() {
     return "${rc}"
   fi
   ftctl_log_event "colo" "primary.create_generated" "ok" "${vm}" "" "path=${generated_xml}"
+}
+
+ftctl_xcolo_rollback_block_primary_create_failure() {
+  local vm="${1-}"
+  local reason="${2-xcolo_block_primary_create_failed}"
+
+  if [[ "${FTCTL_DRY_RUN}" == "1" ]]; then
+    ftctl_log_event "colo" "block_conversion.rollback" "skip" "${vm}" "" "reason=dry_run cause=${reason}"
+    return 0
+  fi
+
+  ftctl_standby_deactivate "${vm}" || {
+    ftctl_log_event "colo" "block_conversion.rollback.secondary_stop" "warn" "${vm}" "" "cause=${reason}"
+  }
+  ftctl_primary_activate_from_backup "${vm}" || {
+    ftctl_log_event "colo" "block_conversion.rollback.primary_restore" "warn" "${vm}" "" "cause=${reason}"
+    return 1
+  }
+  ftctl_state_set "${vm}" \
+    "conversion_stage=rollback_after_primary_create_failed" \
+    "conversion_state=error" \
+    "protection_state=error" \
+    "transport_state=failed" \
+    "active_side=primary" \
+    "last_error=${reason}"
+  ftctl_log_event "colo" "block_conversion.rollback" "ok" "${vm}" "" "cause=${reason}"
 }
 
 ftctl_xcolo_execute_block_cold_conversion() {
@@ -1276,6 +1310,7 @@ ftctl_xcolo_execute_block_cold_conversion() {
     ftctl_log_event "colo" "block_conversion.primary_create" "fail" "${vm}" "" \
       "path=${primary_generated_xml}"
     ftctl_state_set "${vm}" "last_error=xcolo_block_primary_create_failed"
+    ftctl_xcolo_rollback_block_primary_create_failure "${vm}" "xcolo_block_primary_create_failed" || true
     return 1
   }
   ftctl_state_set "${vm}" "conversion_stage=primary_created"

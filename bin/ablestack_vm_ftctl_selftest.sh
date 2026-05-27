@@ -833,12 +833,58 @@ EOF
   selftest_assert_eq "$(ftctl_state_get "${vm}" "protection_state")" "colo_running" "xcolo protect"
   selftest_assert_eq "$(ftctl_state_get "${vm}" "transport_state")" "mirroring" "xcolo transport"
   selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "qemu:commandline"
+  selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "<iothreads>1</iothreads>"
+  selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" '<iothread id="1"'
+  selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "iothread=iothread1"
+  selftest_assert_file_not_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "iothread,id=iothread1"
   selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "socket,id=mirror0,host=0.0.0.0,port=9003,server=on,wait=on"
   selftest_assert_file_contains "$(ftctl_state_get "${vm}" "standby_xml_generated")" "qemu:commandline"
   selftest_assert_file_contains "$(ftctl_state_get "${vm}" "standby_xml_generated")" "/mirror/${vm}-vda.qcow2"
 
   ftctl_xcolo_failover "${vm}"
   selftest_assert_eq "$(ftctl_state_get "${vm}" "active_side")" "secondary" "xcolo failover side"
+}
+
+selftest_case_xcolo_iothread_contract_validation() {
+  selftest_reset_env
+  selftest_info "x-colo iothread contract validation"
+
+  local vm="ft-iothread"
+  local bundle="${SELFTEST_ROOT}/xml/${vm}"
+  local bad_xml good_xml
+  mkdir -p "${bundle}"
+  bad_xml="${bundle}/bad.xml"
+  good_xml="${bundle}/good.xml"
+  cat > "${bad_xml}" <<'EOF'
+<domain type='kvm' xmlns:qemu='http://libvirt.org/schemas/domain/qemu/1.0'>
+  <name>ft-iothread</name>
+  <devices/>
+  <qemu:commandline>
+    <qemu:arg value='-object'/>
+    <qemu:arg value='iothread,id=iothread1'/>
+    <qemu:arg value='-object'/>
+    <qemu:arg value='colo-compare,id=comp0,iothread=iothread1'/>
+  </qemu:commandline>
+</domain>
+EOF
+  if ftctl_xml_validate_xcolo_iothread_contract "${bad_xml}" >/dev/null 2>&1; then
+    selftest_fail "opaque qemu:commandline iothread should fail validation"
+  fi
+
+  cat > "${good_xml}" <<'EOF'
+<domain type='kvm' xmlns:qemu='http://libvirt.org/schemas/domain/qemu/1.0'>
+  <name>ft-iothread</name>
+  <devices/>
+  <qemu:commandline>
+    <qemu:arg value='-object'/>
+    <qemu:arg value='colo-compare,id=comp0,iothread=iothread1'/>
+  </qemu:commandline>
+</domain>
+EOF
+  ftctl_xml_ensure_iothread_id "${good_xml}" "1"
+  ftctl_xml_validate_xcolo_iothread_contract "${good_xml}"
+  selftest_assert_file_contains "${good_xml}" "<iothreads>1</iothreads>"
+  selftest_assert_file_contains "${good_xml}" '<iothread id="1"'
 }
 
 selftest_case_xcolo_block_xml_preserves_disk_targets() {
@@ -2181,6 +2227,7 @@ selftest_main() {
   selftest_case_reconcile_and_fencing
   selftest_case_failover_blocks_copying_transport
   selftest_case_xcolo_and_xml
+  selftest_case_xcolo_iothread_contract_validation
   selftest_case_xcolo_block_xml_preserves_disk_targets
   selftest_case_xcolo_primary_create_maps_rbd_sources
   selftest_case_xcolo_scsi_root_replace_avoids_lun_collision
