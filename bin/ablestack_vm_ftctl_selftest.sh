@@ -837,7 +837,10 @@ EOF
   selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" '<iothread id="1"'
   selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "iothread=iothread1"
   selftest_assert_file_not_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "iothread,id=iothread1"
-  selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "socket,id=mirror0,host=0.0.0.0,port=9003,server=on,wait=on"
+  selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "socket,id=mirror0,host=0.0.0.0,port=9003,server=on,wait=off"
+  selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "socket,id=compare1,host=0.0.0.0,port=9004,server=on,wait=off"
+  selftest_assert_file_not_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "socket,id=mirror0,host=0.0.0.0,port=9003,server=on,wait=on"
+  selftest_assert_file_not_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "socket,id=compare1,host=0.0.0.0,port=9004,server=on,wait=on"
   selftest_assert_file_contains "$(ftctl_state_get "${vm}" "standby_xml_generated")" "qemu:commandline"
   selftest_assert_file_contains "$(ftctl_state_get "${vm}" "standby_xml_generated")" "/mirror/${vm}-vda.qcow2"
 

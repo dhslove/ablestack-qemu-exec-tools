@@ -594,7 +594,7 @@ ftctl_xcolo_primary_listen_host() {
 ftctl_xcolo_build_primary_qemu_args() {
   local proxy_host proxy_port nbd_host nbd_port
   local mirror_port compare_port compare_local_port compare_out_port
-  local mirror_wait
+  local mirror_wait compare_wait
 
   ftctl_xcolo_parse_tcp_endpoint "${FTCTL_PROFILE_XCOLO_PROXY_ENDPOINT}" proxy_host proxy_port
   ftctl_xcolo_parse_tcp_endpoint "${FTCTL_PROFILE_XCOLO_NBD_ENDPOINT}" nbd_host nbd_port
@@ -602,17 +602,20 @@ ftctl_xcolo_build_primary_qemu_args() {
   compare_port="${FTCTL_XCOLO_COMPARE_PORT:-9004}"
   compare_local_port="${FTCTL_XCOLO_COMPARE_LOCAL_PORT:-9001}"
   compare_out_port="${FTCTL_XCOLO_COMPARE_OUT_PORT:-9005}"
-  mirror_wait="${FTCTL_XCOLO_MIRROR_WAIT:-on}"
+  mirror_wait="${FTCTL_XCOLO_MIRROR_WAIT:-off}"
+  compare_wait="${FTCTL_XCOLO_COMPARE_WAIT:-off}"
   case "${mirror_wait}" in
     on|off) ;;
-    *) mirror_wait="on" ;;
+    *) mirror_wait="off" ;;
+  esac
+  case "${compare_wait}" in
+    on|off) ;;
+    *) compare_wait="off" ;;
   esac
 
-  # The cloud-managed cold-start path starts the generated primary first and waits
-  # for its COLO listener sockets before creating the secondary. Keep mirror0
-  # blocking so guest packets cannot reach filter-mirror before the secondary
-  # redirector is attached.
-  printf '%s\n' "-S;-chardev;socket,id=mirror0,host=0.0.0.0,port=${mirror_port},server=on,wait=${mirror_wait};-chardev;socket,id=compare1,host=0.0.0.0,port=${compare_port},server=on,wait=on;-chardev;socket,id=compare0,host=127.0.0.1,port=${compare_local_port},server=on,wait=off;-chardev;socket,id=compare0-0,host=127.0.0.1,port=${compare_local_port};-chardev;socket,id=compare_out,host=127.0.0.1,port=${compare_out_port},server=on,wait=off;-chardev;socket,id=compare_out0,host=127.0.0.1,port=${compare_out_port};-object;filter-mirror,id=m0,netdev=hostnet0,queue=tx,outdev=mirror0;-object;filter-redirector,id=redire0,netdev=hostnet0,queue=rx,indev=compare_out;-object;filter-redirector,id=redire1,netdev=hostnet0,queue=rx,outdev=compare0;-object;colo-compare,id=comp0,primary_in=compare0-0,secondary_in=compare1,outdev=compare_out0,iothread=iothread1"
+  # The cloud-managed cold-start path starts the generated primary first and then
+  # starts the secondary. Primary-side peer sockets must not block QEMU startup.
+  printf '%s\n' "-S;-chardev;socket,id=mirror0,host=0.0.0.0,port=${mirror_port},server=on,wait=${mirror_wait};-chardev;socket,id=compare1,host=0.0.0.0,port=${compare_port},server=on,wait=${compare_wait};-chardev;socket,id=compare0,host=127.0.0.1,port=${compare_local_port},server=on,wait=off;-chardev;socket,id=compare0-0,host=127.0.0.1,port=${compare_local_port};-chardev;socket,id=compare_out,host=127.0.0.1,port=${compare_out_port},server=on,wait=off;-chardev;socket,id=compare_out0,host=127.0.0.1,port=${compare_out_port};-object;filter-mirror,id=m0,netdev=hostnet0,queue=tx,outdev=mirror0;-object;filter-redirector,id=redire0,netdev=hostnet0,queue=rx,indev=compare_out;-object;filter-redirector,id=redire1,netdev=hostnet0,queue=rx,outdev=compare0;-object;colo-compare,id=comp0,primary_in=compare0-0,secondary_in=compare1,outdev=compare_out0,iothread=iothread1"
 }
 
 ftctl_xcolo_build_secondary_qemu_args() {
@@ -635,7 +638,7 @@ ftctl_xcolo_doc_alignment_summary() {
 COLO startup alignment checklist
 1. Primary startup:
    - mirror0 server wait=off
-   - compare1 server wait=on
+   - compare1 server wait=off
    - compare0 / compare0-0 / compare_out / compare_out0 loopback sockets
    - filter-mirror / filter-redirector / colo-compare objects present
    - root disk on if=ide quorum node
@@ -1316,6 +1319,7 @@ ftctl_xcolo_wait_primary_generated_listeners() {
   local handle="${2-}"
   local timeout_sec mirror_port compare_port i
   local pid="" rc_file="" out_file="" err_file="" tmp_dir=""
+  local create_rc
 
   IFS='|' read -r pid rc_file out_file err_file tmp_dir <<< "${handle}"
   : "${pid}${out_file}${err_file}${tmp_dir}"
@@ -1334,9 +1338,12 @@ ftctl_xcolo_wait_primary_generated_listeners() {
       return 0
     fi
     if ftctl_xcolo_primary_create_async_done "${handle}"; then
-      ftctl_log_event "colo" "primary.create_generated.listeners" "fail" "${vm}" "$(cat "${rc_file}" 2>/dev/null || true)" \
-        "reason=create_exited_before_listen mirror_port=${mirror_port} compare_port=${compare_port} log_dir=${tmp_dir}"
-      return 1
+      create_rc="$(cat "${rc_file}" 2>/dev/null || printf '1')"
+      if [[ "${create_rc}" != "0" ]]; then
+        ftctl_log_event "colo" "primary.create_generated.listeners" "fail" "${vm}" "${create_rc}" \
+          "reason=create_exited_before_listen mirror_port=${mirror_port} compare_port=${compare_port} log_dir=${tmp_dir}"
+        return 1
+      fi
     fi
     sleep 1
   done

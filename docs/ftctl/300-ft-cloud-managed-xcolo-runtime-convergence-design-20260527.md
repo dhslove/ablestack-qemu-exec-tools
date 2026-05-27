@@ -18,6 +18,8 @@ This confirms the Cloud lifecycle guard is working: the system no longer reports
 
 Later validation found an earlier generated-primary failure class where libvirt rejected a raw `qemu:commandline` iothread before the COLO handshake could start. That contract is handled separately by [301. FT X-COLO Libvirt Iothread Contract Design](301-ft-xcolo-libvirt-iothread-contract-design-20260527.md). When a run fails at `primary.create_generated`, apply the 301 contract first; this runtime convergence document applies only after both generated domains are accepted and QMP handshake is attempted.
 
+Later validation also found a generated-primary listener startup deadlock: the primary-first cold conversion path emitted `mirror0` and `compare1` with `wait=on`, so `virsh create` waited for a secondary connection before the secondary was started. That contract is handled by [303. FT X-COLO Primary-First Listener Wait Design](303-ft-xcolo-primary-first-listener-wait-design-20260528.md). For primary-first startup, peer-facing primary listeners must use `wait=off`.
+
 ## Design Principles
 
 1. Do not weaken the Cloud-managed ownership boundary.
@@ -50,21 +52,21 @@ Validation loop:
 
 ## COLO Channel Startup Guard
 
-For Cloud-managed cold conversion, qemu FTCTL starts the generated primary domain first and lets QEMU open the primary-side COLO sockets. qemu FTCTL checks those listener sockets passively with local socket inventory such as `ss -ltn`; it must not use TCP connect probes because a probe can consume QEMU's `wait=on` chardev connection.
+For Cloud-managed cold conversion, qemu FTCTL starts the generated primary domain first and lets QEMU open the primary-side COLO sockets. qemu FTCTL checks those listener sockets passively with local socket inventory such as `ss -ltn`; it must not use TCP connect probes because a probe can consume a COLO chardev connection.
 
 After the primary listeners are visible, qemu FTCTL starts the generated secondary domain. The secondary then connects its redirector chardevs to the waiting primary sockets and allows the primary `virsh create` call to complete.
 
 This startup path uses a separate domain-create timeout, `FTCTL_XCOLO_DOMAIN_CREATE_TIMEOUT_SEC`, default 45 seconds. `FTCTL_XCOLO_QMP_TIMEOUT_SEC` remains a short QMP command timeout and must not be reused for `virsh create` calls that intentionally block during COLO socket attachment.
 
-The primary generated XML must not allow guest packets to reach `filter-mirror` before the secondary redirector has connected.
+The primary generated XML must allow QEMU startup to complete before the secondary exists. The service is still kept paused with `-S`, so guest execution and packet flow are not released before the subsequent QMP/migration sequence.
 
 Therefore the primary generated qemu commandline uses:
 
-- `mirror0 ... server=on,wait=on` by default
-- `compare1 ... server=on,wait=on`
+- `mirror0 ... server=on,wait=off` by default
+- `compare1 ... server=on,wait=off`
 - loopback compare sockets unchanged
 
-The wait behavior is configurable with `FTCTL_XCOLO_MIRROR_WAIT`, but invalid values fall back to `on`.
+The wait behavior is configurable with `FTCTL_XCOLO_MIRROR_WAIT` and `FTCTL_XCOLO_COMPARE_WAIT`, but invalid values fall back to `off`.
 
 ## Expected Behavior
 
@@ -89,4 +91,4 @@ New selftest coverage:
 
 - Runtime validation blocks false-positive success when the primary is not running.
 - Runtime validation reports terminal primary migration failure as `primary_migrate_failed`.
-- Generated primary XML defaults `mirror0` to `wait=on`.
+- Generated primary XML defaults `mirror0` and `compare1` to `wait=off`.
