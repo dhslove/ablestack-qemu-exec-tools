@@ -933,6 +933,10 @@ ftctl_xcolo_create_primary_generated() {
   local out err rc
 
   [[ -n "${generated_xml}" && -f "${generated_xml}" ]] || return 1
+  ftctl_primary_map_local_krbd_paths_from_xml "${vm}" "${generated_xml}" || {
+    ftctl_log_event "colo" "primary.create_generated.rbd-map" "fail" "${vm}" "" "path=${generated_xml}"
+    return 1
+  }
   out=""
   err=""
   rc=0

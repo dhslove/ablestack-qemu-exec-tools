@@ -936,6 +936,55 @@ PY
   fi
 }
 
+selftest_case_xcolo_primary_create_maps_rbd_sources() (
+  selftest_reset_env
+  selftest_info "x-colo primary generated XML maps KRBD sources before create"
+
+  local vm="primary-rbd-create"
+  local bundle="${SELFTEST_ROOT}/xml/${vm}"
+  local generated_xml="${bundle}/primary.generated.xml"
+  local call_log="${SELFTEST_ROOT}/primary-rbd-create-calls.log"
+  mkdir -p "${bundle}"
+  cat > "${generated_xml}" <<EOF
+<domain type='kvm'>
+  <name>${vm}</name>
+  <devices>
+    <disk type='block' device='disk'>
+      <source dev='/dev/rbd/rbd/${vm}-root'/>
+      <target dev='sda' bus='scsi'/>
+    </disk>
+    <disk type='block' device='disk'>
+      <source dev='/dev/rbd/rbd/${vm}-data'/>
+      <target dev='sdb' bus='scsi'/>
+    </disk>
+  </devices>
+</domain>
+EOF
+
+  ftctl_blockcopy_krbd_map_local() {
+    printf 'MAP:%s\n' "$1" >> "${call_log}"
+  }
+  ftctl_virsh() {
+    local _timeout="$1" out_var="$2" err_var="$3" rc_var="$4"
+    shift 4
+    : "${_timeout}"
+    printf -v "${out_var}" '%s' ""
+    printf -v "${err_var}" '%s' ""
+    printf -v "${rc_var}" '%s' "0"
+    printf 'VIRSH:%s\n' "$*" >> "${call_log}"
+  }
+
+  FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
+  FTCTL_XCOLO_QMP_TIMEOUT_SEC="3"
+  ftctl_xcolo_create_primary_generated "${vm}" "${generated_xml}"
+
+  selftest_assert_file_contains "${call_log}" "MAP:/dev/rbd/rbd/${vm}-root"
+  selftest_assert_file_contains "${call_log}" "MAP:/dev/rbd/rbd/${vm}-data"
+  selftest_assert_file_contains "${call_log}" "VIRSH:-- -c qemu:///system create ${generated_xml}"
+  selftest_assert_file_contains "${FTCTL_EVENTS_LOG}" "primary.rbd-map"
+  selftest_assert_file_contains "${FTCTL_EVENTS_LOG}" "primary.create_generated"
+)
+
 selftest_case_json_and_locking() {
   selftest_reset_env
   selftest_info "json output and lock behavior"
@@ -1973,6 +2022,7 @@ selftest_main() {
   selftest_case_failover_blocks_copying_transport
   selftest_case_xcolo_and_xml
   selftest_case_xcolo_block_xml_preserves_disk_targets
+  selftest_case_xcolo_primary_create_maps_rbd_sources
   selftest_case_json_and_locking
   selftest_case_check_secondary_active_side
   selftest_case_reconcile_secondary_steady_skips_primary_disks
