@@ -985,6 +985,34 @@ EOF
   selftest_assert_file_contains "${FTCTL_EVENTS_LOG}" "primary.create_generated"
 )
 
+selftest_case_xcolo_scsi_root_replace_avoids_lun_collision() (
+  selftest_reset_env
+  selftest_info "x-colo SCSI root replacement removes existing qdev before reusing LUN"
+
+  local call_log="${SELFTEST_ROOT}/xcolo-scsi-replace-calls.log"
+  FTCTL_DRY_RUN="1"
+  FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
+  FTCTL_PROFILE_SECONDARY_URI="qemu+ssh://peer/system"
+
+  # shellcheck disable=SC2317
+  ftctl_xcolo_qmp_require_ok() {
+    local uri="$1" vm="$2" payload="$3" stage="$4" event="$5"
+    printf '%s|%s|%s|%s|%s\n' "${stage}" "${event}" "${uri}" "${vm}" "${payload}" >> "${call_log}"
+  }
+
+  ftctl_xcolo_attach_secondary_block_graph \
+    "standby-vm" "libvirt-3-format" "/tmp/hidden.qcow2" "/tmp/active.qcow2" "scsi0-0-0-0"
+  ftctl_xcolo_attach_primary_block_graph \
+    "primary-vm" "libvirt-3-storage" "/tmp/primary-active.qcow2" "scsi0-0-0-0"
+
+  selftest_assert_file_contains "${call_log}" "secondary.device_del_existing_root"
+  selftest_assert_file_contains "${call_log}" '"execute":"device_del","arguments":{"id":"scsi0-0-0-0"}'
+  selftest_assert_file_contains "${call_log}" "secondary.device_add_colo_root"
+  selftest_assert_file_contains "${call_log}" '"bus":"scsi0.0","channel":0,"scsi-id":0,"lun":0,"drive":"colo-disk0","id":"ftctl-colo-root"'
+  selftest_assert_file_contains "${call_log}" "primary.device_del_existing_root"
+  selftest_assert_file_contains "${call_log}" "primary.device_add_colo_root"
+)
+
 selftest_case_json_and_locking() {
   selftest_reset_env
   selftest_info "json output and lock behavior"
@@ -2023,6 +2051,7 @@ selftest_main() {
   selftest_case_xcolo_and_xml
   selftest_case_xcolo_block_xml_preserves_disk_targets
   selftest_case_xcolo_primary_create_maps_rbd_sources
+  selftest_case_xcolo_scsi_root_replace_avoids_lun_collision
   selftest_case_json_and_locking
   selftest_case_check_secondary_active_side
   selftest_case_reconcile_secondary_steady_skips_primary_disks

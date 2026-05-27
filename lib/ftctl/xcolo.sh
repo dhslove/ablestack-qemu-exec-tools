@@ -807,11 +807,119 @@ PY
   [[ -n "${payload%%|*}" ]]
 }
 
+ftctl_xcolo_scsi_qdev_to_device_args() {
+  local qdev="${1-}"
+  local drive="${2-}"
+  local id="${3-}"
+  local out_var="${4}"
+  local controller channel scsi_id lun payload
+
+  [[ -n "${qdev}" && -n "${drive}" && -n "${id}" ]] || return 2
+  [[ "${qdev}" =~ ^([A-Za-z0-9_.-]+)-([0-9]+)-([0-9]+)-([0-9]+)$ ]] || return 2
+
+  controller="${BASH_REMATCH[1]}"
+  channel="${BASH_REMATCH[2]}"
+  scsi_id="${BASH_REMATCH[3]}"
+  lun="${BASH_REMATCH[4]}"
+  payload="$(python3 - <<'PY' "${controller}" "${channel}" "${scsi_id}" "${lun}" "${drive}" "${id}"
+import json
+import sys
+
+controller, channel, scsi_id, lun, drive, dev_id = sys.argv[1:]
+print(json.dumps({
+    "driver": "scsi-hd",
+    "bus": f"{controller}.0",
+    "channel": int(channel),
+    "scsi-id": int(scsi_id),
+    "lun": int(lun),
+    "drive": drive,
+    "id": dev_id,
+    "bootindex": 1,
+}, separators=(",", ":")))
+PY
+)"
+  printf -v "${out_var}" '%s' "${payload}"
+}
+
+ftctl_xcolo_qdev_present_on_uri() {
+  local uri="${1-}"
+  local vm="${2-}"
+  local qdev="${3-}"
+  local out="" rc=0
+
+  [[ -n "${qdev}" ]] || return 1
+  ftctl_xcolo_qmp "${uri}" "${vm}" '{"execute":"query-block"}' out rc
+  [[ "${rc}" == "0" && -n "${out}" ]] || return 1
+  python3 - <<'PY' "${qdev}" "${out}"
+import json
+import sys
+
+qdev = sys.argv[1]
+try:
+    data = json.loads(sys.argv[2])
+except Exception:
+    raise SystemExit(1)
+for item in data.get("return", []):
+    if item.get("qdev") == qdev:
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+ftctl_xcolo_wait_qdev_removed() {
+  local uri="${1-}"
+  local vm="${2-}"
+  local qdev="${3-}"
+  local i
+
+  if [[ "${FTCTL_DRY_RUN}" == "1" ]]; then
+    return 0
+  fi
+
+  for ((i=0; i<10; i++)); do
+    if ! ftctl_xcolo_qdev_present_on_uri "${uri}" "${vm}" "${qdev}"; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+ftctl_xcolo_replace_scsi_disk_device() {
+  local uri="${1-}"
+  local vm="${2-}"
+  local qdev="${3-}"
+  local drive="${4-}"
+  local device_id="${5-}"
+  local stage="${6-}"
+  local prefix="${7-}"
+  local args
+
+  ftctl_xcolo_scsi_qdev_to_device_args "${qdev}" "${drive}" "${device_id}" args || {
+    ftctl_log_event "${stage}" "${prefix}.device_replace_prepare" "fail" "${vm}" "" \
+      "qdev=${qdev} reason=unsupported_qdev"
+    return 1
+  }
+
+  ftctl_xcolo_qmp_require_ok "${uri}" "${vm}" \
+    "{\"execute\":\"device_del\",\"arguments\":{\"id\":\"${qdev}\"}}" \
+    "${stage}" "${prefix}.device_del_existing_root" || return 1
+  ftctl_xcolo_wait_qdev_removed "${uri}" "${vm}" "${qdev}" || {
+    ftctl_log_event "${stage}" "${prefix}.device_del_existing_root" "fail" "${vm}" "" \
+      "qdev=${qdev} reason=still_present"
+    return 1
+  }
+  ftctl_xcolo_qmp_require_ok "${uri}" "${vm}" \
+    "{\"execute\":\"device_add\",\"arguments\":${args}}" \
+    "${stage}" "${prefix}.device_add_colo_root" || return 1
+}
+
 ftctl_xcolo_attach_secondary_block_graph() {
   local vm="${1-}"
   local base_node="${2-}"
   local hidden="${3-}"
   local active="${4-}"
+  local qdev="${5-}"
 
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_SECONDARY_URI}" "${vm}" \
     "{\"execute\":\"blockdev-add\",\"arguments\":{\"driver\":\"qcow2\",\"node-name\":\"ftctl-hidden\",\"file\":{\"driver\":\"file\",\"filename\":\"${hidden}\"},\"backing\":\"${base_node}\"}}" \
@@ -825,15 +933,15 @@ ftctl_xcolo_attach_secondary_block_graph() {
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_SECONDARY_URI}" "${vm}" \
     "{\"execute\":\"blockdev-add\",\"arguments\":{\"driver\":\"quorum\",\"node-name\":\"colo-disk0\",\"read-pattern\":\"fifo\",\"vote-threshold\":1,\"children\":[\"childs0\"]}}" \
     "colo" "secondary.blockdev_add_quorum" || return 1
-  ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_SECONDARY_URI}" "${vm}" \
-    '{"execute":"device_add","arguments":{"driver":"scsi-hd","bus":"scsi0.0","channel":0,"scsi-id":0,"lun":0,"drive":"colo-disk0","id":"ftctl-colo-root","bootindex":1}}' \
-    "colo" "secondary.device_add_colo_root" || return 1
+  ftctl_xcolo_replace_scsi_disk_device "${FTCTL_PROFILE_SECONDARY_URI}" "${vm}" "${qdev}" \
+    "colo-disk0" "ftctl-colo-root" "colo" "secondary" || return 1
 }
 
 ftctl_xcolo_attach_primary_block_graph() {
   local vm="${1-}"
   local base_node="${2-}"
   local active="${3-}"
+  local qdev="${4-}"
 
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
     "{\"execute\":\"blockdev-add\",\"arguments\":{\"driver\":\"qcow2\",\"node-name\":\"ftctl-primary-active\",\"file\":{\"driver\":\"file\",\"filename\":\"${active}\"},\"backing\":\"${base_node}\"}}" \
@@ -841,9 +949,8 @@ ftctl_xcolo_attach_primary_block_graph() {
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
     "{\"execute\":\"blockdev-add\",\"arguments\":{\"driver\":\"quorum\",\"node-name\":\"colo-disk0\",\"read-pattern\":\"fifo\",\"vote-threshold\":1,\"children\":[\"ftctl-primary-active\"]}}" \
     "colo" "primary.blockdev_add_quorum" || return 1
-  ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
-    '{"execute":"device_add","arguments":{"driver":"scsi-hd","bus":"scsi0.0","channel":0,"scsi-id":0,"lun":0,"drive":"colo-disk0","id":"ftctl-colo-root","bootindex":1}}' \
-    "colo" "primary.device_add_colo_root" || return 1
+  ftctl_xcolo_replace_scsi_disk_device "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" "${qdev}" \
+    "colo-disk0" "ftctl-colo-root" "colo" "primary" || return 1
 }
 
 ftctl_xcolo_execute_handshake_with_nodes() {
@@ -1060,22 +1167,22 @@ PY
   ftctl_log_event "colo" "block_conversion.binding" "ok" "${vm}" "" \
     "primary_base=${primary_base_node} secondary_base=${secondary_base_node}"
 
-  ftctl_xcolo_attach_secondary_block_graph "${secondary_vm}" "${secondary_base_node}" "${secondary_hidden}" "${secondary_active}" || {
+  ftctl_xcolo_attach_secondary_block_graph "${secondary_vm}" "${secondary_base_node}" "${secondary_hidden}" "${secondary_active}" "${secondary_qdev}" || {
     ftctl_log_event "colo" "block_conversion.secondary_attach" "fail" "${vm}" "" \
-      "base=${secondary_base_node}"
+      "base=${secondary_base_node} qdev=${secondary_qdev}"
     ftctl_state_set "${vm}" "last_error=xcolo_block_secondary_attach_failed"
     return 1
   }
   ftctl_log_event "colo" "block_conversion.secondary_attach" "ok" "${vm}" "" \
-    "base=${secondary_base_node}"
-  ftctl_xcolo_attach_primary_block_graph "${vm}" "${primary_base_node}" "${primary_overlay}" || {
+    "base=${secondary_base_node} qdev=${secondary_qdev}"
+  ftctl_xcolo_attach_primary_block_graph "${vm}" "${primary_base_node}" "${primary_overlay}" "${primary_qdev}" || {
     ftctl_log_event "colo" "block_conversion.primary_attach" "fail" "${vm}" "" \
-      "base=${primary_base_node}"
+      "base=${primary_base_node} qdev=${primary_qdev}"
     ftctl_state_set "${vm}" "last_error=xcolo_block_primary_attach_failed"
     return 1
   }
   ftctl_log_event "colo" "block_conversion.primary_attach" "ok" "${vm}" "" \
-    "base=${primary_base_node}"
+    "base=${primary_base_node} qdev=${primary_qdev}"
 
   ftctl_xcolo_execute_handshake_with_nodes "${vm}" "${secondary_vm}" "${secondary_base_node}" || {
     ftctl_log_event "colo" "block_conversion.handshake" "fail" "${vm}" "" \
