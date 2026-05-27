@@ -262,19 +262,52 @@ PY
   [[ -n "${payload}" ]]
 }
 
+ftctl_xcolo_query_migrate_status() {
+  local uri="${1-}"
+  local vm="${2-}"
+  local status_var="${3}"
+  local out rc payload
+
+  out=""
+  rc=0
+  ftctl_xcolo_qmp "${uri}" "${vm}" '{"execute":"query-migrate"}' out rc
+  if [[ "${rc}" != "0" || -z "${out}" ]]; then
+    printf -v "${status_var}" '%s' ""
+    return 1
+  fi
+  payload="$(python3 - <<'PY' "${out}"
+import json, sys
+raw = sys.argv[1]
+try:
+    data = json.loads(raw)
+except Exception:
+    print("")
+    raise SystemExit(0)
+ret = data.get("return") if isinstance(data, dict) else {}
+print(ret.get("status", "") if isinstance(ret, dict) else "")
+PY
+)" || payload=""
+  printf -v "${status_var}" '%s' "${payload}"
+  [[ -n "${payload}" ]]
+}
+
 ftctl_xcolo_capture_runtime_snapshot() {
   local vm="${1-}"
   local prefix="${2-}"
+  local secondary_vm="${3:-$vm}"
   local primary_running="" secondary_running=""
   local primary_status="" secondary_status=""
   local primary_colo="" secondary_colo=""
+  local primary_migrate="" secondary_migrate=""
 
   ftctl_xcolo_query_running_flag "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" primary_running || true
-  ftctl_xcolo_query_running_flag "${FTCTL_PROFILE_SECONDARY_URI}" "${vm}" secondary_running || true
+  ftctl_xcolo_query_running_flag "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" secondary_running || true
   ftctl_xcolo_query_status_name "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" primary_status || true
-  ftctl_xcolo_query_status_name "${FTCTL_PROFILE_SECONDARY_URI}" "${vm}" secondary_status || true
+  ftctl_xcolo_query_status_name "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" secondary_status || true
   ftctl_xcolo_query_colo_mode "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" primary_colo || true
-  ftctl_xcolo_query_colo_mode "${FTCTL_PROFILE_SECONDARY_URI}" "${vm}" secondary_colo || true
+  ftctl_xcolo_query_colo_mode "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" secondary_colo || true
+  ftctl_xcolo_query_migrate_status "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" primary_migrate || true
+  ftctl_xcolo_query_migrate_status "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" secondary_migrate || true
 
   if [[ -n "${prefix}" ]]; then
     ftctl_state_set "${vm}" \
@@ -283,7 +316,9 @@ ftctl_xcolo_capture_runtime_snapshot() {
       "${prefix}_primary_status=${primary_status}" \
       "${prefix}_secondary_status=${secondary_status}" \
       "${prefix}_primary_colo_mode=${primary_colo}" \
-      "${prefix}_secondary_colo_mode=${secondary_colo}"
+      "${prefix}_secondary_colo_mode=${secondary_colo}" \
+      "${prefix}_primary_migrate_status=${primary_migrate}" \
+      "${prefix}_secondary_migrate_status=${secondary_migrate}"
   else
     ftctl_state_set "${vm}" \
       "xcolo_primary_running=${primary_running}" \
@@ -291,8 +326,105 @@ ftctl_xcolo_capture_runtime_snapshot() {
       "xcolo_primary_status=${primary_status}" \
       "xcolo_secondary_status=${secondary_status}" \
       "xcolo_primary_colo_mode=${primary_colo}" \
-      "xcolo_secondary_colo_mode=${secondary_colo}"
+      "xcolo_secondary_colo_mode=${secondary_colo}" \
+      "xcolo_primary_migrate_status=${primary_migrate}" \
+      "xcolo_secondary_migrate_status=${secondary_migrate}"
   fi
+}
+
+ftctl_xcolo_domain_xml_has_runtime_markers() {
+  local uri="${1-}"
+  local vm="${2-}"
+  local role="${3-}"
+  local out="" err="" rc=0
+
+  ftctl_virsh "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC}" out err rc -- -c "${uri}" dumpxml --security-info "${vm}" || true
+  : "${err}"
+  [[ "${rc}" == "0" && -n "${out}" ]] || return 1
+
+  case "${role}" in
+    primary)
+      [[ "${out}" == *"qemu:commandline"* &&
+         "${out}" == *"colo-compare"* &&
+         "${out}" == *"filter-mirror"* &&
+         "${out}" == *"filter-redirector"* ]]
+      ;;
+    secondary)
+      [[ "${out}" == *"qemu:commandline"* &&
+         "${out}" == *"filter-redirector"* &&
+         "${out}" == *"filter-rewriter"* &&
+         "${out}" == *"-incoming"* ]]
+      ;;
+    *)
+      return 2
+      ;;
+  esac
+}
+
+ftctl_xcolo_validate_pair_runtime() {
+  local vm="${1-}"
+  local secondary_vm="${2:-$vm}"
+  local primary_running="" secondary_running=""
+  local primary_status="" secondary_status=""
+  local secondary_migrate=""
+  local primary_xml="missing" secondary_xml="missing"
+  local reason=""
+
+  if [[ "${FTCTL_DRY_RUN}" == "1" ]]; then
+    ftctl_log_event "colo" "xcolo.runtime_validate" "skip" "${vm}" "" "reason=dry_run"
+    return 0
+  fi
+
+  ftctl_xcolo_query_running_flag "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" primary_running || true
+  ftctl_xcolo_query_running_flag "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" secondary_running || true
+  ftctl_xcolo_query_status_name "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" primary_status || true
+  ftctl_xcolo_query_status_name "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" secondary_status || true
+  ftctl_xcolo_query_migrate_status "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" secondary_migrate || true
+
+  if ftctl_xcolo_domain_xml_has_runtime_markers "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" primary; then
+    primary_xml="ok"
+  fi
+  if ftctl_xcolo_domain_xml_has_runtime_markers "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" secondary; then
+    secondary_xml="ok"
+  fi
+
+  if [[ "${primary_running}" != "true" ]]; then
+    reason="primary_not_running"
+  elif [[ "${secondary_running}" != "true" ]]; then
+    reason="secondary_not_running"
+  elif [[ "${primary_xml}" != "ok" ]]; then
+    reason="primary_runtime_xml_missing_colo_markers"
+  elif [[ "${secondary_xml}" != "ok" ]]; then
+    reason="secondary_runtime_xml_missing_colo_markers"
+  elif [[ "${secondary_migrate}" != "colo" ]]; then
+    reason="secondary_not_in_colo_migration"
+  fi
+
+  if [[ -n "${reason}" ]]; then
+    ftctl_state_set "${vm}" \
+      "xcolo_primary_running=${primary_running}" \
+      "xcolo_secondary_running=${secondary_running}" \
+      "xcolo_primary_status=${primary_status}" \
+      "xcolo_secondary_status=${secondary_status}" \
+      "xcolo_secondary_migrate_status=${secondary_migrate}" \
+      "xcolo_primary_runtime_xml=${primary_xml}" \
+      "xcolo_secondary_runtime_xml=${secondary_xml}" \
+      "last_error=xcolo_runtime_validation_failed:${reason}"
+    ftctl_log_event "colo" "xcolo.runtime_validate" "fail" "${vm}" "" \
+      "reason=${reason} primary_running=${primary_running} secondary_running=${secondary_running} primary_xml=${primary_xml} secondary_xml=${secondary_xml} secondary_migrate=${secondary_migrate}"
+    return 1
+  fi
+
+  ftctl_state_set "${vm}" \
+    "xcolo_primary_running=${primary_running}" \
+    "xcolo_secondary_running=${secondary_running}" \
+    "xcolo_primary_status=${primary_status}" \
+    "xcolo_secondary_status=${secondary_status}" \
+    "xcolo_secondary_migrate_status=${secondary_migrate}" \
+    "xcolo_primary_runtime_xml=${primary_xml}" \
+    "xcolo_secondary_runtime_xml=${secondary_xml}"
+  ftctl_log_event "colo" "xcolo.runtime_validate" "ok" "${vm}" "" \
+    "primary_running=${primary_running} secondary_running=${secondary_running} secondary_migrate=${secondary_migrate}"
 }
 
 ftctl_xcolo_wait_pair_running() {
@@ -1193,6 +1325,16 @@ PY
   ftctl_log_event "colo" "block_conversion.handshake" "ok" "${vm}" "" \
     "export_node=${secondary_base_node}"
 
+  ftctl_xcolo_capture_runtime_snapshot "${vm}" "xcolo_after_handshake" "${secondary_vm}"
+  ftctl_xcolo_validate_pair_runtime "${vm}" "${secondary_vm}" || {
+    ftctl_state_set "${vm}" \
+      "conversion_stage=runtime_validation_failed" \
+      "conversion_state=error" \
+      "protection_state=error" \
+      "transport_state=failed"
+    return 1
+  }
+
   ftctl_xcolo_state_write "${vm}" \
     "mode=cold-conversion" \
     "conversion_policy=block-backed-cold-restart" \
@@ -1300,12 +1442,7 @@ ftctl_xcolo_plan_protect_prebuilt() {
     "parent_block_node=${FTCTL_PROFILE_XCOLO_PARENT_BLOCK_NODE}" \
     "nbd_node=${FTCTL_PROFILE_XCOLO_NBD_NODE}"
 
-  ftctl_state_set "${vm}" \
-    "xcolo_protect_stage=wait-running" \
-    "protection_state=colo_running" \
-    "transport_state=mirroring" \
-    "last_sync_ts=$(ftctl_now_iso8601)" \
-    "last_error="
+  ftctl_state_set "${vm}" "xcolo_protect_stage=wait-running"
   ftctl_xcolo_capture_runtime_snapshot "${vm}"
   if ! ftctl_xcolo_wait_pair_running "${vm}" "20" "${vm}"; then
     ftctl_xcolo_capture_runtime_snapshot "${vm}"
@@ -1317,6 +1454,19 @@ ftctl_xcolo_plan_protect_prebuilt() {
       "reason=pair_not_running"
     return 1
   fi
+  ftctl_xcolo_validate_pair_runtime "${vm}" "${vm}" || {
+    ftctl_state_set "${vm}" \
+      "protection_state=error" \
+      "transport_state=failed"
+    ftctl_log_event "colo" "xcolo.protect" "fail" "${vm}" "" \
+      "reason=runtime_validation_failed"
+    return 1
+  }
+  ftctl_state_set "${vm}" \
+    "protection_state=colo_running" \
+    "transport_state=mirroring" \
+    "last_sync_ts=$(ftctl_now_iso8601)" \
+    "last_error="
   ftctl_log_event "colo" "xcolo.protect" "ok" "${vm}" "" \
     "qmp_timeout=${FTCTL_XCOLO_QMP_TIMEOUT_SEC}"
 }
