@@ -1022,6 +1022,35 @@ selftest_case_xcolo_scsi_root_replace_avoids_lun_collision() (
   selftest_assert_file_contains "${call_log}" "primary.device_add_colo_root"
 )
 
+selftest_case_xcolo_block_handshake_sets_checkpoint_after_migrate() (
+  selftest_reset_env
+  selftest_info "x-colo block handshake sets checkpoint delay after primary migrate"
+
+  local call_log="${SELFTEST_ROOT}/xcolo-block-handshake-order.log"
+  local migrate_line params_line
+  FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
+  FTCTL_PROFILE_SECONDARY_URI="qemu+ssh://peer/system"
+  FTCTL_PROFILE_XCOLO_NBD_ENDPOINT="tcp:10.0.0.2:10809"
+  FTCTL_PROFILE_XCOLO_MIGRATE_URI="tcp:10.0.0.2:9998"
+  FTCTL_PROFILE_XCOLO_NBD_NODE="nbd0"
+  FTCTL_PROFILE_XCOLO_CHECKPOINT_DELAY="2000"
+
+  # shellcheck disable=SC2317
+  ftctl_xcolo_qmp_require_ok() {
+    local uri="$1" vm="$2" payload="$3" stage="$4" event="$5"
+    printf '%s|%s|%s|%s|%s\n' "${stage}" "${event}" "${uri}" "${vm}" "${payload}" >> "${call_log}"
+  }
+
+  ftctl_xcolo_execute_handshake_with_nodes "primary-vm" "standby-vm" "parent0"
+
+  selftest_assert_file_contains "${call_log}" "primary.migrate"
+  selftest_assert_file_contains "${call_log}" "primary.migrate_set_parameters"
+  migrate_line="$(grep -n '|primary.migrate|' "${call_log}" | head -n1 | cut -d: -f1)"
+  params_line="$(grep -n '|primary.migrate_set_parameters|' "${call_log}" | head -n1 | cut -d: -f1)"
+  [[ "${migrate_line}" -lt "${params_line}" ]] || \
+    selftest_fail "primary.migrate_set_parameters must be issued after primary.migrate"
+)
+
 selftest_case_xcolo_runtime_validation_blocks_false_positive() (
   selftest_reset_env
   selftest_info "x-colo runtime validation blocks false-positive colo_running"
@@ -2155,6 +2184,7 @@ selftest_main() {
   selftest_case_xcolo_block_xml_preserves_disk_targets
   selftest_case_xcolo_primary_create_maps_rbd_sources
   selftest_case_xcolo_scsi_root_replace_avoids_lun_collision
+  selftest_case_xcolo_block_handshake_sets_checkpoint_after_migrate
   selftest_case_xcolo_runtime_validation_blocks_false_positive
   selftest_case_xcolo_runtime_validation_reports_primary_migrate_failure
   selftest_case_json_and_locking
