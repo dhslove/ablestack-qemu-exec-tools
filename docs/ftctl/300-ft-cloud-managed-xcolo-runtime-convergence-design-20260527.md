@@ -50,7 +50,13 @@ Validation loop:
 
 ## COLO Channel Startup Guard
 
-For Cloud-managed cold conversion, the secondary VM is started first and reconnects to primary-side COLO sockets. The primary generated XML must not allow guest packets to reach `filter-mirror` before the secondary redirector has connected.
+For Cloud-managed cold conversion, qemu FTCTL starts the generated primary domain first and lets QEMU open the primary-side COLO sockets. qemu FTCTL checks those listener sockets passively with local socket inventory such as `ss -ltn`; it must not use TCP connect probes because a probe can consume QEMU's `wait=on` chardev connection.
+
+After the primary listeners are visible, qemu FTCTL starts the generated secondary domain. The secondary then connects its redirector chardevs to the waiting primary sockets and allows the primary `virsh create` call to complete.
+
+This startup path uses a separate domain-create timeout, `FTCTL_XCOLO_DOMAIN_CREATE_TIMEOUT_SEC`, default 45 seconds. `FTCTL_XCOLO_QMP_TIMEOUT_SEC` remains a short QMP command timeout and must not be reused for `virsh create` calls that intentionally block during COLO socket attachment.
+
+The primary generated XML must not allow guest packets to reach `filter-mirror` before the secondary redirector has connected.
 
 Therefore the primary generated qemu commandline uses:
 

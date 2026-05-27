@@ -608,8 +608,10 @@ ftctl_xcolo_build_primary_qemu_args() {
     *) mirror_wait="on" ;;
   esac
 
-  # The cloud-managed cold-start path starts the secondary first; keep mirror0 blocking by default
-  # so guest packets cannot reach filter-mirror before the secondary redirector is attached.
+  # The cloud-managed cold-start path starts the generated primary first and waits
+  # for its COLO listener sockets before creating the secondary. Keep mirror0
+  # blocking so guest packets cannot reach filter-mirror before the secondary
+  # redirector is attached.
   printf '%s\n' "-S;-chardev;socket,id=mirror0,host=0.0.0.0,port=${mirror_port},server=on,wait=${mirror_wait};-chardev;socket,id=compare1,host=0.0.0.0,port=${compare_port},server=on,wait=on;-chardev;socket,id=compare0,host=127.0.0.1,port=${compare_local_port},server=on,wait=off;-chardev;socket,id=compare0-0,host=127.0.0.1,port=${compare_local_port};-chardev;socket,id=compare_out,host=127.0.0.1,port=${compare_out_port},server=on,wait=off;-chardev;socket,id=compare_out0,host=127.0.0.1,port=${compare_out_port};-object;filter-mirror,id=m0,netdev=hostnet0,queue=tx,outdev=mirror0;-object;filter-redirector,id=redire0,netdev=hostnet0,queue=rx,indev=compare_out;-object;filter-redirector,id=redire1,netdev=hostnet0,queue=rx,outdev=compare0;-object;colo-compare,id=comp0,primary_in=compare0-0,secondary_in=compare1,outdev=compare_out0,iothread=iothread1"
 }
 
@@ -1229,13 +1231,165 @@ ftctl_xcolo_create_primary_generated() {
   out=""
   err=""
   rc=0
-  ftctl_virsh "${FTCTL_XCOLO_QMP_TIMEOUT_SEC}" out err rc -- -c "${FTCTL_PROFILE_PRIMARY_URI}" create "${generated_xml}" || true
+  ftctl_virsh "$(ftctl_xcolo_domain_create_timeout_sec)" out err rc -- -c "${FTCTL_PROFILE_PRIMARY_URI}" create "${generated_xml}" || true
   : "${out}${err}"
   if [[ "${rc}" != "0" ]]; then
     ftctl_log_event "colo" "primary.create_generated" "fail" "${vm}" "${rc}" "path=${generated_xml}"
     return "${rc}"
   fi
   ftctl_log_event "colo" "primary.create_generated" "ok" "${vm}" "" "path=${generated_xml}"
+}
+
+ftctl_xcolo_domain_create_timeout_sec() {
+  local timeout_sec="${FTCTL_XCOLO_DOMAIN_CREATE_TIMEOUT_SEC:-45}"
+  if [[ -z "${timeout_sec}" || ! "${timeout_sec}" =~ ^[0-9]+$ || "${timeout_sec}" -lt 15 ]]; then
+    timeout_sec=45
+  fi
+  printf '%s\n' "${timeout_sec}"
+}
+
+ftctl_xcolo_local_tcp_listen_port_ready() {
+  local port="${1-}"
+  [[ -n "${port}" && "${port}" =~ ^[0-9]+$ ]] || return 1
+  command -v ss >/dev/null 2>&1 || return 2
+  ss -H -ltn 2>/dev/null | awk -v p=":${port}" '
+    $4 == p || $4 ~ p "$" { found=1 }
+    END { exit found ? 0 : 1 }
+  '
+}
+
+ftctl_xcolo_primary_create_async_done() {
+  local handle="${1-}"
+  local pid="" rc_file="" out_file="" err_file="" tmp_dir=""
+  IFS='|' read -r pid rc_file out_file err_file tmp_dir <<< "${handle}"
+  : "${pid}${out_file}${err_file}${tmp_dir}"
+  [[ -n "${rc_file}" && -s "${rc_file}" ]]
+}
+
+ftctl_xcolo_start_primary_generated_async() {
+  local vm="${1-}"
+  local generated_xml="${2-}"
+  local out_handle_var="${3-}"
+  local timeout_sec tmp_dir out_file err_file rc_file pid
+
+  [[ -n "${generated_xml}" && -f "${generated_xml}" ]] || return 1
+  if [[ "${FTCTL_DRY_RUN}" == "1" ]]; then
+    printf -v "${out_handle_var}" '%s' "dry-run||||"
+    ftctl_log_event "colo" "primary.create_generated.async_start" "skip" "${vm}" "" "path=${generated_xml} reason=dry_run"
+    return 0
+  fi
+  ftctl_xml_validate_xcolo_iothread_contract "${generated_xml}" || {
+    ftctl_log_event "colo" "primary.create_generated.iothread-contract" "fail" "${vm}" "" "path=${generated_xml}"
+    return 1
+  }
+  ftctl_primary_map_local_krbd_paths_from_xml "${vm}" "${generated_xml}" || {
+    ftctl_log_event "colo" "primary.create_generated.rbd-map" "fail" "${vm}" "" "path=${generated_xml}"
+    return 1
+  }
+
+  timeout_sec="$(ftctl_xcolo_domain_create_timeout_sec)"
+  tmp_dir="$(mktemp -d "${FTCTL_RUN_DIR:-/run/ablestack-vm-ftctl}/xcolo-primary-create.${vm}.XXXXXX")" || return 1
+  out_file="${tmp_dir}/stdout"
+  err_file="${tmp_dir}/stderr"
+  rc_file="${tmp_dir}/rc"
+  (
+    local create_rc=0
+    if command -v timeout >/dev/null 2>&1; then
+      timeout --preserve-status "${timeout_sec}" env LC_ALL=C LANG=C \
+        virsh -c "${FTCTL_PROFILE_PRIMARY_URI}" create "${generated_xml}" \
+        >"${out_file}" 2>"${err_file}" || create_rc=$?
+    else
+      env LC_ALL=C LANG=C virsh -c "${FTCTL_PROFILE_PRIMARY_URI}" create "${generated_xml}" \
+        >"${out_file}" 2>"${err_file}" || create_rc=$?
+    fi
+    printf '%s\n' "${create_rc}" > "${rc_file}"
+    exit "${create_rc}"
+  ) &
+  pid="$!"
+  printf -v "${out_handle_var}" '%s|%s|%s|%s|%s' "${pid}" "${rc_file}" "${out_file}" "${err_file}" "${tmp_dir}"
+  ftctl_log_event "colo" "primary.create_generated.async_start" "ok" "${vm}" "" \
+    "path=${generated_xml} timeout=${timeout_sec} pid=${pid}"
+}
+
+ftctl_xcolo_wait_primary_generated_listeners() {
+  local vm="${1-}"
+  local handle="${2-}"
+  local timeout_sec mirror_port compare_port i
+  local pid="" rc_file="" out_file="" err_file="" tmp_dir=""
+
+  IFS='|' read -r pid rc_file out_file err_file tmp_dir <<< "${handle}"
+  : "${pid}${out_file}${err_file}${tmp_dir}"
+  if [[ "${pid}" == "dry-run" ]]; then
+    return 0
+  fi
+
+  timeout_sec="$(ftctl_xcolo_domain_create_timeout_sec)"
+  mirror_port="${FTCTL_XCOLO_MIRROR_PORT:-9003}"
+  compare_port="${FTCTL_XCOLO_COMPARE_PORT:-9004}"
+  for ((i=0; i<timeout_sec; i++)); do
+    if ftctl_xcolo_local_tcp_listen_port_ready "${mirror_port}" &&
+       ftctl_xcolo_local_tcp_listen_port_ready "${compare_port}"; then
+      ftctl_log_event "colo" "primary.create_generated.listeners" "ok" "${vm}" "" \
+        "mirror_port=${mirror_port} compare_port=${compare_port}"
+      return 0
+    fi
+    if ftctl_xcolo_primary_create_async_done "${handle}"; then
+      ftctl_log_event "colo" "primary.create_generated.listeners" "fail" "${vm}" "$(cat "${rc_file}" 2>/dev/null || true)" \
+        "reason=create_exited_before_listen mirror_port=${mirror_port} compare_port=${compare_port} log_dir=${tmp_dir}"
+      return 1
+    fi
+    sleep 1
+  done
+  ftctl_log_event "colo" "primary.create_generated.listeners" "fail" "${vm}" "" \
+    "reason=timeout mirror_port=${mirror_port} compare_port=${compare_port} log_dir=${tmp_dir}"
+  return 1
+}
+
+ftctl_xcolo_abort_primary_generated_async() {
+  local vm="${1-}"
+  local handle="${2-}"
+  local pid="" rc_file="" out_file="" err_file="" tmp_dir=""
+  local out err rc
+  IFS='|' read -r pid rc_file out_file err_file tmp_dir <<< "${handle}"
+  : "${rc_file}${out_file}${err_file}${tmp_dir}"
+  [[ -n "${pid}" && "${pid}" != "dry-run" ]] || return 0
+  if ! ftctl_xcolo_primary_create_async_done "${handle}"; then
+    kill "${pid}" >/dev/null 2>&1 || true
+    wait "${pid}" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${vm}" ]]; then
+    out=""
+    err=""
+    rc=0
+    ftctl_virsh "10" out err rc -- -c "${FTCTL_PROFILE_PRIMARY_URI}" destroy "${vm}" || true
+    : "${out}${err}${rc}"
+  fi
+}
+
+ftctl_xcolo_finish_primary_generated_async() {
+  local vm="${1-}"
+  local generated_xml="${2-}"
+  local handle="${3-}"
+  local pid="" rc_file="" out_file="" err_file="" tmp_dir=""
+  local rc err_summary
+
+  IFS='|' read -r pid rc_file out_file err_file tmp_dir <<< "${handle}"
+  : "${out_file}"
+  if [[ "${pid}" == "dry-run" ]]; then
+    ftctl_log_event "colo" "primary.create_generated" "ok" "${vm}" "" "path=${generated_xml} dry_run=1"
+    return 0
+  fi
+
+  wait "${pid}" >/dev/null 2>&1 || true
+  rc="$(cat "${rc_file}" 2>/dev/null || printf '1')"
+  if [[ "${rc}" != "0" ]]; then
+    err_summary="$(tr '\n' ' ' < "${err_file}" 2>/dev/null | cut -c1-180 || true)"
+    ftctl_log_event "colo" "primary.create_generated" "fail" "${vm}" "${rc}" \
+      "path=${generated_xml} log_dir=${tmp_dir} error=${err_summary}"
+    return "${rc}"
+  fi
+  ftctl_log_event "colo" "primary.create_generated" "ok" "${vm}" "" \
+    "path=${generated_xml} log_dir=${tmp_dir}"
 }
 
 ftctl_xcolo_rollback_block_primary_create_failure() {
@@ -1260,6 +1414,8 @@ ftctl_xcolo_rollback_block_primary_create_failure() {
     "protection_state=error" \
     "transport_state=failed" \
     "active_side=primary" \
+    "standby_state=stopped" \
+    "peer_domain_expected=false" \
     "last_error=${reason}"
   ftctl_log_event "colo" "block_conversion.rollback" "ok" "${vm}" "" "cause=${reason}"
 }
@@ -1269,7 +1425,7 @@ ftctl_xcolo_execute_block_cold_conversion() {
   local primary_generated_xml standby_generated_xml primary_source secondary_dest
   local primary_overlay secondary_pair secondary_hidden secondary_active
   local primary_base_node primary_qdev secondary_base_node secondary_qdev
-  local secondary_vm primary_size secondary_size host user out err rc
+  local secondary_vm primary_size secondary_size host user out err rc primary_create_handle
 
   primary_generated_xml="$(ftctl_state_get "${vm}" "primary_xml_generated" 2>/dev/null || true)"
   standby_generated_xml="$(ftctl_state_get "${vm}" "standby_xml_generated" 2>/dev/null || true)"
@@ -1292,21 +1448,42 @@ ftctl_xcolo_execute_block_cold_conversion() {
   ftctl_state_set "${vm}" "conversion_stage=primary_stopped"
   ftctl_log_event "colo" "block_conversion.primary_stop" "ok" "${vm}" "" ""
 
+  ftctl_log_event "colo" "block_conversion.primary_create" "ok" "${vm}" "" \
+    "path=${primary_generated_xml}"
+  primary_create_handle=""
+  ftctl_xcolo_start_primary_generated_async "${vm}" "${primary_generated_xml}" primary_create_handle || {
+    ftctl_log_event "colo" "block_conversion.primary_create" "fail" "${vm}" "" \
+      "path=${primary_generated_xml}"
+    ftctl_state_set "${vm}" "last_error=xcolo_block_primary_create_failed"
+    ftctl_xcolo_rollback_block_primary_create_failure "${vm}" "xcolo_block_primary_create_failed" || true
+    return 1
+  }
+  ftctl_state_set "${vm}" "conversion_stage=primary_create_started"
+  ftctl_xcolo_wait_primary_generated_listeners "${vm}" "${primary_create_handle}" || {
+    ftctl_xcolo_abort_primary_generated_async "${vm}" "${primary_create_handle}"
+    ftctl_log_event "colo" "block_conversion.primary_create" "fail" "${vm}" "" \
+      "path=${primary_generated_xml} reason=listener_wait_failed"
+    ftctl_state_set "${vm}" "last_error=xcolo_block_primary_listener_wait_failed"
+    ftctl_xcolo_rollback_block_primary_create_failure "${vm}" "xcolo_block_primary_listener_wait_failed" || true
+    return 1
+  }
+  ftctl_state_set "${vm}" "conversion_stage=primary_listening"
+
   ftctl_log_event "colo" "block_conversion.secondary_create" "ok" "${vm}" "" \
     "path=${standby_generated_xml}"
   ftctl_standby_activate "${vm}" || {
+    ftctl_xcolo_abort_primary_generated_async "${vm}" "${primary_create_handle}"
     ftctl_log_event "colo" "block_conversion.secondary_create" "fail" "${vm}" "" \
       "path=${standby_generated_xml}"
     ftctl_state_set "${vm}" "last_error=xcolo_block_secondary_create_failed"
+    ftctl_xcolo_rollback_block_primary_create_failure "${vm}" "xcolo_block_secondary_create_failed" || true
     return 1
   }
   ftctl_state_set "${vm}" "conversion_stage=secondary_created"
   ftctl_log_event "colo" "block_conversion.secondary_create" "ok" "${vm}" "" \
     "vm=${secondary_vm}"
 
-  ftctl_log_event "colo" "block_conversion.primary_create" "ok" "${vm}" "" \
-    "path=${primary_generated_xml}"
-  ftctl_xcolo_create_primary_generated "${vm}" "${primary_generated_xml}" || {
+  ftctl_xcolo_finish_primary_generated_async "${vm}" "${primary_generated_xml}" "${primary_create_handle}" || {
     ftctl_log_event "colo" "block_conversion.primary_create" "fail" "${vm}" "" \
       "path=${primary_generated_xml}"
     ftctl_state_set "${vm}" "last_error=xcolo_block_primary_create_failed"

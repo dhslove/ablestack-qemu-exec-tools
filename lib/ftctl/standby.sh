@@ -1195,6 +1195,13 @@ ftctl_primary_activate_from_backup() {
   fi
   : "${out}${err}"
   if [[ "${rc}" != "0" ]]; then
+    case "${out}${err}" in
+      *"domain is already running"*|*"Domain is already active"*|*"domain already active"*|*"already active"*)
+        rc=0
+        ;;
+    esac
+  fi
+  if [[ "${rc}" != "0" ]]; then
     ftctl_log_event "primary" "primary.activate" "fail" "${vm}" "${rc}" \
       "primary_uri=${FTCTL_PROFILE_PRIMARY_URI}"
     return "${rc}"
