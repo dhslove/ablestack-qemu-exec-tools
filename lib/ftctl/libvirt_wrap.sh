@@ -110,6 +110,9 @@ ftctl_command_requires_lock() {
   local command="${1-}"
   local action="${2-}"
   case "${command}" in
+    reconcile)
+      return 1
+      ;;
     status|check|health|events|preflight-remote|dr-key-ensure|dr-key-install|dr-key-remove)
       return 1
       ;;

@@ -443,10 +443,39 @@ ftctl_orchestrator_reconcile() {
   local json="${2-0}"
   local f name lock_file profile_path rc check_rc
   if [[ -n "${vm}" ]]; then
+    lock_file="$(ftctl_lock_path_for_command "reconcile" "${vm}")"
+    CLI_COMMAND="reconcile" CLI_VM="${vm}" ftctl_lock_acquire "${lock_file}" || {
+      ftctl_log_event "lock" "reconcile.skip" "skip" "${vm}" "${EXIT_LOCKED:-20}" \
+        "reason=vm_locked lock_file=${lock_file}"
+      ftctl_state_print_one "${vm}" "${json}"
+      return 0
+    }
+
+    rc=0
+    set +e
     ftctl_orchestrator_reconcile_one "${vm}"
-    if ftctl_profile_load_vm "${vm}" 2>/dev/null; then
-      ftctl_orchestrator_check_vm "${vm}" "1" >/dev/null || true
+    rc=$?
+    set -e
+    if (( rc != 0 )); then
+      ftctl_log_event "health" "reconcile.error" "warn" "${vm}" "${rc}" \
+        "reason=reconcile_failed"
+      ftctl_lock_release
+      ftctl_state_print_one "${vm}" "${json}"
+      return 0
     fi
+
+    check_rc=0
+    if ftctl_profile_load_vm "${vm}" 2>/dev/null; then
+      set +e
+      ftctl_orchestrator_check_vm "${vm}" "1" >/dev/null
+      check_rc=$?
+      set -e
+      if (( check_rc != 0 )); then
+        ftctl_log_event "check" "reconcile.check" "warn" "${vm}" "${check_rc}" \
+          "reason=check_failed"
+      fi
+    fi
+    ftctl_lock_release
     ftctl_local_health "1" "${vm}" >/dev/null || true
     ftctl_state_print_one "${vm}" "${json}"
     return 0
