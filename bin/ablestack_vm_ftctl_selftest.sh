@@ -808,6 +808,7 @@ EOF
   FTCTL_PROFILE_MODE="ft"
   FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
   FTCTL_PROFILE_SECONDARY_URI="qemu+ssh://peer/system"
+  FTCTL_PROFILE_SECONDARY_VM_NAME="${vm}-standby"
   FTCTL_PROFILE_XCOLO_PROXY_ENDPOINT="tcp:10.10.10.21:9000"
   FTCTL_PROFILE_XCOLO_NBD_ENDPOINT="tcp:10.10.20.21:9999"
   FTCTL_PROFILE_XCOLO_MIGRATE_URI="tcp:10.10.20.21:9998"
@@ -821,10 +822,18 @@ EOF
   ftctl_profile_validate "${vm}"
   ftctl_state_set "${vm}" "mode=ft" "active_side=primary"
 
-  ftctl_xcolo_plan_protect "${vm}"
+  local primary_args secondary_args
+  primary_args="$(ftctl_xcolo_build_primary_qemu_args)"
+  secondary_args="$(ftctl_xcolo_build_secondary_qemu_args)"
+  ftctl_xcolo_prepare_block_generated_xmls "${vm}" \
+    "${bundle}/primary.xml" "${bundle}/standby.xml" \
+    "/var/lib/libvirt/images/${vm}.qcow2" "/mirror/${vm}-vda.qcow2" \
+    "qcow2" "${primary_args}" "${secondary_args}"
+  ftctl_state_set "${vm}" "protection_state=colo_running" "transport_state=mirroring"
   selftest_assert_eq "$(ftctl_state_get "${vm}" "protection_state")" "colo_running" "xcolo protect"
   selftest_assert_eq "$(ftctl_state_get "${vm}" "transport_state")" "mirroring" "xcolo transport"
   selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "qemu:commandline"
+  selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "socket,id=mirror0,host=0.0.0.0,port=9003,server=on,wait=on"
   selftest_assert_file_contains "$(ftctl_state_get "${vm}" "standby_xml_generated")" "qemu:commandline"
   selftest_assert_file_contains "$(ftctl_state_get "${vm}" "standby_xml_generated")" "/mirror/${vm}-vda.qcow2"
 
@@ -1023,6 +1032,7 @@ selftest_case_xcolo_runtime_validation_blocks_false_positive() (
   FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
   FTCTL_PROFILE_SECONDARY_URI="qemu+ssh://peer/system"
   FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC="1"
+  FTCTL_XCOLO_RUNTIME_VALIDATE_TIMEOUT_SEC="1"
 
   # shellcheck disable=SC2317
   ftctl_xcolo_query_running_flag() {
@@ -1057,6 +1067,53 @@ selftest_case_xcolo_runtime_validation_blocks_false_positive() (
   selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" \
     "xcolo_runtime_validation_failed:primary_not_running" \
     "runtime validation failure reason"
+)
+
+selftest_case_xcolo_runtime_validation_reports_primary_migrate_failure() (
+  selftest_reset_env
+  selftest_info "x-colo runtime validation reports terminal primary migration failure"
+
+  local vm="xcolo-primary-failed"
+  ftctl_state_init_vm "${vm}"
+  FTCTL_DRY_RUN="0"
+  FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
+  FTCTL_PROFILE_SECONDARY_URI="qemu+ssh://peer/system"
+  FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC="1"
+  FTCTL_XCOLO_RUNTIME_VALIDATE_TIMEOUT_SEC="5"
+
+  # shellcheck disable=SC2317
+  ftctl_xcolo_query_running_flag() {
+    local out_var="${3}"
+    printf -v "${out_var}" '%s' "true"
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_query_status_name() {
+    local out_var="${3}"
+    printf -v "${out_var}" '%s' "running"
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_query_migrate_status() {
+    local uri="${1-}" out_var="${3}"
+    if [[ "${uri}" == "${FTCTL_PROFILE_PRIMARY_URI}" ]]; then
+      printf -v "${out_var}" '%s' "failed"
+    else
+      printf -v "${out_var}" '%s' "active"
+    fi
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_domain_xml_has_runtime_markers() {
+    return 0
+  }
+
+  if ftctl_xcolo_validate_pair_runtime "${vm}" "${vm}-standby"; then
+    selftest_fail "runtime validation should fail on terminal primary migration failure"
+  fi
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" \
+    "xcolo_runtime_validation_failed:primary_migrate_failed" \
+    "runtime validation terminal failure reason"
 )
 
 selftest_case_json_and_locking() {
@@ -2099,6 +2156,7 @@ selftest_main() {
   selftest_case_xcolo_primary_create_maps_rbd_sources
   selftest_case_xcolo_scsi_root_replace_avoids_lun_collision
   selftest_case_xcolo_runtime_validation_blocks_false_positive
+  selftest_case_xcolo_runtime_validation_reports_primary_migrate_failure
   selftest_case_json_and_locking
   selftest_case_check_secondary_active_side
   selftest_case_reconcile_secondary_steady_skips_primary_disks

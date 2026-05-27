@@ -366,38 +366,83 @@ ftctl_xcolo_validate_pair_runtime() {
   local secondary_vm="${2:-$vm}"
   local primary_running="" secondary_running=""
   local primary_status="" secondary_status=""
-  local secondary_migrate=""
+  local primary_migrate="" secondary_migrate=""
   local primary_xml="missing" secondary_xml="missing"
-  local reason=""
+  local reason="" timeout i
 
   if [[ "${FTCTL_DRY_RUN}" == "1" ]]; then
     ftctl_log_event "colo" "xcolo.runtime_validate" "skip" "${vm}" "" "reason=dry_run"
     return 0
   fi
 
-  ftctl_xcolo_query_running_flag "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" primary_running || true
-  ftctl_xcolo_query_running_flag "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" secondary_running || true
-  ftctl_xcolo_query_status_name "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" primary_status || true
-  ftctl_xcolo_query_status_name "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" secondary_status || true
-  ftctl_xcolo_query_migrate_status "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" secondary_migrate || true
+  timeout="${FTCTL_XCOLO_RUNTIME_VALIDATE_TIMEOUT_SEC:-45}"
+  [[ "${timeout}" =~ ^[0-9]+$ && "${timeout}" -gt 0 ]] || timeout="45"
 
-  if ftctl_xcolo_domain_xml_has_runtime_markers "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" primary; then
-    primary_xml="ok"
-  fi
-  if ftctl_xcolo_domain_xml_has_runtime_markers "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" secondary; then
-    secondary_xml="ok"
-  fi
+  for ((i=0; i<timeout; i++)); do
+    reason=""
+    primary_running=""
+    secondary_running=""
+    primary_status=""
+    secondary_status=""
+    primary_migrate=""
+    secondary_migrate=""
+    primary_xml="missing"
+    secondary_xml="missing"
 
-  if [[ "${primary_running}" != "true" ]]; then
-    reason="primary_not_running"
-  elif [[ "${secondary_running}" != "true" ]]; then
-    reason="secondary_not_running"
-  elif [[ "${primary_xml}" != "ok" ]]; then
-    reason="primary_runtime_xml_missing_colo_markers"
-  elif [[ "${secondary_xml}" != "ok" ]]; then
-    reason="secondary_runtime_xml_missing_colo_markers"
-  elif [[ "${secondary_migrate}" != "colo" ]]; then
-    reason="secondary_not_in_colo_migration"
+    ftctl_xcolo_query_running_flag "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" primary_running || true
+    ftctl_xcolo_query_running_flag "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" secondary_running || true
+    ftctl_xcolo_query_status_name "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" primary_status || true
+    ftctl_xcolo_query_status_name "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" secondary_status || true
+    ftctl_xcolo_query_migrate_status "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" primary_migrate || true
+    ftctl_xcolo_query_migrate_status "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" secondary_migrate || true
+
+    if ftctl_xcolo_domain_xml_has_runtime_markers "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" primary; then
+      primary_xml="ok"
+    fi
+    if ftctl_xcolo_domain_xml_has_runtime_markers "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" secondary; then
+      secondary_xml="ok"
+    fi
+
+    if [[ "${primary_migrate}" == "failed" ]]; then
+      reason="primary_migrate_failed"
+      break
+    elif [[ "${secondary_migrate}" == "failed" ]]; then
+      reason="secondary_migrate_failed"
+      break
+    elif [[ "${primary_running}" == "true" &&
+            "${secondary_running}" == "true" &&
+            "${primary_xml}" == "ok" &&
+            "${secondary_xml}" == "ok" &&
+            "${secondary_migrate}" == "colo" ]]; then
+      ftctl_state_set "${vm}" \
+        "xcolo_primary_running=${primary_running}" \
+        "xcolo_secondary_running=${secondary_running}" \
+        "xcolo_primary_status=${primary_status}" \
+        "xcolo_secondary_status=${secondary_status}" \
+        "xcolo_primary_migrate_status=${primary_migrate}" \
+        "xcolo_secondary_migrate_status=${secondary_migrate}" \
+        "xcolo_primary_runtime_xml=${primary_xml}" \
+        "xcolo_secondary_runtime_xml=${secondary_xml}"
+      ftctl_log_event "colo" "xcolo.runtime_validate" "ok" "${vm}" "" \
+        "primary_running=${primary_running} secondary_running=${secondary_running} primary_migrate=${primary_migrate} secondary_migrate=${secondary_migrate} attempts=$((i + 1))"
+      return 0
+    fi
+
+    sleep 1
+  done
+
+  if [[ -z "${reason}" ]]; then
+    if [[ "${primary_running}" != "true" ]]; then
+      reason="primary_not_running"
+    elif [[ "${secondary_running}" != "true" ]]; then
+      reason="secondary_not_running"
+    elif [[ "${primary_xml}" != "ok" ]]; then
+      reason="primary_runtime_xml_missing_colo_markers"
+    elif [[ "${secondary_xml}" != "ok" ]]; then
+      reason="secondary_runtime_xml_missing_colo_markers"
+    elif [[ "${secondary_migrate}" != "colo" ]]; then
+      reason="secondary_not_in_colo_migration"
+    fi
   fi
 
   if [[ -n "${reason}" ]]; then
@@ -406,25 +451,15 @@ ftctl_xcolo_validate_pair_runtime() {
       "xcolo_secondary_running=${secondary_running}" \
       "xcolo_primary_status=${primary_status}" \
       "xcolo_secondary_status=${secondary_status}" \
+      "xcolo_primary_migrate_status=${primary_migrate}" \
       "xcolo_secondary_migrate_status=${secondary_migrate}" \
       "xcolo_primary_runtime_xml=${primary_xml}" \
       "xcolo_secondary_runtime_xml=${secondary_xml}" \
       "last_error=xcolo_runtime_validation_failed:${reason}"
     ftctl_log_event "colo" "xcolo.runtime_validate" "fail" "${vm}" "" \
-      "reason=${reason} primary_running=${primary_running} secondary_running=${secondary_running} primary_xml=${primary_xml} secondary_xml=${secondary_xml} secondary_migrate=${secondary_migrate}"
+      "reason=${reason} primary_running=${primary_running} secondary_running=${secondary_running} primary_xml=${primary_xml} secondary_xml=${secondary_xml} primary_migrate=${primary_migrate} secondary_migrate=${secondary_migrate} attempts=${timeout}"
     return 1
   fi
-
-  ftctl_state_set "${vm}" \
-    "xcolo_primary_running=${primary_running}" \
-    "xcolo_secondary_running=${secondary_running}" \
-    "xcolo_primary_status=${primary_status}" \
-    "xcolo_secondary_status=${secondary_status}" \
-    "xcolo_secondary_migrate_status=${secondary_migrate}" \
-    "xcolo_primary_runtime_xml=${primary_xml}" \
-    "xcolo_secondary_runtime_xml=${secondary_xml}"
-  ftctl_log_event "colo" "xcolo.runtime_validate" "ok" "${vm}" "" \
-    "primary_running=${primary_running} secondary_running=${secondary_running} secondary_migrate=${secondary_migrate}"
 }
 
 ftctl_xcolo_wait_pair_running() {
@@ -559,6 +594,7 @@ ftctl_xcolo_primary_listen_host() {
 ftctl_xcolo_build_primary_qemu_args() {
   local proxy_host proxy_port nbd_host nbd_port
   local mirror_port compare_port compare_local_port compare_out_port
+  local mirror_wait
 
   ftctl_xcolo_parse_tcp_endpoint "${FTCTL_PROFILE_XCOLO_PROXY_ENDPOINT}" proxy_host proxy_port
   ftctl_xcolo_parse_tcp_endpoint "${FTCTL_PROFILE_XCOLO_NBD_ENDPOINT}" nbd_host nbd_port
@@ -566,9 +602,15 @@ ftctl_xcolo_build_primary_qemu_args() {
   compare_port="${FTCTL_XCOLO_COMPARE_PORT:-9004}"
   compare_local_port="${FTCTL_XCOLO_COMPARE_LOCAL_PORT:-9001}"
   compare_out_port="${FTCTL_XCOLO_COMPARE_OUT_PORT:-9005}"
+  mirror_wait="${FTCTL_XCOLO_MIRROR_WAIT:-on}"
+  case "${mirror_wait}" in
+    on|off) ;;
+    *) mirror_wait="on" ;;
+  esac
 
-  # Match the QEMU COLO startup procedure: mirror0 is non-blocking, compare1 blocks until connected.
-  printf '%s\n' "-S;-chardev;socket,id=mirror0,host=0.0.0.0,port=${mirror_port},server=on,wait=off;-chardev;socket,id=compare1,host=0.0.0.0,port=${compare_port},server=on,wait=on;-chardev;socket,id=compare0,host=127.0.0.1,port=${compare_local_port},server=on,wait=off;-chardev;socket,id=compare0-0,host=127.0.0.1,port=${compare_local_port};-chardev;socket,id=compare_out,host=127.0.0.1,port=${compare_out_port},server=on,wait=off;-chardev;socket,id=compare_out0,host=127.0.0.1,port=${compare_out_port};-object;filter-mirror,id=m0,netdev=hostnet0,queue=tx,outdev=mirror0;-object;filter-redirector,id=redire0,netdev=hostnet0,queue=rx,indev=compare_out;-object;filter-redirector,id=redire1,netdev=hostnet0,queue=rx,outdev=compare0;-object;iothread,id=iothread1;-object;colo-compare,id=comp0,primary_in=compare0-0,secondary_in=compare1,outdev=compare_out0,iothread=iothread1"
+  # The cloud-managed cold-start path starts the secondary first; keep mirror0 blocking by default
+  # so guest packets cannot reach filter-mirror before the secondary redirector is attached.
+  printf '%s\n' "-S;-chardev;socket,id=mirror0,host=0.0.0.0,port=${mirror_port},server=on,wait=${mirror_wait};-chardev;socket,id=compare1,host=0.0.0.0,port=${compare_port},server=on,wait=on;-chardev;socket,id=compare0,host=127.0.0.1,port=${compare_local_port},server=on,wait=off;-chardev;socket,id=compare0-0,host=127.0.0.1,port=${compare_local_port};-chardev;socket,id=compare_out,host=127.0.0.1,port=${compare_out_port},server=on,wait=off;-chardev;socket,id=compare_out0,host=127.0.0.1,port=${compare_out_port};-object;filter-mirror,id=m0,netdev=hostnet0,queue=tx,outdev=mirror0;-object;filter-redirector,id=redire0,netdev=hostnet0,queue=rx,indev=compare_out;-object;filter-redirector,id=redire1,netdev=hostnet0,queue=rx,outdev=compare0;-object;iothread,id=iothread1;-object;colo-compare,id=comp0,primary_in=compare0-0,secondary_in=compare1,outdev=compare_out0,iothread=iothread1"
 }
 
 ftctl_xcolo_build_secondary_qemu_args() {
@@ -1418,7 +1460,7 @@ ftctl_xcolo_plan_protect_prebuilt() {
     "xcolo_protect_stage=secondary-stage" \
     "last_error="
 
-  if ! ftctl_xcolo_validate_prebuilt_file_pair_sizes "${vm}"; then
+  if [[ "${FTCTL_DRY_RUN}" != "1" ]] && ! ftctl_xcolo_validate_prebuilt_file_pair_sizes "${vm}"; then
     ftctl_state_set "${vm}" \
       "protection_state=error" \
       "transport_state=planned" \
@@ -1444,7 +1486,7 @@ ftctl_xcolo_plan_protect_prebuilt() {
 
   ftctl_state_set "${vm}" "xcolo_protect_stage=wait-running"
   ftctl_xcolo_capture_runtime_snapshot "${vm}"
-  if ! ftctl_xcolo_wait_pair_running "${vm}" "20" "${vm}"; then
+  if [[ "${FTCTL_DRY_RUN}" != "1" ]] && ! ftctl_xcolo_wait_pair_running "${vm}" "20" "${vm}"; then
     ftctl_xcolo_capture_runtime_snapshot "${vm}"
     ftctl_state_set "${vm}" \
       "protection_state=error" \

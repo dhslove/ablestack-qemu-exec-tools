@@ -74,7 +74,7 @@ For file-based FT, implementation must follow the QEMU COLO test procedure as th
 Startup alignment checklist:
 
 1. Primary startup
-   - `mirror0` listens with `wait=off`
+   - `mirror0` listens with `wait=on` by default for Cloud-managed cold-start conversion so `filter-mirror` cannot emit before the secondary redirector is attached
    - `compare1` listens with `wait=on`
    - `compare0`, `compare0-0`, `compare_out`, `compare_out0` use local loopback
    - `filter-mirror`, `filter-redirector`, `colo-compare` objects are present
@@ -97,7 +97,7 @@ Startup alignment checklist:
    - primary: `migrate-set-capabilities` with `x-colo`
    - primary: `migrate`
 
-The engine must not mark file-based FT as `colo_running` unless both sides are actually `running=true` in QMP.
+The engine must not mark FT as `colo_running` unless both sides are actually `running=true` in QMP and the secondary migration status has converged to `colo`.
 The engine must also reject prebuilt file-based FT pairs when the following virtual sizes do not match:
 
 - primary source
