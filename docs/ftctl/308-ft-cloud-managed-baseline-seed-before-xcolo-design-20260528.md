@@ -34,13 +34,33 @@ The order is:
 
 The seed transport is primary read-only NBD:
 
-1. The primary host opens a temporary read-only `qemu-nbd` export for the stopped primary disk.
-2. The secondary host runs `qemu-img convert` from `nbd://<primary-host>:<seed-port>/<export>` to the Cloud-created target path.
-3. For file targets, conversion writes to a temporary file in the same directory and then atomically replaces the target path.
-4. For block targets, conversion writes directly to the target block device.
-5. The temporary NBD export and transient firewall opening are removed after each disk.
+1. The primary host prepares the stopped primary disk source for read-only export.
+2. The primary host opens a temporary read-only `qemu-nbd` export for the stopped primary disk.
+3. The secondary host runs `qemu-img convert` from `nbd://<primary-host>:<seed-port>/<export>` to the Cloud-created target path.
+4. For file targets, conversion writes to a temporary file in the same directory and then atomically replaces the target path.
+5. For block targets, conversion writes directly to the target block device.
+6. The temporary NBD export and transient firewall opening are removed after each disk.
 
 The seed step uses the existing host transfer network assumption. It does not create or delete Cloud VM/volume records.
+
+## Source Readiness Guard
+
+Validation with `i-2-54-VM` and `i-2-84-VM` showed a fast failure before copy started:
+
+- primary shutdown completed;
+- `block_conversion.baseline_seed.start` was emitted;
+- primary-side `qemu-nbd` failed to start for the first KRBD source;
+- rollback restored the primary, but the published `last_error` could be blank.
+
+The seed path therefore must not assume that a `/dev/rbd/<pool>/<image>` source remains mapped after the primary VM is stopped. Before starting `qemu-nbd`, qemu FTCTL must:
+
+- if the source is a KRBD path, call the existing local KRBD map helper and wait for the stable path;
+- verify the source path exists;
+- run `qemu-img info --force-share --output=json` against the source so format/size problems fail before NBD export;
+- emit `block_conversion.baseline_seed.source_ready` with the target, source kind, source path, and compact source info;
+- remove stale seed NBD exports for the same VM/disk export name before starting a new one.
+
+If source readiness fails, the failure reason is `xcolo_baseline_source_not_ready:<target>`. If `qemu-nbd` itself fails, the reason is `xcolo_baseline_nbd_start_failed:<target>`. If remote copy fails, the reason is `xcolo_baseline_copy_failed:<target>`.
 
 ## Failure Handling
 
@@ -48,10 +68,10 @@ If any disk seed fails:
 
 - stop the temporary seed NBD export;
 - restore the primary from the backed-up Cloud XML path;
-- set `conversion_stage=baseline_seed_failed`;
+- set `conversion_stage=baseline_seed_failed` before rollback and `rollback_after_baseline_seed_failed` after rollback completes;
 - set `protection_state=error`;
 - set `transport_state=failed`;
-- set `last_error=xcolo_baseline_seed_failed:<target>`.
+- set `last_error` and `xcolo_last_runtime_error` to the specific seed failure reason.
 
 The generated secondary must not be started if baseline seed fails.
 
@@ -60,6 +80,8 @@ The generated secondary must not be started if baseline seed fails.
 Selftests must assert:
 
 - qemu FTCTL starts a read-only primary `qemu-nbd` seed export;
+- KRBD primary sources are explicitly mapped before `qemu-nbd` starts;
+- source readiness is logged before the export starts;
 - secondary seed uses `qemu-img convert` from the primary NBD URI;
 - file targets are seeded through a temporary file and moved into place;
 - the per-disk seeded state marker is written before runtime graph assembly.

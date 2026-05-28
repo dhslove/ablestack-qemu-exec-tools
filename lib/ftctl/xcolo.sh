@@ -1252,14 +1252,79 @@ ftctl_xcolo_baseline_seed_port() {
 
 ftctl_xcolo_stop_seed_nbd() {
   local pid_file="${1-}"
+  local export_name="${2-}"
   local pid=""
+  local stale_pid=""
+  local proc_cmd="" cmdline=""
 
-  [[ -n "${pid_file}" ]] || return 0
-  pid="$(cat "${pid_file}" 2>/dev/null || true)"
-  if [[ -n "${pid}" && "${pid}" =~ ^[0-9]+$ ]]; then
-    kill "${pid}" >/dev/null 2>&1 || true
+  if [[ -n "${pid_file}" ]]; then
+    pid="$(cat "${pid_file}" 2>/dev/null || true)"
+    if [[ -n "${pid}" && "${pid}" =~ ^[0-9]+$ ]]; then
+      kill "${pid}" >/dev/null 2>&1 || true
+    fi
+    rm -f -- "${pid_file}" 2>/dev/null || true
   fi
-  rm -f -- "${pid_file}" 2>/dev/null || true
+
+  [[ -n "${export_name}" ]] || return 0
+  for proc_cmd in /proc/[0-9]*/cmdline; do
+    [[ -r "${proc_cmd}" ]] || continue
+    stale_pid="${proc_cmd#/proc/}"
+    stale_pid="${stale_pid%%/*}"
+    [[ -n "${stale_pid}" && "${stale_pid}" =~ ^[0-9]+$ ]] || continue
+    [[ "${stale_pid}" != "$$" ]] || continue
+    cmdline="$(tr '\0' ' ' < "${proc_cmd}" 2>/dev/null || true)"
+    [[ "${cmdline}" == *qemu-nbd* ]] || continue
+    [[ "${cmdline}" == *"--export-name ${export_name}"* ]] || continue
+    kill "${stale_pid}" >/dev/null 2>&1 || true
+  done
+}
+
+ftctl_xcolo_compact_log_value() {
+  printf '%s' "${1-}" | tr '\r\n\t ' '____' | cut -c1-500
+}
+
+ftctl_xcolo_prepare_baseline_seed_source() {
+  local vm="${1-}"
+  local target="${2-}"
+  local source="${3-}"
+  local source_format="${4-raw}"
+  local out="" err="" rc=0 map_msg="" info_msg="" source_kind="file"
+
+  [[ -n "${vm}" && -n "${target}" && -n "${source}" ]] || return 1
+  [[ -n "${source_format}" ]] || source_format="raw"
+
+  if ftctl_blockcopy_is_krbd_path "${source}"; then
+    source_kind="krbd"
+    map_msg="$(ftctl_blockcopy_krbd_map_local "${source}" 2>&1)" || {
+      ftctl_log_event "colo" "block_conversion.baseline_seed.source_ready" "fail" "${vm}" "" \
+        "target=${target} source=${source} source_kind=${source_kind} reason=krbd_map_failed error=$(ftctl_xcolo_compact_log_value "${map_msg}")"
+      return 1
+    }
+  elif [[ "${source}" == /dev/* ]]; then
+    source_kind="block"
+  fi
+
+  ftctl_cmd_run "${FTCTL_XCOLO_QMP_TIMEOUT_SEC:-3}" out err rc -- test -e "${source}" || true
+  if [[ "${rc}" != "0" ]]; then
+    ftctl_log_event "colo" "block_conversion.baseline_seed.source_ready" "fail" "${vm}" "${rc}" \
+      "target=${target} source=${source} source_kind=${source_kind} reason=source_missing error=$(ftctl_xcolo_compact_log_value "${err:-${out}}")"
+    return 1
+  fi
+
+  out=""
+  err=""
+  rc=0
+  ftctl_cmd_run "${FTCTL_XCOLO_QMP_TIMEOUT_SEC:-3}" out err rc -- \
+    qemu-img info --force-share --output=json "${source}" || true
+  if [[ "${rc}" != "0" ]]; then
+    ftctl_log_event "colo" "block_conversion.baseline_seed.source_ready" "fail" "${vm}" "${rc}" \
+      "target=${target} source=${source} source_kind=${source_kind} reason=qemu_img_info_failed error=$(ftctl_xcolo_compact_log_value "${err:-${out}}")"
+    return 1
+  fi
+
+  info_msg="$(ftctl_xcolo_compact_log_value "${out}")"
+  ftctl_log_event "colo" "block_conversion.baseline_seed.source_ready" "ok" "${vm}" "" \
+    "target=${target} source=${source} source_kind=${source_kind} source_format=${source_format} info=${info_msg}"
 }
 
 ftctl_xcolo_seed_secondary_baseline_disk() {
@@ -1290,7 +1355,12 @@ ftctl_xcolo_seed_secondary_baseline_disk() {
   ftctl_log_event "colo" "block_conversion.baseline_seed.start" "ok" "${vm}" "" \
     "target=${target} source=${source} secondary_dest=${secondary_dest} source_format=${source_format} target_format=${target_format} primary_host=${primary_host} port=${port}"
 
-  ftctl_xcolo_stop_seed_nbd "${pid_file}"
+  ftctl_xcolo_stop_seed_nbd "${pid_file}" "${export_name}"
+  ftctl_xcolo_prepare_baseline_seed_source "${vm}" "${target}" "${source}" "${source_format}" || {
+    ftctl_state_set "${vm}" "last_error=xcolo_baseline_source_not_ready:${target}"
+    return 1
+  }
+
   if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld 2>/dev/null; then
     firewall-cmd --quiet --add-port="${port}/tcp" >/dev/null 2>&1 && firewall_added="1"
   fi
@@ -1307,9 +1377,12 @@ ftctl_xcolo_seed_secondary_baseline_disk() {
       --pid-file "${pid_file}" \
       "${source}" || true
   if [[ "${rc}" != "0" ]]; then
-    [[ "${firewall_added}" == "1" ]] && firewall-cmd --quiet --remove-port="${port}/tcp" >/dev/null 2>&1 || true
+    if [[ "${firewall_added}" == "1" ]]; then
+      firewall-cmd --quiet --remove-port="${port}/tcp" >/dev/null 2>&1 || true
+    fi
     ftctl_log_event "colo" "block_conversion.baseline_seed.nbd_start" "fail" "${vm}" "${rc}" \
-      "target=${target} source=${source} error=$(printf '%s' "${err}" | tr ' ' '_')"
+      "target=${target} source=${source} port=${port} export=${export_name} error=$(ftctl_xcolo_compact_log_value "${err:-${out}}")"
+    ftctl_state_set "${vm}" "last_error=xcolo_baseline_nbd_start_failed:${target}"
     return 1
   fi
   ftctl_log_event "colo" "block_conversion.baseline_seed.nbd_start" "ok" "${vm}" "" \
@@ -1360,12 +1433,15 @@ EOF
   rc=0
   ftctl_blockcopy_remote_exec "${remote_host}" "${remote_user}" out err rc "${remote_cmd}" || true
   FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC="${saved_timeout}"
-  ftctl_xcolo_stop_seed_nbd "${pid_file}"
-  [[ "${firewall_added}" == "1" ]] && firewall-cmd --quiet --remove-port="${port}/tcp" >/dev/null 2>&1 || true
+  ftctl_xcolo_stop_seed_nbd "${pid_file}" "${export_name}"
+  if [[ "${firewall_added}" == "1" ]]; then
+    firewall-cmd --quiet --remove-port="${port}/tcp" >/dev/null 2>&1 || true
+  fi
 
   if [[ "${rc}" != "0" ]]; then
     ftctl_log_event "colo" "block_conversion.baseline_seed.copy" "fail" "${vm}" "${rc}" \
-      "target=${target} secondary_dest=${secondary_dest} error=$(printf '%s' "${err}" | tr ' ' '_')"
+      "target=${target} secondary_dest=${secondary_dest} error=$(ftctl_xcolo_compact_log_value "${err:-${out}}")"
+    ftctl_state_set "${vm}" "last_error=xcolo_baseline_copy_failed:${target}"
     return 1
   fi
 
@@ -2041,11 +2117,18 @@ ftctl_xcolo_finish_primary_generated_async() {
 ftctl_xcolo_rollback_block_primary_create_failure() {
   local vm="${1-}"
   local reason="${2-xcolo_block_primary_create_failed}"
+  local rollback_stage="rollback_after_primary_create_failed"
 
   if [[ "${FTCTL_DRY_RUN}" == "1" ]]; then
     ftctl_log_event "colo" "block_conversion.rollback" "skip" "${vm}" "" "reason=dry_run cause=${reason}"
     return 0
   fi
+
+  case "${reason}" in
+    xcolo_baseline_seed_failed:*|xcolo_baseline_source_not_ready:*|xcolo_baseline_nbd_start_failed:*|xcolo_baseline_copy_failed:*)
+      rollback_stage="rollback_after_baseline_seed_failed"
+      ;;
+  esac
 
   ftctl_standby_deactivate "${vm}" || {
     ftctl_log_event "colo" "block_conversion.rollback.secondary_stop" "warn" "${vm}" "" "cause=${reason}"
@@ -2055,13 +2138,14 @@ ftctl_xcolo_rollback_block_primary_create_failure() {
     return 1
   }
   ftctl_state_set "${vm}" \
-    "conversion_stage=rollback_after_primary_create_failed" \
+    "conversion_stage=${rollback_stage}" \
     "conversion_state=error" \
     "protection_state=error" \
     "transport_state=failed" \
     "active_side=primary" \
     "standby_state=stopped" \
     "peer_domain_expected=false" \
+    "xcolo_last_runtime_error=${reason}" \
     "last_error=${reason}"
   ftctl_log_event "colo" "block_conversion.rollback" "ok" "${vm}" "" "cause=${reason}"
 }
@@ -2072,7 +2156,7 @@ ftctl_xcolo_execute_block_cold_conversion() {
   local primary_overlay secondary_pair secondary_hidden secondary_active
   local primary_base_node primary_qdev secondary_base_node secondary_qdev
   local secondary_vm primary_size secondary_size host user out err rc primary_create_handle
-  local disk_plan entry rest target primary_format primary_dtype suffix
+  local disk_plan entry rest target primary_format primary_dtype suffix seed_error
   local -a disk_entries=()
 
   primary_generated_xml="$(ftctl_state_get "${vm}" "primary_xml_generated" 2>/dev/null || true)"
@@ -2121,7 +2205,10 @@ ftctl_xcolo_execute_block_cold_conversion() {
         "protection_state=error" \
         "transport_state=failed" \
         "last_error=xcolo_baseline_seed_failed:${target}"
-      ftctl_xcolo_rollback_block_primary_create_failure "${vm}" "xcolo_baseline_seed_failed:${target}" || true
+      seed_error="$(ftctl_state_get "${vm}" "last_error" 2>/dev/null || true)"
+      [[ -n "${seed_error}" ]] || seed_error="xcolo_baseline_seed_failed:${target}"
+      ftctl_xcolo_rollback_block_primary_create_failure "${vm}" "${seed_error}" || true
+      ftctl_state_set "${vm}" "xcolo_last_runtime_error=${seed_error}" "last_error=${seed_error}"
       return 1
     }
   done

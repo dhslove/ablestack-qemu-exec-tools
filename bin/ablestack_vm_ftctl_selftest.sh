@@ -1209,6 +1209,10 @@ selftest_case_xcolo_baseline_seed_uses_primary_nbd_before_runtime_graph() (
     printf -v "$2" '%s' "root"
   }
   # shellcheck disable=SC2317
+  ftctl_blockcopy_krbd_map_local() {
+    printf 'MAP:%s\n' "$1" >> "${call_log}"
+  }
+  # shellcheck disable=SC2317
   ftctl_cmd_run() {
     local _timeout="$1" out_var="$2" err_var="$3" rc_var="$4" pid_file="" arg prev=""
     shift 4
@@ -1240,6 +1244,8 @@ selftest_case_xcolo_baseline_seed_uses_primary_nbd_before_runtime_graph() (
 
   selftest_assert_file_contains "${call_log}" "qemu-nbd"
   selftest_assert_file_contains "${call_log}" "--read-only"
+  selftest_assert_file_contains "${call_log}" "MAP:/dev/rbd/rbd/root"
+  selftest_assert_file_contains "${call_log}" "qemu-img info --force-share --output=json /dev/rbd/rbd/root"
   selftest_assert_file_contains "${call_log}" "--export-name ftctl-xcolo-seed-primary-vm-sda"
   selftest_assert_file_contains "${call_log}" "qemu-img convert -p"
   selftest_assert_file_contains "${call_log}" "nbd://10.0.0.1:"

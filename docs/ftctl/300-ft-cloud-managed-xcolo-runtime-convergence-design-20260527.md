@@ -42,6 +42,8 @@ Later validation with `i-2-54-VM` and `i-2-82-VM` proved `primary.cont_before_mi
 
 Later validation with `i-2-54-VM` and `i-2-83-VM` showed the primary quorum remote-child path was executed, but the secondary target disks were still near-empty Cloud-created qcow2 placeholders. That follow-up is handled by [308. FT Cloud-Managed Baseline Seed Before X-COLO Design](308-ft-cloud-managed-baseline-seed-before-xcolo-design-20260528.md): qemu FTCTL must materialize the primary disk baseline into every Cloud-created secondary target disk before starting the generated secondary and X-COLO runtime graph.
 
+Later validation with `i-2-54-VM` and `i-2-84-VM` showed the baseline seed step can fail before copy starts if a stopped-primary KRBD source is not explicitly prepared for export, and rollback can hide the specific seed failure in `last_error`. That follow-up remains in [308. FT Cloud-Managed Baseline Seed Before X-COLO Design](308-ft-cloud-managed-baseline-seed-before-xcolo-design-20260528.md): the seed path must map/verify primary sources before `qemu-nbd`, remove stale same-export seed NBD processes, and preserve the specific seed failure reason through rollback.
+
 ## Design Principles
 
 1. Do not weaken the Cloud-managed ownership boundary.
