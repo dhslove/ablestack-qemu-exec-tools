@@ -77,7 +77,7 @@ Startup alignment checklist:
    - `mirror0` listens with `wait=off` by default so qemu FTCTL can observe the primary listener before starting the secondary
    - `compare1` listens with `wait=on`
    - `compare0`, `compare0-0`, `compare_out`, `compare_out0` use local loopback
-   - `filter-mirror`, `filter-redirector`, `colo-compare` objects are present
+   - `filter-mirror`, `filter-redirector`, `colo-compare` are attached later through QMP after the block graph is ready
    - root disk is attached as `if=ide` quorum
    - startup uses `-S`
 2. Secondary startup

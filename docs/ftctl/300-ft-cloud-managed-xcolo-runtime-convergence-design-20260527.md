@@ -22,6 +22,8 @@ Later validation also found a generated-primary listener startup deadlock: the p
 
 Later validation progressed beyond listener startup and failed after secondary startup with primary migration status `failed` and QEMU reporting `Received invalid message 0x0000 length 0x0000`. That contract is handled by [304. FT X-COLO Channel Attach Before Migrate Design](304-ft-xcolo-channel-attach-before-migrate-design-20260528.md). The supported startup model now follows QEMU's documented split: `mirror0 wait=off`, `compare1 wait=on`, and a post-secondary `ESTAB` channel attach check before QMP migration.
 
+Later validation proved both peer-facing channels were established, then failed because primary `filter-mirror` emitted before qemu FTCTL completed the QMP disk graph and migration setup. That contract is handled by [305. FT X-COLO Deferred Primary Filter Attach Design](305-ft-xcolo-deferred-primary-filter-attach-design-20260528.md). In cloud-managed cold conversion, primary network filter objects are now attached with QMP after the block graph is ready, not through generated XML startup.
+
 ## Design Principles
 
 1. Do not weaken the Cloud-managed ownership boundary.
@@ -67,10 +69,13 @@ Therefore the primary generated qemu commandline uses:
 - `mirror0 ... server=on,wait=off` by default
 - `compare1 ... server=on,wait=on`
 - loopback compare sockets unchanged
+- no primary `filter-mirror`, `filter-redirector`, or `colo-compare` objects at XML startup
 
 The wait behavior is configurable with `FTCTL_XCOLO_MIRROR_WAIT` and `FTCTL_XCOLO_COMPARE_WAIT`. Invalid mirror values fall back to `off`; invalid compare values fall back to `on`.
 
 Because `compare1 wait=on` can keep the primary create process blocked until the secondary connects, qemu FTCTL must not wait for both peer ports before starting the secondary. It waits for the primary mirror listener, starts the secondary, verifies both peer-facing channels are `ESTAB`, then runs QMP migration.
+
+Before QMP migration, qemu FTCTL attaches the primary network filter objects with QMP `object-add`, with `filter-mirror` last.
 
 ## Expected Behavior
 
@@ -97,3 +102,4 @@ New selftest coverage:
 - Runtime validation reports terminal primary migration failure as `primary_migrate_failed`.
 - Generated primary XML defaults `mirror0` to `wait=off` and `compare1` to `wait=on`.
 - Channel attach is verified before primary QMP migration starts.
+- Primary network filter objects are attached by QMP after block graph preparation.

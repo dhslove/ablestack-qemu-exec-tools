@@ -345,9 +345,9 @@ ftctl_xcolo_domain_xml_has_runtime_markers() {
   case "${role}" in
     primary)
       [[ "${out}" == *"qemu:commandline"* &&
-         "${out}" == *"colo-compare"* &&
-         "${out}" == *"filter-mirror"* &&
-         "${out}" == *"filter-redirector"* ]]
+         "${out}" == *"socket,id=mirror0"* &&
+         "${out}" == *"socket,id=compare1"* &&
+         "${out}" == *"socket,id=compare_out"* ]]
       ;;
     secondary)
       [[ "${out}" == *"qemu:commandline"* &&
@@ -614,8 +614,9 @@ ftctl_xcolo_build_primary_qemu_args() {
   esac
 
   # The cloud-managed cold-start path starts the generated primary first and then
-  # starts the secondary. Primary-side peer sockets must not block QEMU startup.
-  printf '%s\n' "-S;-chardev;socket,id=mirror0,host=0.0.0.0,port=${mirror_port},server=on,wait=${mirror_wait};-chardev;socket,id=compare1,host=0.0.0.0,port=${compare_port},server=on,wait=${compare_wait};-chardev;socket,id=compare0,host=127.0.0.1,port=${compare_local_port},server=on,wait=off;-chardev;socket,id=compare0-0,host=127.0.0.1,port=${compare_local_port};-chardev;socket,id=compare_out,host=127.0.0.1,port=${compare_out_port},server=on,wait=off;-chardev;socket,id=compare_out0,host=127.0.0.1,port=${compare_out_port};-object;filter-mirror,id=m0,netdev=hostnet0,queue=tx,outdev=mirror0;-object;filter-redirector,id=redire0,netdev=hostnet0,queue=rx,indev=compare_out;-object;filter-redirector,id=redire1,netdev=hostnet0,queue=rx,outdev=compare0;-object;colo-compare,id=comp0,primary_in=compare0-0,secondary_in=compare1,outdev=compare_out0,iothread=iothread1"
+  # starts the secondary. Keep primary packet filters out of the startup XML; the
+  # QMP handshake attaches them after channels and the block graph are ready.
+  printf '%s\n' "-S;-chardev;socket,id=mirror0,host=0.0.0.0,port=${mirror_port},server=on,wait=${mirror_wait};-chardev;socket,id=compare1,host=0.0.0.0,port=${compare_port},server=on,wait=${compare_wait};-chardev;socket,id=compare0,host=127.0.0.1,port=${compare_local_port},server=on,wait=off;-chardev;socket,id=compare0-0,host=127.0.0.1,port=${compare_local_port};-chardev;socket,id=compare_out,host=127.0.0.1,port=${compare_out_port},server=on,wait=off;-chardev;socket,id=compare_out0,host=127.0.0.1,port=${compare_out_port}"
 }
 
 ftctl_xcolo_build_secondary_qemu_args() {
@@ -640,7 +641,7 @@ COLO startup alignment checklist
    - mirror0 server wait=off
    - compare1 server wait=on
    - compare0 / compare0-0 / compare_out / compare_out0 loopback sockets
-   - filter-mirror / filter-redirector / colo-compare objects present
+   - primary filter objects are attached later by QMP after block graph readiness
    - root disk on if=ide quorum node
    - startup paused with -S
 2. Secondary startup:
@@ -657,6 +658,7 @@ COLO startup alignment checklist
    - primary qmp_capabilities
    - primary blockdev-add nbd0
    - primary x-blockdev-change parent=colo-disk0 node=nbd0
+   - primary QMP object-add for redirectors / colo-compare / filter-mirror
    - primary migrate-set-capabilities x-colo
    - primary migrate
 EOF
@@ -748,9 +750,7 @@ ftctl_xcolo_prepare_block_generated_xmls() {
   ftctl_xml_apply_xcolo_network_runtime "${primary_generated_xml}" || return 1
   ftctl_xml_apply_xcolo_network_runtime "${standby_generated_xml}" || return 1
   ftctl_xml_apply_standby_host_runtime "${standby_generated_xml}" || return 1
-  if [[ "${primary_args}" == *"iothread=iothread1"* ]]; then
-    ftctl_xml_ensure_iothread_id "${primary_generated_xml}" "1" || return 1
-  fi
+  ftctl_xml_ensure_iothread_id "${primary_generated_xml}" "1" || return 1
   ftctl_xml_apply_qemu_commandline "${primary_generated_xml}" "${primary_args}" || return 1
   ftctl_xml_apply_qemu_commandline "${standby_generated_xml}" "${secondary_args}" || return 1
   ftctl_xml_validate_unique_disk_targets "${primary_generated_xml}" || return 1
@@ -1136,6 +1136,27 @@ ftctl_xcolo_attach_primary_block_graph() {
     "colo-disk0" "ftctl-colo-root" "colo" "primary" || return 1
 }
 
+ftctl_xcolo_attach_primary_net_filters() {
+  local vm="${1-}"
+
+  ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
+    '{"execute":"stop"}' "colo" "primary.stop_before_filter_attach" || return 1
+  ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
+    '{"execute":"object-add","arguments":{"qom-type":"filter-redirector","id":"redire0","netdev":"hostnet0","queue":"rx","indev":"compare_out"}}' \
+    "colo" "primary.object_add_redirector_in" || return 1
+  ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
+    '{"execute":"object-add","arguments":{"qom-type":"filter-redirector","id":"redire1","netdev":"hostnet0","queue":"rx","outdev":"compare0"}}' \
+    "colo" "primary.object_add_redirector_out" || return 1
+  ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
+    '{"execute":"object-add","arguments":{"qom-type":"colo-compare","id":"comp0","primary_in":"compare0-0","secondary_in":"compare1","outdev":"compare_out0","iothread":"iothread1"}}' \
+    "colo" "primary.object_add_colo_compare" || return 1
+  ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
+    '{"execute":"object-add","arguments":{"qom-type":"filter-mirror","id":"m0","netdev":"hostnet0","queue":"tx","outdev":"mirror0"}}' \
+    "colo" "primary.object_add_filter_mirror" || return 1
+
+  ftctl_state_set "${vm}" "xcolo_primary_net_filters_attached=true"
+}
+
 ftctl_xcolo_execute_handshake_with_nodes() {
   local vm="${1-}"
   local secondary_vm="${2-}"
@@ -1164,6 +1185,7 @@ ftctl_xcolo_execute_handshake_with_nodes() {
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
     "{\"execute\":\"x-blockdev-change\",\"arguments\":{\"parent\":\"colo-disk0\",\"node\":\"${FTCTL_PROFILE_XCOLO_NBD_NODE}\"}}" \
     "colo" "primary.x_blockdev_change" || return 1
+  ftctl_xcolo_attach_primary_net_filters "${vm}" || return 1
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
     '{"execute":"migrate-set-capabilities","arguments":{"capabilities":[{"capability":"return-path","state":true},{"capability":"x-colo","state":true}]}}' \
     "colo" "primary.migrate_set_capabilities" || return 1

@@ -30,6 +30,7 @@ Therefore, implementation fixes must move the pair toward a valid COLO replica s
 ## Iothread Contract
 
 The primary COLO compare object still uses `iothread=iothread1`, but FTCTL must not create that iothread with raw `qemu:commandline`.
+After the deferred primary filter attach change, the compare object is attached through QMP rather than being present in the generated primary XML command line. The native libvirt iothread contract still applies because QMP `object-add` references `iothread1`.
 
 Instead:
 
@@ -37,10 +38,10 @@ Instead:
    - `<iothreads>1</iothreads>`
    - `<iothreadids><iothread id="1"/></iothreadids>`
 2. The qemu commandline omits `-object iothread,id=iothread1`.
-3. The qemu commandline keeps only the `colo-compare ... iothread=iothread1` reference.
+3. The generated primary qemu commandline does not include `colo-compare`; qemu FTCTL attaches `colo-compare ... iothread=iothread1` later through QMP after channel and block graph readiness.
 4. Generated XML validation rejects:
    - any `qemu:arg` that creates `iothread,id=iothread...`
-   - any `colo-compare` reference to `iothread=iothread1` without native libvirt iothread id `1`
+   - any generated XML `colo-compare` reference to `iothread=iothread1` without native libvirt iothread id `1`
 
 This keeps libvirt's expected IOThread count aligned with QEMU monitor state.
 
@@ -71,6 +72,6 @@ Selftest coverage must assert:
 
 - generated primary XML contains native iothread id `1`;
 - generated primary XML does not contain raw `iothread,id=iothread1`;
-- `colo-compare` still references `iothread=iothread1`;
+- generated primary XML does not contain primary filter objects;
+- QMP object-add attaches `colo-compare` with `iothread1` after block graph readiness;
 - explicit validation rejects opaque qemu commandline iothread creation.
-

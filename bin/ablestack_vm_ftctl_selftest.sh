@@ -835,8 +835,10 @@ EOF
   selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "qemu:commandline"
   selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "<iothreads>1</iothreads>"
   selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" '<iothread id="1"'
-  selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "iothread=iothread1"
   selftest_assert_file_not_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "iothread,id=iothread1"
+  selftest_assert_file_not_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "filter-mirror"
+  selftest_assert_file_not_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "filter-redirector"
+  selftest_assert_file_not_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "colo-compare"
   selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "socket,id=mirror0,host=0.0.0.0,port=9003,server=on,wait=off"
   selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "socket,id=compare1,host=0.0.0.0,port=9004,server=on,wait=on"
   selftest_assert_file_not_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "socket,id=mirror0,host=0.0.0.0,port=9003,server=on,wait=on"
@@ -1076,7 +1078,7 @@ selftest_case_xcolo_block_handshake_sets_checkpoint_after_migrate() (
   selftest_info "x-colo block handshake sets checkpoint delay after primary migrate"
 
   local call_log="${SELFTEST_ROOT}/xcolo-block-handshake-order.log"
-  local migrate_line params_line
+  local filter_line migrate_line params_line
   FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
   FTCTL_PROFILE_SECONDARY_URI="qemu+ssh://peer/system"
   FTCTL_PROFILE_XCOLO_NBD_ENDPOINT="tcp:10.0.0.2:10809"
@@ -1092,10 +1094,19 @@ selftest_case_xcolo_block_handshake_sets_checkpoint_after_migrate() (
 
   ftctl_xcolo_execute_handshake_with_nodes "primary-vm" "standby-vm" "parent0"
 
+  selftest_assert_file_contains "${call_log}" "primary.object_add_redirector_in"
+  selftest_assert_file_contains "${call_log}" "primary.object_add_redirector_out"
+  selftest_assert_file_contains "${call_log}" "primary.object_add_colo_compare"
+  selftest_assert_file_contains "${call_log}" "primary.object_add_filter_mirror"
   selftest_assert_file_contains "${call_log}" "primary.migrate"
   selftest_assert_file_contains "${call_log}" "primary.migrate_set_parameters"
+  selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_primary_net_filters_attached")" "true" \
+    "primary net filters attached state"
+  filter_line="$(grep -n '|primary.object_add_filter_mirror|' "${call_log}" | head -n1 | cut -d: -f1)"
   migrate_line="$(grep -n '|primary.migrate|' "${call_log}" | head -n1 | cut -d: -f1)"
   params_line="$(grep -n '|primary.migrate_set_parameters|' "${call_log}" | head -n1 | cut -d: -f1)"
+  [[ "${filter_line}" -lt "${migrate_line}" ]] || \
+    selftest_fail "primary filter-mirror must be attached before primary.migrate"
   [[ "${migrate_line}" -lt "${params_line}" ]] || \
     selftest_fail "primary.migrate_set_parameters must be issued after primary.migrate"
 )

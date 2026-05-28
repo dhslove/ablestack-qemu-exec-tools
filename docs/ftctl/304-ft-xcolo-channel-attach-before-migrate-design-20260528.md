@@ -65,6 +65,8 @@ Runtime validation still owns terminal migration failures such as:
 xcolo_runtime_validation_failed:primary_migrate_failed
 ```
 
+If channel attach succeeds but the primary network filter emits before qemu FTCTL completes QMP graph setup, apply [305. FT X-COLO Deferred Primary Filter Attach Design](305-ft-xcolo-deferred-primary-filter-attach-design-20260528.md).
+
 ## Test Coverage
 
 Selftest coverage must assert:
@@ -73,4 +75,3 @@ Selftest coverage must assert:
 - primary generated XML uses `compare1 ... wait=on`;
 - primary generated XML no longer defaults `compare1` to `wait=off`;
 - channel attach is verified before primary QMP migration starts.
-
