@@ -1137,7 +1137,13 @@ selftest_case_xcolo_multi_disk_handshake_exports_all_disks() (
   FTCTL_PROFILE_XCOLO_CHECKPOINT_DELAY="2000"
 
   ftctl_state_set "primary-vm" \
+    "xcolo_disk_sda_primary_base_node=libvirt-root-storage" \
+    "xcolo_disk_sda_primary_base_qdev=scsi0-0-0-0" \
+    "xcolo_disk_sda_primary_overlay=/tmp/primary-root-active.qcow2" \
     "xcolo_disk_sda_secondary_base_node=libvirt-root-format" \
+    "xcolo_disk_sdb_primary_base_node=libvirt-data-storage" \
+    "xcolo_disk_sdb_primary_base_qdev=scsi0-0-0-1" \
+    "xcolo_disk_sdb_primary_overlay=/tmp/primary-data-active.qcow2" \
     "xcolo_disk_sdb_secondary_base_node=libvirt-data-format"
 
   # shellcheck disable=SC2317
@@ -1154,16 +1160,22 @@ selftest_case_xcolo_multi_disk_handshake_exports_all_disks() (
   selftest_assert_file_contains "${call_log}" "secondary.nbd_server_add.sdb"
   selftest_assert_file_contains "${call_log}" "primary.blockdev_add.sda"
   selftest_assert_file_contains "${call_log}" "primary.blockdev_add.sdb"
+  selftest_assert_file_contains "${call_log}" "primary.blockdev_add_active.sda"
+  selftest_assert_file_contains "${call_log}" "primary.blockdev_add_active.sdb"
+  selftest_assert_file_contains "${call_log}" "primary.blockdev_add_quorum.sda"
+  selftest_assert_file_contains "${call_log}" "primary.blockdev_add_quorum.sdb"
   selftest_assert_file_contains "${call_log}" '"node-name":"nbd0-sda"'
   selftest_assert_file_contains "${call_log}" '"node-name":"nbd0-sdb"'
+  selftest_assert_file_contains "${call_log}" 'ftctl-primary-active-sda","nbd0-sda'
+  selftest_assert_file_contains "${call_log}" 'ftctl-primary-active-sdb","nbd0-sdb'
   selftest_assert_file_contains "${call_log}" '"device":"ftctl-colo-sda"'
   selftest_assert_file_contains "${call_log}" '"device":"ftctl-colo-sdb"'
   selftest_assert_file_contains "${call_log}" '"export":"ftctl-colo-sda"'
   selftest_assert_file_contains "${call_log}" '"export":"ftctl-colo-sdb"'
   selftest_assert_file_not_contains "${call_log}" '"export":"libvirt-root-format"'
   selftest_assert_file_not_contains "${call_log}" '"export":"libvirt-data-format"'
-  selftest_assert_file_contains "${call_log}" '"parent":"ftctl-colo-sda","node":"nbd0-sda"'
-  selftest_assert_file_contains "${call_log}" '"parent":"ftctl-colo-sdb","node":"nbd0-sdb"'
+  selftest_assert_file_not_contains "${call_log}" "primary.x_blockdev_change.sda"
+  selftest_assert_file_not_contains "${call_log}" "primary.x_blockdev_change.sdb"
   selftest_assert_file_contains "${call_log}" "primary.cont_before_migrate"
   sda_export_line="$(grep -n '|secondary.nbd_server_add.sda|' "${call_log}" | head -n1 | cut -d: -f1)"
   sdb_export_line="$(grep -n '|secondary.nbd_server_add.sdb|' "${call_log}" | head -n1 | cut -d: -f1)"

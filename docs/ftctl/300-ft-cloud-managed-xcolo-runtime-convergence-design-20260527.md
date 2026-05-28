@@ -38,6 +38,8 @@ This state is not a successful FT state. It is a runtime convergence deadlock: t
 
 Later validation with `i-2-54-VM` and `i-2-81-VM` confirmed that timeout detection and primary-service recovery worked, but also exposed two follow-up issues. First, qemu FTCTL stopped the generated primary to attach QMP network filters and then started migration while the primary was still stopped, making the `finish-migrate` / `inmigrate` deadlock more likely. Second, recovery restored the primary service, but later status publication could show an empty `last_error`, hiding the actual `runtime_convergence_timeout` cause from Cloud/UI.
 
+Later validation with `i-2-54-VM` and `i-2-82-VM` proved `primary.cont_before_migrate` was executed and the primary briefly reported `running=true`, but the pair still timed out in `finish-migrate` / `inmigrate`. Secondary active overlays remained nearly empty while the primary overlay recorded writes. That follow-up is handled by [307. FT X-COLO Primary Quorum Remote Child Design](307-ft-xcolo-primary-quorum-remote-child-design-20260528.md): primary disk replacement must use a quorum that already contains both local primary active and remote NBD children.
+
 ## Design Principles
 
 1. Do not weaken the Cloud-managed ownership boundary.
@@ -126,6 +128,8 @@ Because `compare1 wait=on` can keep the primary create process blocked until the
 Before QMP migration, qemu FTCTL attaches the primary network filter objects with QMP `object-add`, with `filter-mirror` last.
 
 Before attaching primary network filters, qemu FTCTL must attach the block graph for all mapped writable disks, not only the first/root disk.
+
+For cloud-managed cold conversion, the primary disk graph must be created as a complete local+remote quorum before disk device replacement. qemu FTCTL must not switch a disk to a local-only quorum and rely on later `x-blockdev-change` to add the remote child.
 
 Because primary filter attachment uses QMP `stop` to make object insertion deterministic, qemu FTCTL must explicitly run QMP `cont` after all secondary NBD exports, primary block graph nodes, primary network filters, migration capabilities, and checkpoint delay are configured, and before QMP `migrate` is issued. The ordered event is `primary.cont_before_migrate`. This makes the intended handoff explicit: the generated primary is paused only while the runtime graph is assembled, then resumed immediately before the COLO migration command that should transition the pair into active checkpointing.
 

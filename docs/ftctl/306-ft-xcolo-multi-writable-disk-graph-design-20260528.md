@@ -21,6 +21,8 @@ secondary log: Can't receive COLO message: Input/output error
 
 Runtime inspection showed the COLO replication graph was built only for the root disk. The data disk stayed outside the COLO graph on both primary and secondary. That violates the FT goal: secondary must be a clone of the primary at the VM state level, not only a VM with one replicated disk.
 
+Later validation progressed past this multi-disk coverage gap but still timed out in `finish-migrate` / `inmigrate`. That follow-up found that the primary quorum was first created as local-only and then patched with `x-blockdev-change`. The current contract is updated by [307. FT X-COLO Primary Quorum Remote Child Design](307-ft-xcolo-primary-quorum-remote-child-design-20260528.md): in cloud-managed cold conversion the primary quorum must be created with both local and remote children already present.
+
 ## Design Principle
 
 FT x-colo must treat every writable guest disk as part of the protected VM identity.
@@ -61,11 +63,14 @@ The handshake order becomes:
 5. Primary QMP capabilities.
 6. For each disk:
    - primary NBD client add against the same `ftctl-colo-<target>` export;
-   - primary `x-blockdev-change` to attach the NBD child to that disk's COLO quorum.
+   - primary active overlay add;
+   - primary quorum add with both children already present: `ftctl-primary-active-<target>` and `nbd0-<target>`;
+   - primary disk device replacement to the completed quorum.
 7. Primary network filter object attach.
 8. Primary x-colo/return-path capabilities.
 9. Primary checkpoint parameter update.
-10. Primary migrate.
+10. Primary `cont`.
+11. Primary migrate.
 
 Primary `migrate` must not start while any writable disk is outside the COLO graph.
 
@@ -93,8 +98,10 @@ Selftest coverage must assert:
 - generated secondary XML rewrites all mapped disks;
 - per-disk secondary block graph QMP commands use unique node names;
 - per-disk primary block graph and NBD attach commands use unique node names;
+- primary quorum creation includes both the local primary active child and the remote NBD child;
 - all NBD exports are added before primary migration;
 - secondary exports and primary NBD clients use `ftctl-colo-<target>` and never the `libvirt-*` base node for multi-disk COLO.
+- cloud-managed multi-disk cold conversion does not depend on `x-blockdev-change` to patch the primary quorum after device replacement.
 - device replacement preserves bootability without duplicating `bootindex`: only the boot/root LUN gets `bootindex`, and data disks omit it.
 - runtime validation distinguishes terminal failures from pending convergence.
 
