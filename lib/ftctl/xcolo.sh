@@ -1100,7 +1100,7 @@ import json
 import sys
 
 controller, channel, scsi_id, lun, drive, dev_id = sys.argv[1:]
-print(json.dumps({
+payload = {
     "driver": "scsi-hd",
     "bus": f"{controller}.0",
     "channel": int(channel),
@@ -1108,8 +1108,10 @@ print(json.dumps({
     "lun": int(lun),
     "drive": drive,
     "id": dev_id,
-    "bootindex": 1,
-}, separators=(",", ":")))
+}
+if int(lun) == 0:
+    payload["bootindex"] = 1
+print(json.dumps(payload, separators=(",", ":")))
 PY
 )"
   printf -v "${out_var}" '%s' "${payload}"
@@ -1857,7 +1859,12 @@ ftctl_xcolo_execute_block_cold_conversion() {
     ftctl_xcolo_attach_secondary_block_graph "${secondary_vm}" "${secondary_base_node}" "${secondary_hidden}" "${secondary_active}" "${secondary_qdev}" "${target}" || {
       ftctl_log_event "colo" "block_conversion.secondary_attach" "fail" "${vm}" "" \
         "target=${target} base=${secondary_base_node} qdev=${secondary_qdev}"
-      ftctl_state_set "${vm}" "last_error=xcolo_block_secondary_attach_failed"
+      ftctl_state_set "${vm}" \
+        "conversion_stage=runtime_graph_failed" \
+        "conversion_state=error" \
+        "protection_state=error" \
+        "transport_state=failed" \
+        "last_error=xcolo_block_secondary_attach_failed"
       return 1
     }
     ftctl_log_event "colo" "block_conversion.secondary_attach" "ok" "${vm}" "" \
@@ -1865,7 +1872,12 @@ ftctl_xcolo_execute_block_cold_conversion() {
     ftctl_xcolo_attach_primary_block_graph "${vm}" "${primary_base_node}" "${primary_overlay}" "${primary_qdev}" "${target}" || {
       ftctl_log_event "colo" "block_conversion.primary_attach" "fail" "${vm}" "" \
         "target=${target} base=${primary_base_node} qdev=${primary_qdev}"
-      ftctl_state_set "${vm}" "last_error=xcolo_block_primary_attach_failed"
+      ftctl_state_set "${vm}" \
+        "conversion_stage=runtime_graph_failed" \
+        "conversion_state=error" \
+        "protection_state=error" \
+        "transport_state=failed" \
+        "last_error=xcolo_block_primary_attach_failed"
       return 1
     }
     ftctl_log_event "colo" "block_conversion.primary_attach" "ok" "${vm}" "" \
@@ -1875,7 +1887,12 @@ ftctl_xcolo_execute_block_cold_conversion() {
   ftctl_xcolo_execute_handshake_with_disk_plan "${vm}" "${secondary_vm}" "${disk_plan}" || {
     ftctl_log_event "colo" "block_conversion.handshake" "fail" "${vm}" "" \
       "disk_count=${#disk_entries[@]}"
-    ftctl_state_set "${vm}" "last_error=xcolo_block_handshake_failed"
+    ftctl_state_set "${vm}" \
+      "conversion_stage=handshake_failed" \
+      "conversion_state=error" \
+      "protection_state=error" \
+      "transport_state=failed" \
+      "last_error=xcolo_block_handshake_failed"
     return 1
   }
   ftctl_log_event "colo" "block_conversion.handshake" "ok" "${vm}" "" \

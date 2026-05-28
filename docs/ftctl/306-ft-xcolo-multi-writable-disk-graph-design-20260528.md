@@ -78,4 +78,15 @@ Selftest coverage must assert:
 - per-disk secondary block graph QMP commands use unique node names;
 - per-disk primary block graph and NBD attach commands use unique node names;
 - all NBD exports are added before primary migration.
+- device replacement preserves bootability without duplicating `bootindex`: only the boot/root LUN gets `bootindex`, and data disks omit it.
 
+## Failure State Contract
+
+Any per-disk attach failure must leave qemu FTCTL state in an explicit failure state:
+
+- `conversion_stage=runtime_graph_failed`
+- `conversion_state=error`
+- `protection_state=error`
+- `transport_state=failed`
+
+This prevents Cloud from presenting a failed partial graph as `pairing/planned`.

@@ -1064,11 +1064,17 @@ selftest_case_xcolo_scsi_root_replace_avoids_lun_collision() (
     "standby-vm" "libvirt-3-format" "/tmp/hidden.qcow2" "/tmp/active.qcow2" "scsi0-0-0-0"
   ftctl_xcolo_attach_primary_block_graph \
     "primary-vm" "libvirt-3-storage" "/tmp/primary-active.qcow2" "scsi0-0-0-0"
+  ftctl_xcolo_attach_primary_block_graph \
+    "primary-vm" "libvirt-2-storage" "/tmp/primary-active-data.qcow2" "scsi0-0-0-1" "sdb"
 
   selftest_assert_file_contains "${call_log}" "secondary.device_del_existing_root"
   selftest_assert_file_contains "${call_log}" '"execute":"device_del","arguments":{"id":"scsi0-0-0-0"}'
   selftest_assert_file_contains "${call_log}" "secondary.device_add_colo_root"
-  selftest_assert_file_contains "${call_log}" '"bus":"scsi0.0","channel":0,"scsi-id":0,"lun":0,"drive":"ftctl-colo-root","id":"ftctl-colo-root"'
+  selftest_assert_file_contains "${call_log}" '"bus":"scsi0.0","channel":0,"scsi-id":0,"lun":0,"drive":"ftctl-colo-root","id":"ftctl-colo-root","bootindex":1'
+  selftest_assert_file_contains "${call_log}" '"bus":"scsi0.0","channel":0,"scsi-id":0,"lun":1,"drive":"ftctl-colo-sdb","id":"ftctl-colo-sdb"'
+  if grep -F '"lun":1' "${call_log}" | grep -q '"bootindex"'; then
+    selftest_fail "non-root x-colo disk replacement must not set bootindex"
+  fi
   selftest_assert_file_contains "${call_log}" "primary.device_del_existing_root"
   selftest_assert_file_contains "${call_log}" "primary.device_add_colo_root"
 )
