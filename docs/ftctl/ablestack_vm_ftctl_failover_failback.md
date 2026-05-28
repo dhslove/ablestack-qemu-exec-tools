@@ -74,7 +74,7 @@ For file-based FT, implementation must follow the QEMU COLO test procedure as th
 Startup alignment checklist:
 
 1. Primary startup
-   - `mirror0` listens with `wait=on` by default for Cloud-managed cold-start conversion so `filter-mirror` cannot emit before the secondary redirector is attached
+   - `mirror0` listens with `wait=off` by default so qemu FTCTL can observe the primary listener before starting the secondary
    - `compare1` listens with `wait=on`
    - `compare0`, `compare0-0`, `compare_out`, `compare_out0` use local loopback
    - `filter-mirror`, `filter-redirector`, `colo-compare` objects are present

@@ -18,7 +18,9 @@ This confirms the Cloud lifecycle guard is working: the system no longer reports
 
 Later validation found an earlier generated-primary failure class where libvirt rejected a raw `qemu:commandline` iothread before the COLO handshake could start. That contract is handled separately by [301. FT X-COLO Libvirt Iothread Contract Design](301-ft-xcolo-libvirt-iothread-contract-design-20260527.md). When a run fails at `primary.create_generated`, apply the 301 contract first; this runtime convergence document applies only after both generated domains are accepted and QMP handshake is attempted.
 
-Later validation also found a generated-primary listener startup deadlock: the primary-first cold conversion path emitted `mirror0` and `compare1` with `wait=on`, so `virsh create` waited for a secondary connection before the secondary was started. That contract is handled by [303. FT X-COLO Primary-First Listener Wait Design](303-ft-xcolo-primary-first-listener-wait-design-20260528.md). For primary-first startup, peer-facing primary listeners must use `wait=off`.
+Later validation also found a generated-primary listener startup deadlock: the primary-first cold conversion path emitted `mirror0` and `compare1` with `wait=on`, so `virsh create` waited for a secondary connection before the secondary was started. That contract is handled by [303. FT X-COLO Primary-First Listener Wait Design](303-ft-xcolo-primary-first-listener-wait-design-20260528.md).
+
+Later validation progressed beyond listener startup and failed after secondary startup with primary migration status `failed` and QEMU reporting `Received invalid message 0x0000 length 0x0000`. That contract is handled by [304. FT X-COLO Channel Attach Before Migrate Design](304-ft-xcolo-channel-attach-before-migrate-design-20260528.md). The supported startup model now follows QEMU's documented split: `mirror0 wait=off`, `compare1 wait=on`, and a post-secondary `ESTAB` channel attach check before QMP migration.
 
 ## Design Principles
 
@@ -63,10 +65,12 @@ The primary generated XML must allow QEMU startup to complete before the seconda
 Therefore the primary generated qemu commandline uses:
 
 - `mirror0 ... server=on,wait=off` by default
-- `compare1 ... server=on,wait=off`
+- `compare1 ... server=on,wait=on`
 - loopback compare sockets unchanged
 
-The wait behavior is configurable with `FTCTL_XCOLO_MIRROR_WAIT` and `FTCTL_XCOLO_COMPARE_WAIT`, but invalid values fall back to `off`.
+The wait behavior is configurable with `FTCTL_XCOLO_MIRROR_WAIT` and `FTCTL_XCOLO_COMPARE_WAIT`. Invalid mirror values fall back to `off`; invalid compare values fall back to `on`.
+
+Because `compare1 wait=on` can keep the primary create process blocked until the secondary connects, qemu FTCTL must not wait for both peer ports before starting the secondary. It waits for the primary mirror listener, starts the secondary, verifies both peer-facing channels are `ESTAB`, then runs QMP migration.
 
 ## Expected Behavior
 
@@ -91,4 +95,5 @@ New selftest coverage:
 
 - Runtime validation blocks false-positive success when the primary is not running.
 - Runtime validation reports terminal primary migration failure as `primary_migrate_failed`.
-- Generated primary XML defaults `mirror0` and `compare1` to `wait=off`.
+- Generated primary XML defaults `mirror0` to `wait=off` and `compare1` to `wait=on`.
+- Channel attach is verified before primary QMP migration starts.

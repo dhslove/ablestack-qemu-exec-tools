@@ -45,38 +45,39 @@ For cloud-managed primary-first X-COLO startup:
 
 - primary generated XML keeps `-S`;
 - `mirror0` uses `server=on,wait=off`;
-- `compare1` uses `server=on,wait=off`;
+- `compare1` uses `server=on,wait=on`;
 - loopback compare sockets remain `wait=off`;
 - secondary generated XML still connects to the primary listener endpoints;
 - qemu FTCTL verifies listener presence passively with local socket inventory.
 
-The `-S` flag is the guard that prevents guest execution before the secondary is attached. Chardev `wait=on` must not be used as the guard in a primary-first startup model.
+The `-S` flag is the guard that prevents guest execution before the secondary is attached. Chardev `wait=on` must not be used for every peer-facing listener in a primary-first startup model. `compare1` remains `wait=on` to match QEMU COLO's documented compare-channel contract, while `mirror0 wait=off` provides the early listener that lets qemu FTCTL safely start the secondary.
 
 ## Async Create Handling
 
-With `wait=off`, `virsh create` can return successfully before the listener polling loop observes both sockets. Therefore qemu FTCTL must not treat a completed `virsh create` process with `rc=0` as listener failure.
+With `mirror0 wait=off`, `virsh create` can expose the mirror listener before the compare channel is attached. With `compare1 wait=on`, `virsh create` may remain blocked until the secondary connects. Therefore qemu FTCTL must not treat an in-progress `virsh create` as failure while the mirror listener is visible.
 
 Listener waiting rules:
 
 - if `virsh create` exits nonzero before listeners are visible, fail immediately;
 - if `virsh create` exits zero before listeners are visible, continue polling until listeners appear or the listener timeout expires;
-- when both listener ports are visible, continue to secondary startup and QMP handshake.
+- when the required primary listener contract is visible, continue to secondary startup;
+- after secondary startup, verify both peer-facing channels are `ESTAB` before QMP handshake.
 
 ## Configuration
 
 - `FTCTL_XCOLO_MIRROR_WAIT` defaults to `off`.
-- `FTCTL_XCOLO_COMPARE_WAIT` defaults to `off`.
-- invalid values fall back to `off`.
+- `FTCTL_XCOLO_COMPARE_WAIT` defaults to `on`.
+- invalid mirror values fall back to `off`; invalid compare values fall back to `on`.
 
-These knobs exist for diagnostics only. The supported cloud-managed primary-first default is `off/off`.
+These knobs exist for diagnostics only. The supported cloud-managed primary-first default is `mirror0=off`, `compare1=on`.
 
 ## Validation
 
 Selftest must assert generated primary XML:
 
 - contains `mirror0 ... wait=off`;
-- contains `compare1 ... wait=off`;
+- contains `compare1 ... wait=on`;
 - does not contain `mirror0 ... wait=on`;
-- does not contain `compare1 ... wait=on`.
+- does not contain `compare1 ... wait=off` by default.
 
 Runtime validation must still fail if the later QMP/migration convergence does not prove both sides are actually in COLO state.
