@@ -44,6 +44,8 @@ Later validation with `i-2-54-VM` and `i-2-83-VM` showed the primary quorum remo
 
 Later validation with `i-2-54-VM` and `i-2-84-VM` showed the baseline seed step can fail before copy starts if a stopped-primary KRBD source is not explicitly prepared for export, and rollback can hide the specific seed failure in `last_error`. That follow-up remains in [308. FT Cloud-Managed Baseline Seed Before X-COLO Design](308-ft-cloud-managed-baseline-seed-before-xcolo-design-20260528.md): the seed path must map/verify primary sources before `qemu-nbd`, remove stale same-export seed NBD processes, and preserve the specific seed failure reason through rollback.
 
+Later validation with `i-2-54-VM` and `i-2-85-VM` proved both disk baselines were seeded and the QMP handshake completed, but runtime validation still timed out. The pair reported primary migration `active`, secondary migration `colo`, and runtime XML markers were present, while `query-colo-status.mode` remained `none`. That follow-up is handled by [309. FT X-COLO Runtime Role Observability Design](309-ft-xcolo-runtime-role-observability-design-20260528.md): runtime validation must collect COLO role status every loop, distinguish `colo_role_not_entered` from generic convergence timeout, and accept a non-`none` COLO role state only when migration and XML evidence also match.
+
 ## Design Principles
 
 1. Do not weaken the Cloud-managed ownership boundary.
@@ -63,17 +65,24 @@ Validation loop:
 
 1. Poll primary and secondary QMP status.
 2. Poll primary and secondary `query-migrate`.
-3. Confirm primary and secondary runtime XML contain expected COLO commandline markers.
-4. Succeed only when:
+3. Poll primary and secondary `query-colo-status`.
+4. Confirm primary and secondary runtime XML contain expected COLO commandline markers.
+5. Succeed when the traditional running model is proven:
    - primary `query-status.running=true`
    - secondary `query-status.running=true`
    - primary runtime XML has `colo-compare`, `filter-mirror`, and `filter-redirector`
    - secondary runtime XML has `filter-redirector`, `filter-rewriter`, and `-incoming`
    - secondary `query-migrate.status=colo`
-5. Fail immediately on terminal migration failure:
+6. Also succeed when QEMU explicitly reports COLO role state:
+   - primary runtime XML markers are present
+   - secondary runtime XML markers are present
+   - primary `query-migrate.status=active`
+   - secondary `query-migrate.status=colo`
+   - primary and secondary `query-colo-status.mode` are non-empty and not `none`
+7. Fail immediately on terminal migration failure:
    - primary `query-migrate.status=failed` -> `primary_migrate_failed`
    - secondary `query-migrate.status=failed` -> `secondary_migrate_failed`
-6. Otherwise continue polling up to `FTCTL_XCOLO_RUNTIME_VALIDATE_TIMEOUT_SEC`, default 45 seconds.
+8. Otherwise continue polling up to `FTCTL_XCOLO_RUNTIME_VALIDATE_TIMEOUT_SEC`, default 45 seconds.
 
 Pending convergence is allowed only as a bounded asynchronous state. qemu FTCTL records `xcolo_runtime_pending_since` the first time the pair is classified as `runtime_converging`.
 
@@ -87,6 +96,8 @@ If the following state persists longer than `FTCTL_XCOLO_RUNTIME_PENDING_MAX_SEC
 - secondary `query-migrate.status=colo`
 
 This exact combination means the generated runtime domains and channels exist, but the active service was not released back to running state. It must not be treated as a stable FT wait condition.
+
+If the same migration/XML shape is present but both `query-colo-status.mode` values are empty or `none`, qemu FTCTL must classify the bounded pending state as `colo_role_not_entered`. That preserves the distinction between a real role transition that is still converging and a transport/migration pair that never entered COLO checkpointing.
 
 ## Runtime Failure Recovery
 
@@ -165,6 +176,8 @@ New selftest coverage:
 - Runtime validation blocks false-positive success when the primary is not running.
 - Runtime validation reports terminal primary migration failure as `primary_migrate_failed`.
 - Runtime validation times out a stuck `finish-migrate` / `inmigrate` convergence as `runtime_convergence_timeout`.
+- Runtime validation reports migration `active/colo` with `query-colo-status.mode=none` as `colo_role_not_entered`.
+- Runtime validation accepts explicit non-`none` COLO role state only when migration status and runtime XML markers also match.
 - Generated primary XML defaults `mirror0` to `wait=off` and `compare1` to `wait=on`.
 - Channel attach is verified before primary QMP migration starts.
 - Primary network filter objects are attached by QMP after block graph preparation.

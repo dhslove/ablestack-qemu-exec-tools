@@ -1351,7 +1351,7 @@ selftest_case_xcolo_runtime_validation_reports_primary_migrate_failure() (
 
 selftest_case_xcolo_runtime_validation_reports_pending_convergence() (
   selftest_reset_env
-  selftest_info "x-colo runtime validation reports pending convergence without hard failure"
+  selftest_info "x-colo runtime validation reports missing colo role without hard failure"
 
   local vm="xcolo-runtime-pending"
   local rc=0
@@ -1389,6 +1389,12 @@ selftest_case_xcolo_runtime_validation_reports_pending_convergence() (
     return 0
   }
   # shellcheck disable=SC2317
+  ftctl_xcolo_query_colo_mode() {
+    local out_var="${3}"
+    printf -v "${out_var}" '%s' "none"
+    return 0
+  }
+  # shellcheck disable=SC2317
   ftctl_xcolo_domain_xml_has_runtime_markers() {
     return 0
   }
@@ -1396,7 +1402,7 @@ selftest_case_xcolo_runtime_validation_reports_pending_convergence() (
   ftctl_xcolo_validate_pair_runtime "${vm}" "${vm}-standby" || rc=$?
   selftest_assert_eq "${rc}" "10" "runtime validation pending return code"
   selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_pending_reason")" \
-    "runtime_converging" \
+    "colo_role_not_entered" \
     "runtime validation pending reason"
   selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_runtime_pending_since" >/dev/null 2>&1; echo $?)" \
     "0" \
@@ -1407,7 +1413,7 @@ selftest_case_xcolo_runtime_validation_reports_pending_convergence() (
 
 selftest_case_xcolo_runtime_validation_times_out_stuck_convergence() (
   selftest_reset_env
-  selftest_info "x-colo runtime validation times out stuck finish-migrate/inmigrate convergence"
+  selftest_info "x-colo runtime validation reports missing colo role after bounded wait"
 
   local vm="xcolo-runtime-timeout"
   local rc=0
@@ -1447,6 +1453,12 @@ selftest_case_xcolo_runtime_validation_times_out_stuck_convergence() (
     return 0
   }
   # shellcheck disable=SC2317
+  ftctl_xcolo_query_colo_mode() {
+    local out_var="${3}"
+    printf -v "${out_var}" '%s' "none"
+    return 0
+  }
+  # shellcheck disable=SC2317
   ftctl_xcolo_domain_xml_has_runtime_markers() {
     return 0
   }
@@ -1454,8 +1466,69 @@ selftest_case_xcolo_runtime_validation_times_out_stuck_convergence() (
   ftctl_xcolo_validate_pair_runtime "${vm}" "${vm}-standby" || rc=$?
   selftest_assert_eq "${rc}" "1" "stuck convergence should fail"
   selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" \
-    "xcolo_runtime_validation_failed:runtime_convergence_timeout" \
-    "stuck convergence failure reason"
+    "xcolo_runtime_validation_failed:colo_role_not_entered" \
+    "missing colo role failure reason"
+)
+
+selftest_case_xcolo_runtime_validation_accepts_reported_colo_role() (
+  selftest_reset_env
+  selftest_info "x-colo runtime validation accepts explicit colo role state"
+
+  local vm="xcolo-runtime-role-active"
+  local rc=0
+  ftctl_state_init_vm "${vm}"
+  FTCTL_DRY_RUN="0"
+  FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
+  FTCTL_PROFILE_SECONDARY_URI="qemu+ssh://peer/system"
+  FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC="1"
+  FTCTL_XCOLO_RUNTIME_VALIDATE_TIMEOUT_SEC="1"
+
+  # shellcheck disable=SC2317
+  ftctl_xcolo_query_running_flag() {
+    local out_var="${3}"
+    printf -v "${out_var}" '%s' "false"
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_query_status_name() {
+    local uri="${1-}" out_var="${3}"
+    if [[ "${uri}" == "${FTCTL_PROFILE_PRIMARY_URI}" ]]; then
+      printf -v "${out_var}" '%s' "finish-migrate"
+    else
+      printf -v "${out_var}" '%s' "inmigrate"
+    fi
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_query_migrate_status() {
+    local uri="${1-}" out_var="${3}"
+    if [[ "${uri}" == "${FTCTL_PROFILE_PRIMARY_URI}" ]]; then
+      printf -v "${out_var}" '%s' "active"
+    else
+      printf -v "${out_var}" '%s' "colo"
+    fi
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_query_colo_mode() {
+    local uri="${1-}" out_var="${3}"
+    if [[ "${uri}" == "${FTCTL_PROFILE_PRIMARY_URI}" ]]; then
+      printf -v "${out_var}" '%s' "primary"
+    else
+      printf -v "${out_var}" '%s' "secondary"
+    fi
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_domain_xml_has_runtime_markers() {
+    return 0
+  }
+
+  ftctl_xcolo_validate_pair_runtime "${vm}" "${vm}-standby" || rc=$?
+  selftest_assert_eq "${rc}" "0" "explicit colo role should validate"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_primary_colo_mode")" \
+    "primary" \
+    "primary colo role recorded"
 )
 
 selftest_case_xcolo_runtime_recovery_preserves_error_reason() (
@@ -2549,6 +2622,7 @@ selftest_main() {
   selftest_case_xcolo_runtime_validation_reports_primary_migrate_failure
   selftest_case_xcolo_runtime_validation_reports_pending_convergence
   selftest_case_xcolo_runtime_validation_times_out_stuck_convergence
+  selftest_case_xcolo_runtime_validation_accepts_reported_colo_role
   selftest_case_xcolo_runtime_recovery_preserves_error_reason
   selftest_case_json_and_locking
   selftest_case_check_secondary_active_side
