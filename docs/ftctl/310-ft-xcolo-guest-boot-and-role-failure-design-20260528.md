@@ -15,6 +15,8 @@ This means the runtime validator must be more explicit about two separate facts:
 1. whether both QEMU sides have entered the expected COLO roles
 2. whether the generated primary guest has become healthy enough to be treated as an FT source
 
+A follow-up retest confirmed that the source image itself was not permanently damaged. After FT recovery restored the original XML and original RBD paths, the VM returned to normal. The primary role problem and primary-side NBD child attach correction are defined in [311. FT X-COLO Primary NBD Child Attach Design](311-ft-xcolo-primary-nbd-child-attach-design-20260529.md).
+
 ## Design Principles
 
 1. FT success still means a clone-level secondary that preserves VM identity, network identity, disk state, and memory checkpoint state.

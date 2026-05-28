@@ -1813,10 +1813,13 @@ ftctl_xcolo_attach_primary_block_graph_with_remote() {
     "{\"execute\":\"blockdev-add\",\"arguments\":{\"driver\":\"qcow2\",\"node-name\":\"${active_node}\",\"file\":{\"driver\":\"file\",\"filename\":\"${active}\"},\"backing\":\"${base_node}\"}}" \
     "colo" "primary.blockdev_add_active.${suffix}" || return 1
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
-    "{\"execute\":\"blockdev-add\",\"arguments\":{\"driver\":\"quorum\",\"node-name\":\"${colo_node}\",\"read-pattern\":\"fifo\",\"vote-threshold\":1,\"children\":[\"${active_node}\",\"${nbd_node}\"]}}" \
+    "{\"execute\":\"blockdev-add\",\"arguments\":{\"driver\":\"quorum\",\"node-name\":\"${colo_node}\",\"read-pattern\":\"fifo\",\"vote-threshold\":1,\"children\":[\"${active_node}\"]}}" \
     "colo" "primary.blockdev_add_quorum.${suffix}" || return 1
   ftctl_xcolo_replace_scsi_disk_device "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" "${qdev}" \
     "${colo_node}" "${device_id}" "colo" "primary" || return 1
+  ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
+    "{\"execute\":\"x-blockdev-change\",\"arguments\":{\"parent\":\"${colo_node}\",\"node\":\"${nbd_node}\"}}" \
+    "colo" "primary.x_blockdev_change.${suffix}" || return 1
 }
 
 ftctl_xcolo_attach_primary_net_filters() {

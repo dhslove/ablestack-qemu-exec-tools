@@ -502,18 +502,32 @@ ftctl_state_get_elapsed_key_sec() {
 
 ftctl_state_emit_json_fields() {
   local vm="${1-}"
-  local path line first="1"
+  local path line first="1" key value fallback_error protection_state conversion_state transport_state
   path="$(ftctl_state_path "${vm}")"
+  fallback_error=""
+  protection_state="$(grep -E '^protection_state=' "${path}" 2>/dev/null | tail -n1 | cut -d= -f2- || true)"
+  conversion_state="$(grep -E '^conversion_state=' "${path}" 2>/dev/null | tail -n1 | cut -d= -f2- || true)"
+  transport_state="$(grep -E '^transport_state=' "${path}" 2>/dev/null | tail -n1 | cut -d= -f2- || true)"
+  if [[ "${protection_state}" == "error" ||
+        "${conversion_state}" == "error" ||
+        "${transport_state}" == "failed" ]]; then
+    fallback_error="$(grep -E '^xcolo_last_runtime_error=' "${path}" 2>/dev/null | tail -n1 | cut -d= -f2- || true)"
+  fi
   while IFS= read -r line; do
     [[ -n "${line}" ]] || continue
+    key="${line%%=*}"
+    value="${line#*=}"
+    if [[ "${key}" == "last_error" && -z "${value}" && -n "${fallback_error}" ]]; then
+      value="${fallback_error}"
+    fi
     if [[ "${first}" == "1" ]]; then
       first="0"
     else
       printf ","
     fi
     printf '"%s":"%s"' \
-      "$(ftctl__json_escape "${line%%=*}")" \
-      "$(ftctl__json_escape "${line#*=}")"
+      "$(ftctl__json_escape "${key}")" \
+      "$(ftctl__json_escape "${value}")"
   done < "${path}"
 }
 

@@ -1164,18 +1164,20 @@ selftest_case_xcolo_multi_disk_handshake_exports_all_disks() (
   selftest_assert_file_contains "${call_log}" "primary.blockdev_add_active.sdb"
   selftest_assert_file_contains "${call_log}" "primary.blockdev_add_quorum.sda"
   selftest_assert_file_contains "${call_log}" "primary.blockdev_add_quorum.sdb"
+  selftest_assert_file_contains "${call_log}" "primary.x_blockdev_change.sda"
+  selftest_assert_file_contains "${call_log}" "primary.x_blockdev_change.sdb"
   selftest_assert_file_contains "${call_log}" '"node-name":"nbd0-sda"'
   selftest_assert_file_contains "${call_log}" '"node-name":"nbd0-sdb"'
-  selftest_assert_file_contains "${call_log}" 'ftctl-primary-active-sda","nbd0-sda'
-  selftest_assert_file_contains "${call_log}" 'ftctl-primary-active-sdb","nbd0-sdb'
+  selftest_assert_file_contains "${call_log}" '"children":\["ftctl-primary-active-sda"\]'
+  selftest_assert_file_contains "${call_log}" '"children":\["ftctl-primary-active-sdb"\]'
+  selftest_assert_file_contains "${call_log}" '"parent":"ftctl-colo-sda","node":"nbd0-sda"'
+  selftest_assert_file_contains "${call_log}" '"parent":"ftctl-colo-sdb","node":"nbd0-sdb"'
   selftest_assert_file_contains "${call_log}" '"device":"ftctl-colo-sda"'
   selftest_assert_file_contains "${call_log}" '"device":"ftctl-colo-sdb"'
   selftest_assert_file_contains "${call_log}" '"export":"ftctl-colo-sda"'
   selftest_assert_file_contains "${call_log}" '"export":"ftctl-colo-sdb"'
   selftest_assert_file_not_contains "${call_log}" '"export":"libvirt-root-format"'
   selftest_assert_file_not_contains "${call_log}" '"export":"libvirt-data-format"'
-  selftest_assert_file_not_contains "${call_log}" "primary.x_blockdev_change.sda"
-  selftest_assert_file_not_contains "${call_log}" "primary.x_blockdev_change.sdb"
   selftest_assert_file_contains "${call_log}" "primary.cont_before_migrate"
   sda_export_line="$(grep -n '|secondary.nbd_server_add.sda|' "${call_log}" | head -n1 | cut -d: -f1)"
   sdb_export_line="$(grep -n '|secondary.nbd_server_add.sdb|' "${call_log}" | head -n1 | cut -d: -f1)"
@@ -1776,6 +1778,27 @@ selftest_case_xcolo_runtime_recovery_preserves_error_reason() (
   selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_last_runtime_error")" \
     "${reason}" \
     "runtime recovery preserves sticky runtime error"
+)
+
+selftest_case_xcolo_error_status_uses_sticky_runtime_error() (
+  selftest_reset_env
+  selftest_info "x-colo error status emits sticky runtime error when last_error is blank"
+
+  local vm="xcolo-sticky-status"
+  local out
+  ftctl_state_init_vm "${vm}"
+  ftctl_state_set "${vm}" \
+    "mode=ft" \
+    "protection_state=error" \
+    "transport_state=failed" \
+    "conversion_state=error" \
+    "last_error=" \
+    "xcolo_last_runtime_error=xcolo_runtime_validation_failed:primary_colo_role_not_entered"
+
+  out="$(ftctl_state_emit_json_one "${vm}" "ok")"
+  selftest_assert_contains "${out}" \
+    '"last_error":"xcolo_runtime_validation_failed:primary_colo_role_not_entered"' \
+    "status json falls back to sticky runtime error"
 )
 
 selftest_case_json_and_locking() {
@@ -2834,6 +2857,7 @@ selftest_main() {
   selftest_case_xcolo_runtime_validation_records_optional_qga
   selftest_case_xcolo_runtime_validation_requires_primary_qga
   selftest_case_xcolo_runtime_recovery_preserves_error_reason
+  selftest_case_xcolo_error_status_uses_sticky_runtime_error
   selftest_case_json_and_locking
   selftest_case_check_secondary_active_side
   selftest_case_reconcile_secondary_steady_skips_primary_disks

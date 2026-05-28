@@ -331,6 +331,16 @@ ftctl_orchestrator_reconcile_one() {
     return 0
   fi
 
+  if [[ "${mode}" == "ft" && ( "${protection_state}" == "error" || "${transport}" == "failed" ) ]]; then
+    if declare -F ftctl_xcolo_preserve_runtime_error >/dev/null 2>&1; then
+      ftctl_xcolo_preserve_runtime_error "${vm}"
+    fi
+    ftctl_state_set "${vm}" "last_healthy_ts=$(ftctl_now_iso8601)"
+    ftctl_log_event "health" "reconcile.defer" "warn" "${vm}" "" \
+      "reason=ft_runtime_failure_preserved protection=${protection_state} transport=${transport}"
+    return 0
+  fi
+
   if ftctl_orchestrator_is_cloud_failback_awaiting_command "${mode}" "${active_side}" "${protection_state}" "${transport}" "${fencing_state}"; then
     ftctl_state_set "${vm}" "last_healthy_ts=$(ftctl_now_iso8601)"
     ftctl_log_event "failback" "failback.await-command" "ok" "${vm}" "" \
