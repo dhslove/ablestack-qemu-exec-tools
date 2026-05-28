@@ -325,6 +325,12 @@ ftctl_orchestrator_reconcile_one() {
   transport="$(ftctl_state_get "${vm}" "transport_state" 2>/dev/null || echo "${transport}")"
   active_side="$(ftctl_state_get "${vm}" "active_side" 2>/dev/null || echo "${active_side}")"
   fencing_state="$(ftctl_state_get "${vm}" "fencing_state" 2>/dev/null || echo "${fencing_state}")"
+
+  if [[ "${mode}" == "ft" && "${protection_state}" == "pairing" && "${transport}" == "establishing" ]]; then
+    ftctl_xcolo_reconcile_pending_runtime "${vm}"
+    return 0
+  fi
+
   if ftctl_orchestrator_is_cloud_failback_awaiting_command "${mode}" "${active_side}" "${protection_state}" "${transport}" "${fencing_state}"; then
     ftctl_state_set "${vm}" "last_healthy_ts=$(ftctl_now_iso8601)"
     ftctl_log_event "failback" "failback.await-command" "ok" "${vm}" "" \

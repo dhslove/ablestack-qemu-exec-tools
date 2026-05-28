@@ -69,6 +69,22 @@ The handshake order becomes:
 
 Primary `migrate` must not start while any writable disk is outside the COLO graph.
 
+## Runtime Convergence Contract
+
+Cloud-managed FT registration must not require the synchronous Cloud API call to wait until QEMU reports both peers as fully `running`.
+
+After the disk graph, NBD exports, network filters, and migration channels are attached:
+
+- if QEMU reports a terminal failure, qemu FTCTL must return failure and preserve `last_error`;
+- if QEMU reports `primary migrate=active`, `secondary migrate=colo`, and both runtime XMLs contain the required COLO markers, qemu FTCTL must return success with:
+  - `protection_state=pairing`
+  - `transport_state=establishing`
+  - `conversion_state=pending`
+  - `conversion_stage=runtime_converging`
+- later timer reconciliation must promote the pair to `colo_running / mirroring` when both peers converge, or to `error / failed` when QEMU reports a terminal failure.
+
+This keeps Cloud's API call bounded while qemu FTCTL remains responsible for the actual FT runtime convergence.
+
 ## Validation
 
 Selftest coverage must assert:
@@ -80,6 +96,7 @@ Selftest coverage must assert:
 - all NBD exports are added before primary migration;
 - secondary exports and primary NBD clients use `ftctl-colo-<target>` and never the `libvirt-*` base node for multi-disk COLO.
 - device replacement preserves bootability without duplicating `bootindex`: only the boot/root LUN gets `bootindex`, and data disks omit it.
+- runtime validation distinguishes terminal failures from pending convergence.
 
 ## Failure State Contract
 

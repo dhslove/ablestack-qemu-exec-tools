@@ -432,7 +432,25 @@ ftctl_xcolo_validate_pair_runtime() {
   done
 
   if [[ -z "${reason}" ]]; then
-    if [[ "${primary_running}" != "true" ]]; then
+    if [[ "${primary_xml}" == "ok" &&
+          "${secondary_xml}" == "ok" &&
+          "${primary_migrate}" == "active" &&
+          "${secondary_migrate}" == "colo" ]]; then
+      ftctl_state_set "${vm}" \
+        "xcolo_primary_running=${primary_running}" \
+        "xcolo_secondary_running=${secondary_running}" \
+        "xcolo_primary_status=${primary_status}" \
+        "xcolo_secondary_status=${secondary_status}" \
+        "xcolo_primary_migrate_status=${primary_migrate}" \
+        "xcolo_secondary_migrate_status=${secondary_migrate}" \
+        "xcolo_primary_runtime_xml=${primary_xml}" \
+        "xcolo_secondary_runtime_xml=${secondary_xml}" \
+        "xcolo_pending_reason=runtime_converging" \
+        "last_error="
+      ftctl_log_event "colo" "xcolo.runtime_validate" "pending" "${vm}" "" \
+        "reason=runtime_converging primary_running=${primary_running} secondary_running=${secondary_running} primary_status=${primary_status} secondary_status=${secondary_status} primary_migrate=${primary_migrate} secondary_migrate=${secondary_migrate} attempts=${timeout}"
+      return 10
+    elif [[ "${primary_running}" != "true" ]]; then
       reason="primary_not_running"
     elif [[ "${secondary_running}" != "true" ]]; then
       reason="secondary_not_running"
@@ -460,6 +478,64 @@ ftctl_xcolo_validate_pair_runtime() {
       "reason=${reason} primary_running=${primary_running} secondary_running=${secondary_running} primary_xml=${primary_xml} secondary_xml=${secondary_xml} primary_migrate=${primary_migrate} secondary_migrate=${secondary_migrate} attempts=${timeout}"
     return 1
   fi
+}
+
+ftctl_xcolo_mark_runtime_pending() {
+  local vm="${1-}"
+  local stage="${2:-runtime_converging}"
+
+  ftctl_state_set "${vm}" \
+    "conversion_stage=${stage}" \
+    "conversion_state=pending" \
+    "protection_state=pairing" \
+    "transport_state=establishing" \
+    "active_side=primary" \
+    "last_error="
+}
+
+ftctl_xcolo_reconcile_pending_runtime() {
+  local vm="${1-}"
+  local secondary_vm
+  local rc
+
+  secondary_vm="$(ftctl_profile_secondary_vm_name_resolved "${vm}")"
+  [[ -n "${secondary_vm}" ]] || secondary_vm="$(ftctl_state_get "${vm}" "secondary_vm_name" 2>/dev/null || true)"
+  [[ -n "${secondary_vm}" ]] || secondary_vm="${vm}"
+
+  rc=0
+  ftctl_xcolo_validate_pair_runtime "${vm}" "${secondary_vm}" || rc=$?
+  case "${rc}" in
+    0)
+      ftctl_state_set "${vm}" \
+        "conversion_stage=handshake_complete" \
+        "conversion_state=colo_running" \
+        "protection_state=colo_running" \
+        "transport_state=mirroring" \
+        "active_side=primary" \
+        "last_sync_ts=$(ftctl_now_iso8601)" \
+        "last_error="
+      ftctl_log_event "colo" "xcolo.runtime_reconcile" "ok" "${vm}" "" \
+        "secondary_vm=${secondary_vm}"
+      return 0
+      ;;
+    10)
+      ftctl_xcolo_mark_runtime_pending "${vm}" "runtime_converging"
+      ftctl_state_set "${vm}" "last_healthy_ts=$(ftctl_now_iso8601)"
+      ftctl_log_event "colo" "xcolo.runtime_reconcile" "pending" "${vm}" "" \
+        "secondary_vm=${secondary_vm}"
+      return 0
+      ;;
+    *)
+      ftctl_state_set "${vm}" \
+        "conversion_stage=runtime_validation_failed" \
+        "conversion_state=error" \
+        "protection_state=error" \
+        "transport_state=failed"
+      ftctl_log_event "colo" "xcolo.runtime_reconcile" "fail" "${vm}" "" \
+        "secondary_vm=${secondary_vm} rc=${rc}"
+      return 0
+      ;;
+  esac
 }
 
 ftctl_xcolo_wait_pair_running() {
@@ -1901,16 +1977,6 @@ ftctl_xcolo_execute_block_cold_conversion() {
   ftctl_log_event "colo" "block_conversion.handshake" "ok" "${vm}" "" \
     "disk_count=${#disk_entries[@]}"
 
-  ftctl_xcolo_capture_runtime_snapshot "${vm}" "xcolo_after_handshake" "${secondary_vm}"
-  ftctl_xcolo_validate_pair_runtime "${vm}" "${secondary_vm}" || {
-    ftctl_state_set "${vm}" \
-      "conversion_stage=runtime_validation_failed" \
-      "conversion_state=error" \
-      "protection_state=error" \
-      "transport_state=failed"
-    return 1
-  }
-
   ftctl_xcolo_state_write "${vm}" \
     "mode=cold-conversion" \
     "conversion_policy=block-backed-cold-restart" \
@@ -1931,6 +1997,28 @@ ftctl_xcolo_execute_block_cold_conversion() {
     "proxy_endpoint=${FTCTL_PROFILE_XCOLO_PROXY_ENDPOINT}" \
     "nbd_endpoint=${FTCTL_PROFILE_XCOLO_NBD_ENDPOINT}" \
     "migrate_uri=${FTCTL_PROFILE_XCOLO_MIGRATE_URI}"
+
+  ftctl_xcolo_capture_runtime_snapshot "${vm}" "xcolo_after_handshake" "${secondary_vm}"
+  local validate_rc=0
+  ftctl_xcolo_validate_pair_runtime "${vm}" "${secondary_vm}" || validate_rc=$?
+  case "${validate_rc}" in
+    0)
+      ;;
+    10)
+      ftctl_xcolo_mark_runtime_pending "${vm}" "runtime_converging"
+      ftctl_log_event "colo" "xcolo.block_cold_conversion.execute" "pending" "${vm}" "" \
+        "primary_base=${primary_base_node} secondary_base=${secondary_base_node}"
+      return 0
+      ;;
+    *)
+      ftctl_state_set "${vm}" \
+        "conversion_stage=runtime_validation_failed" \
+        "conversion_state=error" \
+        "protection_state=error" \
+        "transport_state=failed"
+      return 1
+      ;;
+  esac
 
   ftctl_state_set "${vm}" \
     "conversion_stage=handshake_complete" \
@@ -2031,14 +2119,26 @@ ftctl_xcolo_plan_protect_prebuilt() {
       "reason=pair_not_running"
     return 1
   fi
-  ftctl_xcolo_validate_pair_runtime "${vm}" "${vm}" || {
-    ftctl_state_set "${vm}" \
-      "protection_state=error" \
-      "transport_state=failed"
-    ftctl_log_event "colo" "xcolo.protect" "fail" "${vm}" "" \
-      "reason=runtime_validation_failed"
-    return 1
-  }
+  local validate_rc=0
+  ftctl_xcolo_validate_pair_runtime "${vm}" "${vm}" || validate_rc=$?
+  case "${validate_rc}" in
+    0)
+      ;;
+    10)
+      ftctl_xcolo_mark_runtime_pending "${vm}" "runtime_converging"
+      ftctl_log_event "colo" "xcolo.protect" "pending" "${vm}" "" \
+        "reason=runtime_converging"
+      return 0
+      ;;
+    *)
+      ftctl_state_set "${vm}" \
+        "protection_state=error" \
+        "transport_state=failed"
+      ftctl_log_event "colo" "xcolo.protect" "fail" "${vm}" "" \
+        "reason=runtime_validation_failed"
+      return 1
+      ;;
+  esac
   ftctl_state_set "${vm}" \
     "protection_state=colo_running" \
     "transport_state=mirroring" \
