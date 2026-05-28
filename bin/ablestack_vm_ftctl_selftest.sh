@@ -1081,7 +1081,7 @@ selftest_case_xcolo_scsi_root_replace_avoids_lun_collision() (
 
 selftest_case_xcolo_block_handshake_sets_checkpoint_after_migrate() (
   selftest_reset_env
-  selftest_info "x-colo block handshake sets checkpoint delay after primary migrate"
+  selftest_info "x-colo block handshake sets checkpoint delay before primary migrate"
 
   local call_log="${SELFTEST_ROOT}/xcolo-block-handshake-order.log"
   local filter_line migrate_line params_line
@@ -1113,8 +1113,8 @@ selftest_case_xcolo_block_handshake_sets_checkpoint_after_migrate() (
   params_line="$(grep -n '|primary.migrate_set_parameters|' "${call_log}" | head -n1 | cut -d: -f1)"
   [[ "${filter_line}" -lt "${migrate_line}" ]] || \
     selftest_fail "primary filter-mirror must be attached before primary.migrate"
-  [[ "${migrate_line}" -lt "${params_line}" ]] || \
-    selftest_fail "primary.migrate_set_parameters must be issued after primary.migrate"
+  [[ "${params_line}" -lt "${migrate_line}" ]] || \
+    selftest_fail "primary.migrate_set_parameters must be issued before primary.migrate"
 )
 
 selftest_case_xcolo_multi_disk_handshake_exports_all_disks() (
@@ -1150,6 +1150,12 @@ selftest_case_xcolo_multi_disk_handshake_exports_all_disks() (
   selftest_assert_file_contains "${call_log}" "primary.blockdev_add.sdb"
   selftest_assert_file_contains "${call_log}" '"node-name":"nbd0-sda"'
   selftest_assert_file_contains "${call_log}" '"node-name":"nbd0-sdb"'
+  selftest_assert_file_contains "${call_log}" '"device":"ftctl-colo-sda"'
+  selftest_assert_file_contains "${call_log}" '"device":"ftctl-colo-sdb"'
+  selftest_assert_file_contains "${call_log}" '"export":"ftctl-colo-sda"'
+  selftest_assert_file_contains "${call_log}" '"export":"ftctl-colo-sdb"'
+  selftest_assert_file_not_contains "${call_log}" '"export":"libvirt-root-format"'
+  selftest_assert_file_not_contains "${call_log}" '"export":"libvirt-data-format"'
   selftest_assert_file_contains "${call_log}" '"parent":"ftctl-colo-sda","node":"nbd0-sda"'
   selftest_assert_file_contains "${call_log}" '"parent":"ftctl-colo-sdb","node":"nbd0-sdb"'
   sda_export_line="$(grep -n '|secondary.nbd_server_add.sda|' "${call_log}" | head -n1 | cut -d: -f1)"

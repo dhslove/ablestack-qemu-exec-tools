@@ -57,15 +57,15 @@ The handshake order becomes:
 1. Secondary QMP capabilities.
 2. Secondary x-colo/return-path capabilities.
 3. Secondary NBD server start.
-4. For each disk, secondary NBD export add.
+4. For each disk, secondary NBD export add for that disk's COLO quorum top node (`ftctl-colo-<target>`), not the original libvirt base node.
 5. Primary QMP capabilities.
 6. For each disk:
-   - primary NBD client add;
+   - primary NBD client add against the same `ftctl-colo-<target>` export;
    - primary `x-blockdev-change` to attach the NBD child to that disk's COLO quorum.
 7. Primary network filter object attach.
 8. Primary x-colo/return-path capabilities.
-9. Primary migrate.
-10. Primary checkpoint parameter update.
+9. Primary checkpoint parameter update.
+10. Primary migrate.
 
 Primary `migrate` must not start while any writable disk is outside the COLO graph.
 
@@ -77,7 +77,8 @@ Selftest coverage must assert:
 - generated secondary XML rewrites all mapped disks;
 - per-disk secondary block graph QMP commands use unique node names;
 - per-disk primary block graph and NBD attach commands use unique node names;
-- all NBD exports are added before primary migration.
+- all NBD exports are added before primary migration;
+- secondary exports and primary NBD clients use `ftctl-colo-<target>` and never the `libvirt-*` base node for multi-disk COLO.
 - device replacement preserves bootability without duplicating `bootindex`: only the boot/root LUN gets `bootindex`, and data disks omit it.
 
 ## Failure State Contract
