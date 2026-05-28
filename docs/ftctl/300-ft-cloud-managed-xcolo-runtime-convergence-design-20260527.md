@@ -44,7 +44,7 @@ Later validation with `i-2-54-VM` and `i-2-83-VM` showed the primary quorum remo
 
 Later validation with `i-2-54-VM` and `i-2-84-VM` showed the baseline seed step can fail before copy starts if a stopped-primary KRBD source is not explicitly prepared for export, and rollback can hide the specific seed failure in `last_error`. That follow-up remains in [308. FT Cloud-Managed Baseline Seed Before X-COLO Design](308-ft-cloud-managed-baseline-seed-before-xcolo-design-20260528.md): the seed path must map/verify primary sources before `qemu-nbd`, remove stale same-export seed NBD processes, and preserve the specific seed failure reason through rollback.
 
-Later validation with `i-2-54-VM` and `i-2-85-VM` proved both disk baselines were seeded and the QMP handshake completed, but runtime validation still timed out. The pair reported primary migration `active`, secondary migration `colo`, and runtime XML markers were present, while `query-colo-status.mode` remained `none`. That follow-up is handled by [309. FT X-COLO Runtime Role Observability Design](309-ft-xcolo-runtime-role-observability-design-20260528.md): runtime validation must collect COLO role status every loop, distinguish `colo_role_not_entered` from generic convergence timeout, and accept a non-`none` COLO role state only when migration and XML evidence also match.
+Later validation with `i-2-54-VM` and `i-2-85-VM` proved both disk baselines were seeded and the QMP handshake completed, but runtime validation still timed out. The pair reported primary migration `active`, secondary migration `colo`, and runtime XML markers were present, while `query-colo-status.mode` remained `none`. That follow-up is handled by [309. FT X-COLO Runtime Role Observability Design](309-ft-xcolo-runtime-role-observability-design-20260528.md): runtime validation must collect COLO role status every loop, distinguish `colo_role_not_entered` from generic convergence timeout, and accept a non-`none` COLO role state only when migration and XML evidence also match. One-sided role entry and generated-primary guest boot health are refined in [310. FT X-COLO Guest Boot And Role Failure Design](310-ft-xcolo-guest-boot-and-role-failure-design-20260528.md).
 
 ## Design Principles
 
@@ -97,7 +97,7 @@ If the following state persists longer than `FTCTL_XCOLO_RUNTIME_PENDING_MAX_SEC
 
 This exact combination means the generated runtime domains and channels exist, but the active service was not released back to running state. It must not be treated as a stable FT wait condition.
 
-If the same migration/XML shape is present but both `query-colo-status.mode` values are empty or `none`, qemu FTCTL must classify the bounded pending state as `colo_role_not_entered`. That preserves the distinction between a real role transition that is still converging and a transport/migration pair that never entered COLO checkpointing.
+If the same migration/XML shape is present but both `query-colo-status.mode` values are empty or `none`, qemu FTCTL must classify the bounded pending state as `colo_role_not_entered`. If only one side reports a non-`none` COLO role, it must classify the bounded pending state as `primary_colo_role_not_entered` or `secondary_colo_role_not_entered` according to the missing side. That preserves the distinction between a real role transition that is still converging and a transport/migration pair that never entered COLO checkpointing correctly.
 
 ## Runtime Failure Recovery
 

@@ -22,6 +22,8 @@ The host state showed the pair stuck in this shape:
 
 This proves the baseline disk materialization problem was fixed. The remaining problem is narrower: qemu FTCTL needs to distinguish a real COLO role transition from a migration pair that reached `active/colo` transport states but never entered COLO checkpointing.
 
+Follow-up validation showed an additional split: the secondary could report a COLO role while the generated primary still reported `none`, and the generated primary could then fail guest boot with an XFS root filesystem error. The refined role and guest-health policy is captured in [310. FT X-COLO Guest Boot And Role Failure Design](310-ft-xcolo-guest-boot-and-role-failure-design-20260528.md).
+
 ## Design Principles
 
 1. Preserve the FT goal: the secondary is a clone of the primary at VM identity, disk, network, and memory checkpoint level.
@@ -65,15 +67,20 @@ Pending reason must be specific:
 
 - `runtime_converging`: at least one side reports a non-`none` COLO mode, but the pair has not reached a complete success condition.
 - `colo_role_not_entered`: both sides report empty or `none` COLO mode while migration remains `active/colo`.
+- `primary_colo_role_not_entered`: only the secondary reports a non-`none` COLO mode.
+- `secondary_colo_role_not_entered`: only the primary reports a non-`none` COLO mode.
 
 If the pending state exceeds `FTCTL_XCOLO_RUNTIME_PENDING_MAX_SEC`, qemu FTCTL must fail with the specific pending reason instead of always reporting `runtime_convergence_timeout`.
 
 Examples:
 
 - `xcolo_runtime_validation_failed:colo_role_not_entered`
+- `xcolo_runtime_validation_failed:primary_colo_role_not_entered`
+- `xcolo_runtime_validation_failed:secondary_colo_role_not_entered`
 - `xcolo_runtime_validation_failed:runtime_convergence_timeout`
 - `xcolo_runtime_validation_failed:primary_migrate_failed`
 - `xcolo_runtime_validation_failed:secondary_migrate_failed`
+- `xcolo_runtime_validation_failed:primary_guest_boot_unhealthy`
 
 ## Recovery And Cloud Visibility
 
@@ -98,6 +105,8 @@ This keeps the primary service recoverable while still making the real FT failur
 Selftests must cover:
 
 - migration `active/colo` with `query-colo-status.mode=none` remains pending first and then fails as `colo_role_not_entered`
+- one-sided role entry remains pending first and then fails as the matching side-specific role error
 - explicit non-`none` COLO roles are accepted as a valid runtime state
+- optional QGA failure is recorded without failing runtime validation
+- required primary QGA failure is reported as `primary_guest_boot_unhealthy`
 - existing false-positive guards remain: missing primary running state, terminal migration failure, and missing runtime XML markers still fail
-

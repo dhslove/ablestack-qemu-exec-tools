@@ -296,6 +296,68 @@ ftctl_xcolo_colo_mode_active() {
   [[ -n "${mode}" && "${mode}" != "none" ]]
 }
 
+ftctl_xcolo_colo_role_pending_reason() {
+  local primary_colo="${1-}"
+  local secondary_colo="${2-}"
+  local reason_var="${3}"
+  local primary_active="0" secondary_active="0" reason
+
+  if ftctl_xcolo_colo_mode_active "${primary_colo}"; then
+    primary_active="1"
+  fi
+  if ftctl_xcolo_colo_mode_active "${secondary_colo}"; then
+    secondary_active="1"
+  fi
+
+  if [[ "${primary_active}" == "1" && "${secondary_active}" == "1" ]]; then
+    reason="runtime_converging"
+  elif [[ "${primary_active}" != "1" && "${secondary_active}" == "1" ]]; then
+    reason="primary_colo_role_not_entered"
+  elif [[ "${primary_active}" == "1" && "${secondary_active}" != "1" ]]; then
+    reason="secondary_colo_role_not_entered"
+  else
+    reason="colo_role_not_entered"
+  fi
+
+  printf -v "${reason_var}" '%s' "${reason}"
+}
+
+ftctl_xcolo_query_guest_ping() {
+  local uri="${1-}"
+  local vm="${2-}"
+  local qga_var="${3}"
+  local out="" err="" rc=0
+
+  ftctl_virsh "${FTCTL_XCOLO_QGA_TIMEOUT_SEC:-5}" out err rc -- \
+    -c "${uri}" qemu-agent-command "${vm}" '{"execute":"guest-ping"}' || true
+  : "${out}${err}"
+  if [[ "${rc}" == "0" ]]; then
+    printf -v "${qga_var}" '%s' "yes"
+    return 0
+  fi
+  printf -v "${qga_var}" '%s' "no"
+  return 1
+}
+
+ftctl_xcolo_preserve_runtime_error() {
+  local vm="${1-}"
+  local last_error sticky_error protection_state conversion_state transport_state
+
+  last_error="$(ftctl_state_get "${vm}" "last_error" 2>/dev/null || true)"
+  [[ -z "${last_error}" ]] || return 0
+  sticky_error="$(ftctl_state_get "${vm}" "xcolo_last_runtime_error" 2>/dev/null || true)"
+  [[ -n "${sticky_error}" ]] || return 0
+  protection_state="$(ftctl_state_get "${vm}" "protection_state" 2>/dev/null || true)"
+  conversion_state="$(ftctl_state_get "${vm}" "conversion_state" 2>/dev/null || true)"
+  transport_state="$(ftctl_state_get "${vm}" "transport_state" 2>/dev/null || true)"
+
+  if [[ "${protection_state}" == "error" ||
+        "${conversion_state}" == "error" ||
+        "${transport_state}" == "failed" ]]; then
+    ftctl_state_set "${vm}" "last_error=${sticky_error}"
+  fi
+}
+
 ftctl_xcolo_capture_runtime_snapshot() {
   local vm="${1-}"
   local prefix="${2-}"
@@ -373,6 +435,7 @@ ftctl_xcolo_validate_pair_runtime() {
   local primary_status="" secondary_status=""
   local primary_colo="" secondary_colo=""
   local primary_migrate="" secondary_migrate=""
+  local primary_qga="" secondary_qga="" qga_policy
   local primary_xml="missing" secondary_xml="missing"
   local reason="" timeout i pending_since pending_elapsed pending_max pending_reason
 
@@ -383,6 +446,7 @@ ftctl_xcolo_validate_pair_runtime() {
 
   timeout="${FTCTL_XCOLO_RUNTIME_VALIDATE_TIMEOUT_SEC:-45}"
   [[ "${timeout}" =~ ^[0-9]+$ && "${timeout}" -gt 0 ]] || timeout="45"
+  qga_policy="${FTCTL_PROFILE_QGA_POLICY:-optional}"
 
   for ((i=0; i<timeout; i++)); do
     reason=""
@@ -394,6 +458,8 @@ ftctl_xcolo_validate_pair_runtime() {
     secondary_colo=""
     primary_migrate=""
     secondary_migrate=""
+    primary_qga=""
+    secondary_qga=""
     primary_xml="missing"
     secondary_xml="missing"
 
@@ -405,6 +471,13 @@ ftctl_xcolo_validate_pair_runtime() {
     ftctl_xcolo_query_colo_mode "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" secondary_colo || true
     ftctl_xcolo_query_migrate_status "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" primary_migrate || true
     ftctl_xcolo_query_migrate_status "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" secondary_migrate || true
+    if [[ "${qga_policy}" == "off" ]]; then
+      primary_qga="off"
+      secondary_qga="off"
+    else
+      ftctl_xcolo_query_guest_ping "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" primary_qga || true
+      ftctl_xcolo_query_guest_ping "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" secondary_qga || true
+    fi
 
     if ftctl_xcolo_domain_xml_has_runtime_markers "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" primary; then
       primary_xml="ok"
@@ -423,7 +496,8 @@ ftctl_xcolo_validate_pair_runtime() {
             "${secondary_running}" == "true" &&
             "${primary_xml}" == "ok" &&
             "${secondary_xml}" == "ok" &&
-            "${secondary_migrate}" == "colo" ]]; then
+            "${secondary_migrate}" == "colo" &&
+            ( "${qga_policy}" != "required" || "${primary_qga}" == "yes" ) ]]; then
       ftctl_state_set "${vm}" \
         "xcolo_primary_running=${primary_running}" \
         "xcolo_secondary_running=${secondary_running}" \
@@ -433,15 +507,18 @@ ftctl_xcolo_validate_pair_runtime() {
         "xcolo_secondary_colo_mode=${secondary_colo}" \
         "xcolo_primary_migrate_status=${primary_migrate}" \
         "xcolo_secondary_migrate_status=${secondary_migrate}" \
+        "xcolo_primary_qga=${primary_qga}" \
+        "xcolo_secondary_qga=${secondary_qga}" \
         "xcolo_primary_runtime_xml=${primary_xml}" \
         "xcolo_secondary_runtime_xml=${secondary_xml}"
       ftctl_log_event "colo" "xcolo.runtime_validate" "ok" "${vm}" "" \
-        "primary_running=${primary_running} secondary_running=${secondary_running} primary_colo=${primary_colo} secondary_colo=${secondary_colo} primary_migrate=${primary_migrate} secondary_migrate=${secondary_migrate} attempts=$((i + 1))"
+        "primary_running=${primary_running} secondary_running=${secondary_running} primary_colo=${primary_colo} secondary_colo=${secondary_colo} primary_migrate=${primary_migrate} secondary_migrate=${secondary_migrate} primary_qga=${primary_qga} secondary_qga=${secondary_qga} attempts=$((i + 1))"
       return 0
     elif [[ "${primary_xml}" == "ok" &&
             "${secondary_xml}" == "ok" &&
             "${primary_migrate}" == "active" &&
-            "${secondary_migrate}" == "colo" ]] &&
+            "${secondary_migrate}" == "colo" &&
+            ( "${qga_policy}" != "required" || "${primary_qga}" == "yes" ) ]] &&
           ftctl_xcolo_colo_mode_active "${primary_colo}" &&
           ftctl_xcolo_colo_mode_active "${secondary_colo}"; then
       ftctl_state_set "${vm}" \
@@ -453,10 +530,12 @@ ftctl_xcolo_validate_pair_runtime() {
         "xcolo_secondary_colo_mode=${secondary_colo}" \
         "xcolo_primary_migrate_status=${primary_migrate}" \
         "xcolo_secondary_migrate_status=${secondary_migrate}" \
+        "xcolo_primary_qga=${primary_qga}" \
+        "xcolo_secondary_qga=${secondary_qga}" \
         "xcolo_primary_runtime_xml=${primary_xml}" \
         "xcolo_secondary_runtime_xml=${secondary_xml}"
       ftctl_log_event "colo" "xcolo.runtime_validate" "ok" "${vm}" "" \
-        "reason=colo_role_active primary_running=${primary_running} secondary_running=${secondary_running} primary_status=${primary_status} secondary_status=${secondary_status} primary_colo=${primary_colo} secondary_colo=${secondary_colo} primary_migrate=${primary_migrate} secondary_migrate=${secondary_migrate} attempts=$((i + 1))"
+        "reason=colo_role_active primary_running=${primary_running} secondary_running=${secondary_running} primary_status=${primary_status} secondary_status=${secondary_status} primary_colo=${primary_colo} secondary_colo=${secondary_colo} primary_migrate=${primary_migrate} secondary_migrate=${secondary_migrate} primary_qga=${primary_qga} secondary_qga=${secondary_qga} attempts=$((i + 1))"
       return 0
     fi
 
@@ -468,11 +547,7 @@ ftctl_xcolo_validate_pair_runtime() {
           "${secondary_xml}" == "ok" &&
           "${primary_migrate}" == "active" &&
           "${secondary_migrate}" == "colo" ]]; then
-      if ftctl_xcolo_colo_mode_active "${primary_colo}" || ftctl_xcolo_colo_mode_active "${secondary_colo}"; then
-        pending_reason="runtime_converging"
-      else
-        pending_reason="colo_role_not_entered"
-      fi
+      ftctl_xcolo_colo_role_pending_reason "${primary_colo}" "${secondary_colo}" pending_reason
       pending_max="${FTCTL_XCOLO_RUNTIME_PENDING_MAX_SEC:-180}"
       [[ "${pending_max}" =~ ^[0-9]+$ && "${pending_max}" -gt 0 ]] || pending_max="180"
       pending_since="$(ftctl_state_get "${vm}" "xcolo_runtime_pending_since" 2>/dev/null || true)"
@@ -485,7 +560,11 @@ ftctl_xcolo_validate_pair_runtime() {
             "${secondary_status}" == "inmigrate" &&
             -n "${pending_since}" &&
             "${pending_elapsed}" -ge "${pending_max}" ]]; then
-        reason="${pending_reason}"
+        if [[ "${qga_policy}" == "required" && "${primary_qga}" != "yes" ]]; then
+          reason="primary_guest_boot_unhealthy"
+        else
+          reason="${pending_reason}"
+        fi
       else
         [[ -n "${pending_since}" ]] || pending_since="$(ftctl_now_iso8601)"
         ftctl_state_set "${vm}" \
@@ -497,13 +576,15 @@ ftctl_xcolo_validate_pair_runtime() {
           "xcolo_secondary_colo_mode=${secondary_colo}" \
           "xcolo_primary_migrate_status=${primary_migrate}" \
           "xcolo_secondary_migrate_status=${secondary_migrate}" \
+          "xcolo_primary_qga=${primary_qga}" \
+          "xcolo_secondary_qga=${secondary_qga}" \
           "xcolo_primary_runtime_xml=${primary_xml}" \
           "xcolo_secondary_runtime_xml=${secondary_xml}" \
           "xcolo_runtime_pending_since=${pending_since}" \
           "xcolo_pending_reason=${pending_reason}" \
           "last_error="
         ftctl_log_event "colo" "xcolo.runtime_validate" "pending" "${vm}" "" \
-          "reason=${pending_reason} primary_running=${primary_running} secondary_running=${secondary_running} primary_status=${primary_status} secondary_status=${secondary_status} primary_colo=${primary_colo} secondary_colo=${secondary_colo} primary_migrate=${primary_migrate} secondary_migrate=${secondary_migrate} elapsed=${pending_elapsed} max=${pending_max} attempts=${timeout}"
+          "reason=${pending_reason} primary_running=${primary_running} secondary_running=${secondary_running} primary_status=${primary_status} secondary_status=${secondary_status} primary_colo=${primary_colo} secondary_colo=${secondary_colo} primary_migrate=${primary_migrate} secondary_migrate=${secondary_migrate} primary_qga=${primary_qga} secondary_qga=${secondary_qga} elapsed=${pending_elapsed} max=${pending_max} attempts=${timeout}"
         return 10
       fi
     fi
@@ -523,12 +604,17 @@ ftctl_xcolo_validate_pair_runtime() {
         "xcolo_secondary_colo_mode=${secondary_colo}" \
         "xcolo_primary_migrate_status=${primary_migrate}" \
         "xcolo_secondary_migrate_status=${secondary_migrate}" \
+        "xcolo_primary_qga=${primary_qga}" \
+        "xcolo_secondary_qga=${secondary_qga}" \
         "xcolo_primary_runtime_xml=${primary_xml}" \
         "xcolo_secondary_runtime_xml=${secondary_xml}"
-      if ftctl_xcolo_colo_mode_active "${primary_colo}" || ftctl_xcolo_colo_mode_active "${secondary_colo}"; then
-        reason="runtime_convergence_timeout"
+      if [[ "${qga_policy}" == "required" && "${primary_qga}" != "yes" ]]; then
+        reason="primary_guest_boot_unhealthy"
       else
-        reason="colo_role_not_entered"
+        ftctl_xcolo_colo_role_pending_reason "${primary_colo}" "${secondary_colo}" reason
+        if [[ "${reason}" == "runtime_converging" ]]; then
+          reason="runtime_convergence_timeout"
+        fi
       fi
     elif [[ "${primary_running}" != "true" ]]; then
       reason="primary_not_running"
@@ -553,11 +639,13 @@ ftctl_xcolo_validate_pair_runtime() {
       "xcolo_secondary_colo_mode=${secondary_colo}" \
       "xcolo_primary_migrate_status=${primary_migrate}" \
       "xcolo_secondary_migrate_status=${secondary_migrate}" \
+      "xcolo_primary_qga=${primary_qga}" \
+      "xcolo_secondary_qga=${secondary_qga}" \
       "xcolo_primary_runtime_xml=${primary_xml}" \
       "xcolo_secondary_runtime_xml=${secondary_xml}" \
       "last_error=xcolo_runtime_validation_failed:${reason}"
     ftctl_log_event "colo" "xcolo.runtime_validate" "fail" "${vm}" "" \
-      "reason=${reason} primary_running=${primary_running} secondary_running=${secondary_running} primary_status=${primary_status} secondary_status=${secondary_status} primary_colo=${primary_colo} secondary_colo=${secondary_colo} primary_xml=${primary_xml} secondary_xml=${secondary_xml} primary_migrate=${primary_migrate} secondary_migrate=${secondary_migrate} attempts=${timeout}"
+      "reason=${reason} primary_running=${primary_running} secondary_running=${secondary_running} primary_status=${primary_status} secondary_status=${secondary_status} primary_colo=${primary_colo} secondary_colo=${secondary_colo} primary_xml=${primary_xml} secondary_xml=${secondary_xml} primary_migrate=${primary_migrate} secondary_migrate=${secondary_migrate} primary_qga=${primary_qga} secondary_qga=${secondary_qga} attempts=${timeout}"
     return 1
   fi
 }
@@ -675,6 +763,7 @@ ftctl_xcolo_reconcile_pending_runtime() {
       ftctl_state_set "${vm}" \
         "xcolo_last_runtime_error=${recover_reason}" \
         "last_error=${recover_reason}"
+      ftctl_xcolo_preserve_runtime_error "${vm}"
       ftctl_log_event "colo" "xcolo.runtime_reconcile" "fail" "${vm}" "" \
         "secondary_vm=${secondary_vm} rc=${rc}"
       return 0
@@ -2467,6 +2556,7 @@ ftctl_xcolo_execute_block_cold_conversion() {
       ftctl_state_set "${vm}" \
         "xcolo_last_runtime_error=${validate_error}" \
         "last_error=${validate_error}"
+      ftctl_xcolo_preserve_runtime_error "${vm}"
       return 1
       ;;
   esac
@@ -2588,6 +2678,7 @@ ftctl_xcolo_plan_protect_prebuilt() {
       ftctl_state_set "${vm}" \
         "xcolo_last_runtime_error=${validate_error}" \
         "last_error=${validate_error}"
+      ftctl_xcolo_preserve_runtime_error "${vm}"
       ftctl_log_event "colo" "xcolo.protect" "fail" "${vm}" "" \
         "reason=runtime_validation_failed"
       return 1
