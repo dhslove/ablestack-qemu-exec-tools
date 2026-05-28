@@ -90,10 +90,10 @@ Startup alignment checklist:
    - secondary: `qmp_capabilities`
    - secondary: `migrate-set-capabilities` with `x-colo`
    - secondary: `nbd-server-start`
-   - secondary: `nbd-server-add parent0`
+   - secondary: `nbd-server-add` for every mapped writable disk
    - primary: `qmp_capabilities`
-   - primary: `blockdev-add nbd0`
-   - primary: `x-blockdev-change parent=colo-disk0 node=nbd0`
+   - primary: `blockdev-add` and `x-blockdev-change` for every mapped writable disk
+   - primary: attach network filter objects after all disk graphs are ready
    - primary: `migrate-set-capabilities` with `x-colo`
    - primary: `migrate`
 

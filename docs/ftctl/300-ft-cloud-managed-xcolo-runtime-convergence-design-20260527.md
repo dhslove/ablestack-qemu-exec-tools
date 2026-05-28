@@ -24,6 +24,8 @@ Later validation progressed beyond listener startup and failed after secondary s
 
 Later validation proved both peer-facing channels were established, then failed because primary `filter-mirror` emitted before qemu FTCTL completed the QMP disk graph and migration setup. That contract is handled by [305. FT X-COLO Deferred Primary Filter Attach Design](305-ft-xcolo-deferred-primary-filter-attach-design-20260528.md). In cloud-managed cold conversion, primary network filter objects are now attached with QMP after the block graph is ready, not through generated XML startup.
 
+Later validation progressed through deferred primary filter attach and failed at COLO migration because only the root disk was in the COLO graph while the data disk remained outside replication. That contract is handled by [306. FT X-COLO Multi Writable Disk Graph Design](306-ft-xcolo-multi-writable-disk-graph-design-20260528.md). FT success requires every writable guest disk to be represented in the COLO graph before primary migration starts.
+
 ## Design Principles
 
 1. Do not weaken the Cloud-managed ownership boundary.
@@ -77,6 +79,8 @@ Because `compare1 wait=on` can keep the primary create process blocked until the
 
 Before QMP migration, qemu FTCTL attaches the primary network filter objects with QMP `object-add`, with `filter-mirror` last.
 
+Before attaching primary network filters, qemu FTCTL must attach the block graph for all mapped writable disks, not only the first/root disk.
+
 ## Expected Behavior
 
 Successful registration:
@@ -103,3 +107,4 @@ New selftest coverage:
 - Generated primary XML defaults `mirror0` to `wait=off` and `compare1` to `wait=on`.
 - Channel attach is verified before primary QMP migration starts.
 - Primary network filter objects are attached by QMP after block graph preparation.
+- Every mapped writable disk is attached to a COLO block graph before primary migration.

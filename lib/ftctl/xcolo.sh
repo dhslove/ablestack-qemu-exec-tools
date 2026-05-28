@@ -721,6 +721,8 @@ ftctl_xcolo_prepare_block_generated_xmls() {
   local disk_format="${6-}"
   local primary_args="${7-}"
   local secondary_args="${8-}"
+  local primary_disk_map="${9-}"
+  local primary_disk_metadata="${10-}"
   local primary_generated_xml standby_generated_xml standby_vm_name disk_metadata=""
 
   [[ -n "${primary_xml_backup}" && -f "${primary_xml_backup}" ]] || return 1
@@ -740,7 +742,11 @@ ftctl_xcolo_prepare_block_generated_xmls() {
 
   ftctl_xml_remove_qemu_commandline "${primary_generated_xml}" || true
   ftctl_xml_remove_qemu_commandline "${standby_generated_xml}" || true
-  ftctl_xml_rewrite_first_disk_block_runtime "${primary_generated_xml}" "${primary_source}" "${disk_format}" "ro-shareable" "9" || return 1
+  if [[ -n "${primary_disk_map}" ]]; then
+    ftctl_xml_rewrite_disk_map_block_runtime "${primary_generated_xml}" "${primary_disk_map}" "${disk_format}" "ro-shareable" "9" "${primary_disk_metadata}" || return 1
+  else
+    ftctl_xml_rewrite_first_disk_block_runtime "${primary_generated_xml}" "${primary_source}" "${disk_format}" "ro-shareable" "9" || return 1
+  fi
   if [[ "${FTCTL_PROFILE_DISK_MAP}" == "auto" ]]; then
     ftctl_xml_rewrite_first_disk_block_runtime "${standby_generated_xml}" "${secondary_dest}" "${disk_format}" "rw" "9" || return 1
   else
@@ -768,26 +774,55 @@ ftctl_xcolo_block_runtime_dir() {
   printf '%s\n' "${FTCTL_BLOCKCOPY_TARGET_BASE_DIR}/$(ftctl_state_vm_key "${vm}")/xcolo"
 }
 
+ftctl_xcolo_disk_suffix() {
+  local target="${1-}"
+  target="${target:-root}"
+  printf '%s\n' "${target}" | sed 's/[^A-Za-z0-9_.-]/_/g'
+}
+
 ftctl_xcolo_primary_active_overlay_path() {
   local vm="${1-}"
-  printf '%s\n' "$(ftctl_xcolo_block_runtime_dir "${vm}")/primary-active.qcow2"
+  local target="${2-}" suffix
+  if [[ -z "${target}" ]]; then
+    printf '%s\n' "$(ftctl_xcolo_block_runtime_dir "${vm}")/primary-active.qcow2"
+    return 0
+  fi
+  suffix="$(ftctl_xcolo_disk_suffix "${target}")"
+  printf '%s\n' "$(ftctl_xcolo_block_runtime_dir "${vm}")/primary-active-${suffix}.qcow2"
 }
 
 ftctl_xcolo_secondary_hidden_overlay_path() {
   local vm="${1-}"
-  printf '%s\n' "$(ftctl_xcolo_block_runtime_dir "${vm}")/secondary-hidden.qcow2"
+  local target="${2-}" suffix
+  if [[ -z "${target}" ]]; then
+    printf '%s\n' "$(ftctl_xcolo_block_runtime_dir "${vm}")/secondary-hidden.qcow2"
+    return 0
+  fi
+  suffix="$(ftctl_xcolo_disk_suffix "${target}")"
+  printf '%s\n' "$(ftctl_xcolo_block_runtime_dir "${vm}")/secondary-hidden-${suffix}.qcow2"
 }
 
 ftctl_xcolo_secondary_active_overlay_path() {
   local vm="${1-}"
-  printf '%s\n' "$(ftctl_xcolo_block_runtime_dir "${vm}")/secondary-active.qcow2"
+  local target="${2-}" suffix
+  if [[ -z "${target}" ]]; then
+    printf '%s\n' "$(ftctl_xcolo_block_runtime_dir "${vm}")/secondary-active.qcow2"
+    return 0
+  fi
+  suffix="$(ftctl_xcolo_disk_suffix "${target}")"
+  printf '%s\n' "$(ftctl_xcolo_block_runtime_dir "${vm}")/secondary-active-${suffix}.qcow2"
 }
 
 ftctl_xcolo_prepare_primary_overlay() {
   local vm="${1-}"
-  local size_bytes="${2-}"
+  local target="${2-}"
+  local size_bytes="${3-}"
   local path current_size=""
-  path="$(ftctl_xcolo_primary_active_overlay_path "${vm}")"
+  if [[ -z "${size_bytes}" ]]; then
+    size_bytes="${target}"
+    target=""
+  fi
+  path="$(ftctl_xcolo_primary_active_overlay_path "${vm}" "${target}")"
   ftctl_ensure_dir "$(dirname "${path}")" "0755"
   [[ -n "${size_bytes}" ]] || return 1
   if [[ -f "${path}" ]]; then
@@ -802,13 +837,19 @@ ftctl_xcolo_prepare_primary_overlay() {
 
 ftctl_xcolo_prepare_secondary_overlays() {
   local vm="${1-}"
-  local size_bytes="${2-}"
+  local target="${2-}"
+  local size_bytes="${3-}"
   local host user dir hidden active remote_cmd out err rc
+
+  if [[ -z "${size_bytes}" ]]; then
+    size_bytes="${target}"
+    target=""
+  fi
 
   ftctl_blockcopy_remote_target_host_user host user || return 1
   dir="$(ftctl_xcolo_block_runtime_dir "${vm}")"
-  hidden="$(ftctl_xcolo_secondary_hidden_overlay_path "${vm}")"
-  active="$(ftctl_xcolo_secondary_active_overlay_path "${vm}")"
+  hidden="$(ftctl_xcolo_secondary_hidden_overlay_path "${vm}" "${target}")"
+  active="$(ftctl_xcolo_secondary_active_overlay_path "${vm}" "${target}")"
   [[ -n "${size_bytes}" ]] || return 1
   remote_cmd="$(cat <<EOF
 set -euo pipefail
@@ -928,6 +969,56 @@ import json, sys
 data = json.loads(sys.argv[1])
 print(data.get("virtual-size", ""))
 PY
+}
+
+ftctl_xcolo_collect_block_disk_plan() {
+  local vm="${1-}"
+  local plan_var="${2}"
+  local primary_map_var="${3}"
+  local primary_metadata_var="${4}"
+  local disks=()
+  local plan="" primary_map="" primary_metadata=""
+  local entry rest target source format dtype secondary_dest source_attr disk_type
+
+  ftctl_inventory_collect_vm_disks_detailed "${vm}" disks || return 1
+  for entry in "${disks[@]}"; do
+    target="${entry%%|*}"
+    rest="${entry#*|}"
+    source="${rest%%|*}"
+    rest="${rest#*|}"
+    format="${rest%%|*}"
+    dtype="${rest##*|}"
+    [[ -n "${format}" ]] || format="raw"
+    secondary_dest="$(ftctl_profile_lookup_map_value "${FTCTL_PROFILE_DISK_MAP}" "${target}" 2>/dev/null || true)"
+    if [[ -z "${secondary_dest}" ]]; then
+      ftctl_log_event "colo" "xcolo.protect.block_cold_conversion" "fail" "${vm}" "" \
+        "reason=secondary_dest_missing target=${target}"
+      return 1
+    fi
+    case "${dtype}" in
+      block)
+        source_attr="dev"
+        disk_type="block"
+        ;;
+      file)
+        source_attr="file"
+        disk_type="file"
+        ;;
+      *)
+        ftctl_log_event "colo" "xcolo.protect.block_cold_conversion" "fail" "${vm}" "" \
+          "reason=unsupported_disk_type target=${target} type=${dtype}"
+        return 1
+        ;;
+    esac
+    plan+="${plan:+;}${target}|${source}|${format}|${dtype}|${secondary_dest}"
+    primary_map+="${primary_map:+;}${target}=${source}"
+    primary_metadata+="${primary_metadata:+;}${target}=${source}|${format}|${source_attr}|${disk_type}"
+  done
+
+  [[ -n "${plan}" ]] || return 1
+  printf -v "${plan_var}" '%s' "${plan}"
+  printf -v "${primary_map_var}" '%s' "${primary_map}"
+  printf -v "${primary_metadata_var}" '%s' "${primary_metadata}"
 }
 
 ftctl_xcolo_remote_disk_virtual_size_bytes() {
@@ -1103,21 +1194,30 @@ ftctl_xcolo_attach_secondary_block_graph() {
   local hidden="${3-}"
   local active="${4-}"
   local qdev="${5-}"
+  local target="${6-}"
+  local suffix hidden_node active_node child_node colo_node device_id
+
+  suffix="$(ftctl_xcolo_disk_suffix "${target}")"
+  hidden_node="ftctl-hidden-${suffix}"
+  active_node="ftctl-active-${suffix}"
+  child_node="ftctl-childs-${suffix}"
+  colo_node="ftctl-colo-${suffix}"
+  device_id="ftctl-colo-${suffix}"
 
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_SECONDARY_URI}" "${vm}" \
-    "{\"execute\":\"blockdev-add\",\"arguments\":{\"driver\":\"qcow2\",\"node-name\":\"ftctl-hidden\",\"file\":{\"driver\":\"file\",\"filename\":\"${hidden}\"},\"backing\":\"${base_node}\"}}" \
+    "{\"execute\":\"blockdev-add\",\"arguments\":{\"driver\":\"qcow2\",\"node-name\":\"${hidden_node}\",\"file\":{\"driver\":\"file\",\"filename\":\"${hidden}\"},\"backing\":\"${base_node}\"}}" \
     "colo" "secondary.blockdev_add_hidden" || return 1
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_SECONDARY_URI}" "${vm}" \
-    "{\"execute\":\"blockdev-add\",\"arguments\":{\"driver\":\"qcow2\",\"node-name\":\"ftctl-active\",\"file\":{\"driver\":\"file\",\"filename\":\"${active}\"},\"backing\":\"ftctl-hidden\"}}" \
+    "{\"execute\":\"blockdev-add\",\"arguments\":{\"driver\":\"qcow2\",\"node-name\":\"${active_node}\",\"file\":{\"driver\":\"file\",\"filename\":\"${active}\"},\"backing\":\"${hidden_node}\"}}" \
     "colo" "secondary.blockdev_add_active" || return 1
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_SECONDARY_URI}" "${vm}" \
-    "{\"execute\":\"blockdev-add\",\"arguments\":{\"driver\":\"replication\",\"node-name\":\"childs0\",\"mode\":\"secondary\",\"top-id\":\"colo-disk0\",\"file\":\"ftctl-active\"}}" \
+    "{\"execute\":\"blockdev-add\",\"arguments\":{\"driver\":\"replication\",\"node-name\":\"${child_node}\",\"mode\":\"secondary\",\"top-id\":\"${colo_node}\",\"file\":\"${active_node}\"}}" \
     "colo" "secondary.blockdev_add_replication" || return 1
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_SECONDARY_URI}" "${vm}" \
-    "{\"execute\":\"blockdev-add\",\"arguments\":{\"driver\":\"quorum\",\"node-name\":\"colo-disk0\",\"read-pattern\":\"fifo\",\"vote-threshold\":1,\"children\":[\"childs0\"]}}" \
+    "{\"execute\":\"blockdev-add\",\"arguments\":{\"driver\":\"quorum\",\"node-name\":\"${colo_node}\",\"read-pattern\":\"fifo\",\"vote-threshold\":1,\"children\":[\"${child_node}\"]}}" \
     "colo" "secondary.blockdev_add_quorum" || return 1
   ftctl_xcolo_replace_scsi_disk_device "${FTCTL_PROFILE_SECONDARY_URI}" "${vm}" "${qdev}" \
-    "colo-disk0" "ftctl-colo-root" "colo" "secondary" || return 1
+    "${colo_node}" "${device_id}" "colo" "secondary" || return 1
 }
 
 ftctl_xcolo_attach_primary_block_graph() {
@@ -1125,15 +1225,22 @@ ftctl_xcolo_attach_primary_block_graph() {
   local base_node="${2-}"
   local active="${3-}"
   local qdev="${4-}"
+  local target="${5-}"
+  local suffix active_node colo_node device_id
+
+  suffix="$(ftctl_xcolo_disk_suffix "${target}")"
+  active_node="ftctl-primary-active-${suffix}"
+  colo_node="ftctl-colo-${suffix}"
+  device_id="ftctl-colo-${suffix}"
 
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
-    "{\"execute\":\"blockdev-add\",\"arguments\":{\"driver\":\"qcow2\",\"node-name\":\"ftctl-primary-active\",\"file\":{\"driver\":\"file\",\"filename\":\"${active}\"},\"backing\":\"${base_node}\"}}" \
+    "{\"execute\":\"blockdev-add\",\"arguments\":{\"driver\":\"qcow2\",\"node-name\":\"${active_node}\",\"file\":{\"driver\":\"file\",\"filename\":\"${active}\"},\"backing\":\"${base_node}\"}}" \
     "colo" "primary.blockdev_add_active" || return 1
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
-    "{\"execute\":\"blockdev-add\",\"arguments\":{\"driver\":\"quorum\",\"node-name\":\"colo-disk0\",\"read-pattern\":\"fifo\",\"vote-threshold\":1,\"children\":[\"ftctl-primary-active\"]}}" \
+    "{\"execute\":\"blockdev-add\",\"arguments\":{\"driver\":\"quorum\",\"node-name\":\"${colo_node}\",\"read-pattern\":\"fifo\",\"vote-threshold\":1,\"children\":[\"${active_node}\"]}}" \
     "colo" "primary.blockdev_add_quorum" || return 1
   ftctl_xcolo_replace_scsi_disk_device "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" "${qdev}" \
-    "colo-disk0" "ftctl-colo-root" "colo" "primary" || return 1
+    "${colo_node}" "${device_id}" "colo" "primary" || return 1
 }
 
 ftctl_xcolo_attach_primary_net_filters() {
@@ -1185,6 +1292,76 @@ ftctl_xcolo_execute_handshake_with_nodes() {
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
     "{\"execute\":\"x-blockdev-change\",\"arguments\":{\"parent\":\"colo-disk0\",\"node\":\"${FTCTL_PROFILE_XCOLO_NBD_NODE}\"}}" \
     "colo" "primary.x_blockdev_change" || return 1
+  ftctl_xcolo_attach_primary_net_filters "${vm}" || return 1
+  ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
+    '{"execute":"migrate-set-capabilities","arguments":{"capabilities":[{"capability":"return-path","state":true},{"capability":"x-colo","state":true}]}}' \
+    "colo" "primary.migrate_set_capabilities" || return 1
+  ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
+    "{\"execute\":\"migrate\",\"arguments\":{\"uri\":\"${FTCTL_PROFILE_XCOLO_MIGRATE_URI}\"}}" \
+    "colo" "primary.migrate" || return 1
+  ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
+    "{\"execute\":\"migrate-set-parameters\",\"arguments\":{\"x-checkpoint-delay\":${FTCTL_PROFILE_XCOLO_CHECKPOINT_DELAY}}}" \
+    "colo" "primary.migrate_set_parameters" || return 1
+}
+
+ftctl_xcolo_execute_handshake_with_disk_plan() {
+  local vm="${1-}"
+  local secondary_vm="${2-}"
+  local disk_plan="${3-}"
+  local nbd_host nbd_port entry rest target primary_source primary_format primary_dtype secondary_dest
+  local suffix secondary_base_node nbd_node colo_node
+  local -a _ftctl_xcolo_plan_entries=()
+
+  ftctl_xcolo_parse_tcp_endpoint "${FTCTL_PROFILE_XCOLO_NBD_ENDPOINT}" nbd_host nbd_port
+
+  ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" \
+    '{"execute":"qmp_capabilities"}' "colo" "secondary.qmp_capabilities" || return 1
+  ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" \
+    '{"execute":"migrate-set-capabilities","arguments":{"capabilities":[{"capability":"return-path","state":true},{"capability":"x-colo","state":true}]}}' \
+    "colo" "secondary.migrate_set_capabilities" || return 1
+  ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" \
+    "{\"execute\":\"nbd-server-start\",\"arguments\":{\"addr\":{\"type\":\"inet\",\"data\":{\"host\":\"${nbd_host}\",\"port\":\"${nbd_port}\"}}}}" \
+    "colo" "secondary.nbd_server_start" || return 1
+
+  IFS=';' read -r -a _ftctl_xcolo_plan_entries <<< "${disk_plan}"
+  for entry in "${_ftctl_xcolo_plan_entries[@]}"; do
+    [[ -n "${entry}" ]] || continue
+    target="${entry%%|*}"
+    rest="${entry#*|}"
+    primary_source="${rest%%|*}"
+    rest="${rest#*|}"
+    primary_format="${rest%%|*}"
+    rest="${rest#*|}"
+    primary_dtype="${rest%%|*}"
+    secondary_dest="${rest#*|}"
+    : "${primary_source}${primary_format}${primary_dtype}${secondary_dest}"
+    suffix="$(ftctl_xcolo_disk_suffix "${target}")"
+    secondary_base_node="$(ftctl_state_get "${vm}" "xcolo_disk_${suffix}_secondary_base_node" 2>/dev/null || true)"
+    [[ -n "${secondary_base_node}" ]] || return 1
+    ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" \
+      "{\"execute\":\"nbd-server-add\",\"arguments\":{\"device\":\"${secondary_base_node}\",\"writable\":true}}" \
+      "colo" "secondary.nbd_server_add.${suffix}" || return 1
+  done
+
+  ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
+    '{"execute":"qmp_capabilities"}' "colo" "primary.qmp_capabilities" || return 1
+
+  for entry in "${_ftctl_xcolo_plan_entries[@]}"; do
+    [[ -n "${entry}" ]] || continue
+    target="${entry%%|*}"
+    suffix="$(ftctl_xcolo_disk_suffix "${target}")"
+    secondary_base_node="$(ftctl_state_get "${vm}" "xcolo_disk_${suffix}_secondary_base_node" 2>/dev/null || true)"
+    nbd_node="${FTCTL_PROFILE_XCOLO_NBD_NODE}-${suffix}"
+    colo_node="ftctl-colo-${suffix}"
+    [[ -n "${secondary_base_node}" ]] || return 1
+    ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
+      "{\"execute\":\"blockdev-add\",\"arguments\":{\"driver\":\"nbd\",\"node-name\":\"${nbd_node}\",\"server\":{\"type\":\"inet\",\"host\":\"${nbd_host}\",\"port\":\"${nbd_port}\"},\"export\":\"${secondary_base_node}\",\"detect-zeroes\":\"on\"}}" \
+      "colo" "primary.blockdev_add.${suffix}" || return 1
+    ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
+      "{\"execute\":\"x-blockdev-change\",\"arguments\":{\"parent\":\"${colo_node}\",\"node\":\"${nbd_node}\"}}" \
+      "colo" "primary.x_blockdev_change.${suffix}" || return 1
+  done
+
   ftctl_xcolo_attach_primary_net_filters "${vm}" || return 1
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
     '{"execute":"migrate-set-capabilities","arguments":{"capabilities":[{"capability":"return-path","state":true},{"capability":"x-colo","state":true}]}}' \
@@ -1518,14 +1695,18 @@ ftctl_xcolo_execute_block_cold_conversion() {
   local primary_overlay secondary_pair secondary_hidden secondary_active
   local primary_base_node primary_qdev secondary_base_node secondary_qdev
   local secondary_vm primary_size secondary_size host user out err rc primary_create_handle
+  local disk_plan entry rest target primary_format primary_dtype suffix
+  local -a disk_entries=()
 
   primary_generated_xml="$(ftctl_state_get "${vm}" "primary_xml_generated" 2>/dev/null || true)"
   standby_generated_xml="$(ftctl_state_get "${vm}" "standby_xml_generated" 2>/dev/null || true)"
   primary_source="$(ftctl_state_get "${vm}" "primary_disk_source" 2>/dev/null || true)"
   secondary_dest="$(ftctl_state_get "${vm}" "secondary_block_dest" 2>/dev/null || true)"
+  disk_plan="$(ftctl_state_get "${vm}" "xcolo_disk_plan" 2>/dev/null || true)"
   secondary_vm="$(ftctl_profile_secondary_vm_name_resolved "${vm}")"
 
   [[ -n "${primary_generated_xml}" && -n "${standby_generated_xml}" && -n "${primary_source}" && -n "${secondary_dest}" ]] || return 1
+  [[ -n "${disk_plan}" ]] || disk_plan="$(ftctl_state_get "${vm}" "primary_disk_target" 2>/dev/null || true)|${primary_source}|$(ftctl_state_get "${vm}" "primary_disk_format" 2>/dev/null || true)|$(ftctl_state_get "${vm}" "primary_disk_type" 2>/dev/null || true)|${secondary_dest}"
 
   ftctl_log_event "colo" "block_conversion.start" "ok" "${vm}" "" \
     "primary_generated=${primary_generated_xml} standby_generated=${standby_generated_xml}"
@@ -1600,91 +1781,105 @@ ftctl_xcolo_execute_block_cold_conversion() {
   ftctl_state_set "${vm}" "conversion_stage=primary_created"
   ftctl_log_event "colo" "block_conversion.primary_create" "ok" "${vm}" "" ""
 
-  primary_size="$(ftctl_xcolo_disk_virtual_size_bytes "${primary_source}" 2>/dev/null || true)"
-  secondary_size=""
   host=""
   user=""
   out=""
   err=""
   rc=0
   ftctl_blockcopy_remote_target_host_user host user || true
-  if [[ -n "${host}" ]]; then
-    ftctl_blockcopy_remote_exec "${host}" "${user}" out err rc "qemu-img info --output=json '${secondary_dest}'" || true
-    : "${err}"
-    if [[ "${rc}" == "0" && -n "${out}" ]]; then
-      secondary_size="$(python3 - <<'PY' "${out}"
-import json, sys
-data = json.loads(sys.argv[1])
-print(data.get("virtual-size", ""))
-PY
-)" || secondary_size=""
+  IFS=';' read -r -a disk_entries <<< "${disk_plan}"
+  for entry in "${disk_entries[@]}"; do
+    [[ -n "${entry}" ]] || continue
+    target="${entry%%|*}"
+    rest="${entry#*|}"
+    primary_source="${rest%%|*}"
+    rest="${rest#*|}"
+    primary_format="${rest%%|*}"
+    rest="${rest#*|}"
+    primary_dtype="${rest%%|*}"
+    secondary_dest="${rest#*|}"
+    : "${primary_format}${primary_dtype}"
+    suffix="$(ftctl_xcolo_disk_suffix "${target}")"
+
+    primary_size="$(ftctl_xcolo_disk_virtual_size_bytes "${primary_source}" 2>/dev/null || true)"
+    secondary_size=""
+    if [[ -n "${host}" ]]; then
+      secondary_size="$(ftctl_xcolo_remote_disk_virtual_size_bytes "${host}" "${user}" "${secondary_dest}" 2>/dev/null || true)"
     fi
-  fi
-  if [[ -n "${secondary_size}" && -n "${primary_size}" && "${secondary_size}" != "${primary_size}" ]]; then
-    ftctl_log_event "colo" "block_conversion.size_validation" "fail" "${vm}" "" \
-      "primary_size=${primary_size} secondary_size=${secondary_size}"
-    ftctl_state_set "${vm}" "last_error=xcolo_block_preflight_size_mismatch"
-    return 1
-  fi
-  if [[ -z "${secondary_size}" ]]; then
-    secondary_size="${primary_size}"
-  fi
+    if [[ -n "${secondary_size}" && -n "${primary_size}" && "${secondary_size}" != "${primary_size}" ]]; then
+      ftctl_log_event "colo" "block_conversion.size_validation" "fail" "${vm}" "" \
+        "target=${target} primary_size=${primary_size} secondary_size=${secondary_size}"
+      ftctl_state_set "${vm}" "last_error=xcolo_block_preflight_size_mismatch"
+      return 1
+    fi
+    if [[ -z "${secondary_size}" ]]; then
+      secondary_size="${primary_size}"
+    fi
 
-  primary_overlay="$(ftctl_xcolo_prepare_primary_overlay "${vm}" "${primary_size}")" || {
-    ftctl_log_event "colo" "block_conversion.primary_overlay" "fail" "${vm}" "" ""
-    ftctl_state_set "${vm}" "last_error=xcolo_block_primary_overlay_prepare_failed"
-    return 1
-  }
-  secondary_pair="$(ftctl_xcolo_prepare_secondary_overlays "${vm}" "${secondary_size}")" || {
-    ftctl_log_event "colo" "block_conversion.secondary_overlay" "fail" "${vm}" "" ""
-    ftctl_state_set "${vm}" "last_error=xcolo_block_secondary_overlay_prepare_failed"
-    return 1
-  }
-  secondary_hidden="${secondary_pair%%|*}"
-  secondary_active="${secondary_pair##*|}"
-  ftctl_log_event "colo" "block_conversion.overlay_prepare" "ok" "${vm}" "" \
-    "primary_overlay=${primary_overlay} secondary_hidden=${secondary_hidden} secondary_active=${secondary_active}"
+    primary_overlay="$(ftctl_xcolo_prepare_primary_overlay "${vm}" "${target}" "${primary_size}")" || {
+      ftctl_log_event "colo" "block_conversion.primary_overlay" "fail" "${vm}" "" "target=${target}"
+      ftctl_state_set "${vm}" "last_error=xcolo_block_primary_overlay_prepare_failed"
+      return 1
+    }
+    secondary_pair="$(ftctl_xcolo_prepare_secondary_overlays "${vm}" "${target}" "${secondary_size}")" || {
+      ftctl_log_event "colo" "block_conversion.secondary_overlay" "fail" "${vm}" "" "target=${target}"
+      ftctl_state_set "${vm}" "last_error=xcolo_block_secondary_overlay_prepare_failed"
+      return 1
+    }
+    secondary_hidden="${secondary_pair%%|*}"
+    secondary_active="${secondary_pair##*|}"
+    ftctl_log_event "colo" "block_conversion.overlay_prepare" "ok" "${vm}" "" \
+      "target=${target} primary_overlay=${primary_overlay} secondary_hidden=${secondary_hidden} secondary_active=${secondary_active}"
 
-  ftctl_xcolo_collect_disk_binding_on_uri "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" "${primary_source}" primary_base_node primary_qdev || {
-    ftctl_log_event "colo" "block_conversion.primary_binding" "fail" "${vm}" "" \
-      "source=${primary_source}"
-    ftctl_state_set "${vm}" "last_error=xcolo_block_primary_binding_missing"
-    return 1
-  }
-  ftctl_xcolo_collect_disk_binding_on_uri "${FTCTL_PROFILE_SECONDARY_URI}" "$(ftctl_profile_secondary_vm_name_resolved "${vm}")" "${secondary_dest}" secondary_base_node secondary_qdev || {
-    ftctl_log_event "colo" "block_conversion.secondary_binding" "fail" "${vm}" "" \
-      "source=${secondary_dest}"
-    ftctl_state_set "${vm}" "last_error=xcolo_block_secondary_binding_missing"
-    return 1
-  }
-  ftctl_log_event "colo" "block_conversion.binding" "ok" "${vm}" "" \
-    "primary_base=${primary_base_node} secondary_base=${secondary_base_node}"
+    ftctl_xcolo_collect_disk_binding_on_uri "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" "${primary_source}" primary_base_node primary_qdev || {
+      ftctl_log_event "colo" "block_conversion.primary_binding" "fail" "${vm}" "" \
+        "target=${target} source=${primary_source}"
+      ftctl_state_set "${vm}" "last_error=xcolo_block_primary_binding_missing"
+      return 1
+    }
+    ftctl_xcolo_collect_disk_binding_on_uri "${FTCTL_PROFILE_SECONDARY_URI}" "$(ftctl_profile_secondary_vm_name_resolved "${vm}")" "${secondary_dest}" secondary_base_node secondary_qdev || {
+      ftctl_log_event "colo" "block_conversion.secondary_binding" "fail" "${vm}" "" \
+        "target=${target} source=${secondary_dest}"
+      ftctl_state_set "${vm}" "last_error=xcolo_block_secondary_binding_missing"
+      return 1
+    }
+    ftctl_state_set "${vm}" \
+      "xcolo_disk_${suffix}_primary_base_node=${primary_base_node}" \
+      "xcolo_disk_${suffix}_primary_base_qdev=${primary_qdev}" \
+      "xcolo_disk_${suffix}_secondary_base_node=${secondary_base_node}" \
+      "xcolo_disk_${suffix}_secondary_base_qdev=${secondary_qdev}" \
+      "xcolo_disk_${suffix}_primary_overlay=${primary_overlay}" \
+      "xcolo_disk_${suffix}_secondary_hidden=${secondary_hidden}" \
+      "xcolo_disk_${suffix}_secondary_active=${secondary_active}"
+    ftctl_log_event "colo" "block_conversion.binding" "ok" "${vm}" "" \
+      "target=${target} primary_base=${primary_base_node} secondary_base=${secondary_base_node}"
 
-  ftctl_xcolo_attach_secondary_block_graph "${secondary_vm}" "${secondary_base_node}" "${secondary_hidden}" "${secondary_active}" "${secondary_qdev}" || {
-    ftctl_log_event "colo" "block_conversion.secondary_attach" "fail" "${vm}" "" \
-      "base=${secondary_base_node} qdev=${secondary_qdev}"
-    ftctl_state_set "${vm}" "last_error=xcolo_block_secondary_attach_failed"
-    return 1
-  }
-  ftctl_log_event "colo" "block_conversion.secondary_attach" "ok" "${vm}" "" \
-    "base=${secondary_base_node} qdev=${secondary_qdev}"
-  ftctl_xcolo_attach_primary_block_graph "${vm}" "${primary_base_node}" "${primary_overlay}" "${primary_qdev}" || {
-    ftctl_log_event "colo" "block_conversion.primary_attach" "fail" "${vm}" "" \
-      "base=${primary_base_node} qdev=${primary_qdev}"
-    ftctl_state_set "${vm}" "last_error=xcolo_block_primary_attach_failed"
-    return 1
-  }
-  ftctl_log_event "colo" "block_conversion.primary_attach" "ok" "${vm}" "" \
-    "base=${primary_base_node} qdev=${primary_qdev}"
+    ftctl_xcolo_attach_secondary_block_graph "${secondary_vm}" "${secondary_base_node}" "${secondary_hidden}" "${secondary_active}" "${secondary_qdev}" "${target}" || {
+      ftctl_log_event "colo" "block_conversion.secondary_attach" "fail" "${vm}" "" \
+        "target=${target} base=${secondary_base_node} qdev=${secondary_qdev}"
+      ftctl_state_set "${vm}" "last_error=xcolo_block_secondary_attach_failed"
+      return 1
+    }
+    ftctl_log_event "colo" "block_conversion.secondary_attach" "ok" "${vm}" "" \
+      "target=${target} base=${secondary_base_node} qdev=${secondary_qdev}"
+    ftctl_xcolo_attach_primary_block_graph "${vm}" "${primary_base_node}" "${primary_overlay}" "${primary_qdev}" "${target}" || {
+      ftctl_log_event "colo" "block_conversion.primary_attach" "fail" "${vm}" "" \
+        "target=${target} base=${primary_base_node} qdev=${primary_qdev}"
+      ftctl_state_set "${vm}" "last_error=xcolo_block_primary_attach_failed"
+      return 1
+    }
+    ftctl_log_event "colo" "block_conversion.primary_attach" "ok" "${vm}" "" \
+      "target=${target} base=${primary_base_node} qdev=${primary_qdev}"
+  done
 
-  ftctl_xcolo_execute_handshake_with_nodes "${vm}" "${secondary_vm}" "${secondary_base_node}" || {
+  ftctl_xcolo_execute_handshake_with_disk_plan "${vm}" "${secondary_vm}" "${disk_plan}" || {
     ftctl_log_event "colo" "block_conversion.handshake" "fail" "${vm}" "" \
-      "export_node=${secondary_base_node}"
+      "disk_count=${#disk_entries[@]}"
     ftctl_state_set "${vm}" "last_error=xcolo_block_handshake_failed"
     return 1
   }
   ftctl_log_event "colo" "block_conversion.handshake" "ok" "${vm}" "" \
-    "export_node=${secondary_base_node}"
+    "disk_count=${#disk_entries[@]}"
 
   ftctl_xcolo_capture_runtime_snapshot "${vm}" "xcolo_after_handshake" "${secondary_vm}"
   ftctl_xcolo_validate_pair_runtime "${vm}" "${secondary_vm}" || {
@@ -1709,6 +1904,7 @@ PY
     "primary_overlay=${primary_overlay}" \
     "secondary_hidden=${secondary_hidden}" \
     "secondary_active=${secondary_active}" \
+    "xcolo_disk_plan=${disk_plan}" \
     "primary_disk_node=${secondary_base_node}" \
     "parent_block_node=colo-disk0" \
     "nbd_node=${FTCTL_PROFILE_XCOLO_NBD_NODE}" \
@@ -1839,6 +2035,7 @@ ftctl_xcolo_plan_protect_block_cold_conversion() {
   local primary_generated_xml standby_generated_xml
   local xml_bundle_dir persistence secondary_dest primary_state
   local primary_qemu_args secondary_qemu_args
+  local xcolo_disk_plan primary_disk_map primary_disk_metadata
 
   ftctl_xcolo_detect_block_backed_ft "${vm}" disk_kind primary_target primary_source primary_format || return 1
   current_node=""
@@ -1853,6 +2050,9 @@ ftctl_xcolo_plan_protect_block_cold_conversion() {
   primary_state="$(ftctl_xcolo_primary_domain_state "${vm}" 2>/dev/null || echo "unknown")"
   primary_qemu_args="$(ftctl_xcolo_build_primary_qemu_args)"
   secondary_qemu_args="$(ftctl_xcolo_build_secondary_qemu_args)"
+  xcolo_disk_plan=""
+  primary_disk_map=""
+  primary_disk_metadata=""
 
   if [[ -z "${primary_xml_backup}" || -z "${standby_xml_seed}" || ! -f "${primary_xml_backup}" || ! -f "${standby_xml_seed}" ]]; then
     ftctl_inventory_backup_domain_xml "${vm}" xml_bundle_dir primary_xml_backup standby_xml_seed persistence || {
@@ -1878,6 +2078,14 @@ ftctl_xcolo_plan_protect_block_cold_conversion() {
     return 1
   fi
 
+  ftctl_xcolo_collect_block_disk_plan "${vm}" xcolo_disk_plan primary_disk_map primary_disk_metadata || {
+    ftctl_state_set "${vm}" \
+      "protection_state=error" \
+      "transport_state=planned" \
+      "last_error=xcolo_block_disk_plan_failed"
+    return 1
+  }
+
   secondary_dest="$(ftctl_profile_lookup_map_value "${FTCTL_PROFILE_DISK_MAP}" "${primary_target}" 2>/dev/null || true)"
   if [[ -z "${secondary_dest}" ]]; then
     ftctl_state_set "${vm}" \
@@ -1892,7 +2100,8 @@ ftctl_xcolo_plan_protect_block_cold_conversion() {
   if [[ -n "${primary_xml_backup}" && -f "${primary_xml_backup}" ]]; then
     ftctl_xcolo_prepare_block_generated_xmls "${vm}" \
       "${primary_xml_backup}" "${standby_xml_seed}" "${primary_source}" "${secondary_dest}" \
-      "${primary_format}" "${primary_qemu_args}" "${secondary_qemu_args}" || {
+      "${primary_format}" "${primary_qemu_args}" "${secondary_qemu_args}" \
+      "${primary_disk_map}" "${primary_disk_metadata}" || {
       ftctl_state_set "${vm}" \
         "protection_state=error" \
         "transport_state=planned" \
@@ -1932,6 +2141,9 @@ ftctl_xcolo_plan_protect_block_cold_conversion() {
     "primary_runtime_disk_mode=ro-shareable" \
     "secondary_runtime_disk_mode=rw" \
     "secondary_block_dest=${secondary_dest}" \
+    "xcolo_disk_plan=${xcolo_disk_plan}" \
+    "xcolo_primary_disk_map=${primary_disk_map}" \
+    "xcolo_primary_disk_metadata=${primary_disk_metadata}" \
     "proxy_endpoint=${FTCTL_PROFILE_XCOLO_PROXY_ENDPOINT}" \
     "nbd_endpoint=${FTCTL_PROFILE_XCOLO_NBD_ENDPOINT}" \
     "migrate_uri=${FTCTL_PROFILE_XCOLO_MIGRATE_URI}" \
@@ -1940,7 +2152,7 @@ ftctl_xcolo_plan_protect_block_cold_conversion() {
     "nbd_node=${FTCTL_PROFILE_XCOLO_NBD_NODE}"
 
   ftctl_log_event "colo" "xcolo.protect.block_cold_conversion" "warn" "${vm}" "" \
-    "source=${primary_source} node=${current_node} qdev=${current_qdev} secondary_dest=${secondary_dest} policy=cold_restart stage=runtime_xml_generated"
+    "source=${primary_source} node=${current_node} qdev=${current_qdev} secondary_dest=${secondary_dest} disk_plan=${xcolo_disk_plan} policy=cold_restart stage=runtime_xml_generated"
   ftctl_state_set "${vm}" \
     "primary_disk_type=${disk_kind}" \
     "primary_disk_target=${primary_target}" \
@@ -1949,6 +2161,7 @@ ftctl_xcolo_plan_protect_block_cold_conversion() {
     "current_primary_node=${current_node}" \
     "current_primary_qdev=${current_qdev}" \
     "secondary_block_dest=${secondary_dest}" \
+    "xcolo_disk_plan=${xcolo_disk_plan}" \
     "protection_state=pairing" \
     "transport_state=planned" \
     "conversion_stage=runtime_xml_generated" \

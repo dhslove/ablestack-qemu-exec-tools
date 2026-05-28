@@ -1068,7 +1068,7 @@ selftest_case_xcolo_scsi_root_replace_avoids_lun_collision() (
   selftest_assert_file_contains "${call_log}" "secondary.device_del_existing_root"
   selftest_assert_file_contains "${call_log}" '"execute":"device_del","arguments":{"id":"scsi0-0-0-0"}'
   selftest_assert_file_contains "${call_log}" "secondary.device_add_colo_root"
-  selftest_assert_file_contains "${call_log}" '"bus":"scsi0.0","channel":0,"scsi-id":0,"lun":0,"drive":"colo-disk0","id":"ftctl-colo-root"'
+  selftest_assert_file_contains "${call_log}" '"bus":"scsi0.0","channel":0,"scsi-id":0,"lun":0,"drive":"ftctl-colo-root","id":"ftctl-colo-root"'
   selftest_assert_file_contains "${call_log}" "primary.device_del_existing_root"
   selftest_assert_file_contains "${call_log}" "primary.device_add_colo_root"
 )
@@ -1109,6 +1109,48 @@ selftest_case_xcolo_block_handshake_sets_checkpoint_after_migrate() (
     selftest_fail "primary filter-mirror must be attached before primary.migrate"
   [[ "${migrate_line}" -lt "${params_line}" ]] || \
     selftest_fail "primary.migrate_set_parameters must be issued after primary.migrate"
+)
+
+selftest_case_xcolo_multi_disk_handshake_exports_all_disks() (
+  selftest_reset_env
+  selftest_info "x-colo block handshake exports all mapped disks before primary migrate"
+
+  local call_log="${SELFTEST_ROOT}/xcolo-multi-disk-handshake-order.log"
+  local sda_export_line sdb_export_line migrate_line
+  FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
+  FTCTL_PROFILE_SECONDARY_URI="qemu+ssh://peer/system"
+  FTCTL_PROFILE_XCOLO_NBD_ENDPOINT="tcp:10.0.0.2:10809"
+  FTCTL_PROFILE_XCOLO_MIGRATE_URI="tcp:10.0.0.2:9998"
+  FTCTL_PROFILE_XCOLO_NBD_NODE="nbd0"
+  FTCTL_PROFILE_XCOLO_CHECKPOINT_DELAY="2000"
+
+  ftctl_state_set "primary-vm" \
+    "xcolo_disk_sda_secondary_base_node=libvirt-root-format" \
+    "xcolo_disk_sdb_secondary_base_node=libvirt-data-format"
+
+  # shellcheck disable=SC2317
+  ftctl_xcolo_qmp_require_ok() {
+    local uri="$1" vm="$2" payload="$3" stage="$4" event="$5"
+    printf '%s|%s|%s|%s|%s\n' "${stage}" "${event}" "${uri}" "${vm}" "${payload}" >> "${call_log}"
+  }
+
+  ftctl_xcolo_execute_handshake_with_disk_plan \
+    "primary-vm" "standby-vm" \
+    "sda|/dev/rbd/rbd/root|raw|block|/var/lib/libvirt/images/root;sdb|/dev/rbd/rbd/data|raw|block|/var/lib/libvirt/images/data"
+
+  selftest_assert_file_contains "${call_log}" "secondary.nbd_server_add.sda"
+  selftest_assert_file_contains "${call_log}" "secondary.nbd_server_add.sdb"
+  selftest_assert_file_contains "${call_log}" "primary.blockdev_add.sda"
+  selftest_assert_file_contains "${call_log}" "primary.blockdev_add.sdb"
+  selftest_assert_file_contains "${call_log}" '"node-name":"nbd0-sda"'
+  selftest_assert_file_contains "${call_log}" '"node-name":"nbd0-sdb"'
+  selftest_assert_file_contains "${call_log}" '"parent":"ftctl-colo-sda","node":"nbd0-sda"'
+  selftest_assert_file_contains "${call_log}" '"parent":"ftctl-colo-sdb","node":"nbd0-sdb"'
+  sda_export_line="$(grep -n '|secondary.nbd_server_add.sda|' "${call_log}" | head -n1 | cut -d: -f1)"
+  sdb_export_line="$(grep -n '|secondary.nbd_server_add.sdb|' "${call_log}" | head -n1 | cut -d: -f1)"
+  migrate_line="$(grep -n '|primary.migrate|' "${call_log}" | head -n1 | cut -d: -f1)"
+  [[ "${sda_export_line}" -lt "${migrate_line}" && "${sdb_export_line}" -lt "${migrate_line}" ]] || \
+    selftest_fail "all disk exports must be added before primary.migrate"
 )
 
 selftest_case_xcolo_runtime_validation_blocks_false_positive() (
@@ -2250,6 +2292,7 @@ selftest_main() {
   selftest_case_xcolo_primary_create_maps_rbd_sources
   selftest_case_xcolo_scsi_root_replace_avoids_lun_collision
   selftest_case_xcolo_block_handshake_sets_checkpoint_after_migrate
+  selftest_case_xcolo_multi_disk_handshake_exports_all_disks
   selftest_case_xcolo_runtime_validation_blocks_false_positive
   selftest_case_xcolo_runtime_validation_reports_primary_migrate_failure
   selftest_case_json_and_locking
