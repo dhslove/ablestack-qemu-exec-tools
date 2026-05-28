@@ -36,6 +36,8 @@ Later validation with `i-2-54-VM` and `i-2-80-VM` progressed past multi-disk gra
 
 This state is not a successful FT state. It is a runtime convergence deadlock: the secondary has entered COLO receive mode, but the primary never resumes as the active service.
 
+Later validation with `i-2-54-VM` and `i-2-81-VM` confirmed that timeout detection and primary-service recovery worked, but also exposed two follow-up issues. First, qemu FTCTL stopped the generated primary to attach QMP network filters and then started migration while the primary was still stopped, making the `finish-migrate` / `inmigrate` deadlock more likely. Second, recovery restored the primary service, but later status publication could show an empty `last_error`, hiding the actual `runtime_convergence_timeout` cause from Cloud/UI.
+
 ## Design Principles
 
 1. Do not weaken the Cloud-managed ownership boundary.
@@ -94,6 +96,9 @@ When runtime validation fails after generated domains have been started, qemu FT
    - `transport_state=failed`
    - `active_side=primary`
    - `last_error=xcolo_runtime_validation_failed:<reason>`
+   - `xcolo_last_runtime_error=xcolo_runtime_validation_failed:<reason>`
+
+The `xcolo_last_runtime_error` field is sticky diagnostic state. It is not the live protection state, but it prevents the runtime failure cause from being lost if a later reconcile/status publication replays the recovered primary state.
 
 If primary restoration fails, qemu FTCTL must keep `protection_state=error`, set `conversion_stage=runtime_recover_failed`, and surface `primary_restore_failed` in `last_error`.
 
@@ -122,6 +127,8 @@ Before QMP migration, qemu FTCTL attaches the primary network filter objects wit
 
 Before attaching primary network filters, qemu FTCTL must attach the block graph for all mapped writable disks, not only the first/root disk.
 
+Because primary filter attachment uses QMP `stop` to make object insertion deterministic, qemu FTCTL must explicitly run QMP `cont` after all secondary NBD exports, primary block graph nodes, primary network filters, migration capabilities, and checkpoint delay are configured, and before QMP `migrate` is issued. The ordered event is `primary.cont_before_migrate`. This makes the intended handoff explicit: the generated primary is paused only while the runtime graph is assembled, then resumed immediately before the COLO migration command that should transition the pair into active checkpointing.
+
 ## Expected Behavior
 
 Successful registration:
@@ -136,6 +143,7 @@ Failed registration:
 - qemu FTCTL leaves `protection_state=error`
 - qemu FTCTL leaves `transport_state=failed`
 - `last_error=xcolo_runtime_validation_failed:<reason>`
+- `xcolo_last_runtime_error=xcolo_runtime_validation_failed:<reason>`
 - If the failure occurs after generated runtime domains started, qemu FTCTL attempts to restore the original primary service domain from the saved XML.
 - Cloud persists the failure and releases the Cloud-managed lifecycle guard.
 - Operator cleanup can safely remove the partial standby VM, FTCTL state files, and blockcopy runtime directory before retest.
@@ -151,3 +159,5 @@ New selftest coverage:
 - Channel attach is verified before primary QMP migration starts.
 - Primary network filter objects are attached by QMP after block graph preparation.
 - Every mapped writable disk is attached to a COLO block graph before primary migration.
+- Primary is explicitly continued after runtime graph assembly and before primary migration.
+- Runtime recovery preserves both `last_error` and sticky `xcolo_last_runtime_error`.

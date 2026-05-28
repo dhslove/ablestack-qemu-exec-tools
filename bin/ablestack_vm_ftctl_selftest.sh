@@ -1084,7 +1084,7 @@ selftest_case_xcolo_block_handshake_sets_checkpoint_after_migrate() (
   selftest_info "x-colo block handshake sets checkpoint delay before primary migrate"
 
   local call_log="${SELFTEST_ROOT}/xcolo-block-handshake-order.log"
-  local filter_line migrate_line params_line
+  local filter_line cont_line migrate_line params_line
   FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
   FTCTL_PROFILE_SECONDARY_URI="qemu+ssh://peer/system"
   FTCTL_PROFILE_XCOLO_NBD_ENDPOINT="tcp:10.0.0.2:10809"
@@ -1104,17 +1104,23 @@ selftest_case_xcolo_block_handshake_sets_checkpoint_after_migrate() (
   selftest_assert_file_contains "${call_log}" "primary.object_add_redirector_out"
   selftest_assert_file_contains "${call_log}" "primary.object_add_colo_compare"
   selftest_assert_file_contains "${call_log}" "primary.object_add_filter_mirror"
+  selftest_assert_file_contains "${call_log}" "primary.cont_before_migrate"
   selftest_assert_file_contains "${call_log}" "primary.migrate"
   selftest_assert_file_contains "${call_log}" "primary.migrate_set_parameters"
   selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_primary_net_filters_attached")" "true" \
     "primary net filters attached state"
+  selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_primary_cont_before_migrate")" "true" \
+    "primary continued before migrate state"
   filter_line="$(grep -n '|primary.object_add_filter_mirror|' "${call_log}" | head -n1 | cut -d: -f1)"
+  cont_line="$(grep -n '|primary.cont_before_migrate|' "${call_log}" | head -n1 | cut -d: -f1)"
   migrate_line="$(grep -n '|primary.migrate|' "${call_log}" | head -n1 | cut -d: -f1)"
   params_line="$(grep -n '|primary.migrate_set_parameters|' "${call_log}" | head -n1 | cut -d: -f1)"
   [[ "${filter_line}" -lt "${migrate_line}" ]] || \
     selftest_fail "primary filter-mirror must be attached before primary.migrate"
   [[ "${params_line}" -lt "${migrate_line}" ]] || \
     selftest_fail "primary.migrate_set_parameters must be issued before primary.migrate"
+  [[ "${cont_line}" -lt "${migrate_line}" ]] || \
+    selftest_fail "primary.cont_before_migrate must be issued before primary.migrate"
 )
 
 selftest_case_xcolo_multi_disk_handshake_exports_all_disks() (
@@ -1122,7 +1128,7 @@ selftest_case_xcolo_multi_disk_handshake_exports_all_disks() (
   selftest_info "x-colo block handshake exports all mapped disks before primary migrate"
 
   local call_log="${SELFTEST_ROOT}/xcolo-multi-disk-handshake-order.log"
-  local sda_export_line sdb_export_line migrate_line
+  local sda_export_line sdb_export_line cont_line migrate_line
   FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
   FTCTL_PROFILE_SECONDARY_URI="qemu+ssh://peer/system"
   FTCTL_PROFILE_XCOLO_NBD_ENDPOINT="tcp:10.0.0.2:10809"
@@ -1158,11 +1164,15 @@ selftest_case_xcolo_multi_disk_handshake_exports_all_disks() (
   selftest_assert_file_not_contains "${call_log}" '"export":"libvirt-data-format"'
   selftest_assert_file_contains "${call_log}" '"parent":"ftctl-colo-sda","node":"nbd0-sda"'
   selftest_assert_file_contains "${call_log}" '"parent":"ftctl-colo-sdb","node":"nbd0-sdb"'
+  selftest_assert_file_contains "${call_log}" "primary.cont_before_migrate"
   sda_export_line="$(grep -n '|secondary.nbd_server_add.sda|' "${call_log}" | head -n1 | cut -d: -f1)"
   sdb_export_line="$(grep -n '|secondary.nbd_server_add.sdb|' "${call_log}" | head -n1 | cut -d: -f1)"
+  cont_line="$(grep -n '|primary.cont_before_migrate|' "${call_log}" | head -n1 | cut -d: -f1)"
   migrate_line="$(grep -n '|primary.migrate|' "${call_log}" | head -n1 | cut -d: -f1)"
   [[ "${sda_export_line}" -lt "${migrate_line}" && "${sdb_export_line}" -lt "${migrate_line}" ]] || \
     selftest_fail "all disk exports must be added before primary.migrate"
+  [[ "${cont_line}" -lt "${migrate_line}" ]] || \
+    selftest_fail "primary.cont_before_migrate must be issued before primary.migrate"
 )
 
 selftest_case_xcolo_runtime_validation_blocks_false_positive() (
@@ -1366,6 +1376,46 @@ selftest_case_xcolo_runtime_validation_times_out_stuck_convergence() (
   selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" \
     "xcolo_runtime_validation_failed:runtime_convergence_timeout" \
     "stuck convergence failure reason"
+)
+
+selftest_case_xcolo_runtime_recovery_preserves_error_reason() (
+  selftest_reset_env
+  selftest_info "x-colo runtime recovery preserves validation error reason"
+
+  local vm="xcolo-runtime-recover"
+  local reason="xcolo_runtime_validation_failed:runtime_convergence_timeout"
+  ftctl_state_init_vm "${vm}"
+  FTCTL_DRY_RUN="0"
+  FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
+
+  # shellcheck disable=SC2317
+  ftctl_standby_deactivate() {
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_virsh() {
+    local out_var="${2}" err_var="${3}" rc_var="${4}"
+    printf -v "${out_var}" '%s' ""
+    printf -v "${err_var}" '%s' ""
+    printf -v "${rc_var}" '%s' "0"
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_primary_activate_from_backup() {
+    return 0
+  }
+
+  ftctl_xcolo_recover_runtime_convergence_failure "${vm}" "${reason}"
+
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "conversion_stage")" \
+    "runtime_validation_failed" \
+    "runtime recovery marks validation failure stage"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" \
+    "${reason}" \
+    "runtime recovery preserves last_error"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_last_runtime_error")" \
+    "${reason}" \
+    "runtime recovery preserves sticky runtime error"
 )
 
 selftest_case_json_and_locking() {
@@ -2418,6 +2468,7 @@ selftest_main() {
   selftest_case_xcolo_runtime_validation_reports_primary_migrate_failure
   selftest_case_xcolo_runtime_validation_reports_pending_convergence
   selftest_case_xcolo_runtime_validation_times_out_stuck_convergence
+  selftest_case_xcolo_runtime_recovery_preserves_error_reason
   selftest_case_json_and_locking
   selftest_case_check_secondary_active_side
   selftest_case_reconcile_secondary_steady_skips_primary_disks

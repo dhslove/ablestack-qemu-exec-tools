@@ -526,6 +526,7 @@ ftctl_xcolo_recover_runtime_convergence_failure() {
       "conversion_state=error" \
       "protection_state=error" \
       "transport_state=failed" \
+      "xcolo_last_runtime_error=${reason}" \
       "last_error=${reason}"
     ftctl_log_event "colo" "xcolo.runtime_recover" "skip" "${vm}" "" \
       "reason=dry_run cause=${reason}"
@@ -551,6 +552,7 @@ ftctl_xcolo_recover_runtime_convergence_failure() {
       "conversion_state=error" \
       "protection_state=error" \
       "transport_state=failed" \
+      "xcolo_last_runtime_error=${reason}:primary_restore_failed" \
       "last_error=${reason}:primary_restore_failed"
     ftctl_log_event "colo" "xcolo.runtime_recover" "fail" "${vm}" "" \
       "cause=${reason} restore=failed"
@@ -564,6 +566,7 @@ ftctl_xcolo_recover_runtime_convergence_failure() {
     "transport_state=failed" \
     "active_side=primary" \
     "standby_state=stopped" \
+    "xcolo_last_runtime_error=${reason}" \
     "last_error=${reason}"
   ftctl_log_event "colo" "xcolo.runtime_recover" "ok" "${vm}" "" \
     "cause=${reason}"
@@ -622,6 +625,9 @@ ftctl_xcolo_reconcile_pending_runtime() {
       recover_reason="$(ftctl_state_get "${vm}" "last_error" 2>/dev/null || true)"
       [[ -n "${recover_reason}" ]] || recover_reason="xcolo_runtime_validation_failed"
       ftctl_xcolo_recover_runtime_convergence_failure "${vm}" "${recover_reason}" || true
+      ftctl_state_set "${vm}" \
+        "xcolo_last_runtime_error=${recover_reason}" \
+        "last_error=${recover_reason}"
       ftctl_log_event "colo" "xcolo.runtime_reconcile" "fail" "${vm}" "" \
         "secondary_vm=${secondary_vm} rc=${rc}"
       return 0
@@ -1434,6 +1440,14 @@ ftctl_xcolo_attach_primary_net_filters() {
   ftctl_state_set "${vm}" "xcolo_primary_net_filters_attached=true"
 }
 
+ftctl_xcolo_resume_primary_before_migrate() {
+  local vm="${1-}"
+
+  ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
+    '{"execute":"cont"}' "colo" "primary.cont_before_migrate" || return 1
+  ftctl_state_set "${vm}" "xcolo_primary_cont_before_migrate=true"
+}
+
 ftctl_xcolo_execute_handshake_with_nodes() {
   local vm="${1-}"
   local secondary_vm="${2-}"
@@ -1469,6 +1483,7 @@ ftctl_xcolo_execute_handshake_with_nodes() {
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
     "{\"execute\":\"migrate-set-parameters\",\"arguments\":{\"x-checkpoint-delay\":${FTCTL_PROFILE_XCOLO_CHECKPOINT_DELAY}}}" \
     "colo" "primary.migrate_set_parameters" || return 1
+  ftctl_xcolo_resume_primary_before_migrate "${vm}" || return 1
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
     "{\"execute\":\"migrate\",\"arguments\":{\"uri\":\"${FTCTL_PROFILE_XCOLO_MIGRATE_URI}\"}}" \
     "colo" "primary.migrate" || return 1
@@ -1541,6 +1556,7 @@ ftctl_xcolo_execute_handshake_with_disk_plan() {
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
     "{\"execute\":\"migrate-set-parameters\",\"arguments\":{\"x-checkpoint-delay\":${FTCTL_PROFILE_XCOLO_CHECKPOINT_DELAY}}}" \
     "colo" "primary.migrate_set_parameters" || return 1
+  ftctl_xcolo_resume_primary_before_migrate "${vm}" || return 1
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
     "{\"execute\":\"migrate\",\"arguments\":{\"uri\":\"${FTCTL_PROFILE_XCOLO_MIGRATE_URI}\"}}" \
     "colo" "primary.migrate" || return 1
@@ -2105,6 +2121,9 @@ ftctl_xcolo_execute_block_cold_conversion() {
       validate_error="$(ftctl_state_get "${vm}" "last_error" 2>/dev/null || true)"
       [[ -n "${validate_error}" ]] || validate_error="xcolo_runtime_validation_failed"
       ftctl_xcolo_recover_runtime_convergence_failure "${vm}" "${validate_error}" || true
+      ftctl_state_set "${vm}" \
+        "xcolo_last_runtime_error=${validate_error}" \
+        "last_error=${validate_error}"
       return 1
       ;;
   esac
@@ -2223,6 +2242,9 @@ ftctl_xcolo_plan_protect_prebuilt() {
       validate_error="$(ftctl_state_get "${vm}" "last_error" 2>/dev/null || true)"
       [[ -n "${validate_error}" ]] || validate_error="xcolo_runtime_validation_failed"
       ftctl_xcolo_recover_runtime_convergence_failure "${vm}" "${validate_error}" || true
+      ftctl_state_set "${vm}" \
+        "xcolo_last_runtime_error=${validate_error}" \
+        "last_error=${validate_error}"
       ftctl_log_event "colo" "xcolo.protect" "fail" "${vm}" "" \
         "reason=runtime_validation_failed"
       return 1
