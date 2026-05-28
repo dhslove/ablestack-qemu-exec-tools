@@ -1187,6 +1187,68 @@ selftest_case_xcolo_multi_disk_handshake_exports_all_disks() (
     selftest_fail "primary.cont_before_migrate must be issued before primary.migrate"
 )
 
+selftest_case_xcolo_baseline_seed_uses_primary_nbd_before_runtime_graph() (
+  selftest_reset_env
+  selftest_info "x-colo block cold conversion seeds secondary baseline over primary read-only NBD"
+
+  local call_log="${SELFTEST_ROOT}/xcolo-baseline-seed.log"
+  FTCTL_PROFILE_SECONDARY_URI="qemu+ssh://peer/system"
+  FTCTL_PROFILE_FENCING_SSH_USER="root"
+  FTCTL_PROFILE_XCOLO_NBD_ENDPOINT="tcp:10.0.0.2:10809"
+  FTCTL_REMOTE_NBD_PORT_BASE="10809"
+  FTCTL_REMOTE_NBD_PORT_COUNT="64"
+  FTCTL_XCOLO_QMP_TIMEOUT_SEC="3"
+
+  # shellcheck disable=SC2317
+  ftctl_xcolo_primary_connect_host() {
+    printf '%s\n' "10.0.0.1"
+  }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_remote_target_host_user() {
+    printf -v "$1" '%s' "10.0.0.2"
+    printf -v "$2" '%s' "root"
+  }
+  # shellcheck disable=SC2317
+  ftctl_cmd_run() {
+    local _timeout="$1" out_var="$2" err_var="$3" rc_var="$4" pid_file="" arg prev=""
+    shift 4
+    [[ "${1-}" == "--" ]] && shift
+    printf 'LOCAL:%s\n' "$*" >> "${call_log}"
+    for arg in "$@"; do
+      if [[ "${prev}" == "--pid-file" ]]; then
+        pid_file="${arg}"
+        break
+      fi
+      prev="${arg}"
+    done
+    [[ -n "${pid_file}" ]] && printf '999999\n' > "${pid_file}"
+    printf -v "${out_var}" '%s' ""
+    printf -v "${err_var}" '%s' ""
+    printf -v "${rc_var}" '%s' "0"
+  }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_remote_exec() {
+    local out_var="$3" err_var="$4" rc_var="$5" remote_cmd="$6"
+    printf 'REMOTE:%s\n' "${remote_cmd}" >> "${call_log}"
+    printf -v "${out_var}" '%s' "format=qcow2 virtual=12345 actual=4096"
+    printf -v "${err_var}" '%s' ""
+    printf -v "${rc_var}" '%s' "0"
+  }
+
+  ftctl_xcolo_seed_secondary_baseline_disk \
+    "primary-vm" "sda" "/dev/rbd/rbd/root" "raw" "/var/lib/libvirt/images/root.qcow2" "12345"
+
+  selftest_assert_file_contains "${call_log}" "qemu-nbd"
+  selftest_assert_file_contains "${call_log}" "--read-only"
+  selftest_assert_file_contains "${call_log}" "--export-name ftctl-xcolo-seed-primary-vm-sda"
+  selftest_assert_file_contains "${call_log}" "qemu-img convert -p"
+  selftest_assert_file_contains "${call_log}" "nbd://10.0.0.1:"
+  selftest_assert_file_contains "${call_log}" "ftctl-xcolo-seed-primary-vm-sda"
+  selftest_assert_file_contains "${call_log}" "mv -f --"
+  selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_disk_sda_baseline_seeded")" "true" \
+    "baseline seed state"
+)
+
 selftest_case_xcolo_runtime_validation_blocks_false_positive() (
   selftest_reset_env
   selftest_info "x-colo runtime validation blocks false-positive colo_running"
@@ -2476,6 +2538,7 @@ selftest_main() {
   selftest_case_xcolo_scsi_root_replace_avoids_lun_collision
   selftest_case_xcolo_block_handshake_sets_checkpoint_after_migrate
   selftest_case_xcolo_multi_disk_handshake_exports_all_disks
+  selftest_case_xcolo_baseline_seed_uses_primary_nbd_before_runtime_graph
   selftest_case_xcolo_runtime_validation_blocks_false_positive
   selftest_case_xcolo_runtime_validation_reports_primary_migrate_failure
   selftest_case_xcolo_runtime_validation_reports_pending_convergence

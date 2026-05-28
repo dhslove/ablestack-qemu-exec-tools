@@ -61,6 +61,8 @@ For each protected disk:
 
 The old `x-blockdev-change parent=ftctl-colo-<disk> node=nbd0-<disk>` path is not used for cloud-managed multi-disk cold conversion.
 
+Before this order starts, the Cloud-created secondary target disks must already contain the primary disk baseline. That seed step is defined in [308. FT Cloud-Managed Baseline Seed Before X-COLO Design](308-ft-cloud-managed-baseline-seed-before-xcolo-design-20260528.md). The quorum remote-child fix only makes the runtime graph complete; it does not replace baseline disk materialization.
+
 ## Failure Handling
 
 Any missing primary base node, qdev, primary overlay, or secondary export must fail before primary migration starts.

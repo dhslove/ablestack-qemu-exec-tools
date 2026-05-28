@@ -40,6 +40,8 @@ Later validation with `i-2-54-VM` and `i-2-81-VM` confirmed that timeout detecti
 
 Later validation with `i-2-54-VM` and `i-2-82-VM` proved `primary.cont_before_migrate` was executed and the primary briefly reported `running=true`, but the pair still timed out in `finish-migrate` / `inmigrate`. Secondary active overlays remained nearly empty while the primary overlay recorded writes. That follow-up is handled by [307. FT X-COLO Primary Quorum Remote Child Design](307-ft-xcolo-primary-quorum-remote-child-design-20260528.md): primary disk replacement must use a quorum that already contains both local primary active and remote NBD children.
 
+Later validation with `i-2-54-VM` and `i-2-83-VM` showed the primary quorum remote-child path was executed, but the secondary target disks were still near-empty Cloud-created qcow2 placeholders. That follow-up is handled by [308. FT Cloud-Managed Baseline Seed Before X-COLO Design](308-ft-cloud-managed-baseline-seed-before-xcolo-design-20260528.md): qemu FTCTL must materialize the primary disk baseline into every Cloud-created secondary target disk before starting the generated secondary and X-COLO runtime graph.
+
 ## Design Principles
 
 1. Do not weaken the Cloud-managed ownership boundary.
@@ -130,6 +132,8 @@ Before QMP migration, qemu FTCTL attaches the primary network filter objects wit
 Before attaching primary network filters, qemu FTCTL must attach the block graph for all mapped writable disks, not only the first/root disk.
 
 For cloud-managed cold conversion, the primary disk graph must be created as a complete local+remote quorum before disk device replacement. qemu FTCTL must not switch a disk to a local-only quorum and rely on later `x-blockdev-change` to add the remote child.
+
+For cloud-managed block-backed FT, baseline disk materialization is a required step between primary shutdown and generated-domain startup. Cloud creates target volumes; qemu FTCTL seeds their contents.
 
 Because primary filter attachment uses QMP `stop` to make object insertion deterministic, qemu FTCTL must explicitly run QMP `cont` after all secondary NBD exports, primary block graph nodes, primary network filters, migration capabilities, and checkpoint delay are configured, and before QMP `migrate` is issued. The ordered event is `primary.cont_before_migrate`. This makes the intended handoff explicit: the generated primary is paused only while the runtime graph is assembled, then resumed immediately before the COLO migration command that should transition the pair into active checkpointing.
 
