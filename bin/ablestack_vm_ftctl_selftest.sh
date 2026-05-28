@@ -1308,8 +1308,64 @@ selftest_case_xcolo_runtime_validation_reports_pending_convergence() (
   selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_pending_reason")" \
     "runtime_converging" \
     "runtime validation pending reason"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_runtime_pending_since" >/dev/null 2>&1; echo $?)" \
+    "0" \
+    "runtime validation records pending start"
   selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" "" \
     "runtime validation pending keeps last_error clear"
+)
+
+selftest_case_xcolo_runtime_validation_times_out_stuck_convergence() (
+  selftest_reset_env
+  selftest_info "x-colo runtime validation times out stuck finish-migrate/inmigrate convergence"
+
+  local vm="xcolo-runtime-timeout"
+  local rc=0
+  ftctl_state_init_vm "${vm}"
+  ftctl_state_set "${vm}" "xcolo_runtime_pending_since=$(date -d '10 seconds ago' '+%Y-%m-%dT%H:%M:%S%:z')"
+  FTCTL_DRY_RUN="0"
+  FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
+  FTCTL_PROFILE_SECONDARY_URI="qemu+ssh://peer/system"
+  FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC="1"
+  FTCTL_XCOLO_RUNTIME_VALIDATE_TIMEOUT_SEC="1"
+  FTCTL_XCOLO_RUNTIME_PENDING_MAX_SEC="1"
+
+  # shellcheck disable=SC2317
+  ftctl_xcolo_query_running_flag() {
+    local out_var="${3}"
+    printf -v "${out_var}" '%s' "false"
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_query_status_name() {
+    local uri="${1-}" out_var="${3}"
+    if [[ "${uri}" == "${FTCTL_PROFILE_PRIMARY_URI}" ]]; then
+      printf -v "${out_var}" '%s' "finish-migrate"
+    else
+      printf -v "${out_var}" '%s' "inmigrate"
+    fi
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_query_migrate_status() {
+    local uri="${1-}" out_var="${3}"
+    if [[ "${uri}" == "${FTCTL_PROFILE_PRIMARY_URI}" ]]; then
+      printf -v "${out_var}" '%s' "active"
+    else
+      printf -v "${out_var}" '%s' "colo"
+    fi
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_domain_xml_has_runtime_markers() {
+    return 0
+  }
+
+  ftctl_xcolo_validate_pair_runtime "${vm}" "${vm}-standby" || rc=$?
+  selftest_assert_eq "${rc}" "1" "stuck convergence should fail"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" \
+    "xcolo_runtime_validation_failed:runtime_convergence_timeout" \
+    "stuck convergence failure reason"
 )
 
 selftest_case_json_and_locking() {
@@ -2361,6 +2417,7 @@ selftest_main() {
   selftest_case_xcolo_runtime_validation_blocks_false_positive
   selftest_case_xcolo_runtime_validation_reports_primary_migrate_failure
   selftest_case_xcolo_runtime_validation_reports_pending_convergence
+  selftest_case_xcolo_runtime_validation_times_out_stuck_convergence
   selftest_case_json_and_locking
   selftest_case_check_secondary_active_side
   selftest_case_reconcile_secondary_steady_skips_primary_disks

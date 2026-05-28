@@ -26,6 +26,16 @@ Later validation proved both peer-facing channels were established, then failed 
 
 Later validation progressed through deferred primary filter attach and failed at COLO migration because only the root disk was in the COLO graph while the data disk remained outside replication. That contract is handled by [306. FT X-COLO Multi Writable Disk Graph Design](306-ft-xcolo-multi-writable-disk-graph-design-20260528.md). FT success requires every writable guest disk to be represented in the COLO graph before primary migration starts.
 
+Later validation with `i-2-54-VM` and `i-2-80-VM` progressed past multi-disk graph setup but remained stuck with:
+
+- primary `query-status.status=finish-migrate`, `running=false`
+- primary `query-migrate.status=active`
+- secondary `query-status.status=inmigrate`, `running=false`
+- secondary `query-migrate.status=colo`
+- state `protection_state=pairing`, `transport_state=establishing`, `conversion_state=pending`
+
+This state is not a successful FT state. It is a runtime convergence deadlock: the secondary has entered COLO receive mode, but the primary never resumes as the active service.
+
 ## Design Principles
 
 1. Do not weaken the Cloud-managed ownership boundary.
@@ -34,7 +44,8 @@ Later validation progressed through deferred primary filter attach and failed at
 2. Do not mark FT protection successful until runtime state proves both sides are valid.
 3. Prefer deterministic failure reasons over broad `Stream closed` or generic `failed`.
 4. Preserve the existing HA/DR behavior. This change is scoped to FT x-colo.
-5. Cleanup must remain explicit after a failed cold conversion because both primary and secondary runtime domains may be partially active.
+5. A protection attempt must not leave the service VM paused indefinitely. If runtime convergence is stuck, qemu FTCTL must fail the attempt and restore the primary from the saved pre-conversion XML.
+6. Cleanup must remain explicit after a failed cold conversion because both primary and secondary runtime domains may be partially active.
 
 ## Runtime Convergence Model
 
@@ -55,6 +66,36 @@ Validation loop:
    - primary `query-migrate.status=failed` -> `primary_migrate_failed`
    - secondary `query-migrate.status=failed` -> `secondary_migrate_failed`
 6. Otherwise continue polling up to `FTCTL_XCOLO_RUNTIME_VALIDATE_TIMEOUT_SEC`, default 45 seconds.
+
+Pending convergence is allowed only as a bounded asynchronous state. qemu FTCTL records `xcolo_runtime_pending_since` the first time the pair is classified as `runtime_converging`.
+
+If the following state persists longer than `FTCTL_XCOLO_RUNTIME_PENDING_MAX_SEC`, default 180 seconds, qemu FTCTL must mark the attempt failed with `runtime_convergence_timeout`:
+
+- primary runtime XML markers are present
+- secondary runtime XML markers are present
+- primary `query-status.status=finish-migrate`
+- secondary `query-status.status=inmigrate`
+- primary `query-migrate.status=active`
+- secondary `query-migrate.status=colo`
+
+This exact combination means the generated runtime domains and channels exist, but the active service was not released back to running state. It must not be treated as a stable FT wait condition.
+
+## Runtime Failure Recovery
+
+When runtime validation fails after generated domains have been started, qemu FTCTL must perform bounded recovery:
+
+1. Destroy/deactivate the secondary runtime domain.
+2. Destroy the generated primary runtime domain if it is still present.
+3. Recreate or start the primary from `primary_xml_backup`.
+4. Persist:
+   - `conversion_stage=runtime_validation_failed`
+   - `conversion_state=error`
+   - `protection_state=error`
+   - `transport_state=failed`
+   - `active_side=primary`
+   - `last_error=xcolo_runtime_validation_failed:<reason>`
+
+If primary restoration fails, qemu FTCTL must keep `protection_state=error`, set `conversion_stage=runtime_recover_failed`, and surface `primary_restore_failed` in `last_error`.
 
 ## COLO Channel Startup Guard
 
@@ -95,6 +136,7 @@ Failed registration:
 - qemu FTCTL leaves `protection_state=error`
 - qemu FTCTL leaves `transport_state=failed`
 - `last_error=xcolo_runtime_validation_failed:<reason>`
+- If the failure occurs after generated runtime domains started, qemu FTCTL attempts to restore the original primary service domain from the saved XML.
 - Cloud persists the failure and releases the Cloud-managed lifecycle guard.
 - Operator cleanup can safely remove the partial standby VM, FTCTL state files, and blockcopy runtime directory before retest.
 
@@ -104,6 +146,7 @@ New selftest coverage:
 
 - Runtime validation blocks false-positive success when the primary is not running.
 - Runtime validation reports terminal primary migration failure as `primary_migrate_failed`.
+- Runtime validation times out a stuck `finish-migrate` / `inmigrate` convergence as `runtime_convergence_timeout`.
 - Generated primary XML defaults `mirror0` to `wait=off` and `compare1` to `wait=on`.
 - Channel attach is verified before primary QMP migration starts.
 - Primary network filter objects are attached by QMP after block graph preparation.
