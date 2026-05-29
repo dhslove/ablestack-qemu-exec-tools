@@ -2215,6 +2215,7 @@ ftctl_xcolo_attach_primary_net_filters() {
     "colo" "primary.object_add_filter_mirror" || return 1
 
   ftctl_xcolo_validate_primary_channel_paths "${vm}" || return 1
+  ftctl_xcolo_wait_primary_filter_chardev_binding "${vm}" || return 1
   ftctl_state_set "${vm}" "xcolo_primary_net_filters_attached=true"
 }
 
@@ -2548,6 +2549,40 @@ ftctl_xcolo_validate_primary_channel_paths() {
   ftctl_state_set "${vm}" "last_error=${reason}"
   ftctl_log_event "colo" "primary.channel_paths" "fail" "${vm}" "" \
     "reason=${reason} mirror=$(ftctl_state_get "${vm}" "xcolo_channel_mirror_established" 2>/dev/null || true) compare=$(ftctl_state_get "${vm}" "xcolo_channel_compare_established" 2>/dev/null || true) compare_local=$(ftctl_state_get "${vm}" "xcolo_channel_compare_local_established" 2>/dev/null || true) compare_out=$(ftctl_state_get "${vm}" "xcolo_channel_compare_out_established" 2>/dev/null || true)"
+  return 1
+}
+
+ftctl_xcolo_wait_primary_filter_chardev_binding() {
+  local vm="${1-}"
+  local timeout="${FTCTL_XCOLO_FILTER_BIND_WAIT_SEC:-5}"
+  local interval="${FTCTL_XCOLO_FILTER_BIND_INTERVAL_SEC:-1}"
+  local i attempts reason
+
+  if [[ -z "${timeout}" || ! "${timeout}" =~ ^[0-9]+$ || "${timeout}" -lt 1 ]]; then
+    timeout=5
+  fi
+  if [[ -z "${interval}" || ! "${interval}" =~ ^[0-9]+$ || "${interval}" -lt 1 ]]; then
+    interval=1
+  fi
+  attempts=$(( (timeout + interval - 1) / interval ))
+  [[ "${attempts}" -gt 0 ]] || attempts=1
+
+  for ((i=0; i<attempts; i++)); do
+    if ftctl_xcolo_collect_primary_chardev_binding_state "${vm}"; then
+      ftctl_log_event "colo" "primary.filter_chardev_binding" "ok" "${vm}" "" \
+        "attempts=$((i + 1))"
+      return 0
+    fi
+    sleep "${interval}"
+  done
+
+  reason="$(ftctl_state_get "${vm}" "xcolo_primary_filter_chardev_reason" 2>/dev/null || true)"
+  [[ -n "${reason}" ]] || reason="unknown"
+  ftctl_state_set "${vm}" \
+    "last_error=primary_filter_chardev_frontend_incomplete" \
+    "xcolo_primary_filter_chardev_binding_failed_reason=${reason}"
+  ftctl_log_event "colo" "primary.filter_chardev_binding" "fail" "${vm}" "" \
+    "reason=${reason} attempts=${attempts}"
   return 1
 }
 
@@ -2995,14 +3030,17 @@ ftctl_xcolo_execute_block_cold_conversion() {
   done
 
   ftctl_xcolo_execute_handshake_with_disk_plan "${vm}" "${secondary_vm}" "${disk_plan}" || {
+    local handshake_error
+    handshake_error="$(ftctl_state_get "${vm}" "last_error" 2>/dev/null || true)"
+    [[ -n "${handshake_error}" ]] || handshake_error="xcolo_block_handshake_failed"
     ftctl_log_event "colo" "block_conversion.handshake" "fail" "${vm}" "" \
-      "disk_count=${#disk_entries[@]}"
+      "disk_count=${#disk_entries[@]} reason=${handshake_error}"
     ftctl_state_set "${vm}" \
       "conversion_stage=handshake_failed" \
       "conversion_state=error" \
       "protection_state=error" \
       "transport_state=failed" \
-      "last_error=xcolo_block_handshake_failed"
+      "last_error=${handshake_error}"
     return 1
   }
   ftctl_log_event "colo" "block_conversion.handshake" "ok" "${vm}" "" \

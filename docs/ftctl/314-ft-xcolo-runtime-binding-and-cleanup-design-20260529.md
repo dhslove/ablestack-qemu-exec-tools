@@ -76,3 +76,10 @@ The next failed FT attempt should identify one of these narrower causes:
 
 If the attempt fails, secondary runtime cleanup should not leave
 `i-2-<standby>-VM` running on the compute host.
+
+## Follow-up Gate
+
+Design 315 moves the primary chardev frontend check earlier in the protect
+sequence. Runtime diagnostics remain useful for postmortem evidence, but qemu
+FTCTL should now block before `cont` and `migrate` if QEMU accepts the filter
+objects yet leaves required primary chardev frontends closed.
