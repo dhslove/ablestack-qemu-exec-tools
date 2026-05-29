@@ -43,9 +43,8 @@ After primary `filter-redirector`, `colo-compare`, and `filter-mirror` objects
 are attached:
 
 1. Keep the existing TCP channel-path gate.
-2. Add a primary filter/chardev binding gate using QMP `query-chardev`.
-3. Require the following primary chardev labels to be frontend-open before
-   continuing to `migrate`:
+2. Add a primary filter/chardev binding observation using QMP `query-chardev`.
+3. Observe the following primary chardev labels before continuing to `migrate`:
    - `mirror0`
    - `compare1`
    - `compare0`
@@ -53,34 +52,34 @@ are attached:
    - `compare_out`
    - `compare_out0`
 4. Retry for a bounded interval to absorb short QEMU binding delays.
-5. If any required frontend remains missing or closed:
-   - stop before `cont` and `migrate`,
-   - set `last_error=primary_filter_chardev_frontend_incomplete`,
-   - record `xcolo_primary_filter_chardev_reason`,
-   - emit a `primary.filter_chardev_binding` failure event.
+5. If all frontends are open, emit a `primary.filter_chardev_binding` ok event.
+6. If some filter-facing frontends remain missing or closed before `cont`,
+   preserve the reason and emit a `primary.filter_chardev_binding` defer event.
+   Do not set `last_error` at this boundary. Design 317 supersedes the original
+   hard-gate behavior because QEMU can defer opening some packet-filter
+   frontends until after `cont` and migration setup.
 
 ## Error Preservation
 
 The block-backed cold-conversion path wraps the low-level handshake. It must not
-overwrite a specific filter-binding failure with the generic
+overwrite a specific runtime or migration failure with the generic
 `xcolo_block_handshake_failed` error. The outer handler should preserve the
 existing `last_error` when one exists.
 
 ## Desired Result
 
-The next failed run should fail earlier and more honestly if QEMU still does
-not bind the primary COLO chardev frontends. It should no longer spend minutes
-in runtime convergence only to report the same root cause after migration has
-already been attempted.
-
-If the gate passes but the primary still remains outside COLO mode, the failure
-will move forward to the next boundary: primary QEMU accepted the filter
-bindings and block graph, but still did not enter the COLO primary role.
+The next failed run should not stop merely because pre-`cont` packet-filter
+frontends are not open. It should move forward to `cont`, migration setup, and
+runtime validation. If QEMU still cannot bind the filter path, the failure will
+be reported with runtime evidence rather than as a premature pre-`cont`
+assertion.
 
 ## Follow-up Recovery
 
-Design 316 adds rollback for the early handshake failure introduced here. The
-binding gate is intentionally early, but it still runs after generated primary
-and secondary runtimes exist. Therefore a gate failure must restore the primary
-runtime and stop the generated secondary runtime before returning the preserved
-error to Cloud.
+Design 316 adds rollback for handshake failures after generated primary and
+secondary runtimes exist.
+
+Design 317 changes this boundary from a hard pre-`cont` gate into an observation
+because the next retest showed that QEMU may keep `mirror0`, `compare0`, and
+`compare_out0` frontends closed until later runtime progress. Runtime validation
+remains the hard failure boundary.

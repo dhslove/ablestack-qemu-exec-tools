@@ -1230,11 +1230,11 @@ selftest_case_xcolo_multi_disk_handshake_exports_all_disks() (
     selftest_fail "primary.cont_before_migrate must be issued before primary.migrate"
 )
 
-selftest_case_xcolo_primary_filter_binding_blocks_migrate() (
+selftest_case_xcolo_primary_filter_binding_defers_to_runtime_validation() (
   selftest_reset_env
-  selftest_info "x-colo primary filter binding blocks migrate when QEMU frontend is incomplete"
+  selftest_info "x-colo primary filter binding is observed before cont and deferred to runtime validation"
 
-  local call_log="${SELFTEST_ROOT}/xcolo-filter-binding-blocks-migrate.log"
+  local call_log="${SELFTEST_ROOT}/xcolo-filter-binding-defers-runtime.log"
   local rc=0
   FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
   FTCTL_PROFILE_SECONDARY_URI="qemu+ssh://peer/system"
@@ -1252,26 +1252,26 @@ selftest_case_xcolo_primary_filter_binding_blocks_migrate() (
     printf '%s|%s|%s|%s|%s\n' "${stage}" "${event}" "${uri}" "${vm}" "${payload}" >> "${call_log}"
   }
   # shellcheck disable=SC2317
-  ftctl_xcolo_wait_primary_filter_chardev_binding() {
+  ftctl_xcolo_observe_primary_filter_chardev_binding() {
     local vm="${1-}"
     ftctl_state_set "${vm}" \
-      "last_error=primary_filter_chardev_frontend_incomplete" \
       "xcolo_primary_filter_chardev_ready=no" \
-      "xcolo_primary_filter_chardev_reason=mirror0:frontend_closed,compare0:frontend_closed"
-    ftctl_log_event "colo" "primary.filter_chardev_binding" "fail" "${vm}" "" \
-      "reason=mirror0:frontend_closed,compare0:frontend_closed attempts=1"
-    return 1
+      "xcolo_primary_filter_chardev_reason=mirror0:frontend_closed,compare0:frontend_closed" \
+      "xcolo_primary_filter_chardev_binding_deferred_reason=mirror0:frontend_closed,compare0:frontend_closed"
+    ftctl_log_event "colo" "primary.filter_chardev_binding" "defer" "${vm}" "" \
+      "reason=mirror0:frontend_closed,compare0:frontend_closed attempts=1 phase=pre_cont"
+    return 0
   }
 
   ftctl_xcolo_execute_handshake_with_nodes "primary-vm" "standby-vm" "parent0" || rc=$?
 
-  selftest_assert_eq "${rc}" "1" "incomplete primary filter binding should fail"
-  selftest_assert_eq "$(ftctl_state_get "primary-vm" "last_error")" \
-    "primary_filter_chardev_frontend_incomplete" \
-    "specific filter binding error should be preserved"
+  selftest_assert_eq "${rc}" "0" "pre-cont incomplete primary filter binding should not block migrate"
+  selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_primary_filter_chardev_binding_deferred_reason")" \
+    "mirror0:frontend_closed,compare0:frontend_closed" \
+    "deferred filter binding reason should be preserved"
   selftest_assert_file_contains "${call_log}" "primary.object_add_filter_mirror"
-  selftest_assert_file_not_contains "${call_log}" "primary.cont_before_migrate"
-  selftest_assert_file_not_contains "${call_log}" "primary.migrate"
+  selftest_assert_file_contains "${call_log}" "primary.cont_before_migrate"
+  selftest_assert_file_contains "${call_log}" "primary.migrate"
 )
 
 selftest_case_xcolo_baseline_seed_uses_primary_nbd_before_runtime_graph() (
@@ -3210,7 +3210,7 @@ selftest_main() {
   selftest_case_xcolo_scsi_root_replace_avoids_lun_collision
   selftest_case_xcolo_block_handshake_sets_checkpoint_after_migrate
   selftest_case_xcolo_multi_disk_handshake_exports_all_disks
-  selftest_case_xcolo_primary_filter_binding_blocks_migrate
+  selftest_case_xcolo_primary_filter_binding_defers_to_runtime_validation
   selftest_case_xcolo_baseline_seed_uses_primary_nbd_before_runtime_graph
   selftest_case_xcolo_runtime_validation_blocks_false_positive
   selftest_case_xcolo_runtime_validation_reports_primary_migrate_failure

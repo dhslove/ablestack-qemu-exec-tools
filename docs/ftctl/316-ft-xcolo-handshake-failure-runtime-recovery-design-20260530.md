@@ -75,3 +75,9 @@ After this recovery behavior is stable, the remaining technical problem is the
 primary COLO filter topology itself: QEMU accepts the objects, TCP sockets are
 established, but the primary filter frontends stay closed for `mirror0`,
 `compare0`, and `compare_out0`.
+
+Design 317 narrows this further: those closed frontends are no longer treated as
+a pre-`cont` failure by themselves. qemu FTCTL now records them as a deferred
+observation and lets the pair advance to `cont`, migration setup, and runtime
+validation. If the same frontend state remains fatal, the runtime validation
+path will fail and this recovery model still applies.

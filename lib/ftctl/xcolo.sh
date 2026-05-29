@@ -2247,7 +2247,7 @@ ftctl_xcolo_attach_primary_net_filters() {
     "colo" "primary.object_add_filter_mirror" || return 1
 
   ftctl_xcolo_validate_primary_channel_paths "${vm}" || return 1
-  ftctl_xcolo_wait_primary_filter_chardev_binding "${vm}" || return 1
+  ftctl_xcolo_observe_primary_filter_chardev_binding "${vm}" || true
   ftctl_state_set "${vm}" "xcolo_primary_net_filters_attached=true"
 }
 
@@ -2616,6 +2616,39 @@ ftctl_xcolo_wait_primary_filter_chardev_binding() {
   ftctl_log_event "colo" "primary.filter_chardev_binding" "fail" "${vm}" "" \
     "reason=${reason} attempts=${attempts}"
   return 1
+}
+
+ftctl_xcolo_observe_primary_filter_chardev_binding() {
+  local vm="${1-}"
+  local timeout="${FTCTL_XCOLO_FILTER_BIND_WAIT_SEC:-5}"
+  local interval="${FTCTL_XCOLO_FILTER_BIND_INTERVAL_SEC:-1}"
+  local i attempts reason
+
+  if [[ -z "${timeout}" || ! "${timeout}" =~ ^[0-9]+$ || "${timeout}" -lt 1 ]]; then
+    timeout=5
+  fi
+  if [[ -z "${interval}" || ! "${interval}" =~ ^[0-9]+$ || "${interval}" -lt 1 ]]; then
+    interval=1
+  fi
+  attempts=$(( (timeout + interval - 1) / interval ))
+  [[ "${attempts}" -gt 0 ]] || attempts=1
+
+  for ((i=0; i<attempts; i++)); do
+    if ftctl_xcolo_collect_primary_chardev_binding_state "${vm}"; then
+      ftctl_log_event "colo" "primary.filter_chardev_binding" "ok" "${vm}" "" \
+        "attempts=$((i + 1)) phase=pre_cont"
+      return 0
+    fi
+    sleep "${interval}"
+  done
+
+  reason="$(ftctl_state_get "${vm}" "xcolo_primary_filter_chardev_reason" 2>/dev/null || true)"
+  [[ -n "${reason}" ]] || reason="unknown"
+  ftctl_state_set "${vm}" \
+    "xcolo_primary_filter_chardev_binding_deferred_reason=${reason}"
+  ftctl_log_event "colo" "primary.filter_chardev_binding" "defer" "${vm}" "" \
+    "reason=${reason} attempts=${attempts} phase=pre_cont"
+  return 0
 }
 
 ftctl_xcolo_primary_create_async_done() {
