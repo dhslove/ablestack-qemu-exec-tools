@@ -51,6 +51,11 @@ xcolo_runtime_validation_failed:primary_colo_role_not_entered
 
 This error means "primary COLO transition failed", not "guest disk is corrupt".
 
+If the 9000-series COLO compare/proxy channel is not established, qemu FTCTL
+must report the channel-specific error defined in
+[312. FT X-COLO 9000-Series Channel Validation Design](312-ft-xcolo-9000-channel-validation-design-20260529.md)
+before falling back to this generic role-transition error.
+
 ## Error Preservation
 
 When FT runtime is already in `error/failed`, generic reconcile must not clear `last_error`. qemu FTCTL must preserve the runtime failure and status JSON must use `xcolo_last_runtime_error` as the fallback if `last_error` is blank.

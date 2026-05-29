@@ -103,6 +103,26 @@ selftest_assert_not_contains() {
   [[ "${haystack}" != *"${needle}"* ]] || selftest_fail "${msg}: unexpected '${needle}'"
 }
 
+selftest_mock_xcolo_primary_channels_ready() {
+  # shellcheck disable=SC2317
+  ftctl_xcolo_capture_primary_channel_state() {
+    local vm="${1-}"
+    ftctl_state_set "${vm}" \
+      "xcolo_channel_mirror_established=yes" \
+      "xcolo_channel_compare_established=yes" \
+      "xcolo_channel_compare_local_established=yes" \
+      "xcolo_channel_compare_out_established=yes" \
+      "xcolo_channel_mirror_listen=yes" \
+      "xcolo_channel_compare_listen=yes" \
+      "xcolo_channel_compare_local_listen=yes" \
+      "xcolo_channel_compare_out_listen=yes"
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_validate_primary_channel_paths() {
+    ftctl_xcolo_capture_primary_channel_state "$1"
+  }
+}
+
 selftest_prepare_config_file() {
   mkdir -p "${SELFTEST_ROOT}"
   cat > "${SELFTEST_CONFIG}" <<EOF
@@ -1091,6 +1111,7 @@ selftest_case_xcolo_block_handshake_sets_checkpoint_after_migrate() (
   FTCTL_PROFILE_XCOLO_MIGRATE_URI="tcp:10.0.0.2:9998"
   FTCTL_PROFILE_XCOLO_NBD_NODE="nbd0"
   FTCTL_PROFILE_XCOLO_CHECKPOINT_DELAY="2000"
+  selftest_mock_xcolo_primary_channels_ready
 
   # shellcheck disable=SC2317
   ftctl_xcolo_qmp_require_ok() {
@@ -1135,6 +1156,7 @@ selftest_case_xcolo_multi_disk_handshake_exports_all_disks() (
   FTCTL_PROFILE_XCOLO_MIGRATE_URI="tcp:10.0.0.2:9998"
   FTCTL_PROFILE_XCOLO_NBD_NODE="nbd0"
   FTCTL_PROFILE_XCOLO_CHECKPOINT_DELAY="2000"
+  selftest_mock_xcolo_primary_channels_ready
 
   ftctl_state_set "primary-vm" \
     "xcolo_disk_sda_primary_base_node=libvirt-root-storage" \
@@ -1431,6 +1453,7 @@ selftest_case_xcolo_runtime_validation_times_out_stuck_convergence() (
   FTCTL_XCOLO_RUNTIME_VALIDATE_TIMEOUT_SEC="1"
   FTCTL_XCOLO_RUNTIME_PENDING_MAX_SEC="1"
   FTCTL_PROFILE_QGA_POLICY="off"
+  selftest_mock_xcolo_primary_channels_ready
 
   # shellcheck disable=SC2317
   ftctl_xcolo_query_running_flag() {
@@ -1491,6 +1514,7 @@ selftest_case_xcolo_runtime_validation_reports_one_sided_colo_role() (
   FTCTL_XCOLO_RUNTIME_VALIDATE_TIMEOUT_SEC="1"
   FTCTL_XCOLO_RUNTIME_PENDING_MAX_SEC="1"
   FTCTL_PROFILE_QGA_POLICY="off"
+  selftest_mock_xcolo_primary_channels_ready
 
   # shellcheck disable=SC2317
   ftctl_xcolo_query_running_flag() {
@@ -1538,6 +1562,79 @@ selftest_case_xcolo_runtime_validation_reports_one_sided_colo_role() (
   selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" \
     "xcolo_runtime_validation_failed:primary_colo_role_not_entered" \
     "one-sided secondary role failure reason"
+)
+
+selftest_case_xcolo_runtime_validation_reports_compare_channel_failure() (
+  selftest_reset_env
+  selftest_info "x-colo runtime validation reports missing 9000-series compare channel"
+
+  local vm="xcolo-runtime-channel-missing"
+  local rc=0
+  ftctl_state_init_vm "${vm}"
+  ftctl_state_set "${vm}" "xcolo_runtime_pending_since=$(date -d '10 seconds ago' '+%Y-%m-%dT%H:%M:%S%:z')"
+  FTCTL_DRY_RUN="0"
+  FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
+  FTCTL_PROFILE_SECONDARY_URI="qemu+ssh://peer/system"
+  FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC="1"
+  FTCTL_XCOLO_RUNTIME_VALIDATE_TIMEOUT_SEC="1"
+  FTCTL_XCOLO_RUNTIME_PENDING_MAX_SEC="1"
+  FTCTL_PROFILE_QGA_POLICY="off"
+
+  # shellcheck disable=SC2317
+  ftctl_xcolo_capture_primary_channel_state() {
+    local target_vm="${1-}"
+    ftctl_state_set "${target_vm}" \
+      "xcolo_channel_mirror_established=yes" \
+      "xcolo_channel_compare_established=no" \
+      "xcolo_channel_compare_local_established=yes" \
+      "xcolo_channel_compare_out_established=yes"
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_query_running_flag() {
+    local out_var="${3}"
+    printf -v "${out_var}" '%s' "false"
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_query_status_name() {
+    local uri="${1-}" out_var="${3}"
+    if [[ "${uri}" == "${FTCTL_PROFILE_PRIMARY_URI}" ]]; then
+      printf -v "${out_var}" '%s' "finish-migrate"
+    else
+      printf -v "${out_var}" '%s' "inmigrate"
+    fi
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_query_migrate_status() {
+    local uri="${1-}" out_var="${3}"
+    if [[ "${uri}" == "${FTCTL_PROFILE_PRIMARY_URI}" ]]; then
+      printf -v "${out_var}" '%s' "active"
+    else
+      printf -v "${out_var}" '%s' "colo"
+    fi
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_query_colo_mode() {
+    local uri="${1-}" out_var="${3}"
+    if [[ "${uri}" == "${FTCTL_PROFILE_PRIMARY_URI}" ]]; then
+      printf -v "${out_var}" '%s' "none"
+    else
+      printf -v "${out_var}" '%s' "secondary"
+    fi
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_domain_xml_has_runtime_markers() {
+    return 0
+  }
+
+  ftctl_xcolo_validate_pair_runtime "${vm}" "${vm}-standby" || rc=$?
+  selftest_assert_eq "${rc}" "1" "missing compare channel should fail after bounded wait"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" \
+    "xcolo_runtime_validation_failed:colo_compare_peer_channel_not_established" \
+    "missing compare channel failure reason"
 )
 
 selftest_case_xcolo_runtime_validation_accepts_reported_colo_role() (
@@ -2853,6 +2950,7 @@ selftest_main() {
   selftest_case_xcolo_runtime_validation_reports_pending_convergence
   selftest_case_xcolo_runtime_validation_times_out_stuck_convergence
   selftest_case_xcolo_runtime_validation_reports_one_sided_colo_role
+  selftest_case_xcolo_runtime_validation_reports_compare_channel_failure
   selftest_case_xcolo_runtime_validation_accepts_reported_colo_role
   selftest_case_xcolo_runtime_validation_records_optional_qga
   selftest_case_xcolo_runtime_validation_requires_primary_qga
