@@ -1081,6 +1081,38 @@ ftctl_xcolo_recover_runtime_convergence_failure() {
     "cause=${reason}"
 }
 
+ftctl_xcolo_recover_block_handshake_failure() {
+  local vm="${1-}"
+  local reason="${2:-xcolo_block_handshake_failed}"
+  local rc=0 current_error
+
+  ftctl_xcolo_recover_runtime_convergence_failure "${vm}" "${reason}" || rc=$?
+  if [[ "${rc}" != "0" ]]; then
+    current_error="$(ftctl_state_get "${vm}" "last_error" 2>/dev/null || true)"
+    [[ -n "${current_error}" ]] || current_error="${reason}:runtime_recover_failed"
+    ftctl_state_set "${vm}" \
+      "conversion_stage=handshake_recover_failed" \
+      "conversion_state=error" \
+      "protection_state=error" \
+      "transport_state=failed" \
+      "xcolo_last_runtime_error=${current_error}" \
+      "last_error=${current_error}"
+    ftctl_log_event "colo" "block_conversion.handshake_recover" "fail" "${vm}" "${rc}" \
+      "cause=${reason} error=${current_error}"
+    return "${rc}"
+  fi
+
+  ftctl_state_set "${vm}" \
+    "conversion_stage=handshake_failed" \
+    "conversion_state=error" \
+    "protection_state=error" \
+    "transport_state=failed" \
+    "xcolo_last_runtime_error=${reason}" \
+    "last_error=${reason}"
+  ftctl_log_event "colo" "block_conversion.handshake_recover" "ok" "${vm}" "" \
+    "cause=${reason}"
+}
+
 ftctl_xcolo_mark_runtime_pending() {
   local vm="${1-}"
   local stage="${2:-runtime_converging}"
@@ -3035,12 +3067,7 @@ ftctl_xcolo_execute_block_cold_conversion() {
     [[ -n "${handshake_error}" ]] || handshake_error="xcolo_block_handshake_failed"
     ftctl_log_event "colo" "block_conversion.handshake" "fail" "${vm}" "" \
       "disk_count=${#disk_entries[@]} reason=${handshake_error}"
-    ftctl_state_set "${vm}" \
-      "conversion_stage=handshake_failed" \
-      "conversion_state=error" \
-      "protection_state=error" \
-      "transport_state=failed" \
-      "last_error=${handshake_error}"
+    ftctl_xcolo_recover_block_handshake_failure "${vm}" "${handshake_error}" || true
     return 1
   }
   ftctl_log_event "colo" "block_conversion.handshake" "ok" "${vm}" "" \

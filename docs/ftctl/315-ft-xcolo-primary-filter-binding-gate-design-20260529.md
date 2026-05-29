@@ -76,3 +76,11 @@ already been attempted.
 If the gate passes but the primary still remains outside COLO mode, the failure
 will move forward to the next boundary: primary QEMU accepted the filter
 bindings and block graph, but still did not enter the COLO primary role.
+
+## Follow-up Recovery
+
+Design 316 adds rollback for the early handshake failure introduced here. The
+binding gate is intentionally early, but it still runs after generated primary
+and secondary runtimes exist. Therefore a gate failure must restore the primary
+runtime and stop the generated secondary runtime before returning the preserved
+error to Cloud.

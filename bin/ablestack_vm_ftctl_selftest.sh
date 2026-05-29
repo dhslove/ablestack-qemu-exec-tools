@@ -2098,6 +2098,51 @@ selftest_case_xcolo_runtime_recovery_preserves_error_reason() (
     "runtime recovery preserves sticky runtime error"
 )
 
+selftest_case_xcolo_block_handshake_failure_recovers_runtime() (
+  selftest_reset_env
+  selftest_info "x-colo block handshake failure restores primary and stops secondary"
+
+  local vm="xcolo-handshake-recover"
+  local reason="primary_filter_chardev_frontend_incomplete"
+  ftctl_state_init_vm "${vm}"
+  FTCTL_DRY_RUN="0"
+  FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
+
+  # shellcheck disable=SC2317
+  ftctl_standby_deactivate() {
+    local target_vm="${1-}"
+    ftctl_state_set "${target_vm}" "standby_state=stopped"
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_virsh() {
+    local out_var="${2}" err_var="${3}" rc_var="${4}"
+    printf -v "${out_var}" '%s' ""
+    printf -v "${err_var}" '%s' ""
+    printf -v "${rc_var}" '%s' "0"
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_primary_activate_from_backup() {
+    return 0
+  }
+
+  ftctl_xcolo_recover_block_handshake_failure "${vm}" "${reason}"
+
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "conversion_stage")" \
+    "handshake_failed" \
+    "handshake recovery keeps handshake failure stage"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "active_side")" \
+    "primary" \
+    "handshake recovery returns active side to primary"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "standby_state")" \
+    "stopped" \
+    "handshake recovery stops standby runtime"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" \
+    "${reason}" \
+    "handshake recovery preserves original reason"
+)
+
 selftest_case_xcolo_error_status_uses_sticky_runtime_error() (
   selftest_reset_env
   selftest_info "x-colo error status emits sticky runtime error when last_error is blank"
@@ -3179,6 +3224,7 @@ selftest_main() {
   selftest_case_xcolo_runtime_validation_records_optional_qga
   selftest_case_xcolo_runtime_validation_requires_primary_qga
   selftest_case_xcolo_runtime_recovery_preserves_error_reason
+  selftest_case_xcolo_block_handshake_failure_recovers_runtime
   selftest_case_xcolo_error_status_uses_sticky_runtime_error
   selftest_case_json_and_locking
   selftest_case_check_secondary_active_side
