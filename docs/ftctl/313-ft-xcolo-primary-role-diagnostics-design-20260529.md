@@ -58,9 +58,16 @@ captured diagnostics identify a stronger cause:
   is explicitly unset.
 - `primary_colo_filter_objects_not_attached`: FTCTL did not record successful
   primary filter object attachment.
+- `primary_filter_chardev_frontend_incomplete`: primary chardev sockets exist
+  but required filter/compare frontends are not all open.
+- `primary_block_graph_incomplete`: primary COLO block graph nodes are missing
+  from `query-named-block-nodes`.
 - `primary_qemu_colo_role_transition_failed`: channels, filters, capabilities,
   and checkpoint parameter look valid, but primary QEMU still does not enter the
   COLO primary role.
+
+Runtime binding and cleanup details are refined in
+`314-ft-xcolo-runtime-binding-and-cleanup-design-20260529.md`.
 
 ## Desired State
 

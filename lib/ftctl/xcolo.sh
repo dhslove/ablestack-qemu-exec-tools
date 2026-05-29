@@ -498,6 +498,165 @@ PY
   printf '%s\n' "${value}"
 }
 
+ftctl_xcolo_collect_primary_chardev_binding_state() {
+  local vm="${1-}"
+  local out rc payload state_args=()
+
+  out=""
+  rc=0
+  ftctl_xcolo_qmp "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" '{"execute":"query-chardev"}' out rc
+  if [[ "${rc}" != "0" || -z "${out}" ]]; then
+    ftctl_state_set "${vm}" \
+      "xcolo_primary_filter_chardev_ready=unknown" \
+      "xcolo_primary_filter_chardev_reason=query_chardev_failed"
+    return 1
+  fi
+
+  payload="$(python3 - <<'PY' "${out}"
+import json
+import re
+import sys
+
+required = ["mirror0", "compare1", "compare0", "compare0-0", "compare_out", "compare_out0"]
+try:
+    data = json.loads(sys.argv[1])
+except Exception:
+    print("ready=unknown")
+    print("reason=query_chardev_parse_failed")
+    raise SystemExit(0)
+
+items = {}
+for item in data.get("return", []):
+    label = item.get("label")
+    if label:
+        items[label] = item
+
+ready = True
+reasons = []
+for label in required:
+    item = items.get(label)
+    key = re.sub(r"[^A-Za-z0-9_.-]", "_", label)
+    if item is None:
+        ready = False
+        reasons.append(f"{label}:missing")
+        print(f"{key}=missing")
+        continue
+    opened = item.get("frontend-open")
+    if opened is True:
+        print(f"{key}=yes")
+    elif opened is False:
+        ready = False
+        reasons.append(f"{label}:frontend_closed")
+        print(f"{key}=no")
+    else:
+        ready = False
+        reasons.append(f"{label}:frontend_unknown")
+        print(f"{key}=unknown")
+
+print(f"ready={'yes' if ready else 'no'}")
+print("reason=" + (",".join(reasons) if reasons else ""))
+PY
+)" || payload="ready=unknown"$'\n'"reason=query_chardev_parse_failed"
+
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] || continue
+    case "${line}" in
+      ready=*)
+        state_args+=("xcolo_primary_filter_chardev_ready=${line#ready=}")
+        ;;
+      reason=*)
+        state_args+=("xcolo_primary_filter_chardev_reason=${line#reason=}")
+        ;;
+      *=*)
+        state_args+=("xcolo_primary_chardev_${line}")
+        ;;
+    esac
+  done <<< "${payload}"
+  ftctl_state_set "${vm}" "${state_args[@]}"
+  [[ "$(ftctl_state_get "${vm}" "xcolo_primary_filter_chardev_ready" 2>/dev/null || true)" == "yes" ]]
+}
+
+ftctl_xcolo_collect_primary_block_graph_state() {
+  local vm="${1-}"
+  local plan="${2-}"
+  local out rc payload state_args=()
+
+  out=""
+  rc=0
+  ftctl_xcolo_qmp "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" '{"execute":"query-named-block-nodes"}' out rc
+  if [[ "${rc}" != "0" || -z "${out}" ]]; then
+    ftctl_state_set "${vm}" \
+      "xcolo_primary_block_graph_ready=unknown" \
+      "xcolo_primary_block_graph_reason=query_named_block_nodes_failed"
+    return 1
+  fi
+
+  payload="$(python3 - <<'PY' "${plan}" "${FTCTL_PROFILE_XCOLO_NBD_NODE:-ftctl-nbd}" "${out}"
+import json
+import re
+import sys
+
+plan = sys.argv[1]
+nbd_base = sys.argv[2] or "ftctl-nbd"
+raw = sys.argv[3]
+targets = []
+for entry in plan.split(";"):
+    if not entry:
+        continue
+    target = entry.split("|", 1)[0]
+    if target:
+        targets.append(target)
+if not targets:
+    targets = ["root"]
+
+def suffix(target):
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", target or "root")
+
+try:
+    data = json.loads(raw)
+except Exception:
+    print("ready=unknown")
+    print("reason=query_named_block_nodes_parse_failed")
+    raise SystemExit(0)
+
+nodes = {item.get("node-name") for item in data.get("return", []) if item.get("node-name")}
+ready = True
+reasons = []
+for target in targets:
+    s = suffix(target)
+    required = [f"ftctl-colo-{s}", f"ftctl-primary-active-{s}", f"{nbd_base}-{s}"]
+    for node in required:
+        key = re.sub(r"[^A-Za-z0-9_.-]", "_", node)
+        if node in nodes:
+            print(f"{key}=yes")
+        else:
+            ready = False
+            reasons.append(f"{node}:missing")
+            print(f"{key}=missing")
+
+print(f"ready={'yes' if ready else 'no'}")
+print("reason=" + (",".join(reasons) if reasons else ""))
+PY
+)" || payload="ready=unknown"$'\n'"reason=query_named_block_nodes_parse_failed"
+
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] || continue
+    case "${line}" in
+      ready=*)
+        state_args+=("xcolo_primary_block_graph_ready=${line#ready=}")
+        ;;
+      reason=*)
+        state_args+=("xcolo_primary_block_graph_reason=${line#reason=}")
+        ;;
+      *=*)
+        state_args+=("xcolo_primary_block_node_${line}")
+        ;;
+    esac
+  done <<< "${payload}"
+  ftctl_state_set "${vm}" "${state_args[@]}"
+  [[ "$(ftctl_state_get "${vm}" "xcolo_primary_block_graph_ready" 2>/dev/null || true)" == "yes" ]]
+}
+
 ftctl_xcolo_capture_primary_qemu_cmdline() {
   local vm="${1-}"
   local out err rc
@@ -524,6 +683,8 @@ ftctl_xcolo_collect_runtime_failure_diagnostics() {
   ftctl_xcolo_qmp_debug_snapshot_one "${vm}" "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" "primary" || true
   ftctl_xcolo_qmp_debug_snapshot_one "${vm}" "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" "secondary" || true
   ftctl_xcolo_capture_primary_qemu_cmdline "${vm}" || true
+  ftctl_xcolo_collect_primary_chardev_binding_state "${vm}" || true
+  ftctl_xcolo_collect_primary_block_graph_state "${vm}" "$(ftctl_state_get "${vm}" "xcolo_disk_plan" 2>/dev/null || true)" || true
 
   cap_xcolo="$(ftctl_xcolo_query_primary_qmp_diag_value "${vm}" "query-migrate-capabilities" "cap:x-colo")"
   cap_return_path="$(ftctl_xcolo_query_primary_qmp_diag_value "${vm}" "query-migrate-capabilities" "cap:return-path")"
@@ -559,6 +720,10 @@ ftctl_xcolo_refine_primary_role_failure_reason() {
     printf '%s\n' "primary_checkpoint_parameter_missing"
   elif [[ "${filters_attached}" != "true" ]]; then
     printf '%s\n' "primary_colo_filter_objects_not_attached"
+  elif [[ "$(ftctl_state_get "${vm}" "xcolo_primary_filter_chardev_ready" 2>/dev/null || true)" == "no" ]]; then
+    printf '%s\n' "primary_filter_chardev_frontend_incomplete"
+  elif [[ "$(ftctl_state_get "${vm}" "xcolo_primary_block_graph_ready" 2>/dev/null || true)" == "no" ]]; then
+    printf '%s\n' "primary_block_graph_incomplete"
   else
     printf '%s\n' "primary_qemu_colo_role_transition_failed"
   fi
