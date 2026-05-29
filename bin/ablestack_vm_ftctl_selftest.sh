@@ -123,6 +123,18 @@ selftest_mock_xcolo_primary_channels_ready() {
   }
 }
 
+selftest_mock_xcolo_primary_role_diagnostics_ok() {
+  # shellcheck disable=SC2317
+  ftctl_xcolo_collect_runtime_failure_diagnostics() {
+    local vm="${1-}"
+    ftctl_state_set "${vm}" \
+      "xcolo_debug_dir=${FTCTL_RUN_DIR}/debug/xcolo/$(ftctl_state_vm_key "${vm}")" \
+      "xcolo_primary_capability_x_colo=yes" \
+      "xcolo_primary_capability_return_path=yes" \
+      "xcolo_primary_checkpoint_delay_set=yes"
+  }
+}
+
 selftest_prepare_config_file() {
   mkdir -p "${SELFTEST_ROOT}"
   cat > "${SELFTEST_CONFIG}" <<EOF
@@ -1454,6 +1466,8 @@ selftest_case_xcolo_runtime_validation_times_out_stuck_convergence() (
   FTCTL_XCOLO_RUNTIME_PENDING_MAX_SEC="1"
   FTCTL_PROFILE_QGA_POLICY="off"
   selftest_mock_xcolo_primary_channels_ready
+  selftest_mock_xcolo_primary_role_diagnostics_ok
+  ftctl_state_set "${vm}" "xcolo_primary_net_filters_attached=true"
 
   # shellcheck disable=SC2317
   ftctl_xcolo_query_running_flag() {
@@ -1515,6 +1529,8 @@ selftest_case_xcolo_runtime_validation_reports_one_sided_colo_role() (
   FTCTL_XCOLO_RUNTIME_PENDING_MAX_SEC="1"
   FTCTL_PROFILE_QGA_POLICY="off"
   selftest_mock_xcolo_primary_channels_ready
+  selftest_mock_xcolo_primary_role_diagnostics_ok
+  ftctl_state_set "${vm}" "xcolo_primary_net_filters_attached=true"
 
   # shellcheck disable=SC2317
   ftctl_xcolo_query_running_flag() {
@@ -1560,8 +1576,84 @@ selftest_case_xcolo_runtime_validation_reports_one_sided_colo_role() (
   ftctl_xcolo_validate_pair_runtime "${vm}" "${vm}-standby" || rc=$?
   selftest_assert_eq "${rc}" "1" "one-sided role should fail after bounded wait"
   selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" \
-    "xcolo_runtime_validation_failed:primary_colo_role_not_entered" \
-    "one-sided secondary role failure reason"
+    "xcolo_runtime_validation_failed:primary_qemu_colo_role_transition_failed" \
+    "one-sided secondary role refined failure reason"
+)
+
+selftest_case_xcolo_runtime_validation_refines_missing_primary_colo_capability() (
+  selftest_reset_env
+  selftest_info "x-colo runtime validation refines missing primary x-colo capability"
+
+  local vm="xcolo-runtime-missing-capability"
+  local rc=0
+  ftctl_state_init_vm "${vm}"
+  ftctl_state_set "${vm}" \
+    "xcolo_runtime_pending_since=$(date -d '10 seconds ago' '+%Y-%m-%dT%H:%M:%S%:z')" \
+    "xcolo_primary_net_filters_attached=true"
+  FTCTL_DRY_RUN="0"
+  FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
+  FTCTL_PROFILE_SECONDARY_URI="qemu+ssh://peer/system"
+  FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC="1"
+  FTCTL_XCOLO_RUNTIME_VALIDATE_TIMEOUT_SEC="1"
+  FTCTL_XCOLO_RUNTIME_PENDING_MAX_SEC="1"
+  FTCTL_PROFILE_QGA_POLICY="off"
+  selftest_mock_xcolo_primary_channels_ready
+
+  # shellcheck disable=SC2317
+  ftctl_xcolo_collect_runtime_failure_diagnostics() {
+    local vm="${1-}"
+    ftctl_state_set "${vm}" \
+      "xcolo_debug_dir=${FTCTL_RUN_DIR}/debug/xcolo/$(ftctl_state_vm_key "${vm}")" \
+      "xcolo_primary_capability_x_colo=no" \
+      "xcolo_primary_capability_return_path=yes" \
+      "xcolo_primary_checkpoint_delay_set=yes"
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_query_running_flag() {
+    local out_var="${3}"
+    printf -v "${out_var}" '%s' "false"
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_query_status_name() {
+    local uri="${1-}" out_var="${3}"
+    if [[ "${uri}" == "${FTCTL_PROFILE_PRIMARY_URI}" ]]; then
+      printf -v "${out_var}" '%s' "finish-migrate"
+    else
+      printf -v "${out_var}" '%s' "inmigrate"
+    fi
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_query_migrate_status() {
+    local uri="${1-}" out_var="${3}"
+    if [[ "${uri}" == "${FTCTL_PROFILE_PRIMARY_URI}" ]]; then
+      printf -v "${out_var}" '%s' "active"
+    else
+      printf -v "${out_var}" '%s' "colo"
+    fi
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_query_colo_mode() {
+    local uri="${1-}" out_var="${3}"
+    if [[ "${uri}" == "${FTCTL_PROFILE_PRIMARY_URI}" ]]; then
+      printf -v "${out_var}" '%s' "none"
+    else
+      printf -v "${out_var}" '%s' "secondary"
+    fi
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_domain_xml_has_runtime_markers() {
+    return 0
+  }
+
+  ftctl_xcolo_validate_pair_runtime "${vm}" "${vm}-standby" || rc=$?
+  selftest_assert_eq "${rc}" "1" "missing primary x-colo capability should fail"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" \
+    "xcolo_runtime_validation_failed:primary_colo_capability_missing" \
+    "missing primary x-colo capability refined reason"
 )
 
 selftest_case_xcolo_runtime_validation_reports_compare_channel_failure() (
@@ -2950,6 +3042,7 @@ selftest_main() {
   selftest_case_xcolo_runtime_validation_reports_pending_convergence
   selftest_case_xcolo_runtime_validation_times_out_stuck_convergence
   selftest_case_xcolo_runtime_validation_reports_one_sided_colo_role
+  selftest_case_xcolo_runtime_validation_refines_missing_primary_colo_capability
   selftest_case_xcolo_runtime_validation_reports_compare_channel_failure
   selftest_case_xcolo_runtime_validation_accepts_reported_colo_role
   selftest_case_xcolo_runtime_validation_records_optional_qga

@@ -399,6 +399,171 @@ ftctl_xcolo_capture_runtime_snapshot() {
   fi
 }
 
+ftctl_xcolo_debug_dir() {
+  local vm="${1-}"
+  printf '%s\n' "${FTCTL_RUN_DIR}/debug/xcolo/$(ftctl_state_vm_key "${vm}")"
+}
+
+ftctl_xcolo_write_debug_file() {
+  local vm="${1-}"
+  local name="${2-}"
+  local content="${3-}"
+  local dir path
+
+  dir="$(ftctl_xcolo_debug_dir "${vm}")"
+  ftctl_ensure_dir "${dir}" "0755"
+  path="${dir}/${name}"
+  printf '%s\n' "${content}" > "${path}"
+  chmod 0644 "${path}" 2>/dev/null || true
+}
+
+ftctl_xcolo_qmp_debug_snapshot_one() {
+  local vm="${1-}"
+  local uri="${2-}"
+  local domain="${3-}"
+  local prefix="${4-}"
+  local cmd payload out rc safe_cmd
+
+  [[ -n "${uri}" && -n "${domain}" ]] || return 0
+  for cmd in \
+    query-status \
+    query-migrate \
+    query-colo-status \
+    query-migrate-capabilities \
+    query-migrate-parameters \
+    query-named-block-nodes \
+    query-chardev \
+    query-iothreads; do
+    payload="{\"execute\":\"${cmd}\"}"
+    out=""
+    rc=0
+    ftctl_xcolo_qmp "${uri}" "${domain}" "${payload}" out rc
+    safe_cmd="${cmd//[^a-zA-Z0-9_.-]/_}"
+    ftctl_xcolo_write_debug_file "${vm}" "${prefix}-${safe_cmd}.stdout.json" "${out}"
+    ftctl_xcolo_write_debug_file "${vm}" "${prefix}-${safe_cmd}.rc" "${rc}"
+  done
+}
+
+ftctl_xcolo_query_primary_qmp_diag_value() {
+  local vm="${1-}"
+  local cmd="${2-}"
+  local expr="${3-}"
+  local out rc value
+
+  out=""
+  rc=0
+  ftctl_xcolo_qmp "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" "{\"execute\":\"${cmd}\"}" out rc
+  if [[ "${rc}" != "0" || -z "${out}" ]]; then
+    printf '%s\n' "unknown"
+    return 0
+  fi
+  value="$(python3 - <<'PY' "${expr}" "${out}"
+import json
+import sys
+
+expr = sys.argv[1]
+raw = sys.argv[2]
+try:
+    data = json.loads(raw)
+except Exception:
+    print("unknown")
+    raise SystemExit(0)
+
+ret = data.get("return") if isinstance(data, dict) else None
+
+if expr.startswith("cap:"):
+    name = expr.split(":", 1)[1]
+    if isinstance(ret, list):
+        for item in ret:
+            if isinstance(item, dict) and item.get("capability") == name:
+                state = item.get("state")
+                if isinstance(state, bool):
+                    print("yes" if state else "no")
+                    raise SystemExit(0)
+    print("unknown")
+elif expr.startswith("param:"):
+    name = expr.split(":", 1)[1]
+    if isinstance(ret, dict) and name in ret:
+        value = ret.get(name)
+        if value is None:
+            print("no")
+        else:
+            print("yes")
+    else:
+        print("unknown")
+else:
+    print("unknown")
+PY
+)" || value="unknown"
+  printf '%s\n' "${value}"
+}
+
+ftctl_xcolo_capture_primary_qemu_cmdline() {
+  local vm="${1-}"
+  local out err rc
+
+  out=""
+  err=""
+  rc=0
+  ftctl_cmd_run "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC:-15}" out err rc -- \
+    bash -c 'ps -eo pid=,args= | grep -F -- "$1" | grep -F "qemu" | grep -v grep || true' _ "${vm}" || true
+  : "${err}${rc}"
+  ftctl_xcolo_write_debug_file "${vm}" "primary-qemu-process-cmdline.txt" "${out}"
+}
+
+ftctl_xcolo_collect_runtime_failure_diagnostics() {
+  local vm="${1-}"
+  local secondary_vm="${2:-$vm}"
+  local debug_dir cap_xcolo cap_return_path checkpoint_delay
+
+  [[ "${FTCTL_DRY_RUN}" != "1" ]] || return 0
+
+  debug_dir="$(ftctl_xcolo_debug_dir "${vm}")"
+  ftctl_state_set "${vm}" "xcolo_debug_dir=${debug_dir}"
+
+  ftctl_xcolo_qmp_debug_snapshot_one "${vm}" "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" "primary" || true
+  ftctl_xcolo_qmp_debug_snapshot_one "${vm}" "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" "secondary" || true
+  ftctl_xcolo_capture_primary_qemu_cmdline "${vm}" || true
+
+  cap_xcolo="$(ftctl_xcolo_query_primary_qmp_diag_value "${vm}" "query-migrate-capabilities" "cap:x-colo")"
+  cap_return_path="$(ftctl_xcolo_query_primary_qmp_diag_value "${vm}" "query-migrate-capabilities" "cap:return-path")"
+  checkpoint_delay="$(ftctl_xcolo_query_primary_qmp_diag_value "${vm}" "query-migrate-parameters" "param:x-checkpoint-delay")"
+  ftctl_state_set "${vm}" \
+    "xcolo_primary_capability_x_colo=${cap_xcolo}" \
+    "xcolo_primary_capability_return_path=${cap_return_path}" \
+    "xcolo_primary_checkpoint_delay_set=${checkpoint_delay}"
+  ftctl_log_event "colo" "xcolo.runtime_diagnostics" "ok" "${vm}" "" \
+    "debug_dir=${debug_dir} x_colo=${cap_xcolo} return_path=${cap_return_path} checkpoint_delay=${checkpoint_delay}"
+}
+
+ftctl_xcolo_refine_primary_role_failure_reason() {
+  local vm="${1-}"
+  local reason="${2-}"
+  local cap_xcolo cap_return_path checkpoint_delay filters_attached
+
+  [[ "${reason}" == "primary_colo_role_not_entered" ]] || {
+    printf '%s\n' "${reason}"
+    return 0
+  }
+
+  cap_xcolo="$(ftctl_state_get "${vm}" "xcolo_primary_capability_x_colo" 2>/dev/null || true)"
+  cap_return_path="$(ftctl_state_get "${vm}" "xcolo_primary_capability_return_path" 2>/dev/null || true)"
+  checkpoint_delay="$(ftctl_state_get "${vm}" "xcolo_primary_checkpoint_delay_set" 2>/dev/null || true)"
+  filters_attached="$(ftctl_state_get "${vm}" "xcolo_primary_net_filters_attached" 2>/dev/null || true)"
+
+  if [[ "${cap_xcolo}" == "no" ]]; then
+    printf '%s\n' "primary_colo_capability_missing"
+  elif [[ "${cap_return_path}" == "no" ]]; then
+    printf '%s\n' "primary_return_path_capability_missing"
+  elif [[ "${checkpoint_delay}" == "no" ]]; then
+    printf '%s\n' "primary_checkpoint_parameter_missing"
+  elif [[ "${filters_attached}" != "true" ]]; then
+    printf '%s\n' "primary_colo_filter_objects_not_attached"
+  else
+    printf '%s\n' "primary_qemu_colo_role_transition_failed"
+  fi
+}
+
 ftctl_xcolo_domain_xml_has_runtime_markers() {
   local uri="${1-}"
   local vm="${2-}"
@@ -666,6 +831,10 @@ ftctl_xcolo_validate_pair_runtime() {
   fi
 
   if [[ -n "${reason}" ]]; then
+    if [[ "${reason}" == "primary_colo_role_not_entered" ]]; then
+      ftctl_xcolo_collect_runtime_failure_diagnostics "${vm}" "${secondary_vm}" || true
+      reason="$(ftctl_xcolo_refine_primary_role_failure_reason "${vm}" "${reason}")"
+    fi
     ftctl_state_set "${vm}" \
       "xcolo_primary_running=${primary_running}" \
       "xcolo_secondary_running=${secondary_running}" \

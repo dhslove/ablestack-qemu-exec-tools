@@ -57,6 +57,12 @@ The following errors are more useful than the previous generic role failure:
 - `primary_colo_role_not_entered` remains valid only when all required channels
   are established and the primary still does not enter the COLO role.
 
+When all four 9000-series channels are established and the failure remains
+`primary_colo_role_not_entered`, follow
+`313-ft-xcolo-primary-role-diagnostics-design-20260529.md`. At that point the
+next useful evidence is primary QMP capability/parameter/filter state, not
+additional socket-path probing.
+
 ## Desired State
 
 A successful FT protection run must satisfy all of these conditions:

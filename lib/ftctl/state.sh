@@ -372,6 +372,7 @@ ftctl_state_remove_runtime_files() {
     "${FTCTL_STATE_DIR}/${key}.state.blockcopy.progress.event" \
     "${FTCTL_STATE_DIR}/${key}.state.xcolo" 2>/dev/null || true
   rm -rf "${FTCTL_RUN_DIR}/debug/blockcopy/${key}" 2>/dev/null || true
+  rm -rf "${FTCTL_RUN_DIR}/debug/xcolo/${key}" 2>/dev/null || true
   rm -f "${FTCTL_RUN_DIR}/xml/${key}-"*.xml 2>/dev/null || true
   rm -rf "${FTCTL_XML_BACKUP_DIR}/${key}" 2>/dev/null || true
   rm -f "${FTCTL_XML_BACKUP_DIR}/${key}-"*.xml 2>/dev/null || true
