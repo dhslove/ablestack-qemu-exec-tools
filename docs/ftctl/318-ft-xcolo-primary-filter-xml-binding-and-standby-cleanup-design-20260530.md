@@ -133,3 +133,11 @@ If it still fails, the evidence should identify whether:
 Regardless of the runtime outcome, failure recovery must not report secondary
 deactivation as successful while the Cloud-managed secondary domain remains
 running.
+
+## Follow-up In Design 319
+
+The retest after this design proved that the XML-started primary filter objects
+were present, but the RX redirector direction was still wrong for the standard
+primary COLO packet path. Design 319 corrects the primary `redire0`/`redire1`
+semantics and adds QOM property snapshots so future failures can distinguish
+wrong object properties from a deeper QEMU COLO role transition issue.

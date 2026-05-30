@@ -423,6 +423,7 @@ ftctl_xcolo_qmp_debug_snapshot_one() {
   local domain="${3-}"
   local prefix="${4-}"
   local cmd payload out rc safe_cmd
+  local path prop spec
 
   [[ -n "${uri}" && -n "${domain}" ]] || return 0
   for cmd in \
@@ -449,6 +450,41 @@ ftctl_xcolo_qmp_debug_snapshot_one() {
     rc=0
     ftctl_xcolo_qmp "${uri}" "${domain}" "${payload}" out rc
     safe_cmd="qom-list-${path//\//_}"
+    ftctl_xcolo_write_debug_file "${vm}" "${prefix}-${safe_cmd}.stdout.json" "${out}"
+    ftctl_xcolo_write_debug_file "${vm}" "${prefix}-${safe_cmd}.rc" "${rc}"
+  done
+
+  for spec in \
+    /objects/m0:netdev \
+    /objects/m0:queue \
+    /objects/m0:outdev \
+    /objects/redire0:netdev \
+    /objects/redire0:queue \
+    /objects/redire0:indev \
+    /objects/redire0:outdev \
+    /objects/redire1:netdev \
+    /objects/redire1:queue \
+    /objects/redire1:indev \
+    /objects/redire1:outdev \
+    /objects/comp0:primary-in \
+    /objects/comp0:secondary-in \
+    /objects/comp0:outdev \
+    /objects/comp0:iothread \
+    /objects/f1:netdev \
+    /objects/f1:queue \
+    /objects/f1:indev \
+    /objects/f2:netdev \
+    /objects/f2:queue \
+    /objects/f2:outdev \
+    /objects/rew0:netdev \
+    /objects/rew0:queue; do
+    path="${spec%%:*}"
+    prop="${spec#*:}"
+    payload="{\"execute\":\"qom-get\",\"arguments\":{\"path\":\"${path}\",\"property\":\"${prop}\"}}"
+    out=""
+    rc=0
+    ftctl_xcolo_qmp "${uri}" "${domain}" "${payload}" out rc
+    safe_cmd="qom-get-${path//\//_}-${prop//[^a-zA-Z0-9_.-]/_}"
     ftctl_xcolo_write_debug_file "${vm}" "${prefix}-${safe_cmd}.stdout.json" "${out}"
     ftctl_xcolo_write_debug_file "${vm}" "${prefix}-${safe_cmd}.rc" "${rc}"
   done
@@ -1345,7 +1381,7 @@ ftctl_xcolo_build_primary_qemu_args() {
   # Keep chardev endpoints and packet filters in the generated XML so QEMU binds
   # the COLO netfilter chain during netdev creation. Dynamic QMP object-add can
   # accept the objects yet leave filter-facing chardev frontends detached.
-  printf '%s\n' "-S;-chardev;socket,id=mirror0,host=0.0.0.0,port=${mirror_port},server=on,wait=${mirror_wait};-chardev;socket,id=compare1,host=0.0.0.0,port=${compare_port},server=on,wait=${compare_wait};-chardev;socket,id=compare0,host=127.0.0.1,port=${compare_local_port},server=on,wait=off;-chardev;socket,id=compare0-0,host=127.0.0.1,port=${compare_local_port};-chardev;socket,id=compare_out,host=127.0.0.1,port=${compare_out_port},server=on,wait=off;-chardev;socket,id=compare_out0,host=127.0.0.1,port=${compare_out_port};-object;colo-compare,id=comp0,primary_in=compare0-0,secondary_in=compare1,outdev=compare_out0,iothread=iothread1;-object;filter-mirror,id=m0,netdev=hostnet0,queue=tx,outdev=mirror0;-object;filter-redirector,id=redire0,netdev=hostnet0,queue=rx,indev=compare_out;-object;filter-redirector,id=redire1,netdev=hostnet0,queue=rx,outdev=compare0"
+  printf '%s\n' "-S;-chardev;socket,id=mirror0,host=0.0.0.0,port=${mirror_port},server=on,wait=${mirror_wait};-chardev;socket,id=compare1,host=0.0.0.0,port=${compare_port},server=on,wait=${compare_wait};-chardev;socket,id=compare0,host=127.0.0.1,port=${compare_local_port},server=on,wait=off;-chardev;socket,id=compare0-0,host=127.0.0.1,port=${compare_local_port};-chardev;socket,id=compare_out,host=127.0.0.1,port=${compare_out_port},server=on,wait=off;-chardev;socket,id=compare_out0,host=127.0.0.1,port=${compare_out_port};-object;colo-compare,id=comp0,primary_in=compare0-0,secondary_in=compare1,outdev=compare_out0,iothread=iothread1;-object;filter-mirror,id=m0,netdev=hostnet0,queue=tx,outdev=mirror0;-object;filter-redirector,id=redire0,netdev=hostnet0,queue=rx,outdev=compare0;-object;filter-redirector,id=redire1,netdev=hostnet0,queue=rx,indev=compare_out"
 }
 
 ftctl_xcolo_build_secondary_qemu_args() {
@@ -2260,11 +2296,11 @@ ftctl_xcolo_attach_primary_net_filters() {
   fi
 
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
-    '{"execute":"object-add","arguments":{"qom-type":"filter-redirector","id":"redire0","netdev":"hostnet0","queue":"rx","indev":"compare_out"}}' \
-    "colo" "primary.object_add_redirector_in" || return 1
-  ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
-    '{"execute":"object-add","arguments":{"qom-type":"filter-redirector","id":"redire1","netdev":"hostnet0","queue":"rx","outdev":"compare0"}}' \
+    '{"execute":"object-add","arguments":{"qom-type":"filter-redirector","id":"redire0","netdev":"hostnet0","queue":"rx","outdev":"compare0"}}' \
     "colo" "primary.object_add_redirector_out" || return 1
+  ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
+    '{"execute":"object-add","arguments":{"qom-type":"filter-redirector","id":"redire1","netdev":"hostnet0","queue":"rx","indev":"compare_out"}}' \
+    "colo" "primary.object_add_redirector_in" || return 1
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
     '{"execute":"object-add","arguments":{"qom-type":"colo-compare","id":"comp0","primary_in":"compare0-0","secondary_in":"compare1","outdev":"compare_out0","iothread":"iothread1"}}' \
     "colo" "primary.object_add_colo_compare" || return 1
