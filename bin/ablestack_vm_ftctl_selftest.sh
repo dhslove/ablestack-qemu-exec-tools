@@ -372,6 +372,43 @@ EOF
   selftest_assert_eq "$(ftctl_state_get "${vm}" "active_side")" "secondary" "already existing standby side"
 )
 
+selftest_case_standby_deactivate_uses_generated_domain_name() (
+  selftest_reset_env
+  selftest_info "standby deactivate uses generated libvirt domain name"
+
+  local vm="standby-generated-name"
+  local bundle="${SELFTEST_ROOT}/xml/${vm}"
+  local call_log="${SELFTEST_ROOT}/standby-deactivate-generated-name.log"
+  FTCTL_DRY_RUN="0"
+  FTCTL_PROFILE_MODE="ft"
+  FTCTL_PROFILE_SECONDARY_URI="qemu+ssh://peer/system"
+  FTCTL_PROFILE_SECONDARY_VM_NAME="${vm}-standby"
+  ftctl_state_init_vm "${vm}"
+  mkdir -p "${bundle}"
+  cat > "${bundle}/standby.generated.xml" <<EOF
+<domain type='kvm'>
+  <name>i-2-222-VM</name>
+</domain>
+EOF
+  ftctl_state_set "${vm}" \
+    "secondary_vm_name=${vm}-standby" \
+    "standby_xml_generated=${bundle}/standby.generated.xml"
+
+  # shellcheck disable=SC2317
+  ftctl_virsh() {
+    local out_var="${2}" err_var="${3}" rc_var="${4}" cmd="$*"
+    printf '%s\n' "${cmd}" >> "${call_log}"
+    printf -v "${out_var}" '%s' ""
+    printf -v "${err_var}" '%s' "error: Domain not found"
+    printf -v "${rc_var}" '%s' "1"
+  }
+
+  ftctl_standby_deactivate "${vm}"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "standby_state")" "stopped" "standby deactivate generated domain"
+  selftest_assert_file_contains "${call_log}" "destroy i-2-222-VM"
+  selftest_assert_file_contains "${call_log}" "undefine i-2-222-VM"
+)
+
 selftest_case_backend_validation() {
   selftest_reset_env
   selftest_info "backend mode validation"
@@ -875,9 +912,10 @@ EOF
   selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "<iothreads>1</iothreads>"
   selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" '<iothread id="1"'
   selftest_assert_file_not_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "iothread,id=iothread1"
-  selftest_assert_file_not_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "filter-mirror"
-  selftest_assert_file_not_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "filter-redirector"
-  selftest_assert_file_not_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "colo-compare"
+  selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "filter-mirror,id=m0"
+  selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "filter-redirector,id=redire0"
+  selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "filter-redirector,id=redire1"
+  selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "colo-compare,id=comp0"
   selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "socket,id=mirror0,host=0.0.0.0,port=9003,server=on,wait=off"
   selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "socket,id=compare1,host=0.0.0.0,port=9004,server=on,wait=on"
   selftest_assert_file_not_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "socket,id=mirror0,host=0.0.0.0,port=9003,server=on,wait=on"
@@ -3194,6 +3232,7 @@ selftest_main() {
   selftest_case_blockcopy_and_standby
   selftest_case_libvirt_managed_peer_krbd_map
   selftest_case_standby_activate_already_exists
+  selftest_case_standby_deactivate_uses_generated_domain_name
   selftest_case_backend_validation
   selftest_case_dr_remote_key_connectivity_args
   selftest_case_blockcopy_missing_job_state

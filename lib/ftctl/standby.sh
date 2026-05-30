@@ -1122,8 +1122,19 @@ ftctl_standby_activate() {
 ftctl_standby_deactivate() {
   local vm="${1-}"
   local secondary_vm_name out err rc state
+  local candidates=() candidate xml xml_name seen name active_found
 
   secondary_vm_name="$(ftctl_state_get "${vm}" "secondary_vm_name" 2>/dev/null || ftctl_profile_secondary_vm_name_resolved "${vm}")"
+  candidates+=("${secondary_vm_name}")
+  candidates+=("$(ftctl_profile_secondary_vm_name_resolved "${vm}")")
+  for xml in \
+    "$(ftctl_state_get "${vm}" "standby_xml_generated" 2>/dev/null || true)" \
+    "$(ftctl_state_get "${vm}" "standby_xml_seed" 2>/dev/null || true)"; do
+    if [[ -n "${xml}" && -f "${xml}" ]]; then
+      xml_name="$(sed -n 's:.*<name>\([^<]*\)</name>.*:\1:p' "${xml}" | head -n1)"
+      [[ -n "${xml_name}" ]] && candidates+=("${xml_name}")
+    fi
+  done
 
   if [[ "${FTCTL_DRY_RUN}" == "1" ]]; then
     ftctl_state_set "${vm}" "standby_state=stopped-dry-run"
@@ -1132,59 +1143,78 @@ ftctl_standby_deactivate() {
     return 0
   fi
 
-  out=""
-  err=""
-  rc=0
-  ftctl_virsh "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC}" out err rc -- -c "${FTCTL_PROFILE_SECONDARY_URI}" destroy "${secondary_vm_name}" || true
-  : "${out}${err}"
-  if [[ "${rc}" != "0" ]]; then
-    case "${err}" in
-      *"failed to get domain"*|*"domain is not running"*|*"Domain not found"*)
-        rc=0
-        ;;
-    esac
-  fi
-  if [[ "${rc}" != "0" ]]; then
-    ftctl_log_event "standby" "standby.deactivate" "fail" "${vm}" "${rc}" \
-      "secondary_uri=${FTCTL_PROFILE_SECONDARY_URI}"
-    return "${rc}"
-  fi
+  seen=" "
+  for candidate in "${candidates[@]}"; do
+    [[ -n "${candidate}" ]] || continue
+    [[ "${seen}" == *" ${candidate} "* ]] && continue
+    seen="${seen}${candidate} "
 
-  out=""
-  err=""
-  rc=0
-  ftctl_virsh "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC}" out err rc -- -c "${FTCTL_PROFILE_SECONDARY_URI}" undefine "${secondary_vm_name}" || true
-  : "${out}${err}"
-  if [[ "${rc}" != "0" ]]; then
-    case "${err}" in
-      *"failed to get domain"*|*"Domain not found"*|*"not found"*)
-        rc=0
-        ;;
-    esac
-  fi
-  if [[ "${rc}" != "0" ]]; then
-    ftctl_log_event "standby" "standby.deactivate.undefine" "warn" "${vm}" "${rc}" \
-      "secondary_uri=${FTCTL_PROFILE_SECONDARY_URI}"
-  else
-    ftctl_log_event "standby" "standby.deactivate.undefine" "ok" "${vm}" "" \
-      "secondary_uri=${FTCTL_PROFILE_SECONDARY_URI}"
-  fi
+    out=""
+    err=""
+    rc=0
+    ftctl_virsh "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC}" out err rc -- -c "${FTCTL_PROFILE_SECONDARY_URI}" destroy "${candidate}" || true
+    : "${out}${err}"
+    if [[ "${rc}" != "0" ]]; then
+      case "${err}" in
+        *"failed to get domain"*|*"domain is not running"*|*"Domain not found"*)
+          rc=0
+          ;;
+      esac
+    fi
+    if [[ "${rc}" != "0" ]]; then
+      ftctl_log_event "standby" "standby.deactivate.destroy" "warn" "${vm}" "${rc}" \
+        "secondary_uri=${FTCTL_PROFILE_SECONDARY_URI} domain=${candidate}"
+    else
+      ftctl_log_event "standby" "standby.deactivate.destroy" "ok" "${vm}" "" \
+        "secondary_uri=${FTCTL_PROFILE_SECONDARY_URI} domain=${candidate}"
+    fi
 
-  out=""
-  err=""
-  rc=0
-  ftctl_virsh "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC}" out err rc -- -c "${FTCTL_PROFILE_SECONDARY_URI}" domstate "${secondary_vm_name}" || true
-  state="$(printf '%s' "${out}" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | head -n1)"
-  if [[ "${rc}" == "0" && -n "${state}" && "${state}" != "shut off" && "${state}" != "shutoff" ]]; then
-    ftctl_log_event "standby" "standby.deactivate.verify" "fail" "${vm}" "" \
-      "secondary_uri=${FTCTL_PROFILE_SECONDARY_URI} state=${state}"
+    out=""
+    err=""
+    rc=0
+    ftctl_virsh "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC}" out err rc -- -c "${FTCTL_PROFILE_SECONDARY_URI}" undefine "${candidate}" || true
+    : "${out}${err}"
+    if [[ "${rc}" != "0" ]]; then
+      case "${err}" in
+        *"failed to get domain"*|*"Domain not found"*|*"not found"*)
+          rc=0
+          ;;
+      esac
+    fi
+    if [[ "${rc}" != "0" ]]; then
+      ftctl_log_event "standby" "standby.deactivate.undefine" "warn" "${vm}" "${rc}" \
+        "secondary_uri=${FTCTL_PROFILE_SECONDARY_URI} domain=${candidate}"
+    else
+      ftctl_log_event "standby" "standby.deactivate.undefine" "ok" "${vm}" "" \
+        "secondary_uri=${FTCTL_PROFILE_SECONDARY_URI} domain=${candidate}"
+    fi
+  done
+
+  active_found="0"
+  seen=" "
+  for name in "${candidates[@]}"; do
+    [[ -n "${name}" ]] || continue
+    [[ "${seen}" == *" ${name} "* ]] && continue
+    seen="${seen}${name} "
+    out=""
+    err=""
+    rc=0
+    ftctl_virsh "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC}" out err rc -- -c "${FTCTL_PROFILE_SECONDARY_URI}" domstate "${name}" || true
+    state="$(printf '%s' "${out}" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | head -n1)"
+    if [[ "${rc}" == "0" && -n "${state}" && "${state}" != "shut off" && "${state}" != "shutoff" ]]; then
+      active_found="1"
+      ftctl_log_event "standby" "standby.deactivate.verify" "fail" "${vm}" "" \
+        "secondary_uri=${FTCTL_PROFILE_SECONDARY_URI} domain=${name} state=${state}"
+    fi
+  done
+  if [[ "${active_found}" == "1" ]]; then
     ftctl_state_set "${vm}" "standby_state=stop_failed"
     return 1
   fi
 
   ftctl_state_set "${vm}" "standby_state=stopped"
   ftctl_log_event "standby" "standby.deactivate" "ok" "${vm}" "" \
-    "secondary_uri=${FTCTL_PROFILE_SECONDARY_URI}"
+    "secondary_uri=${FTCTL_PROFILE_SECONDARY_URI} domains=$(printf '%s,' "${candidates[@]}")"
 }
 
 ftctl_primary_activate_from_backup() {

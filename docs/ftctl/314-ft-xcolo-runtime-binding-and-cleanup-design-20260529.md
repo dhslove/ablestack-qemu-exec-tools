@@ -83,3 +83,9 @@ Design 315 moves the primary chardev frontend check earlier in the protect
 sequence. Runtime diagnostics remain useful for postmortem evidence, but qemu
 FTCTL should now block before `cont` and `migrate` if QEMU accepts the filter
 objects yet leaves required primary chardev frontends closed.
+
+That early hard gate was later relaxed by design 317 so the system could reach
+the true post-`cont` evidence point. Design 318 then changes the binding model:
+primary filter objects are placed in the generated primary XML so QEMU binds
+them during netdev creation, while QMP dynamic attachment remains only as a
+fallback for older runtimes.

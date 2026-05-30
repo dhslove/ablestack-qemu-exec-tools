@@ -96,3 +96,12 @@ boundary. That gives better evidence about whether the issue is:
 - only a premature pre-`cont` assertion,
 - a post-`cont` COLO role transition failure,
 - or a genuine QEMU filter/redirector topology problem.
+
+## Follow-up
+
+The next retest proved that the pre-`cont` defer was the right diagnostic
+boundary: the run reached `cont`, `migrate`, and runtime validation. It still
+failed because the primary filter-facing chardev frontends remained closed
+after migration. That follow-up changes the primary filter binding strategy
+from QMP-only dynamic attachment to generated-XML startup binding in
+[318. FT X-COLO Primary Filter XML Binding And Standby Cleanup Design](318-ft-xcolo-primary-filter-xml-binding-and-standby-cleanup-design-20260530.md).
