@@ -458,26 +458,44 @@ ftctl_xcolo_qmp_debug_snapshot_one() {
     /objects/m0:netdev \
     /objects/m0:queue \
     /objects/m0:outdev \
+    /objects/m0:status \
+    /objects/m0:insert \
+    /objects/m0:position \
     /objects/redire0:netdev \
     /objects/redire0:queue \
     /objects/redire0:indev \
     /objects/redire0:outdev \
+    /objects/redire0:status \
+    /objects/redire0:insert \
+    /objects/redire0:position \
     /objects/redire1:netdev \
     /objects/redire1:queue \
     /objects/redire1:indev \
     /objects/redire1:outdev \
-    /objects/comp0:primary-in \
-    /objects/comp0:secondary-in \
+    /objects/redire1:status \
+    /objects/redire1:insert \
+    /objects/redire1:position \
+    /objects/comp0:primary_in \
+    /objects/comp0:secondary_in \
     /objects/comp0:outdev \
     /objects/comp0:iothread \
     /objects/f1:netdev \
     /objects/f1:queue \
     /objects/f1:indev \
+    /objects/f1:status \
+    /objects/f1:insert \
+    /objects/f1:position \
     /objects/f2:netdev \
     /objects/f2:queue \
     /objects/f2:outdev \
+    /objects/f2:status \
+    /objects/f2:insert \
+    /objects/f2:position \
     /objects/rew0:netdev \
-    /objects/rew0:queue; do
+    /objects/rew0:queue \
+    /objects/rew0:status \
+    /objects/rew0:insert \
+    /objects/rew0:position; do
     path="${spec%%:*}"
     prop="${spec#*:}"
     payload="{\"execute\":\"qom-get\",\"arguments\":{\"path\":\"${path}\",\"property\":\"${prop}\"}}"
@@ -1193,6 +1211,9 @@ ftctl_xcolo_reconcile_pending_runtime() {
   ftctl_xcolo_validate_pair_runtime "${vm}" "${secondary_vm}" || rc=$?
   case "${rc}" in
     0)
+      ftctl_xcolo_apply_checkpoint_delay_after_start "${vm}" || \
+        ftctl_log_event "colo" "primary.migrate_set_parameters.post_start" "warn" "${vm}" "" \
+          "checkpoint_delay=${FTCTL_PROFILE_XCOLO_CHECKPOINT_DELAY:-}"
       ftctl_state_set "${vm}" \
         "conversion_stage=handshake_complete" \
         "conversion_state=colo_running" \
@@ -1280,9 +1301,6 @@ ftctl_xcolo_prebuilt_primary_stage() {
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
     '{"execute":"migrate-set-capabilities","arguments":{"capabilities":[{"capability":"return-path","state":true},{"capability":"x-colo","state":true}]}}' \
     "colo" "primary.migrate_set_capabilities" || return 1
-  ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
-    "{\"execute\":\"migrate-set-parameters\",\"arguments\":{\"x-checkpoint-delay\":${FTCTL_PROFILE_XCOLO_CHECKPOINT_DELAY}}}" \
-    "colo" "primary.migrate_set_parameters" || return 1
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
     "{\"execute\":\"migrate\",\"arguments\":{\"uri\":\"${FTCTL_PROFILE_XCOLO_MIGRATE_URI}\"}}" \
     "colo" "primary.migrate" || return 1
@@ -1381,7 +1399,7 @@ ftctl_xcolo_build_primary_qemu_args() {
   # Keep chardev endpoints and packet filters in the generated XML so QEMU binds
   # the COLO netfilter chain during netdev creation. Dynamic QMP object-add can
   # accept the objects yet leave filter-facing chardev frontends detached.
-  printf '%s\n' "-S;-chardev;socket,id=mirror0,host=0.0.0.0,port=${mirror_port},server=on,wait=${mirror_wait};-chardev;socket,id=compare1,host=0.0.0.0,port=${compare_port},server=on,wait=${compare_wait};-chardev;socket,id=compare0,host=127.0.0.1,port=${compare_local_port},server=on,wait=off;-chardev;socket,id=compare0-0,host=127.0.0.1,port=${compare_local_port};-chardev;socket,id=compare_out,host=127.0.0.1,port=${compare_out_port},server=on,wait=off;-chardev;socket,id=compare_out0,host=127.0.0.1,port=${compare_out_port};-object;colo-compare,id=comp0,primary_in=compare0-0,secondary_in=compare1,outdev=compare_out0,iothread=iothread1;-object;filter-mirror,id=m0,netdev=hostnet0,queue=tx,outdev=mirror0;-object;filter-redirector,id=redire0,netdev=hostnet0,queue=rx,outdev=compare0;-object;filter-redirector,id=redire1,netdev=hostnet0,queue=rx,indev=compare_out"
+  printf '%s\n' "-S;-chardev;socket,id=mirror0,host=0.0.0.0,port=${mirror_port},server=on,wait=${mirror_wait};-chardev;socket,id=compare1,host=0.0.0.0,port=${compare_port},server=on,wait=${compare_wait};-chardev;socket,id=compare0,host=127.0.0.1,port=${compare_local_port},server=on,wait=off;-chardev;socket,id=compare0-0,host=127.0.0.1,port=${compare_local_port};-chardev;socket,id=compare_out,host=127.0.0.1,port=${compare_out_port},server=on,wait=off;-chardev;socket,id=compare_out0,host=127.0.0.1,port=${compare_out_port};-object;filter-mirror,id=m0,netdev=hostnet0,queue=tx,outdev=mirror0;-object;filter-redirector,id=redire0,netdev=hostnet0,queue=rx,indev=compare_out;-object;filter-redirector,id=redire1,netdev=hostnet0,queue=rx,outdev=compare0;-object;colo-compare,id=comp0,primary_in=compare0-0,secondary_in=compare1,outdev=compare_out0,iothread=iothread1"
 }
 
 ftctl_xcolo_build_secondary_qemu_args() {
@@ -1406,7 +1424,7 @@ COLO startup alignment checklist
    - mirror0 server wait=off
    - compare1 server wait=on
    - compare0 / compare0-0 / compare_out / compare_out0 loopback sockets
-   - primary filter objects are attached later by QMP after block graph readiness
+   - primary filter objects are present in XML or attached by QMP fallback
    - root disk on if=ide quorum node
    - startup paused with -S
 2. Secondary startup:
@@ -1425,8 +1443,8 @@ COLO startup alignment checklist
    - primary x-blockdev-change parent=colo-disk0 node=nbd0
    - primary QMP object-add for redirectors / colo-compare / filter-mirror
    - primary migrate-set-capabilities x-colo
-   - primary migrate-set-parameters x-checkpoint-delay
    - primary migrate
+   - primary migrate-set-parameters x-checkpoint-delay after COLO starts
 EOF
 }
 
@@ -2296,11 +2314,11 @@ ftctl_xcolo_attach_primary_net_filters() {
   fi
 
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
-    '{"execute":"object-add","arguments":{"qom-type":"filter-redirector","id":"redire0","netdev":"hostnet0","queue":"rx","outdev":"compare0"}}' \
-    "colo" "primary.object_add_redirector_out" || return 1
-  ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
-    '{"execute":"object-add","arguments":{"qom-type":"filter-redirector","id":"redire1","netdev":"hostnet0","queue":"rx","indev":"compare_out"}}' \
+    '{"execute":"object-add","arguments":{"qom-type":"filter-redirector","id":"redire0","netdev":"hostnet0","queue":"rx","indev":"compare_out"}}' \
     "colo" "primary.object_add_redirector_in" || return 1
+  ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
+    '{"execute":"object-add","arguments":{"qom-type":"filter-redirector","id":"redire1","netdev":"hostnet0","queue":"rx","outdev":"compare0"}}' \
+    "colo" "primary.object_add_redirector_out" || return 1
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
     '{"execute":"object-add","arguments":{"qom-type":"colo-compare","id":"comp0","primary_in":"compare0-0","secondary_in":"compare1","outdev":"compare_out0","iothread":"iothread1"}}' \
     "colo" "primary.object_add_colo_compare" || return 1
@@ -2321,6 +2339,19 @@ ftctl_xcolo_resume_primary_before_migrate() {
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
     '{"execute":"cont"}' "colo" "primary.cont_before_migrate" || return 1
   ftctl_state_set "${vm}" "xcolo_primary_cont_before_migrate=true"
+}
+
+ftctl_xcolo_apply_checkpoint_delay_after_start() {
+  local vm="${1-}"
+  local checkpoint_delay
+
+  checkpoint_delay="${FTCTL_PROFILE_XCOLO_CHECKPOINT_DELAY:-}"
+  [[ -n "${checkpoint_delay}" && "${checkpoint_delay}" =~ ^[0-9]+$ ]] || return 0
+
+  ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
+    "{\"execute\":\"migrate-set-parameters\",\"arguments\":{\"x-checkpoint-delay\":${checkpoint_delay}}}" \
+    "colo" "primary.migrate_set_parameters.post_start" || return 1
+  ftctl_state_set "${vm}" "xcolo_primary_checkpoint_delay_post_start=${checkpoint_delay}"
 }
 
 ftctl_xcolo_execute_handshake_with_nodes() {
@@ -2355,9 +2386,6 @@ ftctl_xcolo_execute_handshake_with_nodes() {
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
     '{"execute":"migrate-set-capabilities","arguments":{"capabilities":[{"capability":"return-path","state":true},{"capability":"x-colo","state":true}]}}' \
     "colo" "primary.migrate_set_capabilities" || return 1
-  ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
-    "{\"execute\":\"migrate-set-parameters\",\"arguments\":{\"x-checkpoint-delay\":${FTCTL_PROFILE_XCOLO_CHECKPOINT_DELAY}}}" \
-    "colo" "primary.migrate_set_parameters" || return 1
   ftctl_xcolo_resume_primary_before_migrate "${vm}" || return 1
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
     "{\"execute\":\"migrate\",\"arguments\":{\"uri\":\"${FTCTL_PROFILE_XCOLO_MIGRATE_URI}\"}}" \
@@ -2429,9 +2457,6 @@ ftctl_xcolo_execute_handshake_with_disk_plan() {
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
     '{"execute":"migrate-set-capabilities","arguments":{"capabilities":[{"capability":"return-path","state":true},{"capability":"x-colo","state":true}]}}' \
     "colo" "primary.migrate_set_capabilities" || return 1
-  ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
-    "{\"execute\":\"migrate-set-parameters\",\"arguments\":{\"x-checkpoint-delay\":${FTCTL_PROFILE_XCOLO_CHECKPOINT_DELAY}}}" \
-    "colo" "primary.migrate_set_parameters" || return 1
   ftctl_xcolo_resume_primary_before_migrate "${vm}" || return 1
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
     "{\"execute\":\"migrate\",\"arguments\":{\"uri\":\"${FTCTL_PROFILE_XCOLO_MIGRATE_URI}\"}}" \
@@ -3196,6 +3221,9 @@ ftctl_xcolo_execute_block_cold_conversion() {
   ftctl_xcolo_validate_pair_runtime "${vm}" "${secondary_vm}" || validate_rc=$?
   case "${validate_rc}" in
     0)
+      ftctl_xcolo_apply_checkpoint_delay_after_start "${vm}" || \
+        ftctl_log_event "colo" "primary.migrate_set_parameters.post_start" "warn" "${vm}" "" \
+          "checkpoint_delay=${FTCTL_PROFILE_XCOLO_CHECKPOINT_DELAY:-}"
       ;;
     10)
       ftctl_xcolo_mark_runtime_pending "${vm}" "runtime_converging"
@@ -3318,6 +3346,9 @@ ftctl_xcolo_plan_protect_prebuilt() {
   ftctl_xcolo_validate_pair_runtime "${vm}" "${vm}" || validate_rc=$?
   case "${validate_rc}" in
     0)
+      ftctl_xcolo_apply_checkpoint_delay_after_start "${vm}" || \
+        ftctl_log_event "colo" "primary.migrate_set_parameters.post_start" "warn" "${vm}" "" \
+          "checkpoint_delay=${FTCTL_PROFILE_XCOLO_CHECKPOINT_DELAY:-}"
       ;;
     10)
       ftctl_xcolo_mark_runtime_pending "${vm}" "runtime_converging"
