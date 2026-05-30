@@ -1442,6 +1442,86 @@ ftctl_xcolo_mark_runtime_pending() {
     "last_error="
 }
 
+ftctl_xcolo_runtime_candidate_promote_sec() {
+  local threshold="${FTCTL_XCOLO_RUNTIME_CANDIDATE_PROMOTE_SEC:-}"
+  if [[ -z "${threshold}" ]]; then
+    threshold="${FTCTL_XCOLO_RUNTIME_PENDING_MAX_SEC:-180}"
+  fi
+  [[ "${threshold}" =~ ^[0-9]+$ && "${threshold}" -gt 0 ]] || threshold="180"
+  printf '%s\n' "${threshold}"
+}
+
+ftctl_xcolo_established_candidate_ready() {
+  local vm="${1-}"
+  local pending_reason pending_since elapsed threshold
+  local primary_status="" secondary_status="" primary_migrate="" secondary_migrate=""
+  local secondary_vm
+  local filter_qom filter_cmdline mirror compare compare_local compare_out
+
+  pending_reason="$(ftctl_state_get "${vm}" "xcolo_pending_reason" 2>/dev/null || true)"
+  [[ "${pending_reason}" == "colo_established_candidate" ]] || return 1
+
+  pending_since="$(ftctl_state_get "${vm}" "xcolo_runtime_pending_since" 2>/dev/null || true)"
+  [[ -n "${pending_since}" ]] || return 1
+  elapsed="$(ftctl_elapsed_since_iso "${pending_since}" 2>/dev/null || echo "0")"
+  [[ "${elapsed}" =~ ^[0-9]+$ ]] || elapsed="0"
+  threshold="$(ftctl_xcolo_runtime_candidate_promote_sec)"
+  ftctl_state_set "${vm}" \
+    "xcolo_candidate_promote_elapsed=${elapsed}" \
+    "xcolo_candidate_promote_threshold=${threshold}"
+  (( elapsed >= threshold )) || return 1
+
+  secondary_vm="$(ftctl_profile_secondary_vm_name_resolved "${vm}")"
+  [[ -n "${secondary_vm}" ]] || secondary_vm="${vm}"
+  ftctl_xcolo_query_status "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" primary_status || true
+  ftctl_xcolo_query_status "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" secondary_status || true
+  ftctl_xcolo_query_migrate_status "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" primary_migrate || true
+  ftctl_xcolo_query_migrate_status "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" secondary_migrate || true
+
+  [[ "${primary_status}" == "finish-migrate" ]] || return 1
+  [[ "${secondary_status}" == "inmigrate" ]] || return 1
+  [[ "${primary_migrate}" == "active" ]] || return 1
+  [[ "${secondary_migrate}" == "colo" ]] || return 1
+
+  ftctl_xcolo_capture_primary_channel_state "${vm}" || true
+  mirror="$(ftctl_state_get "${vm}" "xcolo_channel_mirror_established" 2>/dev/null || true)"
+  compare="$(ftctl_state_get "${vm}" "xcolo_channel_compare_established" 2>/dev/null || true)"
+  compare_local="$(ftctl_state_get "${vm}" "xcolo_channel_compare_local_established" 2>/dev/null || true)"
+  compare_out="$(ftctl_state_get "${vm}" "xcolo_channel_compare_out_established" 2>/dev/null || true)"
+  [[ "${mirror}" == "yes" && "${compare}" == "yes" && "${compare_local}" == "yes" && "${compare_out}" == "yes" ]] || return 1
+
+  filter_qom="$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_ready" 2>/dev/null || true)"
+  filter_cmdline="$(ftctl_state_get "${vm}" "xcolo_primary_filter_cmdline_ready" 2>/dev/null || true)"
+  [[ "${filter_qom}" == "yes" || "${filter_cmdline}" == "yes" ]] || return 1
+
+  ftctl_state_set "${vm}" \
+    "xcolo_candidate_primary_status=${primary_status}" \
+    "xcolo_candidate_secondary_status=${secondary_status}" \
+    "xcolo_candidate_primary_migrate=${primary_migrate}" \
+    "xcolo_candidate_secondary_migrate=${secondary_migrate}" \
+    "xcolo_candidate_promote_ready=yes"
+  return 0
+}
+
+ftctl_xcolo_mark_established_candidate_promoted() {
+  local vm="${1-}"
+  local source="${2:-runtime_reconcile}"
+
+  ftctl_state_set "${vm}" \
+    "conversion_stage=handshake_candidate_established" \
+    "conversion_state=colo_running" \
+    "protection_state=colo_running" \
+    "transport_state=mirroring" \
+    "active_side=primary" \
+    "xcolo_candidate_promoted=true" \
+    "xcolo_candidate_promoted_by=${source}" \
+    "last_sync_ts=$(ftctl_now_iso8601)" \
+    "last_healthy_ts=$(ftctl_now_iso8601)" \
+    "last_error="
+  ftctl_log_event "colo" "xcolo.runtime_candidate_promote" "ok" "${vm}" "" \
+    "source=${source} elapsed=$(ftctl_state_get "${vm}" "xcolo_candidate_promote_elapsed" 2>/dev/null || true) threshold=$(ftctl_state_get "${vm}" "xcolo_candidate_promote_threshold" 2>/dev/null || true)"
+}
+
 ftctl_xcolo_reconcile_pending_runtime() {
   local vm="${1-}"
   local secondary_vm
@@ -1471,10 +1551,16 @@ ftctl_xcolo_reconcile_pending_runtime() {
       return 0
       ;;
     10)
-      ftctl_xcolo_mark_runtime_pending "${vm}" "runtime_converging"
-      ftctl_state_set "${vm}" "last_healthy_ts=$(ftctl_now_iso8601)"
-      ftctl_log_event "colo" "xcolo.runtime_reconcile" "pending" "${vm}" "" \
-        "secondary_vm=${secondary_vm}"
+      if ftctl_xcolo_established_candidate_ready "${vm}"; then
+        ftctl_xcolo_mark_established_candidate_promoted "${vm}" "runtime_reconcile"
+        ftctl_log_event "colo" "xcolo.runtime_reconcile" "ok" "${vm}" "" \
+          "secondary_vm=${secondary_vm} reason=candidate_promoted"
+      else
+        ftctl_xcolo_mark_runtime_pending "${vm}" "runtime_converging"
+        ftctl_state_set "${vm}" "last_healthy_ts=$(ftctl_now_iso8601)"
+        ftctl_log_event "colo" "xcolo.runtime_reconcile" "pending" "${vm}" "" \
+          "secondary_vm=${secondary_vm}"
+      fi
       return 0
       ;;
     *)
@@ -3470,9 +3556,15 @@ ftctl_xcolo_execute_block_cold_conversion() {
           "checkpoint_delay=${FTCTL_PROFILE_XCOLO_CHECKPOINT_DELAY:-}"
       ;;
     10)
-      ftctl_xcolo_mark_runtime_pending "${vm}" "runtime_converging"
-      ftctl_log_event "colo" "xcolo.block_cold_conversion.execute" "pending" "${vm}" "" \
-        "primary_base=${primary_base_node} secondary_base=${secondary_base_node}"
+      if ftctl_xcolo_established_candidate_ready "${vm}"; then
+        ftctl_xcolo_mark_established_candidate_promoted "${vm}" "block_cold_conversion"
+        ftctl_log_event "colo" "xcolo.block_cold_conversion.execute" "ok" "${vm}" "" \
+          "reason=candidate_promoted primary_base=${primary_base_node} secondary_base=${secondary_base_node}"
+      else
+        ftctl_xcolo_mark_runtime_pending "${vm}" "runtime_converging"
+        ftctl_log_event "colo" "xcolo.block_cold_conversion.execute" "pending" "${vm}" "" \
+          "primary_base=${primary_base_node} secondary_base=${secondary_base_node}"
+      fi
       return 0
       ;;
     *)
@@ -3595,9 +3687,15 @@ ftctl_xcolo_plan_protect_prebuilt() {
           "checkpoint_delay=${FTCTL_PROFILE_XCOLO_CHECKPOINT_DELAY:-}"
       ;;
     10)
-      ftctl_xcolo_mark_runtime_pending "${vm}" "runtime_converging"
-      ftctl_log_event "colo" "xcolo.protect" "pending" "${vm}" "" \
-        "reason=runtime_converging"
+      if ftctl_xcolo_established_candidate_ready "${vm}"; then
+        ftctl_xcolo_mark_established_candidate_promoted "${vm}" "protect_prebuilt"
+        ftctl_log_event "colo" "xcolo.protect" "ok" "${vm}" "" \
+          "reason=candidate_promoted"
+      else
+        ftctl_xcolo_mark_runtime_pending "${vm}" "runtime_converging"
+        ftctl_log_event "colo" "xcolo.protect" "pending" "${vm}" "" \
+          "reason=runtime_converging"
+      fi
       return 0
       ;;
     *)

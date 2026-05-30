@@ -109,3 +109,10 @@ The next retest should preserve the runtime when the live QEMU command line and
 channels prove that COLO is established enough for observation. If it fails
 again, the error should point to a concrete hard failure such as missing
 command-line topology, missing channels, or migration failure.
+
+## Follow-Up: Candidate Promotion
+
+The retest after this design preserved the runtime successfully but left the
+Cloud-visible state at `pairing/establishing`. Design 323 adds a bounded
+promotion gate for stable `colo_established_candidate` runtimes so the
+controller state can converge instead of remaining indefinitely pending.
