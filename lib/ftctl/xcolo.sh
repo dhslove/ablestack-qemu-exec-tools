@@ -1473,8 +1473,8 @@ ftctl_xcolo_established_candidate_ready() {
 
   secondary_vm="$(ftctl_profile_secondary_vm_name_resolved "${vm}")"
   [[ -n "${secondary_vm}" ]] || secondary_vm="${vm}"
-  ftctl_xcolo_query_status "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" primary_status || true
-  ftctl_xcolo_query_status "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" secondary_status || true
+  ftctl_xcolo_query_status_name "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" primary_status || true
+  ftctl_xcolo_query_status_name "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" secondary_status || true
   ftctl_xcolo_query_migrate_status "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" primary_migrate || true
   ftctl_xcolo_query_migrate_status "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" secondary_migrate || true
 
