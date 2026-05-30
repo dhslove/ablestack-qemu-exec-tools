@@ -118,3 +118,13 @@ The next retest should answer a narrower question:
 
 The failure artifact must be sufficient to decide that without another broad
 topology guess.
+
+## Follow-up In Design 321
+
+The retest after this design showed the official QEMU topology and deferred
+checkpoint setup were both applied, but the runtime still stopped at
+`primary_filter_chardev_frontend_incomplete`. The QOM evidence showed
+`status=on`, `insert=behind`, and `position=tail` for the primary filter chain,
+so design 321 changes validation policy: a healthy QOM filter chain with live
+migration is preserved as a `colo_established_candidate` instead of being
+destroyed only because filter-facing chardev frontends are still closed.
