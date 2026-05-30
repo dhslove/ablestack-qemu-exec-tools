@@ -852,6 +852,120 @@ PY
   [[ "$(ftctl_state_get "${vm}" "xcolo_primary_block_graph_ready" 2>/dev/null || true)" == "yes" ]]
 }
 
+ftctl_xcolo_collect_secondary_block_graph_state() {
+  local vm="${1-}"
+  local secondary_vm="${2:-$vm}"
+  local plan="${3-}"
+  local nodes_out nodes_rc block_out block_rc payload state_args=()
+
+  if [[ -z "${plan}" ]]; then
+    ftctl_state_set "${vm}" \
+      "xcolo_secondary_block_graph_ready=not_applicable" \
+      "xcolo_secondary_block_graph_reason=no_disk_plan"
+    return 0
+  fi
+
+  nodes_out=""
+  nodes_rc=0
+  ftctl_xcolo_qmp "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" '{"execute":"query-named-block-nodes"}' nodes_out nodes_rc
+  block_out=""
+  block_rc=0
+  ftctl_xcolo_qmp "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" '{"execute":"query-block"}' block_out block_rc
+  if [[ "${nodes_rc}" != "0" || -z "${nodes_out}" || "${block_rc}" != "0" || -z "${block_out}" ]]; then
+    ftctl_state_set "${vm}" \
+      "xcolo_secondary_block_graph_ready=unknown" \
+      "xcolo_secondary_block_graph_reason=query_block_graph_failed"
+    return 1
+  fi
+
+  payload="$(python3 - <<'PY' "${plan}" "${nodes_out}" "${block_out}"
+import json
+import re
+import sys
+
+plan = sys.argv[1]
+nodes_raw = sys.argv[2]
+block_raw = sys.argv[3]
+targets = []
+for entry in plan.split(";"):
+    if not entry:
+        continue
+    target = entry.split("|", 1)[0]
+    if target:
+        targets.append(target)
+
+def suffix(target):
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", target or "root")
+
+try:
+    nodes_data = json.loads(nodes_raw)
+    block_data = json.loads(block_raw)
+except Exception:
+    print("ready=unknown")
+    print("reason=query_block_graph_parse_failed")
+    raise SystemExit(0)
+
+nodes = {item.get("node-name") for item in nodes_data.get("return", []) if item.get("node-name")}
+qdev_nodes = {}
+for item in block_data.get("return", []):
+    inserted = item.get("inserted")
+    node = inserted.get("node-name") if isinstance(inserted, dict) else ""
+    qdev = item.get("qdev") or item.get("device") or ""
+    if node:
+        qdev_nodes[node] = qdev
+
+ready = True
+reasons = []
+for target in targets:
+    s = suffix(target)
+    required_nodes = [
+        f"ftctl-colo-{s}",
+        f"ftctl-childs-{s}",
+        f"ftctl-active-{s}",
+        f"ftctl-hidden-{s}",
+    ]
+    for node in required_nodes:
+        key = re.sub(r"[^A-Za-z0-9_.-]", "_", node)
+        if node in nodes:
+            print(f"{key}=yes")
+        else:
+            ready = False
+            reasons.append(f"{node}:missing")
+            print(f"{key}=missing")
+    colo = f"ftctl-colo-{s}"
+    qdev = qdev_nodes.get(colo, "")
+    qkey = re.sub(r"[^A-Za-z0-9_.-]", "_", f"{colo}_qdev")
+    if qdev:
+        print(f"{qkey}={qdev}")
+    else:
+        ready = False
+        reasons.append(f"{colo}:qdev_missing")
+        print(f"{qkey}=missing")
+
+print(f"ready={'yes' if ready else 'no'}")
+print("reason=" + (",".join(reasons) if reasons else ""))
+PY
+)" || payload="ready=unknown"$'\n'"reason=query_block_graph_parse_failed"
+
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] || continue
+    case "${line}" in
+      ready=*)
+        state_args+=("xcolo_secondary_block_graph_ready=${line#ready=}")
+        ;;
+      reason=*)
+        state_args+=("xcolo_secondary_block_graph_reason=${line#reason=}")
+        ;;
+      *=*)
+        state_args+=("xcolo_secondary_block_graph_${line}")
+        ;;
+    esac
+  done <<< "${payload}"
+
+  ftctl_state_set "${vm}" "${state_args[@]}"
+  [[ "$(ftctl_state_get "${vm}" "xcolo_secondary_block_graph_ready" 2>/dev/null || true)" == "yes" ]]
+}
+
 ftctl_xcolo_capture_primary_qemu_cmdline() {
   local vm="${1-}"
   local out err rc
@@ -1026,6 +1140,7 @@ ftctl_xcolo_validate_pair_runtime() {
   local channel_mirror="" channel_compare="" channel_compare_local="" channel_compare_out=""
   local primary_filter_qom="unknown" primary_filter_qom_reason=""
   local primary_filter_cmdline="unknown" primary_filter_cmdline_reason=""
+  local disk_plan="" secondary_block_graph="unknown" secondary_block_graph_reason=""
   local reason="" timeout i pending_since pending_elapsed pending_max pending_reason
 
   if [[ "${FTCTL_DRY_RUN}" == "1" ]]; then
@@ -1036,6 +1151,7 @@ ftctl_xcolo_validate_pair_runtime() {
   timeout="${FTCTL_XCOLO_RUNTIME_VALIDATE_TIMEOUT_SEC:-45}"
   [[ "${timeout}" =~ ^[0-9]+$ && "${timeout}" -gt 0 ]] || timeout="45"
   qga_policy="${FTCTL_PROFILE_QGA_POLICY:-optional}"
+  disk_plan="$(ftctl_state_get "${vm}" "xcolo_disk_plan" 2>/dev/null || true)"
 
   for ((i=0; i<timeout; i++)); do
     reason=""
@@ -1059,6 +1175,8 @@ ftctl_xcolo_validate_pair_runtime() {
     primary_filter_qom_reason=""
     primary_filter_cmdline="unknown"
     primary_filter_cmdline_reason=""
+    secondary_block_graph="unknown"
+    secondary_block_graph_reason=""
 
     ftctl_xcolo_query_running_flag "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" primary_running || true
     ftctl_xcolo_query_running_flag "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" secondary_running || true
@@ -1093,6 +1211,9 @@ ftctl_xcolo_validate_pair_runtime() {
     ftctl_xcolo_collect_primary_filter_cmdline_state "${vm}" || true
     primary_filter_cmdline="$(ftctl_state_get "${vm}" "xcolo_primary_filter_cmdline_ready" 2>/dev/null || true)"
     primary_filter_cmdline_reason="$(ftctl_state_get "${vm}" "xcolo_primary_filter_cmdline_reason" 2>/dev/null || true)"
+    ftctl_xcolo_collect_secondary_block_graph_state "${vm}" "${secondary_vm}" "${disk_plan}" || true
+    secondary_block_graph="$(ftctl_state_get "${vm}" "xcolo_secondary_block_graph_ready" 2>/dev/null || true)"
+    secondary_block_graph_reason="$(ftctl_state_get "${vm}" "xcolo_secondary_block_graph_reason" 2>/dev/null || true)"
 
     if [[ "${primary_migrate}" == "failed" ]]; then
       reason="primary_migrate_failed"
@@ -1100,40 +1221,18 @@ ftctl_xcolo_validate_pair_runtime() {
     elif [[ "${secondary_migrate}" == "failed" ]]; then
       reason="secondary_migrate_failed"
       break
-    elif [[ "${primary_running}" == "true" &&
-            "${secondary_running}" == "true" &&
-            "${primary_xml}" == "ok" &&
-            "${secondary_xml}" == "ok" &&
-            "${secondary_migrate}" == "colo" &&
-            ( "${qga_policy}" != "required" || "${primary_qga}" == "yes" ) ]]; then
-      ftctl_state_set "${vm}" \
-        "xcolo_primary_running=${primary_running}" \
-        "xcolo_secondary_running=${secondary_running}" \
-        "xcolo_primary_status=${primary_status}" \
-        "xcolo_secondary_status=${secondary_status}" \
-        "xcolo_primary_colo_mode=${primary_colo}" \
-        "xcolo_secondary_colo_mode=${secondary_colo}" \
-        "xcolo_primary_migrate_status=${primary_migrate}" \
-        "xcolo_secondary_migrate_status=${secondary_migrate}" \
-        "xcolo_primary_qga=${primary_qga}" \
-        "xcolo_secondary_qga=${secondary_qga}" \
-        "xcolo_primary_runtime_xml=${primary_xml}" \
-        "xcolo_secondary_runtime_xml=${secondary_xml}" \
-        "xcolo_primary_filter_qom_ready=${primary_filter_qom}" \
-        "xcolo_primary_filter_qom_reason=${primary_filter_qom_reason}" \
-        "xcolo_primary_filter_cmdline_ready=${primary_filter_cmdline}" \
-        "xcolo_primary_filter_cmdline_reason=${primary_filter_cmdline_reason}" \
-        "xcolo_channel_mirror_established=${channel_mirror}" \
-        "xcolo_channel_compare_established=${channel_compare}" \
-        "xcolo_channel_compare_local_established=${channel_compare_local}" \
-        "xcolo_channel_compare_out_established=${channel_compare_out}"
-      ftctl_log_event "colo" "xcolo.runtime_validate" "ok" "${vm}" "" \
-        "primary_running=${primary_running} secondary_running=${secondary_running} primary_colo=${primary_colo} secondary_colo=${secondary_colo} primary_migrate=${primary_migrate} secondary_migrate=${secondary_migrate} primary_qga=${primary_qga} secondary_qga=${secondary_qga} filter_qom=${primary_filter_qom} filter_cmdline=${primary_filter_cmdline} mirror=${channel_mirror} compare=${channel_compare} compare_local=${channel_compare_local} compare_out=${channel_compare_out} attempts=$((i + 1))"
-      return 0
     elif [[ "${primary_xml}" == "ok" &&
             "${secondary_xml}" == "ok" &&
             "${primary_migrate}" == "active" &&
             "${secondary_migrate}" == "colo" &&
+            "${primary_colo}" == "primary" &&
+            "${secondary_colo}" == "secondary" &&
+            ( -z "${disk_plan}" || "${secondary_block_graph}" == "yes" || "${secondary_block_graph}" == "not_applicable" ) &&
+            ( "${primary_filter_cmdline}" == "yes" || "${primary_filter_qom}" == "yes" ) &&
+            "${channel_mirror}" == "yes" &&
+            "${channel_compare}" == "yes" &&
+            "${channel_compare_local}" == "yes" &&
+            "${channel_compare_out}" == "yes" &&
             ( "${qga_policy}" != "required" || "${primary_qga}" == "yes" ) ]] &&
           ftctl_xcolo_colo_mode_active "${primary_colo}" &&
           ftctl_xcolo_colo_mode_active "${secondary_colo}"; then
@@ -1157,9 +1256,11 @@ ftctl_xcolo_validate_pair_runtime() {
         "xcolo_channel_mirror_established=${channel_mirror}" \
         "xcolo_channel_compare_established=${channel_compare}" \
         "xcolo_channel_compare_local_established=${channel_compare_local}" \
-        "xcolo_channel_compare_out_established=${channel_compare_out}"
+        "xcolo_channel_compare_out_established=${channel_compare_out}" \
+        "xcolo_secondary_block_graph_ready=${secondary_block_graph}" \
+        "xcolo_secondary_block_graph_reason=${secondary_block_graph_reason}"
       ftctl_log_event "colo" "xcolo.runtime_validate" "ok" "${vm}" "" \
-        "reason=colo_role_active primary_running=${primary_running} secondary_running=${secondary_running} primary_status=${primary_status} secondary_status=${secondary_status} primary_colo=${primary_colo} secondary_colo=${secondary_colo} primary_migrate=${primary_migrate} secondary_migrate=${secondary_migrate} primary_qga=${primary_qga} secondary_qga=${secondary_qga} filter_qom=${primary_filter_qom} filter_cmdline=${primary_filter_cmdline} mirror=${channel_mirror} compare=${channel_compare} compare_local=${channel_compare_local} compare_out=${channel_compare_out} attempts=$((i + 1))"
+        "reason=colo_role_active primary_running=${primary_running} secondary_running=${secondary_running} primary_status=${primary_status} secondary_status=${secondary_status} primary_colo=${primary_colo} secondary_colo=${secondary_colo} primary_migrate=${primary_migrate} secondary_migrate=${secondary_migrate} primary_qga=${primary_qga} secondary_qga=${secondary_qga} filter_qom=${primary_filter_qom} filter_cmdline=${primary_filter_cmdline} mirror=${channel_mirror} compare=${channel_compare} compare_local=${channel_compare_local} compare_out=${channel_compare_out} secondary_block_graph=${secondary_block_graph} attempts=$((i + 1))"
       return 0
     fi
 
@@ -1192,7 +1293,8 @@ ftctl_xcolo_validate_pair_runtime() {
                 "${channel_mirror}" == "yes" &&
                 "${channel_compare}" == "yes" &&
                 "${channel_compare_local}" == "yes" &&
-                "${channel_compare_out}" == "yes" ) ]]; then
+                "${channel_compare_out}" == "yes" &&
+                ( -z "${disk_plan}" || "${secondary_block_graph}" == "yes" || "${secondary_block_graph}" == "not_applicable" ) ) ]]; then
         if [[ "${qga_policy}" == "required" && "${primary_qga}" != "yes" ]]; then
           reason="primary_guest_boot_unhealthy"
         elif [[ "${primary_filter_cmdline}" == "no" && "${primary_filter_qom}" == "no" ]]; then
@@ -1202,6 +1304,8 @@ ftctl_xcolo_validate_pair_runtime() {
                 "${channel_compare_local}" != "yes" ||
                 "${channel_compare_out}" != "yes" ]]; then
           reason="$(ftctl_xcolo_primary_channel_failure_reason "${vm}")"
+        elif [[ -n "${disk_plan}" && "${secondary_block_graph}" != "yes" && "${secondary_block_graph}" != "not_applicable" ]]; then
+          reason="secondary_block_graph_not_ready"
         else
           reason="${pending_reason}"
         fi
@@ -1215,8 +1319,15 @@ ftctl_xcolo_validate_pair_runtime() {
               "${channel_mirror}" == "yes" &&
               "${channel_compare}" == "yes" &&
               "${channel_compare_local}" == "yes" &&
-              "${channel_compare_out}" == "yes" ]]; then
+              "${channel_compare_out}" == "yes" &&
+              ( -z "${disk_plan}" || "${secondary_block_graph}" == "yes" || "${secondary_block_graph}" == "not_applicable" ) ]]; then
           pending_reason="colo_established_candidate"
+          if [[ "${primary_status}" == "finish-migrate" &&
+                "${secondary_status}" == "inmigrate" &&
+                "${primary_colo}" != "primary" &&
+                "${pending_elapsed}" -ge "${pending_max}" ]]; then
+            pending_reason="colo_activation_stalled"
+          fi
         fi
         ftctl_state_set "${vm}" \
           "xcolo_primary_running=${primary_running}" \
@@ -1239,11 +1350,13 @@ ftctl_xcolo_validate_pair_runtime() {
           "xcolo_channel_compare_established=${channel_compare}" \
           "xcolo_channel_compare_local_established=${channel_compare_local}" \
           "xcolo_channel_compare_out_established=${channel_compare_out}" \
+          "xcolo_secondary_block_graph_ready=${secondary_block_graph}" \
+          "xcolo_secondary_block_graph_reason=${secondary_block_graph_reason}" \
           "xcolo_runtime_pending_since=${pending_since}" \
           "xcolo_pending_reason=${pending_reason}" \
           "last_error="
         ftctl_log_event "colo" "xcolo.runtime_validate" "pending" "${vm}" "" \
-          "reason=${pending_reason} primary_running=${primary_running} secondary_running=${secondary_running} primary_status=${primary_status} secondary_status=${secondary_status} primary_colo=${primary_colo} secondary_colo=${secondary_colo} primary_migrate=${primary_migrate} secondary_migrate=${secondary_migrate} primary_qga=${primary_qga} secondary_qga=${secondary_qga} filter_qom=${primary_filter_qom} filter_qom_reason=${primary_filter_qom_reason} filter_cmdline=${primary_filter_cmdline} filter_cmdline_reason=${primary_filter_cmdline_reason} mirror=${channel_mirror} compare=${channel_compare} compare_local=${channel_compare_local} compare_out=${channel_compare_out} elapsed=${pending_elapsed} max=${pending_max} attempts=${timeout}"
+          "reason=${pending_reason} primary_running=${primary_running} secondary_running=${secondary_running} primary_status=${primary_status} secondary_status=${secondary_status} primary_colo=${primary_colo} secondary_colo=${secondary_colo} primary_migrate=${primary_migrate} secondary_migrate=${secondary_migrate} primary_qga=${primary_qga} secondary_qga=${secondary_qga} filter_qom=${primary_filter_qom} filter_qom_reason=${primary_filter_qom_reason} filter_cmdline=${primary_filter_cmdline} filter_cmdline_reason=${primary_filter_cmdline_reason} mirror=${channel_mirror} compare=${channel_compare} compare_local=${channel_compare_local} compare_out=${channel_compare_out} secondary_block_graph=${secondary_block_graph} elapsed=${pending_elapsed} max=${pending_max} attempts=${timeout}"
         return 10
       fi
     fi
@@ -1284,6 +1397,8 @@ ftctl_xcolo_validate_pair_runtime() {
               "${channel_compare_local}" != "yes" ||
               "${channel_compare_out}" != "yes" ]]; then
         reason="$(ftctl_xcolo_primary_channel_failure_reason "${vm}")"
+      elif [[ -n "${disk_plan}" && "${secondary_block_graph}" != "yes" && "${secondary_block_graph}" != "not_applicable" ]]; then
+        reason="secondary_block_graph_not_ready"
       else
         ftctl_xcolo_colo_role_pending_reason "${primary_colo}" "${secondary_colo}" reason
         if [[ "${reason}" == "runtime_converging" ]]; then
@@ -1329,9 +1444,11 @@ ftctl_xcolo_validate_pair_runtime() {
       "xcolo_channel_compare_established=${channel_compare}" \
       "xcolo_channel_compare_local_established=${channel_compare_local}" \
       "xcolo_channel_compare_out_established=${channel_compare_out}" \
+      "xcolo_secondary_block_graph_ready=${secondary_block_graph}" \
+      "xcolo_secondary_block_graph_reason=${secondary_block_graph_reason}" \
       "last_error=xcolo_runtime_validation_failed:${reason}"
     ftctl_log_event "colo" "xcolo.runtime_validate" "fail" "${vm}" "" \
-      "reason=${reason} primary_running=${primary_running} secondary_running=${secondary_running} primary_status=${primary_status} secondary_status=${secondary_status} primary_colo=${primary_colo} secondary_colo=${secondary_colo} primary_xml=${primary_xml} secondary_xml=${secondary_xml} primary_migrate=${primary_migrate} secondary_migrate=${secondary_migrate} primary_qga=${primary_qga} secondary_qga=${secondary_qga} filter_qom=${primary_filter_qom} filter_qom_reason=${primary_filter_qom_reason} filter_cmdline=${primary_filter_cmdline} filter_cmdline_reason=${primary_filter_cmdline_reason} mirror=${channel_mirror} compare=${channel_compare} compare_local=${channel_compare_local} compare_out=${channel_compare_out} attempts=${timeout}"
+      "reason=${reason} primary_running=${primary_running} secondary_running=${secondary_running} primary_status=${primary_status} secondary_status=${secondary_status} primary_colo=${primary_colo} secondary_colo=${secondary_colo} primary_xml=${primary_xml} secondary_xml=${secondary_xml} primary_migrate=${primary_migrate} secondary_migrate=${secondary_migrate} primary_qga=${primary_qga} secondary_qga=${secondary_qga} filter_qom=${primary_filter_qom} filter_qom_reason=${primary_filter_qom_reason} filter_cmdline=${primary_filter_cmdline} filter_cmdline_reason=${primary_filter_cmdline_reason} mirror=${channel_mirror} compare=${channel_compare} compare_local=${channel_compare_local} compare_out=${channel_compare_out} secondary_block_graph=${secondary_block_graph} attempts=${timeout}"
     return 1
   fi
 }
@@ -1442,8 +1559,11 @@ ftctl_xcolo_mark_runtime_pending() {
     "last_error="
 }
 
-ftctl_xcolo_runtime_candidate_promote_sec() {
-  local threshold="${FTCTL_XCOLO_RUNTIME_CANDIDATE_PROMOTE_SEC:-}"
+ftctl_xcolo_runtime_candidate_observe_sec() {
+  local threshold="${FTCTL_XCOLO_RUNTIME_CANDIDATE_OBSERVE_SEC:-}"
+  if [[ -z "${threshold}" ]]; then
+    threshold="${FTCTL_XCOLO_RUNTIME_CANDIDATE_PROMOTE_SEC:-}"
+  fi
   if [[ -z "${threshold}" ]]; then
     threshold="${FTCTL_XCOLO_RUNTIME_PENDING_MAX_SEC:-180}"
   fi
@@ -1451,24 +1571,26 @@ ftctl_xcolo_runtime_candidate_promote_sec() {
   printf '%s\n' "${threshold}"
 }
 
-ftctl_xcolo_established_candidate_ready() {
+ftctl_xcolo_candidate_observation_ready() {
   local vm="${1-}"
   local pending_reason pending_since elapsed threshold
   local primary_status="" secondary_status="" primary_migrate="" secondary_migrate=""
+  local primary_colo="" secondary_colo=""
   local secondary_vm
   local filter_qom filter_cmdline mirror compare compare_local compare_out
+  local secondary_block_graph
 
   pending_reason="$(ftctl_state_get "${vm}" "xcolo_pending_reason" 2>/dev/null || true)"
-  [[ "${pending_reason}" == "colo_established_candidate" ]] || return 1
+  [[ "${pending_reason}" == "colo_established_candidate" || "${pending_reason}" == "colo_activation_stalled" ]] || return 1
 
   pending_since="$(ftctl_state_get "${vm}" "xcolo_runtime_pending_since" 2>/dev/null || true)"
   [[ -n "${pending_since}" ]] || return 1
   elapsed="$(ftctl_elapsed_since_iso "${pending_since}" 2>/dev/null || echo "0")"
   [[ "${elapsed}" =~ ^[0-9]+$ ]] || elapsed="0"
-  threshold="$(ftctl_xcolo_runtime_candidate_promote_sec)"
+  threshold="$(ftctl_xcolo_runtime_candidate_observe_sec)"
   ftctl_state_set "${vm}" \
-    "xcolo_candidate_promote_elapsed=${elapsed}" \
-    "xcolo_candidate_promote_threshold=${threshold}"
+    "xcolo_candidate_observe_elapsed=${elapsed}" \
+    "xcolo_candidate_observe_threshold=${threshold}"
   (( elapsed >= threshold )) || return 1
 
   secondary_vm="$(ftctl_profile_secondary_vm_name_resolved "${vm}")"
@@ -1477,11 +1599,15 @@ ftctl_xcolo_established_candidate_ready() {
   ftctl_xcolo_query_status_name "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" secondary_status || true
   ftctl_xcolo_query_migrate_status "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" primary_migrate || true
   ftctl_xcolo_query_migrate_status "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" secondary_migrate || true
+  ftctl_xcolo_query_colo_mode "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" primary_colo || true
+  ftctl_xcolo_query_colo_mode "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" secondary_colo || true
 
   [[ "${primary_status}" == "finish-migrate" ]] || return 1
   [[ "${secondary_status}" == "inmigrate" ]] || return 1
   [[ "${primary_migrate}" == "active" ]] || return 1
   [[ "${secondary_migrate}" == "colo" ]] || return 1
+  [[ "${primary_colo}" != "primary" ]] || return 1
+  [[ "${secondary_colo}" == "secondary" ]] || return 1
 
   ftctl_xcolo_capture_primary_channel_state "${vm}" || true
   mirror="$(ftctl_state_get "${vm}" "xcolo_channel_mirror_established" 2>/dev/null || true)"
@@ -1493,33 +1619,48 @@ ftctl_xcolo_established_candidate_ready() {
   filter_qom="$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_ready" 2>/dev/null || true)"
   filter_cmdline="$(ftctl_state_get "${vm}" "xcolo_primary_filter_cmdline_ready" 2>/dev/null || true)"
   [[ "${filter_qom}" == "yes" || "${filter_cmdline}" == "yes" ]] || return 1
+  secondary_block_graph="$(ftctl_state_get "${vm}" "xcolo_secondary_block_graph_ready" 2>/dev/null || true)"
+  [[ "${secondary_block_graph}" == "yes" || "${secondary_block_graph}" == "not_applicable" ]] || return 1
 
   ftctl_state_set "${vm}" \
     "xcolo_candidate_primary_status=${primary_status}" \
     "xcolo_candidate_secondary_status=${secondary_status}" \
+    "xcolo_candidate_primary_colo=${primary_colo}" \
+    "xcolo_candidate_secondary_colo=${secondary_colo}" \
     "xcolo_candidate_primary_migrate=${primary_migrate}" \
     "xcolo_candidate_secondary_migrate=${secondary_migrate}" \
-    "xcolo_candidate_promote_ready=yes"
+    "xcolo_candidate_observe_ready=yes"
   return 0
 }
 
-ftctl_xcolo_mark_established_candidate_promoted() {
+ftctl_xcolo_mark_candidate_observed() {
   local vm="${1-}"
   local source="${2:-runtime_reconcile}"
+  local pending_reason stage transport error result
 
+  pending_reason="$(ftctl_state_get "${vm}" "xcolo_pending_reason" 2>/dev/null || true)"
+  stage="handshake_candidate_established"
+  transport="candidate_established"
+  error=""
+  result="pending"
+  if [[ "${pending_reason}" == "colo_activation_stalled" ]]; then
+    stage="activation_stalled"
+    transport="activation_stalled"
+    error="xcolo_activation_stalled"
+    result="warn"
+  fi
   ftctl_state_set "${vm}" \
-    "conversion_stage=handshake_candidate_established" \
-    "conversion_state=colo_running" \
-    "protection_state=colo_running" \
-    "transport_state=mirroring" \
+    "conversion_stage=${stage}" \
+    "conversion_state=pending" \
+    "protection_state=pairing" \
+    "transport_state=${transport}" \
     "active_side=primary" \
-    "xcolo_candidate_promoted=true" \
-    "xcolo_candidate_promoted_by=${source}" \
-    "last_sync_ts=$(ftctl_now_iso8601)" \
+    "xcolo_candidate_observed=true" \
+    "xcolo_candidate_observed_by=${source}" \
     "last_healthy_ts=$(ftctl_now_iso8601)" \
-    "last_error="
-  ftctl_log_event "colo" "xcolo.runtime_candidate_promote" "ok" "${vm}" "" \
-    "source=${source} elapsed=$(ftctl_state_get "${vm}" "xcolo_candidate_promote_elapsed" 2>/dev/null || true) threshold=$(ftctl_state_get "${vm}" "xcolo_candidate_promote_threshold" 2>/dev/null || true)"
+    "last_error=${error}"
+  ftctl_log_event "colo" "xcolo.runtime_candidate" "${result}" "${vm}" "" \
+    "source=${source} reason=${pending_reason} elapsed=$(ftctl_state_get "${vm}" "xcolo_candidate_observe_elapsed" 2>/dev/null || true) threshold=$(ftctl_state_get "${vm}" "xcolo_candidate_observe_threshold" 2>/dev/null || true)"
 }
 
 ftctl_xcolo_reconcile_pending_runtime() {
@@ -1551,10 +1692,10 @@ ftctl_xcolo_reconcile_pending_runtime() {
       return 0
       ;;
     10)
-      if ftctl_xcolo_established_candidate_ready "${vm}"; then
-        ftctl_xcolo_mark_established_candidate_promoted "${vm}" "runtime_reconcile"
-        ftctl_log_event "colo" "xcolo.runtime_reconcile" "ok" "${vm}" "" \
-          "secondary_vm=${secondary_vm} reason=candidate_promoted"
+      if ftctl_xcolo_candidate_observation_ready "${vm}"; then
+        ftctl_xcolo_mark_candidate_observed "${vm}" "runtime_reconcile"
+        ftctl_log_event "colo" "xcolo.runtime_reconcile" "pending" "${vm}" "" \
+          "secondary_vm=${secondary_vm} reason=$(ftctl_state_get "${vm}" "xcolo_pending_reason" 2>/dev/null || true)"
       else
         ftctl_xcolo_mark_runtime_pending "${vm}" "runtime_converging"
         ftctl_state_set "${vm}" "last_healthy_ts=$(ftctl_now_iso8601)"
@@ -3556,10 +3697,10 @@ ftctl_xcolo_execute_block_cold_conversion() {
           "checkpoint_delay=${FTCTL_PROFILE_XCOLO_CHECKPOINT_DELAY:-}"
       ;;
     10)
-      if ftctl_xcolo_established_candidate_ready "${vm}"; then
-        ftctl_xcolo_mark_established_candidate_promoted "${vm}" "block_cold_conversion"
-        ftctl_log_event "colo" "xcolo.block_cold_conversion.execute" "ok" "${vm}" "" \
-          "reason=candidate_promoted primary_base=${primary_base_node} secondary_base=${secondary_base_node}"
+      if ftctl_xcolo_candidate_observation_ready "${vm}"; then
+        ftctl_xcolo_mark_candidate_observed "${vm}" "block_cold_conversion"
+        ftctl_log_event "colo" "xcolo.block_cold_conversion.execute" "pending" "${vm}" "" \
+          "reason=$(ftctl_state_get "${vm}" "xcolo_pending_reason" 2>/dev/null || true) primary_base=${primary_base_node} secondary_base=${secondary_base_node}"
       else
         ftctl_xcolo_mark_runtime_pending "${vm}" "runtime_converging"
         ftctl_log_event "colo" "xcolo.block_cold_conversion.execute" "pending" "${vm}" "" \
@@ -3687,10 +3828,10 @@ ftctl_xcolo_plan_protect_prebuilt() {
           "checkpoint_delay=${FTCTL_PROFILE_XCOLO_CHECKPOINT_DELAY:-}"
       ;;
     10)
-      if ftctl_xcolo_established_candidate_ready "${vm}"; then
-        ftctl_xcolo_mark_established_candidate_promoted "${vm}" "protect_prebuilt"
-        ftctl_log_event "colo" "xcolo.protect" "ok" "${vm}" "" \
-          "reason=candidate_promoted"
+      if ftctl_xcolo_candidate_observation_ready "${vm}"; then
+        ftctl_xcolo_mark_candidate_observed "${vm}" "protect_prebuilt"
+        ftctl_log_event "colo" "xcolo.protect" "pending" "${vm}" "" \
+          "reason=$(ftctl_state_get "${vm}" "xcolo_pending_reason" 2>/dev/null || true)"
       else
         ftctl_xcolo_mark_runtime_pending "${vm}" "runtime_converging"
         ftctl_log_event "colo" "xcolo.protect" "pending" "${vm}" "" \
