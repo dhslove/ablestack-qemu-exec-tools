@@ -128,3 +128,9 @@ checkpoint setup were both applied, but the runtime still stopped at
 so design 321 changes validation policy: a healthy QOM filter chain with live
 migration is preserved as a `colo_established_candidate` instead of being
 destroyed only because filter-facing chardev frontends are still closed.
+
+Design 322 further refines that rule. QOM property reads may be empty on this
+QEMU/libvirt stack even when the live QEMU command line contains the expected
+filter objects. Therefore QOM is diagnostic, while live command-line/XML
+topology plus established 9000-series channels are sufficient to preserve a
+candidate runtime.

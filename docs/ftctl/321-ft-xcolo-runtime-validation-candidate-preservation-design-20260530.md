@@ -48,9 +48,10 @@ COLO role/checkpoint path.
 ## Principles
 
 1. `frontend-open=false` is not, by itself, proof of an invalid COLO topology.
-2. QOM filter health is the stronger topology signal:
-   `status=on`, `insert=behind`, and `position=tail` must be treated as a
-   valid runtime candidate when migration is still alive.
+2. QOM filter health is a useful topology signal when the properties are
+   available, but empty QOM property reads are inconclusive on some QEMU builds.
+   Live QEMU command line/XML topology and channel state must be accepted as
+   the stronger proof when QOM is inconclusive.
 3. Runtime recovery must be reserved for hard failures such as QMP command
    failure, missing QOM objects, invalid filter properties, failed migration,
    or process loss.
@@ -88,7 +89,8 @@ When all of the following are true:
 - secondary XML markers are present,
 - primary migration is `active`,
 - secondary migration is `colo`,
-- primary filter QOM health is `yes`,
+- primary filter topology is proven by live QEMU command line, XML markers, or
+  QOM health,
 - 9000-series channel paths are established,
 
 then validation must return pending (`rc=10`) even if `query-chardev` still
@@ -109,7 +111,8 @@ The runtime should still fail immediately when a hard failure is observed:
 
 - primary migration status is `failed`,
 - secondary migration status is `failed`,
-- QOM filter health is `no`,
+- QOM filter health returns concrete contradictory values and no command-line
+  topology proof exists,
 - required channel paths are not established after the pending window,
 - primary or secondary XML markers are missing,
 - secondary is not in COLO migration,
@@ -125,3 +128,12 @@ If QOM and migration remain healthy, the UI/backend state should stay in a
 pending/converging state and the runtime should remain available for manual
 QMP inspection. If the runtime later fails for a hard reason, the error should
 name that hard reason instead of `primary_filter_chardev_frontend_incomplete`.
+
+## Follow-Up: QOM Inconclusive Handling
+
+The 2026-05-30 retest after this design showed QOM property values can be empty
+even when the live QEMU command line contains the expected filter topology and
+9000-series channels are established. Design 322 supersedes the QOM hard-gate
+portion of this document: QOM empty/missing values are `unknown`, not `no`, and
+the live QEMU command line becomes the primary topology proof for candidate
+preservation.
