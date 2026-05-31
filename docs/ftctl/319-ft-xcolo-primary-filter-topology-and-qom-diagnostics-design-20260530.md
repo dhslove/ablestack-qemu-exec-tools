@@ -40,6 +40,10 @@ Design 320 supersedes this document's topology change. The useful part of this
 document is the QOM diagnostics direction: object presence alone is not enough,
 and property values must be captured.
 
+Design 326 also supersedes this document's fixed `hostnet0` examples. They are
+valid only as the common single-NIC alias `net0` result; the implementation must
+resolve the actual libvirt/QEMU netdev ID from the generated XML.
+
 ## Principles
 
 1. FT remains a clone-takeover feature, not an HA restart feature. The

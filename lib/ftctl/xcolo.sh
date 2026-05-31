@@ -764,8 +764,11 @@ ftctl_xcolo_collect_primary_filter_qom_state() {
   local ready="yes"
   local inconclusive="no"
   local reasons=()
-  local value
+  local value expected_netdev
   local -a state_args=()
+
+  expected_netdev="$(ftctl_state_get "${vm}" "xcolo_primary_netdev_id" 2>/dev/null || true)"
+  expected_netdev="${expected_netdev:-hostnet0}"
 
   _ftctl_xcolo_expect_qom() {
     local path="${1-}"
@@ -787,14 +790,16 @@ ftctl_xcolo_collect_primary_filter_qom_state() {
     state_args+=("xcolo_primary_filter_qom_${key}=${value}")
   }
 
-  _ftctl_xcolo_expect_qom "/objects/m0" "netdev" "hostnet0" "m0_netdev"
+  state_args+=("xcolo_primary_filter_qom_expected_netdev=${expected_netdev}")
+
+  _ftctl_xcolo_expect_qom "/objects/m0" "netdev" "${expected_netdev}" "m0_netdev"
   _ftctl_xcolo_expect_qom "/objects/m0" "queue" "tx" "m0_queue"
   _ftctl_xcolo_expect_qom "/objects/m0" "outdev" "mirror0" "m0_outdev"
   _ftctl_xcolo_expect_qom "/objects/m0" "status" "on" "m0_status"
   _ftctl_xcolo_expect_qom "/objects/m0" "insert" "behind" "m0_insert"
   _ftctl_xcolo_expect_qom "/objects/m0" "position" "tail" "m0_position"
 
-  _ftctl_xcolo_expect_qom "/objects/redire0" "netdev" "hostnet0" "redire0_netdev"
+  _ftctl_xcolo_expect_qom "/objects/redire0" "netdev" "${expected_netdev}" "redire0_netdev"
   _ftctl_xcolo_expect_qom "/objects/redire0" "queue" "rx" "redire0_queue"
   _ftctl_xcolo_expect_qom "/objects/redire0" "indev" "compare_out" "redire0_indev"
   _ftctl_xcolo_expect_qom "/objects/redire0" "outdev" "" "redire0_outdev"
@@ -802,7 +807,7 @@ ftctl_xcolo_collect_primary_filter_qom_state() {
   _ftctl_xcolo_expect_qom "/objects/redire0" "insert" "behind" "redire0_insert"
   _ftctl_xcolo_expect_qom "/objects/redire0" "position" "tail" "redire0_position"
 
-  _ftctl_xcolo_expect_qom "/objects/redire1" "netdev" "hostnet0" "redire1_netdev"
+  _ftctl_xcolo_expect_qom "/objects/redire1" "netdev" "${expected_netdev}" "redire1_netdev"
   _ftctl_xcolo_expect_qom "/objects/redire1" "queue" "rx" "redire1_queue"
   _ftctl_xcolo_expect_qom "/objects/redire1" "indev" "" "redire1_indev"
   _ftctl_xcolo_expect_qom "/objects/redire1" "outdev" "compare0" "redire1_outdev"
@@ -1053,7 +1058,7 @@ ftctl_xcolo_capture_primary_qemu_cmdline() {
 
 ftctl_xcolo_collect_primary_filter_cmdline_state() {
   local vm="${1-}"
-  local out err rc ready reason_text
+  local out err rc ready reason_text expected_netdev
   local -a reasons=()
 
   out=""
@@ -1071,6 +1076,8 @@ ftctl_xcolo_collect_primary_filter_cmdline_state() {
     return 1
   fi
 
+  expected_netdev="$(ftctl_state_get "${vm}" "xcolo_primary_netdev_id" 2>/dev/null || true)"
+  expected_netdev="${expected_netdev:-hostnet0}"
   ready="yes"
   _ftctl_xcolo_expect_cmdline_token() {
     local token="${1-}"
@@ -1085,7 +1092,7 @@ ftctl_xcolo_collect_primary_filter_cmdline_state() {
   _ftctl_xcolo_expect_cmdline_token "filter-redirector,id=redire0" "redire0"
   _ftctl_xcolo_expect_cmdline_token "filter-redirector,id=redire1" "redire1"
   _ftctl_xcolo_expect_cmdline_token "colo-compare,id=comp0" "comp0"
-  _ftctl_xcolo_expect_cmdline_token "netdev=hostnet0" "hostnet0"
+  _ftctl_xcolo_expect_cmdline_token "netdev=${expected_netdev}" "primary_netdev"
   _ftctl_xcolo_expect_cmdline_token "outdev=mirror0" "mirror0"
   _ftctl_xcolo_expect_cmdline_token "indev=compare_out" "compare_out_in"
   _ftctl_xcolo_expect_cmdline_token "outdev=compare0" "compare0_out"
@@ -1096,6 +1103,7 @@ ftctl_xcolo_collect_primary_filter_cmdline_state() {
   reason_text="$(IFS=,; printf '%s' "${reasons[*]}")"
   ftctl_state_set "${vm}" \
     "xcolo_primary_filter_cmdline_ready=${ready}" \
+    "xcolo_primary_filter_cmdline_expected_netdev=${expected_netdev}" \
     "xcolo_primary_filter_cmdline_reason=${reason_text}"
   [[ "${ready}" == "yes" ]]
 }
@@ -1133,6 +1141,7 @@ ftctl_xcolo_refine_primary_role_failure_reason() {
   local vm="${1-}"
   local reason="${2-}"
   local cap_xcolo cap_return_path checkpoint_delay filters_attached filter_qom_ready filter_cmdline_ready
+  local netdev_ready filter_qom_reason filter_cmdline_reason
 
   [[ "${reason}" == "primary_colo_role_not_entered" ]] || {
     printf '%s\n' "${reason}"
@@ -1145,6 +1154,9 @@ ftctl_xcolo_refine_primary_role_failure_reason() {
   filters_attached="$(ftctl_state_get "${vm}" "xcolo_primary_net_filters_attached" 2>/dev/null || true)"
   filter_qom_ready="$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_ready" 2>/dev/null || true)"
   filter_cmdline_ready="$(ftctl_state_get "${vm}" "xcolo_primary_filter_cmdline_ready" 2>/dev/null || true)"
+  netdev_ready="$(ftctl_state_get "${vm}" "xcolo_primary_netdev_ready" 2>/dev/null || true)"
+  filter_qom_reason="$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_reason" 2>/dev/null || true)"
+  filter_cmdline_reason="$(ftctl_state_get "${vm}" "xcolo_primary_filter_cmdline_reason" 2>/dev/null || true)"
 
   if [[ "${cap_xcolo}" == "no" ]]; then
     printf '%s\n' "primary_colo_capability_missing"
@@ -1152,6 +1164,11 @@ ftctl_xcolo_refine_primary_role_failure_reason() {
     printf '%s\n' "primary_return_path_capability_missing"
   elif [[ "${checkpoint_delay}" == "no" ]]; then
     printf '%s\n' "primary_checkpoint_parameter_missing"
+  elif [[ "${netdev_ready}" == "no" ]]; then
+    printf '%s\n' "primary_filter_netdev_id_unresolved"
+  elif [[ "${filter_cmdline_reason}" == *"primary_netdev:missing"* ||
+          "${filter_qom_reason}" == *"_netdev:"* ]]; then
+    printf '%s\n' "primary_filter_netdev_not_found"
   elif [[ "${filters_attached}" != "true" && "${filter_cmdline_ready}" != "yes" ]]; then
     printf '%s\n' "primary_colo_filter_objects_not_attached"
   elif [[ "$(ftctl_state_get "${vm}" "xcolo_primary_filter_chardev_ready" 2>/dev/null || true)" == "no" ]]; then
@@ -1935,11 +1952,145 @@ ftctl_xcolo_primary_listen_host() {
   printf '%s\n' "0.0.0.0"
 }
 
+ftctl_xcolo_xml_resolve_netdev_id() {
+  local xml_path="${1-}"
+  local role="${2-}"
+  local vm="${3-}"
+  local out_var="${4-}"
+  local payload rc status netdev alias target model reason
+
+  [[ -n "${xml_path}" && -f "${xml_path}" ]] || {
+    ftctl_state_set "${vm}" \
+      "xcolo_${role}_netdev_ready=no" \
+      "xcolo_${role}_netdev_reason=xml_missing" \
+      "last_error=xcolo_${role}_netdev_id_unresolved"
+    return 1
+  }
+  command -v python3 >/dev/null 2>&1 || {
+    ftctl_state_set "${vm}" \
+      "xcolo_${role}_netdev_ready=no" \
+      "xcolo_${role}_netdev_reason=python3_missing" \
+      "last_error=xcolo_${role}_netdev_id_unresolved"
+    return 1
+  }
+
+  payload="$(XML_PATH="${xml_path}" python3 - <<'PY'
+import os
+import re
+import sys
+import xml.etree.ElementTree as ET
+
+xml_path = os.environ["XML_PATH"]
+
+def local_name(tag):
+    return tag.rsplit("}", 1)[-1] if "}" in tag else tag
+
+def first_child(node, name):
+    for child in list(node):
+        if local_name(child.tag) == name:
+            return child
+    return None
+
+try:
+    tree = ET.parse(xml_path)
+except Exception as exc:
+    print("status=fail")
+    print(f"reason=parse_failed:{exc}")
+    raise SystemExit(0)
+
+root = tree.getroot()
+devices = first_child(root, "devices")
+if devices is None:
+    print("status=fail")
+    print("reason=devices_missing")
+    raise SystemExit(0)
+
+interfaces = [child for child in list(devices) if local_name(child.tag) == "interface"]
+if not interfaces:
+    print("status=fail")
+    print("reason=interface_missing")
+    raise SystemExit(0)
+
+chosen = None
+for iface in interfaces:
+    model = first_child(iface, "model")
+    if model is not None and model.get("type") == "virtio":
+        chosen = iface
+        break
+if chosen is None:
+    chosen = interfaces[0]
+
+idx = interfaces.index(chosen)
+alias_node = first_child(chosen, "alias")
+target_node = first_child(chosen, "target")
+model_node = first_child(chosen, "model")
+alias = alias_node.get("name", "") if alias_node is not None else ""
+target = target_node.get("dev", "") if target_node is not None else ""
+model = model_node.get("type", "") if model_node is not None else ""
+
+netdev_idx = idx
+match = re.fullmatch(r"net([0-9]+)", alias)
+if match:
+    netdev_idx = int(match.group(1))
+
+print("status=ok")
+print(f"netdev=hostnet{netdev_idx}")
+print(f"alias={alias}")
+print(f"target={target}")
+print(f"model={model}")
+print(f"index={idx}")
+PY
+)"
+  rc=$?
+  [[ "${rc}" == "0" ]] || payload=""
+
+  status=""
+  netdev=""
+  alias=""
+  target=""
+  model=""
+  reason=""
+  while IFS= read -r line; do
+    case "${line}" in
+      status=*) status="${line#status=}" ;;
+      netdev=*) netdev="${line#netdev=}" ;;
+      alias=*) alias="${line#alias=}" ;;
+      target=*) target="${line#target=}" ;;
+      model=*) model="${line#model=}" ;;
+      reason=*) reason="${line#reason=}" ;;
+    esac
+  done <<< "${payload}"
+
+  if [[ "${status}" != "ok" || -z "${netdev}" ]]; then
+    reason="${reason:-netdev_unresolved}"
+    ftctl_state_set "${vm}" \
+      "xcolo_${role}_netdev_ready=no" \
+      "xcolo_${role}_netdev_reason=${reason}" \
+      "last_error=xcolo_${role}_netdev_id_unresolved"
+    ftctl_log_event "colo" "xcolo.${role}.netdev" "fail" "${vm}" "" \
+      "reason=${reason} xml=${xml_path}"
+    return 1
+  fi
+
+  ftctl_state_set "${vm}" \
+    "xcolo_${role}_netdev_ready=yes" \
+    "xcolo_${role}_netdev_id=${netdev}" \
+    "xcolo_${role}_netdev_alias=${alias}" \
+    "xcolo_${role}_netdev_target=${target}" \
+    "xcolo_${role}_netdev_model=${model}" \
+    "xcolo_${role}_netdev_reason="
+  ftctl_log_event "colo" "xcolo.${role}.netdev" "ok" "${vm}" "" \
+    "netdev=${netdev} alias=${alias:-none} target=${target:-none} model=${model:-unknown}"
+  printf -v "${out_var}" '%s' "${netdev}"
+}
+
 ftctl_xcolo_build_primary_qemu_args() {
+  local netdev_id="${1:-hostnet0}"
   local proxy_host proxy_port nbd_host nbd_port
   local mirror_port compare_port compare_local_port compare_out_port
   local mirror_wait compare_wait
 
+  [[ "${netdev_id}" =~ ^[A-Za-z0-9_.-]+$ ]] || netdev_id="hostnet0"
   ftctl_xcolo_parse_tcp_endpoint "${FTCTL_PROFILE_XCOLO_PROXY_ENDPOINT}" proxy_host proxy_port
   ftctl_xcolo_parse_tcp_endpoint "${FTCTL_PROFILE_XCOLO_NBD_ENDPOINT}" nbd_host nbd_port
   mirror_port="${FTCTL_XCOLO_MIRROR_PORT:-9003}"
@@ -1960,13 +2111,15 @@ ftctl_xcolo_build_primary_qemu_args() {
   # Keep chardev endpoints and packet filters in the generated XML so QEMU binds
   # the COLO netfilter chain during netdev creation. Dynamic QMP object-add can
   # accept the objects yet leave filter-facing chardev frontends detached.
-  printf '%s\n' "-S;-chardev;socket,id=mirror0,host=0.0.0.0,port=${mirror_port},server=on,wait=${mirror_wait};-chardev;socket,id=compare1,host=0.0.0.0,port=${compare_port},server=on,wait=${compare_wait};-chardev;socket,id=compare0,host=127.0.0.1,port=${compare_local_port},server=on,wait=off;-chardev;socket,id=compare0-0,host=127.0.0.1,port=${compare_local_port};-chardev;socket,id=compare_out,host=127.0.0.1,port=${compare_out_port},server=on,wait=off;-chardev;socket,id=compare_out0,host=127.0.0.1,port=${compare_out_port};-object;filter-mirror,id=m0,netdev=hostnet0,queue=tx,outdev=mirror0;-object;filter-redirector,id=redire0,netdev=hostnet0,queue=rx,indev=compare_out;-object;filter-redirector,id=redire1,netdev=hostnet0,queue=rx,outdev=compare0;-object;colo-compare,id=comp0,primary_in=compare0-0,secondary_in=compare1,outdev=compare_out0,iothread=iothread1"
+  printf '%s\n' "-S;-chardev;socket,id=mirror0,host=0.0.0.0,port=${mirror_port},server=on,wait=${mirror_wait};-chardev;socket,id=compare1,host=0.0.0.0,port=${compare_port},server=on,wait=${compare_wait};-chardev;socket,id=compare0,host=127.0.0.1,port=${compare_local_port},server=on,wait=off;-chardev;socket,id=compare0-0,host=127.0.0.1,port=${compare_local_port};-chardev;socket,id=compare_out,host=127.0.0.1,port=${compare_out_port},server=on,wait=off;-chardev;socket,id=compare_out0,host=127.0.0.1,port=${compare_out_port};-object;filter-mirror,id=m0,netdev=${netdev_id},queue=tx,outdev=mirror0;-object;filter-redirector,id=redire0,netdev=${netdev_id},queue=rx,indev=compare_out;-object;filter-redirector,id=redire1,netdev=${netdev_id},queue=rx,outdev=compare0;-object;colo-compare,id=comp0,primary_in=compare0-0,secondary_in=compare1,outdev=compare_out0,iothread=iothread1"
 }
 
 ftctl_xcolo_build_secondary_qemu_args() {
+  local netdev_id="${1:-hostnet0}"
   local connect_ctrl connect_data proxy_host proxy_port nbd_host nbd_port
   local mirror_port compare_port
 
+  [[ "${netdev_id}" =~ ^[A-Za-z0-9_.-]+$ ]] || netdev_id="hostnet0"
   ftctl_xcolo_parse_tcp_endpoint "${FTCTL_PROFILE_XCOLO_PROXY_ENDPOINT}" proxy_host proxy_port
   ftctl_xcolo_parse_tcp_endpoint "${FTCTL_PROFILE_XCOLO_NBD_ENDPOINT}" nbd_host nbd_port
   connect_ctrl="$(ftctl_xcolo_primary_listen_host control)"
@@ -1975,7 +2128,7 @@ ftctl_xcolo_build_secondary_qemu_args() {
   compare_port="${FTCTL_XCOLO_COMPARE_PORT:-9004}"
 
   # Match the QEMU COLO startup procedure: the secondary does not use -S during startup.
-  printf '%s\n' "-chardev;socket,id=red0,host=${connect_ctrl},port=${mirror_port},reconnect-ms=1000;-chardev;socket,id=red1,host=${connect_data},port=${compare_port},reconnect-ms=1000;-object;filter-redirector,id=f1,netdev=hostnet0,queue=tx,indev=red0;-object;filter-redirector,id=f2,netdev=hostnet0,queue=rx,outdev=red1;-object;filter-rewriter,id=rew0,netdev=hostnet0,queue=all;-incoming;${FTCTL_PROFILE_XCOLO_MIGRATE_URI}"
+  printf '%s\n' "-chardev;socket,id=red0,host=${connect_ctrl},port=${mirror_port},reconnect-ms=1000;-chardev;socket,id=red1,host=${connect_data},port=${compare_port},reconnect-ms=1000;-object;filter-redirector,id=f1,netdev=${netdev_id},queue=tx,indev=red0;-object;filter-redirector,id=f2,netdev=${netdev_id},queue=rx,outdev=red1;-object;filter-rewriter,id=rew0,netdev=${netdev_id},queue=all;-incoming;${FTCTL_PROFILE_XCOLO_MIGRATE_URI}"
 }
 
 ftctl_xcolo_doc_alignment_summary() {
@@ -2859,6 +3012,7 @@ ftctl_xcolo_attach_primary_block_graph_with_remote() {
 
 ftctl_xcolo_attach_primary_net_filters() {
   local vm="${1-}"
+  local netdev_id
 
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
     '{"execute":"stop"}' "colo" "primary.stop_before_filter_attach" || return 1
@@ -2868,30 +3022,34 @@ ftctl_xcolo_attach_primary_net_filters() {
     ftctl_xcolo_observe_primary_filter_chardev_binding "${vm}" || true
     ftctl_state_set "${vm}" \
       "xcolo_primary_net_filters_attached=true" \
-      "xcolo_primary_net_filters_attach_mode=xml"
+      "xcolo_primary_net_filters_attach_mode=xml" \
+      "xcolo_primary_net_filters_netdev=$(ftctl_state_get "${vm}" "xcolo_primary_netdev_id" 2>/dev/null || printf '%s' hostnet0)"
     ftctl_log_event "colo" "primary.net_filters" "ok" "${vm}" "" \
       "mode=xml"
     return 0
   fi
 
+  netdev_id="$(ftctl_state_get "${vm}" "xcolo_primary_netdev_id" 2>/dev/null || true)"
+  netdev_id="${netdev_id:-hostnet0}"
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
-    '{"execute":"object-add","arguments":{"qom-type":"filter-redirector","id":"redire0","netdev":"hostnet0","queue":"rx","indev":"compare_out"}}' \
+    "{\"execute\":\"object-add\",\"arguments\":{\"qom-type\":\"filter-redirector\",\"id\":\"redire0\",\"netdev\":\"${netdev_id}\",\"queue\":\"rx\",\"indev\":\"compare_out\"}}" \
     "colo" "primary.object_add_redirector_in" || return 1
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
-    '{"execute":"object-add","arguments":{"qom-type":"filter-redirector","id":"redire1","netdev":"hostnet0","queue":"rx","outdev":"compare0"}}' \
+    "{\"execute\":\"object-add\",\"arguments\":{\"qom-type\":\"filter-redirector\",\"id\":\"redire1\",\"netdev\":\"${netdev_id}\",\"queue\":\"rx\",\"outdev\":\"compare0\"}}" \
     "colo" "primary.object_add_redirector_out" || return 1
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
     '{"execute":"object-add","arguments":{"qom-type":"colo-compare","id":"comp0","primary_in":"compare0-0","secondary_in":"compare1","outdev":"compare_out0","iothread":"iothread1"}}' \
     "colo" "primary.object_add_colo_compare" || return 1
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
-    '{"execute":"object-add","arguments":{"qom-type":"filter-mirror","id":"m0","netdev":"hostnet0","queue":"tx","outdev":"mirror0"}}' \
+    "{\"execute\":\"object-add\",\"arguments\":{\"qom-type\":\"filter-mirror\",\"id\":\"m0\",\"netdev\":\"${netdev_id}\",\"queue\":\"tx\",\"outdev\":\"mirror0\"}}" \
     "colo" "primary.object_add_filter_mirror" || return 1
 
   ftctl_xcolo_validate_primary_channel_paths "${vm}" || return 1
   ftctl_xcolo_observe_primary_filter_chardev_binding "${vm}" || true
   ftctl_state_set "${vm}" \
     "xcolo_primary_net_filters_attached=true" \
-    "xcolo_primary_net_filters_attach_mode=qmp"
+    "xcolo_primary_net_filters_attach_mode=qmp" \
+    "xcolo_primary_net_filters_netdev=${netdev_id}"
 }
 
 ftctl_xcolo_resume_primary_before_migrate() {
@@ -3950,6 +4108,7 @@ ftctl_xcolo_plan_protect_block_cold_conversion() {
   local primary_generated_xml standby_generated_xml
   local xml_bundle_dir persistence secondary_dest primary_state
   local primary_qemu_args secondary_qemu_args
+  local primary_netdev_id secondary_netdev_id
   local xcolo_disk_plan primary_disk_map primary_disk_metadata
 
   ftctl_xcolo_detect_block_backed_ft "${vm}" disk_kind primary_target primary_source primary_format || return 1
@@ -3963,8 +4122,10 @@ ftctl_xcolo_plan_protect_block_cold_conversion() {
   persistence="$(ftctl_state_get "${vm}" "primary_persistence" 2>/dev/null || true)"
   secondary_dest=""
   primary_state="$(ftctl_xcolo_primary_domain_state "${vm}" 2>/dev/null || echo "unknown")"
-  primary_qemu_args="$(ftctl_xcolo_build_primary_qemu_args)"
-  secondary_qemu_args="$(ftctl_xcolo_build_secondary_qemu_args)"
+  primary_qemu_args=""
+  secondary_qemu_args=""
+  primary_netdev_id=""
+  secondary_netdev_id=""
   xcolo_disk_plan=""
   primary_disk_map=""
   primary_disk_metadata=""
@@ -3982,6 +4143,23 @@ ftctl_xcolo_plan_protect_block_cold_conversion() {
       "standby_xml_seed=${standby_xml_seed}" \
       "primary_persistence=${persistence}"
   fi
+
+  ftctl_xcolo_xml_resolve_netdev_id "${primary_xml_backup}" "primary" "${vm}" primary_netdev_id || {
+    ftctl_state_set "${vm}" \
+      "protection_state=error" \
+      "transport_state=planned" \
+      "last_error=xcolo_primary_netdev_id_unresolved"
+    return 1
+  }
+  ftctl_xcolo_xml_resolve_netdev_id "${standby_xml_seed}" "secondary" "${vm}" secondary_netdev_id || {
+    ftctl_state_set "${vm}" \
+      "protection_state=error" \
+      "transport_state=planned" \
+      "last_error=xcolo_secondary_netdev_id_unresolved"
+    return 1
+  }
+  primary_qemu_args="$(ftctl_xcolo_build_primary_qemu_args "${primary_netdev_id}")"
+  secondary_qemu_args="$(ftctl_xcolo_build_secondary_qemu_args "${secondary_netdev_id}")"
 
   if [[ "${FTCTL_PROFILE_DISK_MAP}" == "auto" ]]; then
     ftctl_state_set "${vm}" \
@@ -4047,6 +4225,8 @@ ftctl_xcolo_plan_protect_block_cold_conversion() {
     "primary_disk_format=${primary_format}" \
     "current_primary_node=${current_node}" \
     "current_primary_qdev=${current_qdev}" \
+    "xcolo_primary_netdev_id=${primary_netdev_id}" \
+    "xcolo_secondary_netdev_id=${secondary_netdev_id}" \
     "primary_xml_backup=${primary_xml_backup}" \
     "standby_xml_seed=${standby_xml_seed}" \
     "primary_xml_generated=${primary_generated_xml}" \
@@ -4076,6 +4256,8 @@ ftctl_xcolo_plan_protect_block_cold_conversion() {
     "current_primary_node=${current_node}" \
     "current_primary_qdev=${current_qdev}" \
     "secondary_block_dest=${secondary_dest}" \
+    "xcolo_primary_netdev_id=${primary_netdev_id}" \
+    "xcolo_secondary_netdev_id=${secondary_netdev_id}" \
     "xcolo_disk_plan=${xcolo_disk_plan}" \
     "protection_state=pairing" \
     "transport_state=planned" \

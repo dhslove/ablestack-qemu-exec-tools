@@ -68,7 +68,10 @@ direction:
 -object colo-compare,id=comp0,primary_in=compare0-0,secondary_in=compare1,outdev=compare_out0,iothread=iothread1
 ```
 
-This makes `hostnet0` the only local difference from the QEMU example's `hn0`.
+In the original 320 design this was written with `hostnet0` as the local
+single-NIC value. Design 326 refines that point: `hostnet0` is not a constant.
+The implementation must resolve the actual libvirt/QEMU netdev ID from the
+generated XML and then apply the same QEMU COLO topology to that netdev.
 
 ### Defer Checkpoint Delay
 
