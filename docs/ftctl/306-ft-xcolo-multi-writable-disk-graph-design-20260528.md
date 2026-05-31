@@ -59,7 +59,7 @@ The handshake order becomes:
 1. Secondary QMP capabilities.
 2. Secondary x-colo/return-path capabilities.
 3. Secondary NBD server start.
-4. For each disk, secondary NBD export add for that disk's COLO quorum top node (`ftctl-colo-<target>`), not the original libvirt base node.
+4. For each disk, secondary NBD export add for that disk's base/parent node. Design 332 supersedes the earlier attempt to export the COLO quorum top node (`ftctl-colo-<target>`), because QEMU's COLO procedure exports `parent0` and the primary NBD client attaches that export under the primary quorum.
 5. Primary QMP capabilities.
 6. For each disk:
    - primary NBD client add against the same `ftctl-colo-<target>` export;

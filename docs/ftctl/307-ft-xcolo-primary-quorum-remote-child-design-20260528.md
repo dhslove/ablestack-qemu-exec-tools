@@ -2,7 +2,7 @@
 
 ## Background
 
-After the `primary.cont_before_migrate` fix, `r97-link-01` progressed further:
+After the historical `primary.cont_before_migrate` experiment, `r97-link-01` progressed further:
 
 - primary generated domain started;
 - secondary generated domain started;

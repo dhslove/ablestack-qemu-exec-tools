@@ -65,7 +65,7 @@ test from reaching the next meaningful evidence point.
      `primary.filter_chardev_binding result=defer` and preserve the reason in
      `xcolo_primary_filter_chardev_binding_deferred_reason`.
    - Do not set `last_error` at this point.
-   - Do not block `primary.cont_before_migrate` or `primary.migrate` only
+   - Do not block `primary.migrate` only
      because pre-`cont` filter-facing chardevs are closed.
 3. Keep runtime validation strict.
    - If the pair later fails to enter the COLO role, runtime diagnostics still
@@ -82,12 +82,16 @@ The next retest should no longer stop immediately after
 
 ```text
 primary.filter_chardev_binding defer   # allowed if QEMU has not opened all frontends yet
-primary.cont_before_migrate
 primary.migrate_set_capabilities
-primary.migrate_set_parameters
 primary.migrate
 xcolo.runtime_validate
 ```
+
+Design 332 later removes the explicit `primary.cont_before_migrate` operation
+and keeps checkpoint-delay tuning as a post-start operation. The deferral rule
+remains: incomplete chardev frontend binding is not enough by itself to block
+`primary.migrate` when topology and channel preconditions are otherwise
+satisfied.
 
 If the same topology problem is still real after runtime convergence, the
 failure should appear in `xcolo.runtime_validate` rather than at the pre-`cont`

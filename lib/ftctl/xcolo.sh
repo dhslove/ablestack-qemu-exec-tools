@@ -1554,7 +1554,38 @@ ftctl_xcolo_validate_pair_runtime() {
         elif [[ -n "${disk_plan}" && "${secondary_block_graph}" != "yes" && "${secondary_block_graph}" != "not_applicable" ]]; then
           reason="secondary_block_graph_not_ready"
         elif [[ "${primary_colo}" != "primary" && "${secondary_colo}" == "secondary" ]]; then
-          reason="primary_finish_migrate_colo_role_not_entered"
+          pending_reason="colo_activation_stalled"
+          ftctl_state_set "${vm}" \
+            "xcolo_primary_running=${primary_running}" \
+            "xcolo_secondary_running=${secondary_running}" \
+            "xcolo_primary_status=${primary_status}" \
+            "xcolo_secondary_status=${secondary_status}" \
+            "xcolo_primary_colo_mode=${primary_colo}" \
+            "xcolo_secondary_colo_mode=${secondary_colo}" \
+            "xcolo_primary_migrate_status=${primary_migrate}" \
+            "xcolo_secondary_migrate_status=${secondary_migrate}" \
+            "xcolo_primary_qga=${primary_qga}" \
+            "xcolo_secondary_qga=${secondary_qga}" \
+            "xcolo_primary_runtime_xml=${primary_xml}" \
+            "xcolo_secondary_runtime_xml=${secondary_xml}" \
+            "xcolo_primary_filter_qom_ready=${primary_filter_qom}" \
+            "xcolo_primary_filter_qom_reason=${primary_filter_qom_reason}" \
+            "xcolo_primary_filter_cmdline_ready=${primary_filter_cmdline}" \
+            "xcolo_primary_filter_cmdline_reason=${primary_filter_cmdline_reason}" \
+            "xcolo_primary_filter_chardev_ready=${primary_chardev}" \
+            "xcolo_primary_filter_chardev_reason=${primary_chardev_reason}" \
+            "xcolo_channel_mirror_established=${channel_mirror}" \
+            "xcolo_channel_compare_established=${channel_compare}" \
+            "xcolo_channel_compare_local_established=${channel_compare_local}" \
+            "xcolo_channel_compare_out_established=${channel_compare_out}" \
+            "xcolo_secondary_block_graph_ready=${secondary_block_graph}" \
+            "xcolo_secondary_block_graph_reason=${secondary_block_graph_reason}" \
+            "xcolo_runtime_pending_since=${pending_since}" \
+            "xcolo_pending_reason=${pending_reason}" \
+            "last_error=xcolo_activation_stalled"
+          ftctl_log_event "colo" "xcolo.runtime_validate" "pending" "${vm}" "" \
+            "reason=${pending_reason} primary_running=${primary_running} secondary_running=${secondary_running} primary_status=${primary_status} secondary_status=${secondary_status} primary_colo=${primary_colo} secondary_colo=${secondary_colo} primary_migrate=${primary_migrate} secondary_migrate=${secondary_migrate} primary_qga=${primary_qga} secondary_qga=${secondary_qga} filter_qom=${primary_filter_qom} filter_qom_reason=${primary_filter_qom_reason} filter_cmdline=${primary_filter_cmdline} filter_cmdline_reason=${primary_filter_cmdline_reason} chardev=${primary_chardev} chardev_reason=${primary_chardev_reason} mirror=${channel_mirror} compare=${channel_compare} compare_local=${channel_compare_local} compare_out=${channel_compare_out} secondary_block_graph=${secondary_block_graph} elapsed=${pending_elapsed} max=${pending_max} attempts=${timeout}"
+          return 10
         else
           reason="${pending_reason}"
         fi
@@ -2296,11 +2327,10 @@ COLO startup alignment checklist
    - secondary qmp_capabilities
    - secondary migrate-set-capabilities x-colo
    - secondary nbd-server-start
-   - secondary nbd-server-add for the COLO quorum top node
+   - secondary nbd-server-add for the COLO base/parent node
    - primary qmp_capabilities
    - primary blockdev-add nbd0
    - primary x-blockdev-change parent=colo-disk0 node=nbd0
-   - primary QMP object-add for redirectors / colo-compare / filter-mirror
    - primary migrate-set-capabilities x-colo
    - primary migrate
    - primary migrate-set-parameters x-checkpoint-delay after COLO starts
@@ -3334,7 +3364,6 @@ ftctl_xcolo_execute_handshake_with_nodes() {
     "colo" "primary.x_blockdev_change" || return 1
   ftctl_xcolo_attach_primary_net_filters "${vm}" || return 1
   ftctl_xcolo_set_and_verify_migrate_capabilities "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" "${vm}" "primary" "primary" || return 1
-  ftctl_xcolo_resume_primary_before_migrate "${vm}" || return 1
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
     "{\"execute\":\"migrate\",\"arguments\":{\"uri\":\"${FTCTL_PROFILE_XCOLO_MIGRATE_URI}\"}}" \
     "colo" "primary.migrate" || return 1
@@ -3371,11 +3400,12 @@ ftctl_xcolo_execute_handshake_with_disk_plan() {
     : "${primary_source}${primary_format}${primary_dtype}${secondary_dest}"
     suffix="$(ftctl_xcolo_disk_suffix "${target}")"
     secondary_base_node="$(ftctl_state_get "${vm}" "xcolo_disk_${suffix}_secondary_base_node" 2>/dev/null || true)"
-    export_node="ftctl-colo-${suffix}"
+    export_node="${secondary_base_node}"
     [[ -n "${secondary_base_node}" ]] || return 1
     ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" \
       "{\"execute\":\"nbd-server-add\",\"arguments\":{\"device\":\"${export_node}\",\"writable\":true}}" \
       "colo" "secondary.nbd_server_add.${suffix}" || return 1
+    ftctl_state_set "${vm}" "xcolo_disk_${suffix}_secondary_export_node=${export_node}"
   done
 
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
@@ -3391,7 +3421,7 @@ ftctl_xcolo_execute_handshake_with_disk_plan() {
     secondary_base_node="$(ftctl_state_get "${vm}" "xcolo_disk_${suffix}_secondary_base_node" 2>/dev/null || true)"
     nbd_node="${FTCTL_PROFILE_XCOLO_NBD_NODE}-${suffix}"
     colo_node="ftctl-colo-${suffix}"
-    export_node="${colo_node}"
+    export_node="${secondary_base_node}"
     [[ -n "${primary_base_node}" && -n "${primary_qdev}" && -n "${primary_overlay}" && -n "${secondary_base_node}" ]] || return 1
     ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
       "{\"execute\":\"blockdev-add\",\"arguments\":{\"driver\":\"nbd\",\"node-name\":\"${nbd_node}\",\"server\":{\"type\":\"inet\",\"host\":\"${nbd_host}\",\"port\":\"${nbd_port}\"},\"export\":\"${export_node}\",\"detect-zeroes\":\"on\"}}" \
@@ -3401,7 +3431,6 @@ ftctl_xcolo_execute_handshake_with_disk_plan() {
 
   ftctl_xcolo_attach_primary_net_filters "${vm}" || return 1
   ftctl_xcolo_set_and_verify_migrate_capabilities "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" "${vm}" "primary" "primary" || return 1
-  ftctl_xcolo_resume_primary_before_migrate "${vm}" || return 1
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
     "{\"execute\":\"migrate\",\"arguments\":{\"uri\":\"${FTCTL_PROFILE_XCOLO_MIGRATE_URI}\"}}" \
     "colo" "primary.migrate" || return 1

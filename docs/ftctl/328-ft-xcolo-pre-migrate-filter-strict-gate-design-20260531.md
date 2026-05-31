@@ -47,10 +47,9 @@ For FT, the primary and secondary must enter COLO as a matched pair. Runtime
 validation may diagnose a bad COLO graph, but it must not be the normal place to
 construct the primary network filter graph.
 
-The primary network filter/chardev graph must be complete before:
-
-1. `primary.cont_before_migrate`
-2. `primary.migrate`
+The primary network filter/chardev graph must be complete before `primary.migrate`.
+Design 332 later removes the explicit `primary.cont_before_migrate` step from
+the protected startup path.
 
 If that precondition is not met, FTCTL must fail early and preserve a clear
 diagnostic reason instead of starting a migration that cannot converge.
@@ -108,7 +107,6 @@ primary.object_add_*
 primary.net_filters.rebuild ok
 primary.filter_chardev_binding ok phase=pre_migrate topology_aware=yes
 primary.net_filters ok mode=qmp-rebuild
-primary.cont_before_migrate ok
 primary.migrate ok
 ```
 

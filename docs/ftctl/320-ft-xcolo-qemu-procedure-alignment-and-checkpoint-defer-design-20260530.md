@@ -88,7 +88,6 @@ primary blockdev-add
 primary x-blockdev-change
 primary filter topology already in XML or attached by fallback
 primary migrate-set-capabilities
-primary cont
 primary migrate
 ```
 

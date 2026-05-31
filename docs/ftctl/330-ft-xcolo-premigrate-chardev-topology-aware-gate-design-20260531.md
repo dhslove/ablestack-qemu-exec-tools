@@ -103,7 +103,6 @@ The next successful pre-migrate sequence should pass the former failure point:
 primary.channel_paths ok mode=pre_migrate
 primary.filter_chardev_binding ok phase=pre_migrate topology_aware=yes
 primary.net_filters ok mode=qmp-rebuild
-primary.cont_before_migrate ok
 primary.migrate ok
 ```
 

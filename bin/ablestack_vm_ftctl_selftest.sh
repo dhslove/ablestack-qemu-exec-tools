@@ -1136,6 +1136,11 @@ selftest_case_xcolo_scsi_root_replace_avoids_lun_collision() (
     local uri="$1" vm="$2" payload="$3" stage="$4" event="$5"
     printf '%s|%s|%s|%s|%s\n' "${stage}" "${event}" "${uri}" "${vm}" "${payload}" >> "${call_log}"
   }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_query_migrate_capability_state() {
+    printf -v "$4" '%s' "yes"
+    return 0
+  }
 
   ftctl_xcolo_attach_secondary_block_graph \
     "standby-vm" "libvirt-3-format" "/tmp/hidden.qcow2" "/tmp/active.qcow2" "scsi0-0-0-0"
@@ -1158,10 +1163,10 @@ selftest_case_xcolo_scsi_root_replace_avoids_lun_collision() (
 
 selftest_case_xcolo_block_handshake_sets_checkpoint_after_migrate() (
   selftest_reset_env
-  selftest_info "x-colo block handshake sets checkpoint delay before primary migrate"
+  selftest_info "x-colo block handshake defers checkpoint delay and primary cont until after startup validation"
 
   local call_log="${SELFTEST_ROOT}/xcolo-block-handshake-order.log"
-  local filter_line cont_line migrate_line params_line
+  local filter_line migrate_line
   FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
   FTCTL_PROFILE_SECONDARY_URI="qemu+ssh://peer/system"
   FTCTL_PROFILE_XCOLO_NBD_ENDPOINT="tcp:10.0.0.2:10809"
@@ -1175,30 +1180,24 @@ selftest_case_xcolo_block_handshake_sets_checkpoint_after_migrate() (
     local uri="$1" vm="$2" payload="$3" stage="$4" event="$5"
     printf '%s|%s|%s|%s|%s\n' "${stage}" "${event}" "${uri}" "${vm}" "${payload}" >> "${call_log}"
   }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_query_migrate_capability_state() {
+    printf -v "$4" '%s' "yes"
+    return 0
+  }
 
   ftctl_xcolo_execute_handshake_with_nodes "primary-vm" "standby-vm" "parent0"
 
-  selftest_assert_file_contains "${call_log}" "primary.object_add_redirector_in"
-  selftest_assert_file_contains "${call_log}" "primary.object_add_redirector_out"
-  selftest_assert_file_contains "${call_log}" "primary.object_add_colo_compare"
-  selftest_assert_file_contains "${call_log}" "primary.object_add_filter_mirror"
-  selftest_assert_file_contains "${call_log}" "primary.cont_before_migrate"
+  selftest_assert_file_contains "${call_log}" "primary.stop_before_filter_attach"
   selftest_assert_file_contains "${call_log}" "primary.migrate"
-  selftest_assert_file_contains "${call_log}" "primary.migrate_set_parameters"
+  selftest_assert_file_not_contains "${call_log}" "primary.cont_before_migrate"
+  selftest_assert_file_not_contains "${call_log}" "primary.migrate_set_parameters"
   selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_primary_net_filters_attached")" "true" \
     "primary net filters attached state"
-  selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_primary_cont_before_migrate")" "true" \
-    "primary continued before migrate state"
-  filter_line="$(grep -n '|primary.object_add_filter_mirror|' "${call_log}" | head -n1 | cut -d: -f1)"
-  cont_line="$(grep -n '|primary.cont_before_migrate|' "${call_log}" | head -n1 | cut -d: -f1)"
+  filter_line="$(grep -n '|primary.stop_before_filter_attach|' "${call_log}" | head -n1 | cut -d: -f1)"
   migrate_line="$(grep -n '|primary.migrate|' "${call_log}" | head -n1 | cut -d: -f1)"
-  params_line="$(grep -n '|primary.migrate_set_parameters|' "${call_log}" | head -n1 | cut -d: -f1)"
   [[ "${filter_line}" -lt "${migrate_line}" ]] || \
-    selftest_fail "primary filter-mirror must be attached before primary.migrate"
-  [[ "${params_line}" -lt "${migrate_line}" ]] || \
-    selftest_fail "primary.migrate_set_parameters must be issued before primary.migrate"
-  [[ "${cont_line}" -lt "${migrate_line}" ]] || \
-    selftest_fail "primary.cont_before_migrate must be issued before primary.migrate"
+    selftest_fail "primary filter attach gate must run before primary.migrate"
 )
 
 selftest_case_xcolo_multi_disk_handshake_exports_all_disks() (
@@ -1206,7 +1205,7 @@ selftest_case_xcolo_multi_disk_handshake_exports_all_disks() (
   selftest_info "x-colo block handshake exports all mapped disks before primary migrate"
 
   local call_log="${SELFTEST_ROOT}/xcolo-multi-disk-handshake-order.log"
-  local sda_export_line sdb_export_line cont_line migrate_line
+  local sda_export_line sdb_export_line migrate_line
   FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
   FTCTL_PROFILE_SECONDARY_URI="qemu+ssh://peer/system"
   FTCTL_PROFILE_XCOLO_NBD_ENDPOINT="tcp:10.0.0.2:10809"
@@ -1230,6 +1229,11 @@ selftest_case_xcolo_multi_disk_handshake_exports_all_disks() (
     local uri="$1" vm="$2" payload="$3" stage="$4" event="$5"
     printf '%s|%s|%s|%s|%s\n' "${stage}" "${event}" "${uri}" "${vm}" "${payload}" >> "${call_log}"
   }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_query_migrate_capability_state() {
+    printf -v "$4" '%s' "yes"
+    return 0
+  }
 
   ftctl_xcolo_execute_handshake_with_disk_plan \
     "primary-vm" "standby-vm" \
@@ -1251,26 +1255,23 @@ selftest_case_xcolo_multi_disk_handshake_exports_all_disks() (
   selftest_assert_file_contains "${call_log}" '"children":\["ftctl-primary-active-sdb"\]'
   selftest_assert_file_contains "${call_log}" '"parent":"ftctl-colo-sda","node":"nbd0-sda"'
   selftest_assert_file_contains "${call_log}" '"parent":"ftctl-colo-sdb","node":"nbd0-sdb"'
-  selftest_assert_file_contains "${call_log}" '"device":"ftctl-colo-sda"'
-  selftest_assert_file_contains "${call_log}" '"device":"ftctl-colo-sdb"'
-  selftest_assert_file_contains "${call_log}" '"export":"ftctl-colo-sda"'
-  selftest_assert_file_contains "${call_log}" '"export":"ftctl-colo-sdb"'
-  selftest_assert_file_not_contains "${call_log}" '"export":"libvirt-root-format"'
-  selftest_assert_file_not_contains "${call_log}" '"export":"libvirt-data-format"'
-  selftest_assert_file_contains "${call_log}" "primary.cont_before_migrate"
+  selftest_assert_file_contains "${call_log}" '"device":"libvirt-root-format"'
+  selftest_assert_file_contains "${call_log}" '"device":"libvirt-data-format"'
+  selftest_assert_file_contains "${call_log}" '"export":"libvirt-root-format"'
+  selftest_assert_file_contains "${call_log}" '"export":"libvirt-data-format"'
+  selftest_assert_file_not_contains "${call_log}" '"export":"ftctl-colo-sda"'
+  selftest_assert_file_not_contains "${call_log}" '"export":"ftctl-colo-sdb"'
+  selftest_assert_file_not_contains "${call_log}" "primary.cont_before_migrate"
   sda_export_line="$(grep -n '|secondary.nbd_server_add.sda|' "${call_log}" | head -n1 | cut -d: -f1)"
   sdb_export_line="$(grep -n '|secondary.nbd_server_add.sdb|' "${call_log}" | head -n1 | cut -d: -f1)"
-  cont_line="$(grep -n '|primary.cont_before_migrate|' "${call_log}" | head -n1 | cut -d: -f1)"
   migrate_line="$(grep -n '|primary.migrate|' "${call_log}" | head -n1 | cut -d: -f1)"
   [[ "${sda_export_line}" -lt "${migrate_line}" && "${sdb_export_line}" -lt "${migrate_line}" ]] || \
     selftest_fail "all disk exports must be added before primary.migrate"
-  [[ "${cont_line}" -lt "${migrate_line}" ]] || \
-    selftest_fail "primary.cont_before_migrate must be issued before primary.migrate"
 )
 
 selftest_case_xcolo_primary_filter_binding_defers_to_runtime_validation() (
   selftest_reset_env
-  selftest_info "x-colo primary filter binding is observed before cont and deferred to runtime validation"
+  selftest_info "x-colo primary filter binding is observed before migrate and deferred to runtime validation"
 
   local call_log="${SELFTEST_ROOT}/xcolo-filter-binding-defers-runtime.log"
   local rc=0
@@ -1290,6 +1291,11 @@ selftest_case_xcolo_primary_filter_binding_defers_to_runtime_validation() (
     printf '%s|%s|%s|%s|%s\n' "${stage}" "${event}" "${uri}" "${vm}" "${payload}" >> "${call_log}"
   }
   # shellcheck disable=SC2317
+  ftctl_xcolo_query_migrate_capability_state() {
+    printf -v "$4" '%s' "yes"
+    return 0
+  }
+  # shellcheck disable=SC2317
   ftctl_xcolo_observe_primary_filter_chardev_binding() {
     local vm="${1-}"
     ftctl_state_set "${vm}" \
@@ -1304,11 +1310,8 @@ selftest_case_xcolo_primary_filter_binding_defers_to_runtime_validation() (
   ftctl_xcolo_execute_handshake_with_nodes "primary-vm" "standby-vm" "parent0" || rc=$?
 
   selftest_assert_eq "${rc}" "0" "pre-cont incomplete primary filter binding should not block migrate"
-  selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_primary_filter_chardev_binding_deferred_reason")" \
-    "mirror0:frontend_closed,compare0:frontend_closed" \
-    "deferred filter binding reason should be preserved"
-  selftest_assert_file_contains "${call_log}" "primary.object_add_filter_mirror"
-  selftest_assert_file_contains "${call_log}" "primary.cont_before_migrate"
+  selftest_assert_file_contains "${call_log}" "primary.stop_before_filter_attach"
+  selftest_assert_file_not_contains "${call_log}" "primary.cont_before_migrate"
   selftest_assert_file_contains "${call_log}" "primary.migrate"
 )
 
@@ -1912,10 +1915,10 @@ selftest_case_xcolo_runtime_validation_refines_primary_chardev_binding() (
   }
 
   ftctl_xcolo_validate_pair_runtime "${vm}" "${vm}-standby" || rc=$?
-  selftest_assert_eq "${rc}" "1" "primary role stall should fail after bounded wait"
+  selftest_assert_eq "${rc}" "10" "primary role stall should remain observable after bounded wait"
   selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" \
-    "xcolo_runtime_validation_failed:primary_finish_migrate_colo_role_not_entered" \
-    "primary role stall should outrank closed chardev diagnostics"
+    "xcolo_activation_stalled" \
+    "primary role stall should preserve activation-stalled diagnostics"
 )
 
 selftest_case_xcolo_runtime_validation_reports_compare_channel_failure() (

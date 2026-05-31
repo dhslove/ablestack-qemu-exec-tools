@@ -48,7 +48,7 @@ Split primary channel validation into two scopes.
 
 ### Pre-Migrate Gate
 
-Before `primary.cont_before_migrate` and `primary.migrate`, require only the
+Before `primary.migrate`, require only the
 topology that must already exist:
 
 - mirror channel: `LISTEN` or already `ESTABLISHED`
@@ -97,7 +97,6 @@ Pre-migrate success can now look like this:
 primary.channel_paths ok mode=pre_migrate mirror_listen=yes compare_listen=yes
 primary.filter_chardev_binding ok phase=pre_migrate topology_aware=yes
 primary.net_filters ok mode=qmp-rebuild
-primary.cont_before_migrate ok
 primary.migrate ok
 ```
 

@@ -6,7 +6,7 @@ Date: 2026-05-31
 
 The runtime-validation repair path described in this document is no longer the
 normal FT protection path. The QMP rebuild primitive is still valid, but it must
-be executed before `primary.cont_before_migrate` and `primary.migrate` whenever
+be executed before `primary.migrate` whenever
 the primary chardev/filter graph is incomplete.
 
 See `328-ft-xcolo-pre-migrate-filter-strict-gate-design-20260531.md` for the
