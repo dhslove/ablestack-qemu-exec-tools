@@ -65,3 +65,5 @@ The runtime validation must distinguish these cases:
 For single-NIC VMs with alias `net0`, the resolved value remains `hostnet0`, so existing 32.x FT tests should keep the same visible command-line shape. The important change is that this is now a derived runtime contract rather than a hardcoded assumption.
 
 This document supersedes earlier examples in documents 319 through 322 where `hostnet0` was shown as a fixed value. Those examples should be read as the common single-NIC result, not as a required constant.
+
+Follow-up design 327 keeps this netdev resolution contract and adds a QMP runtime rebuild path for the primary filter/chardev graph when XML command-line injection is present but the primary chardev frontends do not stay bound.
