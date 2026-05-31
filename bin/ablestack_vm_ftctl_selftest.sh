@@ -1813,7 +1813,7 @@ selftest_case_xcolo_runtime_validation_refines_missing_primary_colo_capability()
 
 selftest_case_xcolo_runtime_validation_refines_primary_chardev_binding() (
   selftest_reset_env
-  selftest_info "x-colo runtime validation refines incomplete primary chardev binding"
+  selftest_info "x-colo runtime validation reports primary role stall ahead of closed chardevs"
 
   local vm="xcolo-runtime-chardev-binding"
   local rc=0
@@ -1840,6 +1840,35 @@ selftest_case_xcolo_runtime_validation_refines_primary_chardev_binding() (
       "xcolo_primary_filter_chardev_ready=no" \
       "xcolo_primary_filter_chardev_reason=mirror0:frontend_closed" \
       "xcolo_primary_block_graph_ready=yes"
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_collect_primary_filter_cmdline_state() {
+    local vm="${1-}"
+    ftctl_state_set "${vm}" \
+      "xcolo_primary_filter_cmdline_ready=yes" \
+      "xcolo_primary_filter_cmdline_reason="
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_collect_primary_filter_qom_state() {
+    local vm="${1-}"
+    ftctl_state_set "${vm}" \
+      "xcolo_primary_filter_qom_ready=unknown" \
+      "xcolo_primary_filter_qom_reason=qom_unavailable"
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_collect_primary_chardev_binding_state() {
+    local vm="${1-}"
+    ftctl_state_set "${vm}" \
+      "xcolo_primary_filter_chardev_ready=no" \
+      "xcolo_primary_filter_chardev_reason=mirror0:frontend_closed"
+    return 1
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_collect_secondary_block_graph_state() {
+    local vm="${1-}"
+    ftctl_state_set "${vm}" \
+      "xcolo_secondary_block_graph_ready=yes" \
+      "xcolo_secondary_block_graph_reason="
   }
   # shellcheck disable=SC2317
   ftctl_xcolo_query_running_flag() {
@@ -1883,10 +1912,10 @@ selftest_case_xcolo_runtime_validation_refines_primary_chardev_binding() (
   }
 
   ftctl_xcolo_validate_pair_runtime "${vm}" "${vm}-standby" || rc=$?
-  selftest_assert_eq "${rc}" "1" "incomplete chardev binding should fail"
+  selftest_assert_eq "${rc}" "1" "primary role stall should fail after bounded wait"
   selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" \
-    "xcolo_runtime_validation_failed:primary_filter_chardev_frontend_incomplete" \
-    "incomplete chardev binding refined reason"
+    "xcolo_runtime_validation_failed:primary_finish_migrate_colo_role_not_entered" \
+    "primary role stall should outrank closed chardev diagnostics"
 )
 
 selftest_case_xcolo_runtime_validation_reports_compare_channel_failure() (

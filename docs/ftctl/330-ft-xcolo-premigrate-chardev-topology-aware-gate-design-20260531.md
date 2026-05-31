@@ -119,3 +119,8 @@ phase.
   as runtime peer establishment.
 - Runtime validation documents remain valid because strict chardev/frontend
   checks are still used after migration starts.
+- `331-ft-xcolo-runtime-primary-role-failure-classification-design-20260531.md`
+  refines runtime behavior: chardev frontend state remains diagnostic evidence,
+  but a topology-ready runtime pair that stalls with primary in
+  `finish-migrate` must be classified as a primary COLO role transition failure
+  rather than as a pre-migrate chardev binding failure.

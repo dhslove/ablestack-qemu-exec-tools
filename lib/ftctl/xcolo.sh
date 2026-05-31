@@ -1260,6 +1260,8 @@ ftctl_xcolo_refine_primary_role_failure_reason() {
   local reason="${2-}"
   local cap_xcolo cap_return_path checkpoint_delay filters_attached filter_qom_ready filter_cmdline_ready
   local netdev_ready filter_qom_reason filter_cmdline_reason
+  local primary_status secondary_status primary_colo secondary_colo primary_migrate secondary_migrate
+  local channel_mirror channel_compare channel_compare_local channel_compare_out disk_plan secondary_block_graph
 
   [[ "${reason}" == "primary_colo_role_not_entered" ]] || {
     printf '%s\n' "${reason}"
@@ -1275,6 +1277,18 @@ ftctl_xcolo_refine_primary_role_failure_reason() {
   netdev_ready="$(ftctl_state_get "${vm}" "xcolo_primary_netdev_ready" 2>/dev/null || true)"
   filter_qom_reason="$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_reason" 2>/dev/null || true)"
   filter_cmdline_reason="$(ftctl_state_get "${vm}" "xcolo_primary_filter_cmdline_reason" 2>/dev/null || true)"
+  primary_status="$(ftctl_state_get "${vm}" "xcolo_primary_status" 2>/dev/null || true)"
+  secondary_status="$(ftctl_state_get "${vm}" "xcolo_secondary_status" 2>/dev/null || true)"
+  primary_colo="$(ftctl_state_get "${vm}" "xcolo_primary_colo_mode" 2>/dev/null || true)"
+  secondary_colo="$(ftctl_state_get "${vm}" "xcolo_secondary_colo_mode" 2>/dev/null || true)"
+  primary_migrate="$(ftctl_state_get "${vm}" "xcolo_primary_migrate_status" 2>/dev/null || true)"
+  secondary_migrate="$(ftctl_state_get "${vm}" "xcolo_secondary_migrate_status" 2>/dev/null || true)"
+  channel_mirror="$(ftctl_state_get "${vm}" "xcolo_channel_mirror_established" 2>/dev/null || true)"
+  channel_compare="$(ftctl_state_get "${vm}" "xcolo_channel_compare_established" 2>/dev/null || true)"
+  channel_compare_local="$(ftctl_state_get "${vm}" "xcolo_channel_compare_local_established" 2>/dev/null || true)"
+  channel_compare_out="$(ftctl_state_get "${vm}" "xcolo_channel_compare_out_established" 2>/dev/null || true)"
+  disk_plan="$(ftctl_state_get "${vm}" "xcolo_disk_plan" 2>/dev/null || true)"
+  secondary_block_graph="$(ftctl_state_get "${vm}" "xcolo_secondary_block_graph_ready" 2>/dev/null || true)"
 
   if [[ "${cap_xcolo}" == "no" ]]; then
     printf '%s\n' "primary_colo_capability_missing"
@@ -1289,6 +1303,16 @@ ftctl_xcolo_refine_primary_role_failure_reason() {
     printf '%s\n' "primary_filter_netdev_not_found"
   elif [[ "${filters_attached}" != "true" && "${filter_cmdline_ready}" != "yes" ]]; then
     printf '%s\n' "primary_colo_filter_objects_not_attached"
+  elif [[ "${primary_status}" == "finish-migrate" &&
+          "${secondary_status}" == "inmigrate" &&
+          "${primary_migrate}" == "active" &&
+          "${secondary_migrate}" == "colo" &&
+          "${primary_colo}" != "primary" &&
+          "${secondary_colo}" == "secondary" ]] &&
+        ftctl_xcolo_runtime_primary_topology_ready "ok" "${filter_qom_ready}" "${filter_cmdline_ready}" \
+          "${channel_mirror}" "${channel_compare}" "${channel_compare_local}" "${channel_compare_out}" \
+          "${disk_plan}" "${secondary_block_graph}"; then
+    printf '%s\n' "primary_finish_migrate_colo_role_not_entered"
   elif [[ "$(ftctl_state_get "${vm}" "xcolo_primary_filter_chardev_ready" 2>/dev/null || true)" == "no" ]]; then
     printf '%s\n' "primary_filter_chardev_frontend_incomplete"
   elif [[ "${filter_qom_ready}" == "no" && "${filter_cmdline_ready}" != "yes" ]]; then
@@ -1331,6 +1355,29 @@ ftctl_xcolo_domain_xml_has_runtime_markers() {
       return 2
       ;;
   esac
+}
+
+ftctl_xcolo_runtime_primary_topology_ready() {
+  local primary_xml="${1-}"
+  local primary_filter_qom="${2-}"
+  local primary_filter_cmdline="${3-}"
+  local channel_mirror="${4-}"
+  local channel_compare="${5-}"
+  local channel_compare_local="${6-}"
+  local channel_compare_out="${7-}"
+  local disk_plan="${8-}"
+  local secondary_block_graph="${9-}"
+
+  [[ ( "${primary_filter_cmdline}" == "yes" ||
+        "${primary_filter_qom}" == "yes" ||
+        ( "${primary_xml}" == "ok" &&
+          "${primary_filter_cmdline}" != "no" &&
+          "${primary_filter_qom}" != "no" ) ) &&
+     "${channel_mirror}" == "yes" &&
+     "${channel_compare}" == "yes" &&
+     "${channel_compare_local}" == "yes" &&
+     "${channel_compare_out}" == "yes" &&
+     ( -z "${disk_plan}" || "${secondary_block_graph}" == "yes" || "${secondary_block_graph}" == "not_applicable" ) ]]
 }
 
 ftctl_xcolo_validate_pair_runtime() {
@@ -1438,14 +1485,10 @@ ftctl_xcolo_validate_pair_runtime() {
             "${secondary_migrate}" == "colo" &&
             "${primary_colo}" == "primary" &&
             "${secondary_colo}" == "secondary" &&
-            ( -z "${disk_plan}" || "${secondary_block_graph}" == "yes" || "${secondary_block_graph}" == "not_applicable" ) &&
-            ( "${primary_filter_cmdline}" == "yes" || "${primary_filter_qom}" == "yes" ) &&
-            "${primary_chardev}" == "yes" &&
-            "${channel_mirror}" == "yes" &&
-            "${channel_compare}" == "yes" &&
-            "${channel_compare_local}" == "yes" &&
-            "${channel_compare_out}" == "yes" &&
             ( "${qga_policy}" != "required" || "${primary_qga}" == "yes" ) ]] &&
+          ftctl_xcolo_runtime_primary_topology_ready "${primary_xml}" "${primary_filter_qom}" "${primary_filter_cmdline}" \
+            "${channel_mirror}" "${channel_compare}" "${channel_compare_local}" "${channel_compare_out}" \
+            "${disk_plan}" "${secondary_block_graph}" &&
           ftctl_xcolo_colo_mode_active "${primary_colo}" &&
           ftctl_xcolo_colo_mode_active "${secondary_colo}"; then
       ftctl_state_set "${vm}" \
@@ -1498,22 +1541,9 @@ ftctl_xcolo_validate_pair_runtime() {
       if [[ "${primary_status}" == "finish-migrate" &&
             "${secondary_status}" == "inmigrate" &&
             -n "${pending_since}" &&
-            "${pending_elapsed}" -ge "${pending_max}" &&
-            ! ( ( "${primary_filter_cmdline}" == "yes" ||
-                  "${primary_filter_qom}" == "yes" ||
-                  ( "${primary_xml}" == "ok" &&
-                    "${primary_filter_cmdline}" != "no" &&
-                    "${primary_filter_qom}" != "no" ) ) &&
-                "${primary_chardev}" == "yes" &&
-                "${channel_mirror}" == "yes" &&
-                "${channel_compare}" == "yes" &&
-                "${channel_compare_local}" == "yes" &&
-                "${channel_compare_out}" == "yes" &&
-                ( -z "${disk_plan}" || "${secondary_block_graph}" == "yes" || "${secondary_block_graph}" == "not_applicable" ) ) ]]; then
+            "${pending_elapsed}" -ge "${pending_max}" ]]; then
         if [[ "${qga_policy}" == "required" && "${primary_qga}" != "yes" ]]; then
           reason="primary_guest_boot_unhealthy"
-        elif [[ "${primary_chardev}" == "no" ]]; then
-          reason="primary_filter_chardev_frontend_incomplete"
         elif [[ "${primary_filter_cmdline}" == "no" && "${primary_filter_qom}" == "no" ]]; then
           reason="primary_colo_filter_topology_missing"
         elif [[ "${channel_mirror}" != "yes" ||
@@ -1523,22 +1553,16 @@ ftctl_xcolo_validate_pair_runtime() {
           reason="$(ftctl_xcolo_primary_channel_failure_reason "${vm}")"
         elif [[ -n "${disk_plan}" && "${secondary_block_graph}" != "yes" && "${secondary_block_graph}" != "not_applicable" ]]; then
           reason="secondary_block_graph_not_ready"
+        elif [[ "${primary_colo}" != "primary" && "${secondary_colo}" == "secondary" ]]; then
+          reason="primary_finish_migrate_colo_role_not_entered"
         else
           reason="${pending_reason}"
         fi
       else
         [[ -n "${pending_since}" ]] || pending_since="$(ftctl_now_iso8601)"
-        if [[ ( "${primary_filter_cmdline}" == "yes" ||
-                "${primary_filter_qom}" == "yes" ||
-                ( "${primary_xml}" == "ok" &&
-                  "${primary_filter_cmdline}" != "no" &&
-                  "${primary_filter_qom}" != "no" ) ) &&
-              "${primary_chardev}" == "yes" &&
-              "${channel_mirror}" == "yes" &&
-              "${channel_compare}" == "yes" &&
-              "${channel_compare_local}" == "yes" &&
-              "${channel_compare_out}" == "yes" &&
-              ( -z "${disk_plan}" || "${secondary_block_graph}" == "yes" || "${secondary_block_graph}" == "not_applicable" ) ]]; then
+        if ftctl_xcolo_runtime_primary_topology_ready "${primary_xml}" "${primary_filter_qom}" "${primary_filter_cmdline}" \
+            "${channel_mirror}" "${channel_compare}" "${channel_compare_local}" "${channel_compare_out}" \
+            "${disk_plan}" "${secondary_block_graph}"; then
           pending_reason="colo_established_candidate"
           if [[ "${primary_status}" == "finish-migrate" &&
                 "${secondary_status}" == "inmigrate" &&
@@ -1612,8 +1636,6 @@ ftctl_xcolo_validate_pair_runtime() {
         "xcolo_channel_compare_out_established=${channel_compare_out}"
       if [[ "${qga_policy}" == "required" && "${primary_qga}" != "yes" ]]; then
         reason="primary_guest_boot_unhealthy"
-      elif [[ "${primary_chardev}" == "no" ]]; then
-        reason="primary_filter_chardev_frontend_incomplete"
       elif [[ "${primary_filter_cmdline}" == "no" && "${primary_filter_qom}" == "no" ]]; then
         reason="primary_colo_filter_topology_missing"
       elif [[ "${channel_mirror}" != "yes" ||
@@ -1623,6 +1645,11 @@ ftctl_xcolo_validate_pair_runtime() {
         reason="$(ftctl_xcolo_primary_channel_failure_reason "${vm}")"
       elif [[ -n "${disk_plan}" && "${secondary_block_graph}" != "yes" && "${secondary_block_graph}" != "not_applicable" ]]; then
         reason="secondary_block_graph_not_ready"
+      elif [[ "${primary_status}" == "finish-migrate" &&
+              "${secondary_status}" == "inmigrate" &&
+              "${primary_colo}" != "primary" &&
+              "${secondary_colo}" == "secondary" ]]; then
+        reason="primary_finish_migrate_colo_role_not_entered"
       else
         ftctl_xcolo_colo_role_pending_reason "${primary_colo}" "${secondary_colo}" reason
         if [[ "${reason}" == "runtime_converging" ]]; then
