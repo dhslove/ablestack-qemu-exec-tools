@@ -2,6 +2,17 @@
 
 Date: 2026-05-31
 
+## Superseded Runtime Repair Note
+
+The runtime-validation repair path described in this document is no longer the
+normal FT protection path. The QMP rebuild primitive is still valid, but it must
+be executed before `primary.cont_before_migrate` and `primary.migrate` whenever
+the primary chardev/filter graph is incomplete.
+
+See `328-ft-xcolo-pre-migrate-filter-strict-gate-design-20260531.md` for the
+current gate. Runtime validation now diagnoses and classifies incomplete filter
+state instead of trying to construct the graph after migration has started.
+
 ## Context
 
 The retest after design 326 reached the deepest FT runtime point so far:
