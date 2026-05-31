@@ -1312,6 +1312,72 @@ selftest_case_xcolo_primary_filter_binding_defers_to_runtime_validation() (
   selftest_assert_file_contains "${call_log}" "primary.migrate"
 )
 
+selftest_case_xcolo_premigrate_chardev_binding_accepts_listener_endpoints() (
+  selftest_reset_env
+  selftest_info "x-colo pre-migrate chardev binding accepts listener-backed closed frontends"
+
+  local vm="xcolo-premigrate-chardev-binding"
+  local rc=0
+  ftctl_state_init_vm "${vm}"
+  FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
+  ftctl_state_set "${vm}" \
+    "xcolo_channel_mirror_established=no" \
+    "xcolo_channel_mirror_listen=yes" \
+    "xcolo_channel_compare_established=no" \
+    "xcolo_channel_compare_listen=yes" \
+    "xcolo_channel_compare_out_established=yes"
+
+  # shellcheck disable=SC2317
+  ftctl_xcolo_qmp() {
+    local out_var="${4}" rc_var="${5}"
+    printf -v "${out_var}" '%s' '{"return":[{"label":"mirror0","frontend-open":false},{"label":"compare1","frontend-open":true},{"label":"compare0","frontend-open":false},{"label":"compare0-0","frontend-open":true},{"label":"compare_out","frontend-open":true},{"label":"compare_out0","frontend-open":false}]}'
+    printf -v "${rc_var}" '%s' "0"
+    return 0
+  }
+
+  ftctl_xcolo_collect_primary_chardev_binding_state "${vm}" "pre_migrate" || rc=$?
+  selftest_assert_eq "${rc}" "0" "pre-migrate listener-backed chardev binding should pass"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_primary_filter_chardev_ready")" \
+    "yes" "pre-migrate chardev binding ready"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_primary_chardev_mirror0")" \
+    "accepted_closed" "mirror listener endpoint should be accepted"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_primary_chardev_compare0")" \
+    "accepted_closed" "compare listener endpoint should be accepted"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_primary_chardev_compare_out0")" \
+    "accepted_closed" "compare out loopback endpoint should be accepted"
+)
+
+selftest_case_xcolo_strict_chardev_binding_rejects_closed_frontends() (
+  selftest_reset_env
+  selftest_info "x-colo strict chardev binding still rejects closed frontends"
+
+  local vm="xcolo-strict-chardev-binding"
+  local rc=0
+  ftctl_state_init_vm "${vm}"
+  FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
+  ftctl_state_set "${vm}" \
+    "xcolo_channel_mirror_established=yes" \
+    "xcolo_channel_mirror_listen=yes" \
+    "xcolo_channel_compare_established=yes" \
+    "xcolo_channel_compare_listen=yes" \
+    "xcolo_channel_compare_out_established=yes"
+
+  # shellcheck disable=SC2317
+  ftctl_xcolo_qmp() {
+    local out_var="${4}" rc_var="${5}"
+    printf -v "${out_var}" '%s' '{"return":[{"label":"mirror0","frontend-open":false},{"label":"compare1","frontend-open":true},{"label":"compare0","frontend-open":false},{"label":"compare0-0","frontend-open":true},{"label":"compare_out","frontend-open":true},{"label":"compare_out0","frontend-open":false}]}'
+    printf -v "${rc_var}" '%s' "0"
+    return 0
+  }
+
+  ftctl_xcolo_collect_primary_chardev_binding_state "${vm}" || rc=$?
+  selftest_assert_eq "${rc}" "1" "strict chardev binding should still fail"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_primary_filter_chardev_ready")" \
+    "no" "strict chardev binding not ready"
+  selftest_assert_contains "$(ftctl_state_get "${vm}" "xcolo_primary_filter_chardev_reason")" \
+    "mirror0:frontend_closed" "strict reason should include mirror0"
+)
+
 selftest_case_xcolo_baseline_seed_uses_primary_nbd_before_runtime_graph() (
   selftest_reset_env
   selftest_info "x-colo block cold conversion seeds secondary baseline over primary read-only NBD"
@@ -3250,6 +3316,8 @@ selftest_main() {
   selftest_case_xcolo_block_handshake_sets_checkpoint_after_migrate
   selftest_case_xcolo_multi_disk_handshake_exports_all_disks
   selftest_case_xcolo_primary_filter_binding_defers_to_runtime_validation
+  selftest_case_xcolo_premigrate_chardev_binding_accepts_listener_endpoints
+  selftest_case_xcolo_strict_chardev_binding_rejects_closed_frontends
   selftest_case_xcolo_baseline_seed_uses_primary_nbd_before_runtime_graph
   selftest_case_xcolo_runtime_validation_blocks_false_positive
   selftest_case_xcolo_runtime_validation_reports_primary_migrate_failure

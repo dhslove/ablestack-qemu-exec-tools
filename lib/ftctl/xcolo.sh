@@ -723,6 +723,7 @@ PY
 
 ftctl_xcolo_collect_primary_chardev_binding_state() {
   local vm="${1-}"
+  local phase="${2:-strict}"
   local out rc payload state_args=()
 
   out=""
@@ -735,12 +736,37 @@ ftctl_xcolo_collect_primary_chardev_binding_state() {
     return 1
   fi
 
-  payload="$(python3 - <<'PY' "${out}"
+  payload="$(python3 - "${out}" "${phase}" \
+    "$(ftctl_state_get "${vm}" "xcolo_channel_mirror_established" 2>/dev/null || true)" \
+    "$(ftctl_state_get "${vm}" "xcolo_channel_mirror_listen" 2>/dev/null || true)" \
+    "$(ftctl_state_get "${vm}" "xcolo_channel_compare_established" 2>/dev/null || true)" \
+    "$(ftctl_state_get "${vm}" "xcolo_channel_compare_listen" 2>/dev/null || true)" \
+    "$(ftctl_state_get "${vm}" "xcolo_channel_compare_out_established" 2>/dev/null || true)" <<'PY'
 import json
 import re
 import sys
 
 required = ["mirror0", "compare1", "compare0", "compare0-0", "compare_out", "compare_out0"]
+phase = sys.argv[2] if len(sys.argv) > 2 else "strict"
+channel = {
+    "mirror_established": sys.argv[3] if len(sys.argv) > 3 else "",
+    "mirror_listen": sys.argv[4] if len(sys.argv) > 4 else "",
+    "compare_established": sys.argv[5] if len(sys.argv) > 5 else "",
+    "compare_listen": sys.argv[6] if len(sys.argv) > 6 else "",
+    "compare_out_established": sys.argv[7] if len(sys.argv) > 7 else "",
+}
+
+def pre_migrate_accepts_closed(label):
+    if phase != "pre_migrate":
+        return False
+    if label == "mirror0":
+        return channel["mirror_established"] == "yes" or channel["mirror_listen"] == "yes"
+    if label == "compare0":
+        return channel["compare_established"] == "yes" or channel["compare_listen"] == "yes"
+    if label == "compare_out0":
+        return channel["compare_out_established"] == "yes"
+    return False
+
 try:
     data = json.loads(sys.argv[1])
 except Exception:
@@ -768,9 +794,12 @@ for label in required:
     if opened is True:
         print(f"{key}=yes")
     elif opened is False:
-        ready = False
-        reasons.append(f"{label}:frontend_closed")
-        print(f"{key}=no")
+        if pre_migrate_accepts_closed(label):
+            print(f"{key}=accepted_closed")
+        else:
+            ready = False
+            reasons.append(f"{label}:frontend_closed")
+            print(f"{key}=no")
     else:
         ready = False
         reasons.append(f"{label}:frontend_unknown")
@@ -795,6 +824,7 @@ PY
         ;;
     esac
   done <<< "${payload}"
+  state_args+=("xcolo_primary_filter_chardev_phase=${phase}")
   ftctl_state_set "${vm}" "${state_args[@]}"
   [[ "$(ftctl_state_get "${vm}" "xcolo_primary_filter_chardev_ready" 2>/dev/null || true)" == "yes" ]]
 }
@@ -3615,9 +3645,9 @@ ftctl_xcolo_wait_primary_filter_chardev_binding() {
   [[ "${attempts}" -gt 0 ]] || attempts=1
 
   for ((i=0; i<attempts; i++)); do
-    if ftctl_xcolo_collect_primary_chardev_binding_state "${vm}"; then
+    if ftctl_xcolo_collect_primary_chardev_binding_state "${vm}" "pre_migrate"; then
       ftctl_log_event "colo" "primary.filter_chardev_binding" "ok" "${vm}" "" \
-        "attempts=$((i + 1))"
+        "attempts=$((i + 1)) phase=pre_migrate topology_aware=yes"
       return 0
     fi
     sleep "${interval}"
@@ -3629,7 +3659,7 @@ ftctl_xcolo_wait_primary_filter_chardev_binding() {
     "last_error=primary_filter_chardev_frontend_incomplete" \
     "xcolo_primary_filter_chardev_binding_failed_reason=${reason}"
   ftctl_log_event "colo" "primary.filter_chardev_binding" "fail" "${vm}" "" \
-    "reason=${reason} attempts=${attempts}"
+    "reason=${reason} attempts=${attempts} phase=pre_migrate topology_aware=yes"
   return 1
 }
 
@@ -3649,9 +3679,9 @@ ftctl_xcolo_observe_primary_filter_chardev_binding() {
   [[ "${attempts}" -gt 0 ]] || attempts=1
 
   for ((i=0; i<attempts; i++)); do
-    if ftctl_xcolo_collect_primary_chardev_binding_state "${vm}"; then
+    if ftctl_xcolo_collect_primary_chardev_binding_state "${vm}" "pre_migrate"; then
       ftctl_log_event "colo" "primary.filter_chardev_binding" "ok" "${vm}" "" \
-        "attempts=$((i + 1)) phase=pre_cont"
+        "attempts=$((i + 1)) phase=pre_cont topology_aware=yes"
       return 0
     fi
     sleep "${interval}"
@@ -3662,7 +3692,7 @@ ftctl_xcolo_observe_primary_filter_chardev_binding() {
   ftctl_state_set "${vm}" \
     "xcolo_primary_filter_chardev_binding_deferred_reason=${reason}"
   ftctl_log_event "colo" "primary.filter_chardev_binding" "defer" "${vm}" "" \
-    "reason=${reason} attempts=${attempts} phase=pre_cont"
+    "reason=${reason} attempts=${attempts} phase=pre_cont topology_aware=yes"
   return 0
 }
 

@@ -74,7 +74,7 @@ When the generated primary XML already contains X-COLO runtime markers:
 3. if `xcolo_primary_filter_chardev_ready != yes`, run QMP rebuild with source
    `pre_migrate_xml_chardev_incomplete`,
 4. validate channel paths again,
-5. strictly wait for `xcolo_primary_filter_chardev_ready=yes`,
+5. wait for pre-migrate topology-aware `xcolo_primary_filter_chardev_ready=yes`,
 6. only then mark `primary.net_filters` as ready and allow migration.
 
 ### Primary QMP-only path
@@ -83,7 +83,7 @@ When XML markers are not available:
 
 1. run QMP rebuild with source `pre_migrate_no_xml_markers`,
 2. validate channel paths,
-3. strictly wait for `xcolo_primary_filter_chardev_ready=yes`,
+3. wait for pre-migrate topology-aware `xcolo_primary_filter_chardev_ready=yes`,
 4. only then mark `primary.net_filters` as ready and allow migration.
 
 ### Runtime validation
@@ -106,7 +106,7 @@ primary.net_filters.rebuild start source=pre_migrate_xml_chardev_incomplete
 primary.chardev_add.*
 primary.object_add_*
 primary.net_filters.rebuild ok
-primary.filter_chardev_binding ok
+primary.filter_chardev_binding ok phase=pre_migrate topology_aware=yes
 primary.net_filters ok mode=qmp-rebuild
 primary.cont_before_migrate ok
 primary.migrate ok
@@ -133,3 +133,8 @@ and existing logs remain readable.
 The design supersedes the part of
 `327-ft-xcolo-primary-filter-runtime-rebuild-design-20260531.md` that allowed
 `source=runtime_validation` to be a normal repair path.
+
+`330-ft-xcolo-premigrate-chardev-topology-aware-gate-design-20260531.md`
+refines this document: the pre-migrate gate is strict about required topology
+and missing labels, but it does not require every listener/server-side chardev
+to report `frontend-open=true` before migration starts.

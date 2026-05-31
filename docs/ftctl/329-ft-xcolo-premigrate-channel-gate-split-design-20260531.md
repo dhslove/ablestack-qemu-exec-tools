@@ -55,7 +55,8 @@ topology that must already exist:
 - compare peer channel: `LISTEN` or already `ESTABLISHED`
 - compare local loopback-in channel: `ESTABLISHED`
 - compare loopback-out channel: `ESTABLISHED`
-- primary filter/chardev binding: `xcolo_primary_filter_chardev_ready=yes`
+- primary filter/chardev binding: pre-migrate topology-aware
+  `xcolo_primary_filter_chardev_ready=yes`
 
 If the compare peer channel is not yet `ESTABLISHED` but is `LISTEN`, the
 pre-migrate gate passes.
@@ -94,7 +95,7 @@ Pre-migrate success can now look like this:
 
 ```text
 primary.channel_paths ok mode=pre_migrate mirror_listen=yes compare_listen=yes
-primary.filter_chardev_binding ok
+primary.filter_chardev_binding ok phase=pre_migrate topology_aware=yes
 primary.net_filters ok mode=qmp-rebuild
 primary.cont_before_migrate ok
 primary.migrate ok
@@ -118,3 +119,8 @@ Design 328 remains valid: the primary filter/chardev graph must be constructed
 before migration. This design refines the channel gate used by that same
 pre-migrate boundary so that listener readiness and runtime peer establishment
 are not conflated.
+
+`330-ft-xcolo-premigrate-chardev-topology-aware-gate-design-20260531.md`
+extends the same split to chardev frontend validation: pre-migrate listener
+frontends may remain closed when the corresponding channel topology is ready,
+while runtime validation remains strict.
