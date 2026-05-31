@@ -3514,6 +3514,22 @@ ftctl_xcolo_primary_channels_ready() {
      "$(ftctl_state_get "${vm}" "xcolo_channel_compare_out_established" 2>/dev/null || true)" == "yes" ]]
 }
 
+ftctl_xcolo_primary_channels_premigrate_ready() {
+  local vm="${1-}"
+  local mirror_established mirror_listen compare_established compare_listen
+
+  ftctl_xcolo_capture_primary_channel_state "${vm}"
+  mirror_established="$(ftctl_state_get "${vm}" "xcolo_channel_mirror_established" 2>/dev/null || true)"
+  mirror_listen="$(ftctl_state_get "${vm}" "xcolo_channel_mirror_listen" 2>/dev/null || true)"
+  compare_established="$(ftctl_state_get "${vm}" "xcolo_channel_compare_established" 2>/dev/null || true)"
+  compare_listen="$(ftctl_state_get "${vm}" "xcolo_channel_compare_listen" 2>/dev/null || true)"
+
+  [[ ( "${mirror_established}" == "yes" || "${mirror_listen}" == "yes" ) &&
+     ( "${compare_established}" == "yes" || "${compare_listen}" == "yes" ) &&
+     "$(ftctl_state_get "${vm}" "xcolo_channel_compare_local_established" 2>/dev/null || true)" == "yes" &&
+     "$(ftctl_state_get "${vm}" "xcolo_channel_compare_out_established" 2>/dev/null || true)" == "yes" ]]
+}
+
 ftctl_xcolo_primary_channel_failure_reason() {
   local vm="${1-}"
   local reason="colo_compare_channel_not_established"
@@ -3543,20 +3559,43 @@ ftctl_xcolo_primary_channel_failure_reason() {
   printf '%s\n' "${reason}"
 }
 
+ftctl_xcolo_primary_premigrate_channel_failure_reason() {
+  local vm="${1-}"
+  local reason="colo_premigrate_channel_not_ready"
+  local mirror_established mirror_listen compare_established compare_listen
+
+  mirror_established="$(ftctl_state_get "${vm}" "xcolo_channel_mirror_established" 2>/dev/null || true)"
+  mirror_listen="$(ftctl_state_get "${vm}" "xcolo_channel_mirror_listen" 2>/dev/null || true)"
+  compare_established="$(ftctl_state_get "${vm}" "xcolo_channel_compare_established" 2>/dev/null || true)"
+  compare_listen="$(ftctl_state_get "${vm}" "xcolo_channel_compare_listen" 2>/dev/null || true)"
+
+  if [[ "${mirror_established}" != "yes" && "${mirror_listen}" != "yes" ]]; then
+    reason="colo_mirror_channel_not_listening"
+  elif [[ "${compare_established}" != "yes" && "${compare_listen}" != "yes" ]]; then
+    reason="colo_compare_channel_not_listening"
+  elif [[ "$(ftctl_state_get "${vm}" "xcolo_channel_compare_local_established" 2>/dev/null || true)" != "yes" ]]; then
+    reason="colo_compare_loopback_in_not_established"
+  elif [[ "$(ftctl_state_get "${vm}" "xcolo_channel_compare_out_established" 2>/dev/null || true)" != "yes" ]]; then
+    reason="colo_compare_loopback_out_not_established"
+  fi
+
+  printf '%s\n' "${reason}"
+}
+
 ftctl_xcolo_validate_primary_channel_paths() {
   local vm="${1-}"
   local reason
 
-  if ftctl_xcolo_primary_channels_ready "${vm}"; then
+  if ftctl_xcolo_primary_channels_premigrate_ready "${vm}"; then
     ftctl_log_event "colo" "primary.channel_paths" "ok" "${vm}" "" \
-      "mirror_port=$(ftctl_state_get "${vm}" "xcolo_channel_mirror_port" 2>/dev/null || true) compare_port=$(ftctl_state_get "${vm}" "xcolo_channel_compare_port" 2>/dev/null || true) compare_local_port=$(ftctl_state_get "${vm}" "xcolo_channel_compare_local_port" 2>/dev/null || true) compare_out_port=$(ftctl_state_get "${vm}" "xcolo_channel_compare_out_port" 2>/dev/null || true)"
+      "mode=pre_migrate mirror_port=$(ftctl_state_get "${vm}" "xcolo_channel_mirror_port" 2>/dev/null || true) compare_port=$(ftctl_state_get "${vm}" "xcolo_channel_compare_port" 2>/dev/null || true) compare_local_port=$(ftctl_state_get "${vm}" "xcolo_channel_compare_local_port" 2>/dev/null || true) compare_out_port=$(ftctl_state_get "${vm}" "xcolo_channel_compare_out_port" 2>/dev/null || true) mirror_listen=$(ftctl_state_get "${vm}" "xcolo_channel_mirror_listen" 2>/dev/null || true) compare_listen=$(ftctl_state_get "${vm}" "xcolo_channel_compare_listen" 2>/dev/null || true)"
     return 0
   fi
 
-  reason="$(ftctl_xcolo_primary_channel_failure_reason "${vm}")"
+  reason="$(ftctl_xcolo_primary_premigrate_channel_failure_reason "${vm}")"
   ftctl_state_set "${vm}" "last_error=${reason}"
   ftctl_log_event "colo" "primary.channel_paths" "fail" "${vm}" "" \
-    "reason=${reason} mirror=$(ftctl_state_get "${vm}" "xcolo_channel_mirror_established" 2>/dev/null || true) compare=$(ftctl_state_get "${vm}" "xcolo_channel_compare_established" 2>/dev/null || true) compare_local=$(ftctl_state_get "${vm}" "xcolo_channel_compare_local_established" 2>/dev/null || true) compare_out=$(ftctl_state_get "${vm}" "xcolo_channel_compare_out_established" 2>/dev/null || true)"
+    "mode=pre_migrate reason=${reason} mirror=$(ftctl_state_get "${vm}" "xcolo_channel_mirror_established" 2>/dev/null || true) mirror_listen=$(ftctl_state_get "${vm}" "xcolo_channel_mirror_listen" 2>/dev/null || true) compare=$(ftctl_state_get "${vm}" "xcolo_channel_compare_established" 2>/dev/null || true) compare_listen=$(ftctl_state_get "${vm}" "xcolo_channel_compare_listen" 2>/dev/null || true) compare_local=$(ftctl_state_get "${vm}" "xcolo_channel_compare_local_established" 2>/dev/null || true) compare_out=$(ftctl_state_get "${vm}" "xcolo_channel_compare_out_established" 2>/dev/null || true)"
   return 1
 }
 

@@ -57,6 +57,14 @@ diagnostic reason instead of starting a migration that cannot converge.
 
 ## New Flow
 
+### Channel gate refinement
+
+This design requires the primary filter/chardev graph to be complete before
+migration. The channel readiness condition is refined by
+`329-ft-xcolo-premigrate-channel-gate-split-design-20260531.md`: pre-migrate
+validation requires listener/local-loopback readiness, while runtime validation
+keeps the stricter peer `ESTABLISHED` requirement.
+
 ### Primary XML marker path
 
 When the generated primary XML already contains X-COLO runtime markers:
