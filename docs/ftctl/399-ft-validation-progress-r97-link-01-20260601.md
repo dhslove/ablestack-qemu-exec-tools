@@ -127,3 +127,71 @@ but a lower-level signature or reached stage changed, set
     exact pre-migrate point, before recovery removes the generated runtime
   - review the primary `migrate` command ordering and QEMU COLO capability
     setup against the documented COLO sequence
+
+### Run 2026-06-01-04
+
+- Target: `r97-link-01`
+- Primary VM: `i-2-54-VM`
+- Standby VM: `i-2-111-VM`
+- Result: failed
+- Last reached stage: 11
+- Evidence:
+  - standby VM/volumes created
+  - baseline seeding completed for root and data disks
+  - primary generated runtime started and listened on COLO channels
+  - secondary generated runtime started and connected
+  - primary network filters were marked as QMP-attached with
+    `xcolo_primary_net_filters_attach_mode=qmp-objects`
+  - pre-migrate evidence was persisted before runtime recovery
+  - pre-migrate migration capabilities were present:
+    `x-colo=yes`, `return-path=yes`, `checkpoint_delay=yes`
+  - pre-migrate channels were established:
+    `mirror=yes`, `compare=yes`, `compare_local=yes`, `compare_out=yes`
+  - pre-migrate primary chardev topology was accepted:
+    `xcolo_premigrate_primary_filter_chardev_ready=yes`
+  - secondary reached `query-migrate=colo`
+- Failure signature:
+  - `last_error=xcolo_runtime_validation_failed:primary_migrate_failed`
+  - primary `query-migrate.error-desc`:
+    `Received invalid message 0x0000 length 0x0000`
+  - primary QEMU log:
+    `Received invalid message 0x0000 length 0x0000`
+  - secondary QEMU log:
+    `Can't receive COLO message: Input/output error`
+  - pre-migrate QOM evidence shows the expected QMP-attached primary filter
+    objects were not visible through the current `/objects/<id>` QOM checks:
+    `xcolo_premigrate_primary_filter_qom_ready=unknown`
+    with empty `m0`, `redire0`, `redire1`, and `comp0` properties
+- Progress judgment:
+  - `repetition_status=not_repeat`
+  - forward progress: the new pre-migrate evidence was captured and survived
+    runtime recovery
+  - not a pure repeat of Run 2026-06-01-03 because the exact pre-migrate
+    topology is now known
+  - the current blocker is no longer missing channel evidence; it is the
+    mismatch between QMP object-add success handling and QOM topology
+    verification
+- Next improvement:
+  - after each primary QMP `object-add`, verify the created object using a
+    QOM path that is valid for runtime-added netfilter objects on
+    qemu-ablestack-9.2.4
+  - if `/objects/<id>` is not the valid path, discover and persist the actual
+    QOM object path from `qom-list /objects` or equivalent QMP inventory
+  - do not set `xcolo_primary_net_filters_attached=true` until the discovered
+    QOM path confirms `m0`, `redire0`, `redire1`, and `comp0`
+  - if the object path is valid but properties are unavailable, classify the
+    failure before issuing primary `migrate` instead of letting migration fail
+    with an opaque COLO protocol error
+
+### Change For Next Run
+
+- Design:
+  `docs/ftctl/335-ft-xcolo-qmp-filter-qom-hard-gate-design-20260601.md`
+- Implementation intent:
+  - discover QMP-created filter object paths through `qom-list /objects`
+  - add explicit `status=on`, `insert=behind`, and `position=tail` to QMP
+    netfilter `object-add` calls
+  - require `xcolo_primary_filter_qom_ready=yes` before setting
+    `xcolo_primary_net_filters_attached=true`
+  - stop before primary `migrate` with
+    `last_error=primary_filter_qom_topology_missing` if QOM validation fails

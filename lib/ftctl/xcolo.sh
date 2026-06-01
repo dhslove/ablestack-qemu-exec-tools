@@ -868,7 +868,7 @@ ftctl_xcolo_qom_get_property() {
   local path="${3-}"
   local prop="${4-}"
   local out_var="${5-}"
-  local out rc value
+  local out rc qom_value
 
   out=""
   rc=0
@@ -879,7 +879,7 @@ ftctl_xcolo_qom_get_property() {
     return 1
   fi
 
-  value="$(python3 - <<'PY' "${out}"
+  qom_value="$(python3 - <<'PY' "${out}"
 import json
 import sys
 
@@ -906,8 +906,82 @@ PY
     return 1
   }
 
-  printf -v "${out_var}" '%s' "${value}"
+  printf -v "${out_var}" '%s' "${qom_value}"
   return 0
+}
+
+ftctl_xcolo_qom_list_names() {
+  local uri="${1-}"
+  local vm="${2-}"
+  local path="${3-}"
+  local names_var="${4-}"
+  local out rc payload
+
+  out=""
+  rc=0
+  ftctl_xcolo_qmp "${uri}" "${vm}" \
+    "{\"execute\":\"qom-list\",\"arguments\":{\"path\":\"${path}\"}}" out rc
+  if [[ "${rc}" != "0" || -z "${out}" ]]; then
+    printf -v "${names_var}" '%s' ""
+    return 1
+  fi
+
+  payload="$(python3 - <<'PY' "${out}"
+import json
+import sys
+
+try:
+    data = json.loads(sys.argv[1])
+except Exception:
+    raise SystemExit(1)
+if not isinstance(data, dict) or "error" in data:
+    raise SystemExit(1)
+items = data.get("return")
+if not isinstance(items, list):
+    raise SystemExit(1)
+for item in items:
+    if isinstance(item, dict) and item.get("name"):
+        print(item.get("name"))
+PY
+)" || payload=""
+  printf -v "${names_var}" '%s' "${payload}"
+  [[ -n "${payload}" ]]
+}
+
+ftctl_xcolo_qom_child_path() {
+  local uri="${1-}"
+  local vm="${2-}"
+  local object_id="${3-}"
+  local path_var="${4-}"
+  local objects names
+
+  objects=""
+  if ftctl_xcolo_qom_list_names "${uri}" "${vm}" "/objects" objects &&
+      printf '%s\n' "${objects}" | grep -Fxq "${object_id}"; then
+    printf -v "${path_var}" '%s' "/objects/${object_id}"
+    return 0
+  fi
+
+  names=""
+  if ftctl_xcolo_qom_list_names "${uri}" "${vm}" "/objects/${object_id}" names; then
+    printf -v "${path_var}" '%s' "/objects/${object_id}"
+    return 0
+  fi
+
+  printf -v "${path_var}" '%s' ""
+  return 1
+}
+
+ftctl_xcolo_qom_path_has_property() {
+  local uri="${1-}"
+  local vm="${2-}"
+  local path="${3-}"
+  local prop="${4-}"
+  local names
+
+  names=""
+  ftctl_xcolo_qom_list_names "${uri}" "${vm}" "${path}" names || return 1
+  printf '%s\n' "${names}" | grep -Fxq "${prop}"
 }
 
 ftctl_xcolo_collect_primary_filter_qom_state() {
@@ -915,7 +989,7 @@ ftctl_xcolo_collect_primary_filter_qom_state() {
   local ready="yes"
   local inconclusive="no"
   local reasons=()
-  local value expected_netdev
+  local value expected_netdev path m0_path redire0_path redire1_path comp0_path
   local -a state_args=()
 
   expected_netdev="$(ftctl_state_get "${vm}" "xcolo_primary_netdev_id" 2>/dev/null || true)"
@@ -941,36 +1015,62 @@ ftctl_xcolo_collect_primary_filter_qom_state() {
     state_args+=("xcolo_primary_filter_qom_${key}=${value}")
   }
 
-  state_args+=("xcolo_primary_filter_qom_expected_netdev=${expected_netdev}")
+  m0_path=""
+  redire0_path=""
+  redire1_path=""
+  comp0_path=""
+  ftctl_xcolo_qom_child_path "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" "m0" m0_path || true
+  ftctl_xcolo_qom_child_path "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" "redire0" redire0_path || true
+  ftctl_xcolo_qom_child_path "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" "redire1" redire1_path || true
+  ftctl_xcolo_qom_child_path "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" "comp0" comp0_path || true
 
-  _ftctl_xcolo_expect_qom "/objects/m0" "netdev" "${expected_netdev}" "m0_netdev"
-  _ftctl_xcolo_expect_qom "/objects/m0" "queue" "tx" "m0_queue"
-  _ftctl_xcolo_expect_qom "/objects/m0" "outdev" "mirror0" "m0_outdev"
-  _ftctl_xcolo_expect_qom "/objects/m0" "status" "on" "m0_status"
-  _ftctl_xcolo_expect_qom "/objects/m0" "insert" "behind" "m0_insert"
-  _ftctl_xcolo_expect_qom "/objects/m0" "position" "tail" "m0_position"
+  state_args+=(
+    "xcolo_primary_filter_qom_expected_netdev=${expected_netdev}"
+    "xcolo_primary_filter_qom_m0_path=${m0_path}"
+    "xcolo_primary_filter_qom_redire0_path=${redire0_path}"
+    "xcolo_primary_filter_qom_redire1_path=${redire1_path}"
+    "xcolo_primary_filter_qom_comp0_path=${comp0_path}"
+  )
 
-  _ftctl_xcolo_expect_qom "/objects/redire0" "netdev" "${expected_netdev}" "redire0_netdev"
-  _ftctl_xcolo_expect_qom "/objects/redire0" "queue" "rx" "redire0_queue"
-  _ftctl_xcolo_expect_qom "/objects/redire0" "indev" "compare_out" "redire0_indev"
-  _ftctl_xcolo_expect_qom "/objects/redire0" "outdev" "" "redire0_outdev"
-  _ftctl_xcolo_expect_qom "/objects/redire0" "status" "on" "redire0_status"
-  _ftctl_xcolo_expect_qom "/objects/redire0" "insert" "behind" "redire0_insert"
-  _ftctl_xcolo_expect_qom "/objects/redire0" "position" "tail" "redire0_position"
+  for path in \
+    "m0:${m0_path}" \
+    "redire0:${redire0_path}" \
+    "redire1:${redire1_path}" \
+    "comp0:${comp0_path}"; do
+    if [[ -z "${path#*:}" ]]; then
+      ready="no"
+      reasons+=("${path%%:*}:missing")
+    fi
+  done
 
-  _ftctl_xcolo_expect_qom "/objects/redire1" "netdev" "${expected_netdev}" "redire1_netdev"
-  _ftctl_xcolo_expect_qom "/objects/redire1" "queue" "rx" "redire1_queue"
-  _ftctl_xcolo_expect_qom "/objects/redire1" "indev" "" "redire1_indev"
-  _ftctl_xcolo_expect_qom "/objects/redire1" "outdev" "compare0" "redire1_outdev"
-  _ftctl_xcolo_expect_qom "/objects/redire1" "status" "on" "redire1_status"
-  _ftctl_xcolo_expect_qom "/objects/redire1" "insert" "behind" "redire1_insert"
-  _ftctl_xcolo_expect_qom "/objects/redire1" "position" "tail" "redire1_position"
+  _ftctl_xcolo_expect_qom "${m0_path}" "netdev" "${expected_netdev}" "m0_netdev"
+  _ftctl_xcolo_expect_qom "${m0_path}" "queue" "tx" "m0_queue"
+  _ftctl_xcolo_expect_qom "${m0_path}" "outdev" "mirror0" "m0_outdev"
+  _ftctl_xcolo_expect_qom "${m0_path}" "status" "on" "m0_status"
+  _ftctl_xcolo_expect_qom "${m0_path}" "insert" "behind" "m0_insert"
+  _ftctl_xcolo_expect_qom "${m0_path}" "position" "tail" "m0_position"
 
-  _ftctl_xcolo_expect_qom "/objects/comp0" "primary_in" "compare0-0" "comp0_primary_in"
-  _ftctl_xcolo_expect_qom "/objects/comp0" "secondary_in" "compare1" "comp0_secondary_in"
-  _ftctl_xcolo_expect_qom "/objects/comp0" "outdev" "compare_out0" "comp0_outdev"
+  _ftctl_xcolo_expect_qom "${redire0_path}" "netdev" "${expected_netdev}" "redire0_netdev"
+  _ftctl_xcolo_expect_qom "${redire0_path}" "queue" "rx" "redire0_queue"
+  _ftctl_xcolo_expect_qom "${redire0_path}" "indev" "compare_out" "redire0_indev"
+  _ftctl_xcolo_expect_qom "${redire0_path}" "outdev" "" "redire0_outdev"
+  _ftctl_xcolo_expect_qom "${redire0_path}" "status" "on" "redire0_status"
+  _ftctl_xcolo_expect_qom "${redire0_path}" "insert" "behind" "redire0_insert"
+  _ftctl_xcolo_expect_qom "${redire0_path}" "position" "tail" "redire0_position"
 
-  ftctl_xcolo_qom_get_property "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" "/objects/comp0" "iothread" value || value="unknown"
+  _ftctl_xcolo_expect_qom "${redire1_path}" "netdev" "${expected_netdev}" "redire1_netdev"
+  _ftctl_xcolo_expect_qom "${redire1_path}" "queue" "rx" "redire1_queue"
+  _ftctl_xcolo_expect_qom "${redire1_path}" "indev" "" "redire1_indev"
+  _ftctl_xcolo_expect_qom "${redire1_path}" "outdev" "compare0" "redire1_outdev"
+  _ftctl_xcolo_expect_qom "${redire1_path}" "status" "on" "redire1_status"
+  _ftctl_xcolo_expect_qom "${redire1_path}" "insert" "behind" "redire1_insert"
+  _ftctl_xcolo_expect_qom "${redire1_path}" "position" "tail" "redire1_position"
+
+  _ftctl_xcolo_expect_qom "${comp0_path}" "primary_in" "compare0-0" "comp0_primary_in"
+  _ftctl_xcolo_expect_qom "${comp0_path}" "secondary_in" "compare1" "comp0_secondary_in"
+  _ftctl_xcolo_expect_qom "${comp0_path}" "outdev" "compare_out0" "comp0_outdev"
+
+  ftctl_xcolo_qom_get_property "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" "${comp0_path}" "iothread" value || value="unknown"
   if [[ -z "${value}" || "${value}" == "unknown" ]]; then
     inconclusive="yes"
     reasons+=("comp0_iothread:${value:-empty}")
@@ -1048,6 +1148,28 @@ ftctl_xcolo_record_pre_migrate_evidence() {
 ftctl_xcolo_primary_filter_qom_ready() {
   local vm="${1-}"
   [[ "$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_ready" 2>/dev/null || true)" == "yes" ]]
+}
+
+ftctl_xcolo_require_primary_filter_qom_ready() {
+  local vm="${1-}"
+  local phase="${2:-pre_migrate}"
+  local reason
+
+  if ftctl_xcolo_collect_primary_filter_qom_state "${vm}"; then
+    ftctl_log_event "colo" "primary.filter_qom_topology" "ok" "${vm}" "" \
+      "phase=${phase} m0=$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_m0_path" 2>/dev/null || true) redire0=$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_redire0_path" 2>/dev/null || true) redire1=$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_redire1_path" 2>/dev/null || true) comp0=$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_comp0_path" 2>/dev/null || true)"
+    return 0
+  fi
+
+  reason="$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_reason" 2>/dev/null || true)"
+  [[ -n "${reason}" ]] || reason="unknown"
+  ftctl_state_set "${vm}" \
+    "xcolo_primary_net_filters_attached=false" \
+    "xcolo_primary_filter_qom_topology_failed_reason=${reason}" \
+    "last_error=primary_filter_qom_topology_missing"
+  ftctl_log_event "colo" "primary.filter_qom_topology" "fail" "${vm}" "" \
+    "phase=${phase} reason=${reason} m0=$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_m0_path" 2>/dev/null || true) redire0=$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_redire0_path" 2>/dev/null || true) redire1=$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_redire1_path" 2>/dev/null || true) comp0=$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_comp0_path" 2>/dev/null || true)"
+  return 1
 }
 
 ftctl_xcolo_collect_primary_block_graph_state() {
@@ -3355,20 +3477,20 @@ ftctl_xcolo_primary_net_filters_qmp_rebuild() {
     "colo" "primary.chardev_add.compare_out_client" || return 1
 
   ftctl_xcolo_qmp_require_ok_or_exists "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
-    "{\"execute\":\"object-add\",\"arguments\":{\"qom-type\":\"filter-redirector\",\"id\":\"redire0\",\"netdev\":\"${netdev_id}\",\"queue\":\"rx\",\"indev\":\"compare_out\"}}" \
+    "{\"execute\":\"object-add\",\"arguments\":{\"qom-type\":\"filter-redirector\",\"id\":\"redire0\",\"netdev\":\"${netdev_id}\",\"queue\":\"rx\",\"indev\":\"compare_out\",\"status\":\"on\",\"insert\":\"behind\",\"position\":\"tail\"}}" \
     "colo" "primary.object_add_redirector_in" || return 1
   ftctl_xcolo_qmp_require_ok_or_exists "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
-    "{\"execute\":\"object-add\",\"arguments\":{\"qom-type\":\"filter-redirector\",\"id\":\"redire1\",\"netdev\":\"${netdev_id}\",\"queue\":\"rx\",\"outdev\":\"compare0\"}}" \
+    "{\"execute\":\"object-add\",\"arguments\":{\"qom-type\":\"filter-redirector\",\"id\":\"redire1\",\"netdev\":\"${netdev_id}\",\"queue\":\"rx\",\"outdev\":\"compare0\",\"status\":\"on\",\"insert\":\"behind\",\"position\":\"tail\"}}" \
     "colo" "primary.object_add_redirector_out" || return 1
   ftctl_xcolo_qmp_require_ok_or_exists "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
     '{"execute":"object-add","arguments":{"qom-type":"colo-compare","id":"comp0","primary_in":"compare0-0","secondary_in":"compare1","outdev":"compare_out0","iothread":"iothread1"}}' \
     "colo" "primary.object_add_colo_compare" || return 1
   ftctl_xcolo_qmp_require_ok_or_exists "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
-    "{\"execute\":\"object-add\",\"arguments\":{\"qom-type\":\"filter-mirror\",\"id\":\"m0\",\"netdev\":\"${netdev_id}\",\"queue\":\"tx\",\"outdev\":\"mirror0\"}}" \
+    "{\"execute\":\"object-add\",\"arguments\":{\"qom-type\":\"filter-mirror\",\"id\":\"m0\",\"netdev\":\"${netdev_id}\",\"queue\":\"tx\",\"outdev\":\"mirror0\",\"status\":\"on\",\"insert\":\"behind\",\"position\":\"tail\"}}" \
     "colo" "primary.object_add_filter_mirror" || return 1
 
   ftctl_xcolo_collect_primary_chardev_binding_state "${vm}" || true
-  ftctl_xcolo_collect_primary_filter_qom_state "${vm}" || true
+  ftctl_xcolo_require_primary_filter_qom_ready "${vm}" "qmp-rebuild" || return 1
   ftctl_state_set "${vm}" \
     "xcolo_primary_net_filters_attached=true" \
     "xcolo_primary_net_filters_attach_mode=qmp-rebuild" \
@@ -3404,20 +3526,20 @@ ftctl_xcolo_primary_net_filters_qmp_attach_objects() {
     "colo" "primary.object_del_colo_compare"
 
   ftctl_xcolo_qmp_require_ok_or_exists "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
-    "{\"execute\":\"object-add\",\"arguments\":{\"qom-type\":\"filter-redirector\",\"id\":\"redire0\",\"netdev\":\"${netdev_id}\",\"queue\":\"rx\",\"indev\":\"compare_out\"}}" \
+    "{\"execute\":\"object-add\",\"arguments\":{\"qom-type\":\"filter-redirector\",\"id\":\"redire0\",\"netdev\":\"${netdev_id}\",\"queue\":\"rx\",\"indev\":\"compare_out\",\"status\":\"on\",\"insert\":\"behind\",\"position\":\"tail\"}}" \
     "colo" "primary.object_add_redirector_in" || return 1
   ftctl_xcolo_qmp_require_ok_or_exists "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
-    "{\"execute\":\"object-add\",\"arguments\":{\"qom-type\":\"filter-redirector\",\"id\":\"redire1\",\"netdev\":\"${netdev_id}\",\"queue\":\"rx\",\"outdev\":\"compare0\"}}" \
+    "{\"execute\":\"object-add\",\"arguments\":{\"qom-type\":\"filter-redirector\",\"id\":\"redire1\",\"netdev\":\"${netdev_id}\",\"queue\":\"rx\",\"outdev\":\"compare0\",\"status\":\"on\",\"insert\":\"behind\",\"position\":\"tail\"}}" \
     "colo" "primary.object_add_redirector_out" || return 1
   ftctl_xcolo_qmp_require_ok_or_exists "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
     '{"execute":"object-add","arguments":{"qom-type":"colo-compare","id":"comp0","primary_in":"compare0-0","secondary_in":"compare1","outdev":"compare_out0","iothread":"iothread1"}}' \
     "colo" "primary.object_add_colo_compare" || return 1
   ftctl_xcolo_qmp_require_ok_or_exists "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
-    "{\"execute\":\"object-add\",\"arguments\":{\"qom-type\":\"filter-mirror\",\"id\":\"m0\",\"netdev\":\"${netdev_id}\",\"queue\":\"tx\",\"outdev\":\"mirror0\"}}" \
+    "{\"execute\":\"object-add\",\"arguments\":{\"qom-type\":\"filter-mirror\",\"id\":\"m0\",\"netdev\":\"${netdev_id}\",\"queue\":\"tx\",\"outdev\":\"mirror0\",\"status\":\"on\",\"insert\":\"behind\",\"position\":\"tail\"}}" \
     "colo" "primary.object_add_filter_mirror" || return 1
 
   ftctl_xcolo_collect_primary_chardev_binding_state "${vm}" || true
-  ftctl_xcolo_collect_primary_filter_qom_state "${vm}" || true
+  ftctl_xcolo_require_primary_filter_qom_ready "${vm}" "qmp-objects" || return 1
   ftctl_state_set "${vm}" \
     "xcolo_primary_net_filters_attached=true" \
     "xcolo_primary_net_filters_attach_mode=qmp-objects" \

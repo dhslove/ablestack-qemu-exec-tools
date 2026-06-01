@@ -90,3 +90,7 @@ The next failed run, if any, must say whether the failure is:
 - invalid/closed chardev or 9000-series channel state before `migrate`;
 - a COLO migration protocol failure after a valid pre-migrate topology;
 - a repeated failure loop requiring a different strategy.
+
+Design 335 supersedes the diagnostic-only handling for primary QMP filter
+objects: filter QOM topology is now a hard gate, and qemu FTCTL must not issue
+primary `migrate` until the QMP-created filter objects are confirmed.

@@ -128,6 +128,17 @@ selftest_mock_xcolo_primary_channels_ready() {
       "xcolo_primary_filter_chardev_ready=yes" \
       "xcolo_primary_filter_chardev_reason="
   }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_require_primary_filter_qom_ready() {
+    local vm="${1-}"
+    ftctl_state_set "${vm}" \
+      "xcolo_primary_filter_qom_ready=yes" \
+      "xcolo_primary_filter_qom_reason=" \
+      "xcolo_primary_filter_qom_m0_path=/objects/m0" \
+      "xcolo_primary_filter_qom_redire0_path=/objects/redire0" \
+      "xcolo_primary_filter_qom_redire1_path=/objects/redire1" \
+      "xcolo_primary_filter_qom_comp0_path=/objects/comp0"
+  }
 }
 
 selftest_mock_xcolo_primary_role_diagnostics_ok() {
@@ -1381,6 +1392,89 @@ selftest_case_xcolo_strict_chardev_binding_rejects_closed_frontends() (
     "no" "strict chardev binding not ready"
   selftest_assert_contains "$(ftctl_state_get "${vm}" "xcolo_primary_filter_chardev_reason")" \
     "mirror0:frontend_closed" "strict reason should include mirror0"
+)
+
+selftest_case_xcolo_filter_qom_hard_gate() (
+  selftest_reset_env
+  selftest_info "x-colo primary filter QOM topology is a hard pre-migrate gate"
+
+  local vm="primary-vm"
+  FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
+  ftctl_state_set "${vm}" "xcolo_primary_netdev_id=hostnet0"
+
+  # shellcheck disable=SC2317
+  ftctl_xcolo_qom_list_names() {
+    local path="${3-}" out_var="${4-}"
+    case "${path}" in
+      /objects)
+        printf -v "${out_var}" '%s\n' "type" "m0" "redire0" "redire1" "comp0"
+        ;;
+      /objects/m0)
+        printf -v "${out_var}" '%s\n' "netdev" "queue" "outdev" "status" "insert" "position"
+        ;;
+      /objects/redire0)
+        printf -v "${out_var}" '%s\n' "netdev" "queue" "indev" "outdev" "status" "insert" "position"
+        ;;
+      /objects/redire1)
+        printf -v "${out_var}" '%s\n' "netdev" "queue" "indev" "outdev" "status" "insert" "position"
+        ;;
+      /objects/comp0)
+        printf -v "${out_var}" '%s\n' "primary_in" "secondary_in" "outdev" "iothread"
+        ;;
+      *)
+        printf -v "${out_var}" '%s' ""
+        return 1
+        ;;
+    esac
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_qom_get_property() {
+    local path="${3-}" prop="${4-}" out_var="${5-}" prop_value=""
+    case "${path}:${prop}" in
+      /objects/m0:netdev|/objects/redire0:netdev|/objects/redire1:netdev) prop_value="hostnet0" ;;
+      /objects/m0:queue) prop_value="tx" ;;
+      /objects/redire0:queue|/objects/redire1:queue) prop_value="rx" ;;
+      /objects/m0:outdev) prop_value="mirror0" ;;
+      /objects/redire0:indev) prop_value="compare_out" ;;
+      /objects/redire0:outdev|/objects/redire1:indev) prop_value="" ;;
+      /objects/redire1:outdev) prop_value="compare0" ;;
+      /objects/m0:status|/objects/redire0:status|/objects/redire1:status) prop_value="on" ;;
+      /objects/m0:insert|/objects/redire0:insert|/objects/redire1:insert) prop_value="behind" ;;
+      /objects/m0:position|/objects/redire0:position|/objects/redire1:position) prop_value="tail" ;;
+      /objects/comp0:primary_in) prop_value="compare0-0" ;;
+      /objects/comp0:secondary_in) prop_value="compare1" ;;
+      /objects/comp0:outdev) prop_value="compare_out0" ;;
+      /objects/comp0:iothread) prop_value="iothread1" ;;
+      *) return 1 ;;
+    esac
+    printf -v "${out_var}" '%s' "${prop_value}"
+  }
+
+  ftctl_xcolo_require_primary_filter_qom_ready "${vm}" "selftest"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_ready")" \
+    "yes" "QOM topology ready"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_m0_path")" \
+    "/objects/m0" "m0 path discovered"
+
+  # shellcheck disable=SC2317
+  ftctl_xcolo_qom_list_names() {
+    local path="${3-}" out_var="${4-}"
+    case "${path}" in
+      /objects)
+        printf -v "${out_var}" '%s\n' "type" "m0" "redire0" "redire1"
+        ;;
+      *)
+        printf -v "${out_var}" '%s' ""
+        return 1
+        ;;
+    esac
+  }
+
+  if ftctl_xcolo_require_primary_filter_qom_ready "${vm}" "selftest-missing"; then
+    selftest_fail "missing comp0 must block pre-migrate QOM gate"
+  fi
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" \
+    "primary_filter_qom_topology_missing" "missing QOM topology error"
 )
 
 selftest_case_xcolo_baseline_seed_uses_primary_nbd_before_runtime_graph() (
@@ -3352,6 +3446,7 @@ selftest_main() {
   selftest_case_xcolo_primary_filter_binding_defers_to_runtime_validation
   selftest_case_xcolo_premigrate_chardev_binding_accepts_listener_endpoints
   selftest_case_xcolo_strict_chardev_binding_rejects_closed_frontends
+  selftest_case_xcolo_filter_qom_hard_gate
   selftest_case_xcolo_baseline_seed_uses_primary_nbd_before_runtime_graph
   selftest_case_xcolo_runtime_validation_blocks_false_positive
   selftest_case_xcolo_runtime_validation_reports_primary_migrate_failure
