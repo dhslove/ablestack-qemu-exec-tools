@@ -563,6 +563,9 @@ for iface in devices.findall("interface"):
                 insert_at = idx + 1
         iface.insert(insert_at, driver)
     driver.set("name", "qemu")
+    for attr in ("vhost", "vhostfd"):
+        if attr in driver.attrib:
+            del driver.attrib[attr]
 
 tree.write(xml_path, encoding="unicode")
 PY

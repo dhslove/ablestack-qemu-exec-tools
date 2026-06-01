@@ -255,3 +255,73 @@ but a lower-level signature or reached stage changed, set
   - add selftest coverage for the primary QMP object-add order
   - do not interpret a later COLO protocol failure as a repeated loop unless
     the order marker and QOM hard gate are both confirmed
+
+### Run 2026-06-02-06
+
+- Target: `r97-link-01`
+- Primary VM: `i-2-54-VM`
+- Standby VM: `i-2-113-VM`
+- Protection row: `57`
+- Result: failed, still active in Cloud DB as an error row
+- Monitoring note:
+  - the user reported a new protection start, but Cloud DB did not create a
+    new protection row
+  - active state remained on the previous failed row `57`
+  - DB still reports standby VM `i-2-113-VM` as `Running`, while the target
+    host `10.10.32.1` no longer has that libvirt domain
+- Last reached stage: runtime validation after primary `migrate`
+- Evidence:
+  - Design 336 was active:
+    `xcolo_primary_filter_qmp_attach_order=qemu-doc-primary`
+  - primary and secondary netdev discovery passed:
+    `xcolo_primary_netdev_ready=yes`,
+    `xcolo_secondary_netdev_ready=yes`
+  - QOM hard gate passed:
+    `xcolo_primary_filter_qom_ready=yes`
+  - pre-migrate evidence was complete:
+    `xcolo_premigrate_primary_filter_qom_ready=yes`,
+    `xcolo_premigrate_primary_filter_chardev_ready=yes`,
+    all four COLO channels established
+  - primary `migrate` moved into runtime validation, not an earlier prepare
+    failure
+- Failure signature:
+  - `last_error=xcolo_runtime_validation_failed:primary_migrate_failed`
+  - `xcolo_primary_status=paused`
+  - `xcolo_secondary_status=running`
+  - `xcolo_primary_colo_mode=none`
+  - `xcolo_secondary_colo_mode=secondary`
+  - `xcolo_primary_migrate_status=failed`
+  - `xcolo_secondary_migrate_status=colo`
+  - `xcolo_primary_migrate_error_desc=Received invalid message 0x0000 length 0x0000`
+- Progress judgment:
+  - `repetition_status=progressed_evidence_same_terminal_error`
+  - Design 336 was applied and verified, so the failure is no longer
+    attributable to primary QMP filter order
+  - the remaining terminal symptom is still the primary-side COLO protocol
+    message failure after migration starts
+  - the stale active DB row and stale standby inventory also prove cleanup must
+    be done before the next valid start
+- Next improvement:
+  - add an explicit FT/COLO primary runtime netdev vhost guard
+  - fail before primary `migrate` if the generated primary runtime QEMU command
+    still contains a vhost-enabled tap netdev for the COLO-filtered NIC
+  - persist a marker such as `xcolo_primary_netdev_vhost=off` or
+    `xcolo_primary_netdev_vhost=on` so future runs can distinguish a real COLO
+    protocol failure from an invalid vhost-backed network path
+  - cleanup row `57`, stale standby VM `113`, volumes `211` and `212`, and
+    host runtime leftovers before the next test
+
+### Change For Next Run
+
+- Design:
+  `docs/ftctl/337-ft-xcolo-primary-vhost-guard-design-20260602.md`
+- Implementation intent:
+  - keep virtio MAC/IP identity unchanged
+  - normalize generated FT/COLO virtio interfaces to QEMU userspace driver XML
+  - inspect the actual generated primary QEMU process command line through
+    `/proc/*/cmdline`
+  - record `xcolo_primary_netdev_vhost=off/on/unknown`
+  - stop before primary `migrate` with
+    `last_error=primary_netdev_vhost_enabled` if vhost is still enabled
+  - treat a future protocol failure with `xcolo_primary_netdev_vhost=off` as a
+    new blocker, not another vhost investigation loop

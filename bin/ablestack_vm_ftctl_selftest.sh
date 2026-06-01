@@ -1009,6 +1009,7 @@ selftest_case_xcolo_block_xml_preserves_disk_targets() {
       <source bridge='bridge0'/>
       <target dev='vnet0'/>
       <model type='virtio'/>
+      <driver name='vhost' vhost='on' vhostfd='13'/>
     </interface>
     <graphics type='vnc' port='5904' autoport='no' listen='172.16.20.11'>
       <listen type='address' address='172.16.20.11'/>
@@ -1049,6 +1050,8 @@ for xml_path in sys.argv[1:]:
     driver = iface.find("driver")
     if driver is None or driver.get("name") != "qemu":
         raise SystemExit(f"interface driver is not qemu in {xml_path}")
+    if driver.get("vhost") is not None or driver.get("vhostfd") is not None:
+        raise SystemExit(f"interface driver kept vhost attributes in {xml_path}")
 
 standby_root = ET.parse(sys.argv[2]).getroot()
 graphics = standby_root.find("./devices/graphics")
@@ -1521,6 +1524,46 @@ selftest_case_xcolo_primary_filter_qmp_order_matches_qemu_doc() (
     selftest_fail "primary QMP filter object-add order must be m0 redire0 redire1 comp0"
   selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_primary_filter_qmp_attach_order")" \
     "qemu-doc-primary" "primary QMP filter attach order marker"
+)
+
+selftest_case_xcolo_primary_netdev_vhost_guard() (
+  selftest_reset_env
+  selftest_info "x-colo primary runtime rejects vhost-backed netdev"
+
+  local vm="xcolo-vhost-guard"
+  local rc=0
+  ftctl_state_init_vm "${vm}"
+  ftctl_state_set "${vm}" "xcolo_primary_netdev_id=hostnet0"
+  FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC="1"
+
+  # shellcheck disable=SC2317
+  ftctl_cmd_run() {
+    local timeout_sec="${1-}" out_var="${2-}" err_var="${3-}" rc_var="${4-}"
+    : "${timeout_sec}"
+    printf -v "${out_var}" '%s' '-name guest=xcolo-vhost-guard -netdev {"type":"tap","fd":"51","vhost":true,"vhostfd":"57","id":"hostnet0"}'
+    printf -v "${err_var}" '%s' ''
+    printf -v "${rc_var}" '%s' '0'
+  }
+
+  ftctl_xcolo_require_primary_netdev_vhost_off "${vm}" || rc=$?
+  selftest_assert_eq "${rc}" "1" "vhost guard should reject vhost-enabled netdev"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_primary_netdev_vhost")" "on" "vhost state on"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" "primary_netdev_vhost_enabled" "vhost guard error"
+
+  rc=0
+  ftctl_state_set "${vm}" "last_error="
+  # shellcheck disable=SC2317
+  ftctl_cmd_run() {
+    local timeout_sec="${1-}" out_var="${2-}" err_var="${3-}" rc_var="${4-}"
+    : "${timeout_sec}"
+    printf -v "${out_var}" '%s' '-name guest=xcolo-vhost-guard -netdev {"type":"tap","fd":"51","id":"hostnet0"}'
+    printf -v "${err_var}" '%s' ''
+    printf -v "${rc_var}" '%s' '0'
+  }
+
+  ftctl_xcolo_require_primary_netdev_vhost_off "${vm}" || rc=$?
+  selftest_assert_eq "${rc}" "0" "vhost guard should accept qemu userspace netdev"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_primary_netdev_vhost")" "off" "vhost state off"
 )
 
 selftest_case_xcolo_baseline_seed_uses_primary_nbd_before_runtime_graph() (
@@ -3494,6 +3537,7 @@ selftest_main() {
   selftest_case_xcolo_strict_chardev_binding_rejects_closed_frontends
   selftest_case_xcolo_filter_qom_hard_gate
   selftest_case_xcolo_primary_filter_qmp_order_matches_qemu_doc
+  selftest_case_xcolo_primary_netdev_vhost_guard
   selftest_case_xcolo_baseline_seed_uses_primary_nbd_before_runtime_graph
   selftest_case_xcolo_runtime_validation_blocks_false_positive
   selftest_case_xcolo_runtime_validation_reports_primary_migrate_failure

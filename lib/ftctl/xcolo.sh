@@ -1376,9 +1376,109 @@ ftctl_xcolo_capture_primary_qemu_cmdline() {
   rc=0
   # shellcheck disable=SC2016
   ftctl_cmd_run "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC:-15}" out err rc -- \
-    bash -c 'ps -eo pid=,args= | grep -F -- "$1" | grep -F "qemu" | grep -v grep || true' _ "${vm}" || true
+    bash -c '
+vm="$1"
+for proc_cmd in /proc/[0-9]*/cmdline; do
+  [[ -r "${proc_cmd}" ]] || continue
+  cmdline="$(tr "\0" " " < "${proc_cmd}" 2>/dev/null || true)"
+  [[ "${cmdline}" == *"${vm}"* ]] || continue
+  [[ "${cmdline}" == *qemu* ]] || continue
+  printf "%s\n" "${cmdline}"
+done
+' _ "${vm}" || true
   : "${err}${rc}"
   ftctl_xcolo_write_debug_file "${vm}" "primary-qemu-process-cmdline.txt" "${out}"
+}
+
+ftctl_xcolo_collect_primary_netdev_vhost_state() {
+  local vm="${1-}"
+  local out err rc expected_netdev state reason_text
+
+  out=""
+  err=""
+  rc=0
+  # shellcheck disable=SC2016
+  ftctl_cmd_run "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC:-15}" out err rc -- \
+    bash -c '
+vm="$1"
+expected_netdev="$2"
+for proc_cmd in /proc/[0-9]*/cmdline; do
+  [[ -r "${proc_cmd}" ]] || continue
+  cmdline="$(tr "\0" " " < "${proc_cmd}" 2>/dev/null || true)"
+  [[ "${cmdline}" == *"${vm}"* ]] || continue
+  [[ "${cmdline}" == *qemu* ]] || continue
+  if [[ -z "${expected_netdev}" || "${cmdline}" == *"${expected_netdev}"* ]]; then
+    printf "%s\n" "${cmdline}"
+    exit 0
+  fi
+  fallback="${cmdline}"
+done
+if [[ -n "${fallback:-}" ]]; then
+  printf "%s\n" "${fallback}"
+fi
+' _ "${vm}" "$(ftctl_state_get "${vm}" "xcolo_primary_netdev_id" 2>/dev/null || true)" || true
+  : "${err}${rc}"
+
+  expected_netdev="$(ftctl_state_get "${vm}" "xcolo_primary_netdev_id" 2>/dev/null || true)"
+  expected_netdev="${expected_netdev:-hostnet0}"
+  if [[ -z "${out}" ]]; then
+    state="unknown"
+    reason_text="primary_qemu_process_not_found"
+  elif [[ "${out}" == *"vhostfd"* ||
+          "${out}" == *'"vhost":true'* ||
+          "${out}" == *"vhost=on"* ||
+          "${out}" == *"vhost=true"* ]]; then
+    state="on"
+    reason_text="vhost_marker_present"
+  else
+    state="off"
+    reason_text=""
+  fi
+
+  ftctl_xcolo_write_debug_file "${vm}" "primary-qemu-netdev-vhost-cmdline.txt" "${out}" || true
+  ftctl_state_set "${vm}" \
+    "xcolo_primary_netdev_vhost=${state}" \
+    "xcolo_primary_netdev_vhost_expected_netdev=${expected_netdev}" \
+    "xcolo_primary_netdev_vhost_reason=${reason_text}"
+  ftctl_log_event "colo" "primary.netdev.vhost" "ok" "${vm}" "" \
+    "state=${state} expected_netdev=${expected_netdev} reason=${reason_text:-none}"
+  [[ "${state}" == "off" ]]
+}
+
+ftctl_xcolo_require_primary_netdev_vhost_off() {
+  local vm="${1-}"
+  local state reason_text
+
+  ftctl_xcolo_collect_primary_netdev_vhost_state "${vm}" || true
+  state="$(ftctl_state_get "${vm}" "xcolo_primary_netdev_vhost" 2>/dev/null || true)"
+  reason_text="$(ftctl_state_get "${vm}" "xcolo_primary_netdev_vhost_reason" 2>/dev/null || true)"
+  case "${state}" in
+    off)
+      return 0
+      ;;
+    on)
+      ftctl_state_set "${vm}" \
+        "conversion_stage=primary_vhost_guard_failed" \
+        "conversion_state=error" \
+        "protection_state=error" \
+        "transport_state=failed" \
+        "last_error=primary_netdev_vhost_enabled"
+      ftctl_log_event "colo" "primary.netdev.vhost_guard" "fail" "${vm}" "" \
+        "state=${state} reason=${reason_text:-vhost_marker_present}"
+      return 1
+      ;;
+    *)
+      ftctl_state_set "${vm}" \
+        "conversion_stage=primary_vhost_guard_failed" \
+        "conversion_state=error" \
+        "protection_state=error" \
+        "transport_state=failed" \
+        "last_error=primary_netdev_vhost_unknown"
+      ftctl_log_event "colo" "primary.netdev.vhost_guard" "fail" "${vm}" "" \
+        "state=${state:-unknown} reason=${reason_text:-unknown}"
+      return 1
+      ;;
+  esac
 }
 
 ftctl_xcolo_collect_primary_filter_cmdline_state() {
@@ -1391,7 +1491,16 @@ ftctl_xcolo_collect_primary_filter_cmdline_state() {
   rc=0
   # shellcheck disable=SC2016
   ftctl_cmd_run "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC:-15}" out err rc -- \
-    bash -c 'ps -eo pid=,args= | grep -F -- "$1" | grep -F "qemu" | grep -v grep || true' _ "${vm}" || true
+    bash -c '
+vm="$1"
+for proc_cmd in /proc/[0-9]*/cmdline; do
+  [[ -r "${proc_cmd}" ]] || continue
+  cmdline="$(tr "\0" " " < "${proc_cmd}" 2>/dev/null || true)"
+  [[ "${cmdline}" == *"${vm}"* ]] || continue
+  [[ "${cmdline}" == *qemu* ]] || continue
+  printf "%s\n" "${cmdline}"
+done
+' _ "${vm}" || true
   : "${err}${rc}"
 
   if [[ -z "${out}" ]]; then
@@ -1446,6 +1555,7 @@ ftctl_xcolo_collect_runtime_failure_diagnostics() {
   ftctl_xcolo_qmp_debug_snapshot_one "${vm}" "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" "primary" || true
   ftctl_xcolo_qmp_debug_snapshot_one "${vm}" "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" "secondary" || true
   ftctl_xcolo_capture_primary_qemu_cmdline "${vm}" || true
+  ftctl_xcolo_collect_primary_netdev_vhost_state "${vm}" || true
   ftctl_xcolo_collect_primary_filter_cmdline_state "${vm}" || true
   ftctl_xcolo_collect_primary_chardev_binding_state "${vm}" || true
   ftctl_xcolo_collect_primary_filter_qom_state "${vm}" || true
@@ -4417,6 +4527,13 @@ ftctl_xcolo_execute_block_cold_conversion() {
   }
   ftctl_state_set "${vm}" "conversion_stage=primary_created"
   ftctl_log_event "colo" "block_conversion.primary_create" "ok" "${vm}" "" ""
+
+  ftctl_xcolo_require_primary_netdev_vhost_off "${vm}" || {
+    ftctl_xcolo_abort_primary_generated_async "${vm}" "${primary_create_handle}"
+    ftctl_xcolo_rollback_block_primary_create_failure "${vm}" "$(ftctl_state_get "${vm}" "last_error" 2>/dev/null || printf '%s' primary_netdev_vhost_enabled)" || true
+    return 1
+  }
+  ftctl_state_set "${vm}" "conversion_stage=primary_vhost_guard_passed"
 
   host=""
   user=""
