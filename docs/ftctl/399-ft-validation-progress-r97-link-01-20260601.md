@@ -195,3 +195,63 @@ but a lower-level signature or reached stage changed, set
     `xcolo_primary_net_filters_attached=true`
   - stop before primary `migrate` with
     `last_error=primary_filter_qom_topology_missing` if QOM validation fails
+
+### Run 2026-06-01-05
+
+- Target: `r97-link-01`
+- Primary VM: `i-2-54-VM`
+- Standby VM: `i-2-112-VM`
+- Protection row: `56`
+- Result: failed
+- Last reached stage: runtime validation after primary `migrate`
+- Evidence:
+  - standby VM and standby volumes were created
+  - baseline seed completed for both root and data disks
+  - primary generated runtime and secondary generated runtime were created
+  - secondary incoming side started and reached COLO-capable state
+  - primary QMP filter objects were created dynamically
+  - hard QOM gate passed:
+    `primary.filter_qom_topology=ok`
+  - persisted QOM paths and properties were valid:
+    `m0=/objects/m0`, `redire0=/objects/redire0`,
+    `redire1=/objects/redire1`, `comp0=/objects/comp0`
+  - pre-migrate evidence was complete:
+    `x-colo=yes`, `return-path=yes`, `checkpoint_delay=yes`,
+    `filter_qom=yes`, `chardev=yes`, `mirror=yes`, `compare=yes`,
+    `compare_local=yes`, `compare_out=yes`
+  - primary `migrate` command returned `ok`
+- Failure signature:
+  - `last_error=xcolo_runtime_validation_failed:primary_migrate_failed`
+  - runtime validation saw:
+    `primary_status=paused`, `secondary_status=running`,
+    `primary_colo=none`, `secondary_colo=secondary`
+  - primary `query-migrate.error-desc`:
+    `Received invalid message 0x0000 length 0x0000`
+  - secondary QEMU log:
+    `Can't receive COLO message: Input/output error`
+- Progress judgment:
+  - `repetition_status=not_repeat`
+  - Design 335 worked: the prior blocker, unconfirmed primary QOM filter
+    topology, is gone
+  - this run proves the failure is now after a valid primary filter QOM and
+    complete pre-migrate channel evidence
+  - the next blocker is COLO protocol negotiation after primary `migrate`, not
+    QMP object creation
+- Next improvement:
+  - keep the late QMP attach point, but change the primary QMP object-add
+    order to QEMU's documented primary COLO filter order:
+    `m0 -> redire0 -> redire1 -> comp0`
+  - persist `xcolo_primary_filter_qmp_attach_order=qemu-doc-primary` so the
+    next run can prove the new order was active
+  - keep Design 335 QOM hard gate after the reordered attach
+
+### Change For Next Run
+
+- Design:
+  `docs/ftctl/336-ft-xcolo-primary-filter-qmp-order-design-20260601.md`
+- Implementation intent:
+  - update both `qmp-objects` and `qmp-rebuild` primary filter attach paths
+  - attach `filter-mirror m0` before `redire0`, `redire1`, and `comp0`
+  - add selftest coverage for the primary QMP object-add order
+  - do not interpret a later COLO protocol failure as a repeated loop unless
+    the order marker and QOM hard gate are both confirmed

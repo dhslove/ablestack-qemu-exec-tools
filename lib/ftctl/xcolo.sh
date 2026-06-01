@@ -3477,6 +3477,9 @@ ftctl_xcolo_primary_net_filters_qmp_rebuild() {
     "colo" "primary.chardev_add.compare_out_client" || return 1
 
   ftctl_xcolo_qmp_require_ok_or_exists "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
+    "{\"execute\":\"object-add\",\"arguments\":{\"qom-type\":\"filter-mirror\",\"id\":\"m0\",\"netdev\":\"${netdev_id}\",\"queue\":\"tx\",\"outdev\":\"mirror0\",\"status\":\"on\",\"insert\":\"behind\",\"position\":\"tail\"}}" \
+    "colo" "primary.object_add_filter_mirror" || return 1
+  ftctl_xcolo_qmp_require_ok_or_exists "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
     "{\"execute\":\"object-add\",\"arguments\":{\"qom-type\":\"filter-redirector\",\"id\":\"redire0\",\"netdev\":\"${netdev_id}\",\"queue\":\"rx\",\"indev\":\"compare_out\",\"status\":\"on\",\"insert\":\"behind\",\"position\":\"tail\"}}" \
     "colo" "primary.object_add_redirector_in" || return 1
   ftctl_xcolo_qmp_require_ok_or_exists "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
@@ -3485,9 +3488,6 @@ ftctl_xcolo_primary_net_filters_qmp_rebuild() {
   ftctl_xcolo_qmp_require_ok_or_exists "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
     '{"execute":"object-add","arguments":{"qom-type":"colo-compare","id":"comp0","primary_in":"compare0-0","secondary_in":"compare1","outdev":"compare_out0","iothread":"iothread1"}}' \
     "colo" "primary.object_add_colo_compare" || return 1
-  ftctl_xcolo_qmp_require_ok_or_exists "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
-    "{\"execute\":\"object-add\",\"arguments\":{\"qom-type\":\"filter-mirror\",\"id\":\"m0\",\"netdev\":\"${netdev_id}\",\"queue\":\"tx\",\"outdev\":\"mirror0\",\"status\":\"on\",\"insert\":\"behind\",\"position\":\"tail\"}}" \
-    "colo" "primary.object_add_filter_mirror" || return 1
 
   ftctl_xcolo_collect_primary_chardev_binding_state "${vm}" || true
   ftctl_xcolo_require_primary_filter_qom_ready "${vm}" "qmp-rebuild" || return 1
@@ -3495,6 +3495,7 @@ ftctl_xcolo_primary_net_filters_qmp_rebuild() {
     "xcolo_primary_net_filters_attached=true" \
     "xcolo_primary_net_filters_attach_mode=qmp-rebuild" \
     "xcolo_primary_net_filters_netdev=${netdev_id}" \
+    "xcolo_primary_filter_qmp_attach_order=qemu-doc-primary" \
     "xcolo_primary_filter_runtime_repair_attempted=yes" \
     "xcolo_primary_filter_runtime_repair_source=${source}"
   ftctl_log_event "colo" "primary.net_filters.rebuild" "ok" "${vm}" "" \
@@ -3526,6 +3527,9 @@ ftctl_xcolo_primary_net_filters_qmp_attach_objects() {
     "colo" "primary.object_del_colo_compare"
 
   ftctl_xcolo_qmp_require_ok_or_exists "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
+    "{\"execute\":\"object-add\",\"arguments\":{\"qom-type\":\"filter-mirror\",\"id\":\"m0\",\"netdev\":\"${netdev_id}\",\"queue\":\"tx\",\"outdev\":\"mirror0\",\"status\":\"on\",\"insert\":\"behind\",\"position\":\"tail\"}}" \
+    "colo" "primary.object_add_filter_mirror" || return 1
+  ftctl_xcolo_qmp_require_ok_or_exists "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
     "{\"execute\":\"object-add\",\"arguments\":{\"qom-type\":\"filter-redirector\",\"id\":\"redire0\",\"netdev\":\"${netdev_id}\",\"queue\":\"rx\",\"indev\":\"compare_out\",\"status\":\"on\",\"insert\":\"behind\",\"position\":\"tail\"}}" \
     "colo" "primary.object_add_redirector_in" || return 1
   ftctl_xcolo_qmp_require_ok_or_exists "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
@@ -3534,9 +3538,6 @@ ftctl_xcolo_primary_net_filters_qmp_attach_objects() {
   ftctl_xcolo_qmp_require_ok_or_exists "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
     '{"execute":"object-add","arguments":{"qom-type":"colo-compare","id":"comp0","primary_in":"compare0-0","secondary_in":"compare1","outdev":"compare_out0","iothread":"iothread1"}}' \
     "colo" "primary.object_add_colo_compare" || return 1
-  ftctl_xcolo_qmp_require_ok_or_exists "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
-    "{\"execute\":\"object-add\",\"arguments\":{\"qom-type\":\"filter-mirror\",\"id\":\"m0\",\"netdev\":\"${netdev_id}\",\"queue\":\"tx\",\"outdev\":\"mirror0\",\"status\":\"on\",\"insert\":\"behind\",\"position\":\"tail\"}}" \
-    "colo" "primary.object_add_filter_mirror" || return 1
 
   ftctl_xcolo_collect_primary_chardev_binding_state "${vm}" || true
   ftctl_xcolo_require_primary_filter_qom_ready "${vm}" "qmp-objects" || return 1
@@ -3544,6 +3545,7 @@ ftctl_xcolo_primary_net_filters_qmp_attach_objects() {
     "xcolo_primary_net_filters_attached=true" \
     "xcolo_primary_net_filters_attach_mode=qmp-objects" \
     "xcolo_primary_net_filters_netdev=${netdev_id}" \
+    "xcolo_primary_filter_qmp_attach_order=qemu-doc-primary" \
     "xcolo_primary_filter_runtime_repair_attempted=no" \
     "xcolo_primary_filter_runtime_repair_source=${source}"
   ftctl_log_event "colo" "primary.net_filters.qmp_objects" "ok" "${vm}" "" \

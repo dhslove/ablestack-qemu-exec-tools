@@ -64,13 +64,13 @@ The primary XML and QMP responsibilities are split:
    connectivity.
 5. qemu FTCTL builds the secondary and primary block graph/NBD topology.
 6. Only after block graph and channel readiness does qemu FTCTL attach primary
-   packet filter objects with QMP:
+   packet filter objects with QMP.
+7. The QMP attach point is delayed, but the attach order must match the QEMU
+   primary COLO filter order:
+   - `filter-mirror m0`
    - `filter-redirector redire0`
    - `filter-redirector redire1`
    - `colo-compare comp0`
-   - `filter-mirror m0`
-7. `filter-mirror` remains last so primary packet mirroring cannot emit before
-   redirector/compare output paths exist.
 8. qemu FTCTL validates chardev binding, QOM filter topology, and channel
    state before issuing primary `migrate`.
 
@@ -102,6 +102,10 @@ before QMP handshaking. The desired runtime evidence is:
 
 - primary command line has COLO chardevs but no filter objects;
 - QMP/QOM shows `m0`, `redire0`, `redire1`, and `comp0` only after qemu FTCTL
-  attaches them;
+  attaches them in QEMU documented primary order;
 - channel state remains established after QMP object attach;
 - primary migration does not fail immediately with filter mirror send errors.
+
+Design 336 supersedes the earlier mirror-last experiment. The safe model is now
+late QMP attach with QEMU documented primary filter order, plus the Design 335
+QOM hard gate before primary `migrate`.

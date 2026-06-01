@@ -1477,6 +1477,52 @@ selftest_case_xcolo_filter_qom_hard_gate() (
     "primary_filter_qom_topology_missing" "missing QOM topology error"
 )
 
+selftest_case_xcolo_primary_filter_qmp_order_matches_qemu_doc() (
+  selftest_reset_env
+  selftest_info "x-colo primary QMP filter attach follows QEMU documented order"
+
+  local vm="primary-vm"
+  local call_log="${SELFTEST_ROOT}/xcolo-primary-filter-qmp-order.log"
+  local mirror_line redire0_line redire1_line comp0_line
+  FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
+  ftctl_state_set "${vm}" "xcolo_primary_netdev_id=hostnet0"
+
+  # shellcheck disable=SC2317
+  ftctl_xcolo_qmp_optional() {
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_qmp_require_ok_or_exists() {
+    local event="${5-}"
+    printf '%s\n' "${event}" >> "${call_log}"
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_collect_primary_chardev_binding_state() {
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_require_primary_filter_qom_ready() {
+    return 0
+  }
+
+  ftctl_xcolo_primary_net_filters_qmp_attach_objects "${vm}" "selftest"
+
+  mirror_line="$(grep -n '^primary.object_add_filter_mirror$' "${call_log}" | head -n1 | cut -d: -f1)"
+  redire0_line="$(grep -n '^primary.object_add_redirector_in$' "${call_log}" | head -n1 | cut -d: -f1)"
+  redire1_line="$(grep -n '^primary.object_add_redirector_out$' "${call_log}" | head -n1 | cut -d: -f1)"
+  comp0_line="$(grep -n '^primary.object_add_colo_compare$' "${call_log}" | head -n1 | cut -d: -f1)"
+
+  [[ -n "${mirror_line}" && -n "${redire0_line}" && -n "${redire1_line}" && -n "${comp0_line}" ]] || \
+    selftest_fail "all primary QMP filter object-add events must be present"
+  [[ "${mirror_line}" -lt "${redire0_line}" &&
+     "${redire0_line}" -lt "${redire1_line}" &&
+     "${redire1_line}" -lt "${comp0_line}" ]] || \
+    selftest_fail "primary QMP filter object-add order must be m0 redire0 redire1 comp0"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_primary_filter_qmp_attach_order")" \
+    "qemu-doc-primary" "primary QMP filter attach order marker"
+)
+
 selftest_case_xcolo_baseline_seed_uses_primary_nbd_before_runtime_graph() (
   selftest_reset_env
   selftest_info "x-colo block cold conversion seeds secondary baseline over primary read-only NBD"
@@ -3447,6 +3493,7 @@ selftest_main() {
   selftest_case_xcolo_premigrate_chardev_binding_accepts_listener_endpoints
   selftest_case_xcolo_strict_chardev_binding_rejects_closed_frontends
   selftest_case_xcolo_filter_qom_hard_gate
+  selftest_case_xcolo_primary_filter_qmp_order_matches_qemu_doc
   selftest_case_xcolo_baseline_seed_uses_primary_nbd_before_runtime_graph
   selftest_case_xcolo_runtime_validation_blocks_false_positive
   selftest_case_xcolo_runtime_validation_reports_primary_migrate_failure
