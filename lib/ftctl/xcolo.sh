@@ -1357,6 +1357,24 @@ ftctl_xcolo_domain_xml_has_runtime_markers() {
   esac
 }
 
+ftctl_xcolo_domain_xml_has_primary_chardev_markers() {
+  local uri="${1-}"
+  local vm="${2-}"
+  local out="" err="" rc=0
+
+  ftctl_virsh "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC}" out err rc -- -c "${uri}" dumpxml --security-info "${vm}" || true
+  : "${err}"
+  [[ "${rc}" == "0" && -n "${out}" ]] || return 1
+
+  [[ "${out}" == *"qemu:commandline"* &&
+     "${out}" == *"socket,id=mirror0"* &&
+     "${out}" == *"socket,id=compare1"* &&
+     "${out}" == *"socket,id=compare0"* &&
+     "${out}" == *"socket,id=compare0-0"* &&
+     "${out}" == *"socket,id=compare_out"* &&
+     "${out}" == *"socket,id=compare_out0"* ]]
+}
+
 ftctl_xcolo_runtime_primary_topology_ready() {
   local primary_xml="${1-}"
   local primary_filter_qom="${2-}"
@@ -1449,7 +1467,8 @@ ftctl_xcolo_validate_pair_runtime() {
       ftctl_xcolo_query_guest_ping "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" secondary_qga || true
     fi
 
-    if ftctl_xcolo_domain_xml_has_runtime_markers "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" primary; then
+    if ftctl_xcolo_domain_xml_has_runtime_markers "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" primary ||
+        ftctl_xcolo_domain_xml_has_primary_chardev_markers "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}"; then
       primary_xml="ok"
     fi
     if ftctl_xcolo_domain_xml_has_runtime_markers "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" secondary; then
@@ -2284,10 +2303,11 @@ ftctl_xcolo_build_primary_qemu_args() {
     *) compare_wait="on" ;;
   esac
 
-  # Keep chardev endpoints and packet filters in the generated XML so QEMU binds
-  # the COLO netfilter chain during netdev creation. Dynamic QMP object-add can
-  # accept the objects yet leave filter-facing chardev frontends detached.
-  printf '%s\n' "-S;-chardev;socket,id=mirror0,host=0.0.0.0,port=${mirror_port},server=on,wait=${mirror_wait};-chardev;socket,id=compare1,host=0.0.0.0,port=${compare_port},server=on,wait=${compare_wait};-chardev;socket,id=compare0,host=127.0.0.1,port=${compare_local_port},server=on,wait=off;-chardev;socket,id=compare0-0,host=127.0.0.1,port=${compare_local_port};-chardev;socket,id=compare_out,host=127.0.0.1,port=${compare_out_port},server=on,wait=off;-chardev;socket,id=compare_out0,host=127.0.0.1,port=${compare_out_port};-object;filter-mirror,id=m0,netdev=${netdev_id},queue=tx,outdev=mirror0;-object;filter-redirector,id=redire0,netdev=${netdev_id},queue=rx,indev=compare_out;-object;filter-redirector,id=redire1,netdev=${netdev_id},queue=rx,outdev=compare0;-object;colo-compare,id=comp0,primary_in=compare0-0,secondary_in=compare1,outdev=compare_out0,iothread=iothread1"
+  # Keep only paused startup and COLO chardev endpoints in the generated XML.
+  # Packet filter objects are attached later with QMP after the block graph and
+  # peer channels are ready; attaching them here can mirror guest packets before
+  # migration setup has converged.
+  printf '%s\n' "-S;-chardev;socket,id=mirror0,host=0.0.0.0,port=${mirror_port},server=on,wait=${mirror_wait};-chardev;socket,id=compare1,host=0.0.0.0,port=${compare_port},server=on,wait=${compare_wait};-chardev;socket,id=compare0,host=127.0.0.1,port=${compare_local_port},server=on,wait=off;-chardev;socket,id=compare0-0,host=127.0.0.1,port=${compare_local_port};-chardev;socket,id=compare_out,host=127.0.0.1,port=${compare_out_port},server=on,wait=off;-chardev;socket,id=compare_out0,host=127.0.0.1,port=${compare_out_port}"
 }
 
 ftctl_xcolo_build_secondary_qemu_args() {
@@ -2314,7 +2334,7 @@ COLO startup alignment checklist
    - mirror0 server wait=off
    - compare1 server wait=on
    - compare0 / compare0-0 / compare_out / compare_out0 loopback sockets
-   - primary filter objects are present in XML or attached by QMP fallback
+   - primary filter objects are attached by QMP after block graph readiness
    - root disk on if=ide quorum node
    - startup paused with -S
 2. Secondary startup:
@@ -3263,6 +3283,55 @@ ftctl_xcolo_primary_net_filters_qmp_rebuild() {
     "source=${source} netdev=${netdev_id}"
 }
 
+ftctl_xcolo_primary_net_filters_qmp_attach_objects() {
+  local vm="${1-}"
+  local source="${2:-qmp-object-attach}"
+  local netdev_id
+
+  netdev_id="$(ftctl_state_get "${vm}" "xcolo_primary_netdev_id" 2>/dev/null || true)"
+  netdev_id="${netdev_id:-hostnet0}"
+
+  ftctl_log_event "colo" "primary.net_filters.qmp_objects" "start" "${vm}" "" \
+    "source=${source} netdev=${netdev_id}"
+
+  ftctl_xcolo_qmp_optional "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
+    '{"execute":"object-del","arguments":{"id":"m0"}}' \
+    "colo" "primary.object_del_filter_mirror"
+  ftctl_xcolo_qmp_optional "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
+    '{"execute":"object-del","arguments":{"id":"redire0"}}' \
+    "colo" "primary.object_del_redirector_in"
+  ftctl_xcolo_qmp_optional "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
+    '{"execute":"object-del","arguments":{"id":"redire1"}}' \
+    "colo" "primary.object_del_redirector_out"
+  ftctl_xcolo_qmp_optional "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
+    '{"execute":"object-del","arguments":{"id":"comp0"}}' \
+    "colo" "primary.object_del_colo_compare"
+
+  ftctl_xcolo_qmp_require_ok_or_exists "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
+    "{\"execute\":\"object-add\",\"arguments\":{\"qom-type\":\"filter-redirector\",\"id\":\"redire0\",\"netdev\":\"${netdev_id}\",\"queue\":\"rx\",\"indev\":\"compare_out\"}}" \
+    "colo" "primary.object_add_redirector_in" || return 1
+  ftctl_xcolo_qmp_require_ok_or_exists "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
+    "{\"execute\":\"object-add\",\"arguments\":{\"qom-type\":\"filter-redirector\",\"id\":\"redire1\",\"netdev\":\"${netdev_id}\",\"queue\":\"rx\",\"outdev\":\"compare0\"}}" \
+    "colo" "primary.object_add_redirector_out" || return 1
+  ftctl_xcolo_qmp_require_ok_or_exists "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
+    '{"execute":"object-add","arguments":{"qom-type":"colo-compare","id":"comp0","primary_in":"compare0-0","secondary_in":"compare1","outdev":"compare_out0","iothread":"iothread1"}}' \
+    "colo" "primary.object_add_colo_compare" || return 1
+  ftctl_xcolo_qmp_require_ok_or_exists "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
+    "{\"execute\":\"object-add\",\"arguments\":{\"qom-type\":\"filter-mirror\",\"id\":\"m0\",\"netdev\":\"${netdev_id}\",\"queue\":\"tx\",\"outdev\":\"mirror0\"}}" \
+    "colo" "primary.object_add_filter_mirror" || return 1
+
+  ftctl_xcolo_collect_primary_chardev_binding_state "${vm}" || true
+  ftctl_xcolo_collect_primary_filter_qom_state "${vm}" || true
+  ftctl_state_set "${vm}" \
+    "xcolo_primary_net_filters_attached=true" \
+    "xcolo_primary_net_filters_attach_mode=qmp-objects" \
+    "xcolo_primary_net_filters_netdev=${netdev_id}" \
+    "xcolo_primary_filter_runtime_repair_attempted=no" \
+    "xcolo_primary_filter_runtime_repair_source=${source}"
+  ftctl_log_event "colo" "primary.net_filters.qmp_objects" "ok" "${vm}" "" \
+    "source=${source} netdev=${netdev_id}"
+}
+
 ftctl_xcolo_attach_primary_net_filters() {
   local vm="${1-}"
   local netdev_id attach_mode chardev_ready chardev_reason
@@ -3293,6 +3362,28 @@ ftctl_xcolo_attach_primary_net_filters() {
       "xcolo_primary_net_filters_netdev=$(ftctl_state_get "${vm}" "xcolo_primary_netdev_id" 2>/dev/null || printf '%s' hostnet0)"
     ftctl_log_event "colo" "primary.net_filters" "ok" "${vm}" "" \
       "mode=${attach_mode}"
+    return 0
+  fi
+
+  if ftctl_xcolo_domain_xml_has_primary_chardev_markers "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}"; then
+    ftctl_xcolo_validate_primary_channel_paths "${vm}" || return 1
+    ftctl_xcolo_primary_net_filters_qmp_attach_objects "${vm}" "pre_migrate_xml_chardev_only" || return 1
+    ftctl_xcolo_validate_primary_channel_paths "${vm}" || return 1
+    ftctl_xcolo_wait_primary_filter_chardev_binding "${vm}" || {
+      chardev_reason="$(ftctl_state_get "${vm}" "xcolo_primary_filter_chardev_reason" 2>/dev/null || true)"
+      [[ -n "${chardev_reason}" ]] || chardev_reason="unknown"
+      ftctl_log_event "colo" "primary.net_filters.pre_migrate_gate" "fail" "${vm}" "" \
+        "reason=primary_filter_chardev_frontend_incomplete detail=${chardev_reason} mode=qmp-objects"
+      return 1
+    }
+    netdev_id="$(ftctl_state_get "${vm}" "xcolo_primary_netdev_id" 2>/dev/null || true)"
+    netdev_id="${netdev_id:-hostnet0}"
+    ftctl_state_set "${vm}" \
+      "xcolo_primary_net_filters_attached=true" \
+      "xcolo_primary_net_filters_attach_mode=qmp-objects" \
+      "xcolo_primary_net_filters_netdev=${netdev_id}"
+    ftctl_log_event "colo" "primary.net_filters" "ok" "${vm}" "" \
+      "mode=qmp-objects"
     return 0
   fi
 

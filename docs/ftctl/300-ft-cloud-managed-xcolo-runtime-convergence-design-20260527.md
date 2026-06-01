@@ -70,7 +70,9 @@ Validation loop:
 5. Succeed when the traditional running model is proven:
    - primary `query-status.running=true`
    - secondary `query-status.running=true`
-   - primary runtime XML has `colo-compare`, `filter-mirror`, and `filter-redirector`
+   - primary runtime XML has the COLO chardev command line markers, while
+     `colo-compare`, `filter-mirror`, and `filter-redirector` are validated
+     through QMP/QOM because they are attached after block graph readiness
    - secondary runtime XML has `filter-redirector`, `filter-rewriter`, and `-incoming`
    - secondary `query-migrate.status=colo`
 6. Also succeed when QEMU explicitly reports COLO role state:
