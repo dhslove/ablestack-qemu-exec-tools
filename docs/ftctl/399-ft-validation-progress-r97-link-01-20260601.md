@@ -325,3 +325,41 @@ but a lower-level signature or reached stage changed, set
     `last_error=primary_netdev_vhost_enabled` if vhost is still enabled
   - treat a future protocol failure with `xcolo_primary_netdev_vhost=off` as a
     new blocker, not another vhost investigation loop
+
+### Build And Cleanup 2026-06-02-07
+
+- Source commit:
+  `6629a414e31a683a7ea4e836ce81a2fb12421b94`
+- GitHub Actions run:
+  `26764986794`
+- Build result: success
+- RPM:
+  `ablestack_vm_ftctl-0.8.0-1.noarch.rpm`
+- RPM SHA256:
+  `8fe5f2e26e6aab588e3af1932a0042d406701d81e6da017df618fab8b25f5fac`
+- Deployment:
+  - installed on `10.10.32.1`, `10.10.32.2`, `10.10.32.3`
+  - used `aspkg` through `exec -a rpm` because 32.x masks direct `rpm`
+  - `ablestack-vm-ftctl.timer` and `ablestack-vm-hangctl.timer` are active on
+    all three hosts
+  - installed `xcolo.sh` contains the
+    `xcolo_primary_netdev_vhost` and `primary_vhost_guard_failed` markers
+- Cleanup:
+  - host-side runtime for `i-2-54-VM` was removed with forced unprotect after
+    the stale lock cleared
+  - stale standby domain `i-2-113-VM` is not present on `10.10.32.1`
+  - stale local image files for volumes `211` and `212` were removed from
+    `10.10.32.1`
+  - Cloud DB active FT state is clean:
+    `active_protection=0`, `active_protection_volume=0`,
+    `active_ftctl_details=0`, `active_standby_vm=0`,
+    `active_standby_volumes=0`
+  - primary VM `i-2-54-VM` remains `Running` on host `10.10.32.3`
+  - primary QMP `query-block-jobs` returns an empty list
+  - primary QMP `query-migrate` returns an empty object
+- Next valid test expectation:
+  - if vhost is still present on the generated primary runtime, the run should
+    stop before primary `migrate` with `primary_netdev_vhost_enabled`
+  - if `xcolo_primary_netdev_vhost=off` is recorded and the same protocol
+    failure remains, the next blocker is not vhost and must move to COLO channel
+    payload direction or QEMU behavior
