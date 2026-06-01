@@ -379,6 +379,39 @@ PY
   [[ -n "${payload}" ]]
 }
 
+ftctl_xcolo_query_migrate_error_desc() {
+  local uri="${1-}"
+  local vm="${2-}"
+  local desc_var="${3}"
+  local out rc payload
+
+  out=""
+  rc=0
+  ftctl_xcolo_qmp "${uri}" "${vm}" '{"execute":"query-migrate"}' out rc
+  if [[ "${rc}" != "0" || -z "${out}" ]]; then
+    printf -v "${desc_var}" '%s' ""
+    return 1
+  fi
+  payload="$(python3 - <<'PY' "${out}"
+import json, sys
+raw = sys.argv[1]
+try:
+    data = json.loads(raw)
+except Exception:
+    print("")
+    raise SystemExit(0)
+if not isinstance(data, dict):
+    print("")
+    raise SystemExit(0)
+ret = data.get("return") if isinstance(data.get("return"), dict) else {}
+err = data.get("error") if isinstance(data.get("error"), dict) else {}
+print((ret.get("error-desc") or err.get("desc") or "").strip())
+PY
+)" || payload=""
+  printf -v "${desc_var}" '%s' "${payload}"
+  [[ -n "${payload}" ]]
+}
+
 ftctl_xcolo_query_migrate_capability_state() {
   local uri="${1-}"
   local vm="${2-}"
@@ -960,6 +993,58 @@ ftctl_xcolo_collect_primary_filter_qom_state() {
   [[ "${ready}" == "yes" ]]
 }
 
+ftctl_xcolo_record_pre_migrate_evidence() {
+  local vm="${1-}"
+  local cap_xcolo cap_return_path checkpoint_delay
+  local filter_qom filter_qom_reason chardev chardev_reason
+  local channel_mirror channel_compare channel_compare_local channel_compare_out
+  local ts
+
+  [[ -n "${vm}" ]] || return 1
+
+  ts="$(ftctl_now_iso8601)"
+  ftctl_xcolo_capture_primary_channel_state "${vm}" || true
+  ftctl_xcolo_collect_primary_chardev_binding_state "${vm}" "pre_migrate" || true
+  ftctl_xcolo_collect_primary_filter_qom_state "${vm}" || true
+
+  cap_xcolo="$(ftctl_xcolo_query_primary_qmp_diag_value "${vm}" "query-migrate-capabilities" "cap:x-colo")"
+  cap_return_path="$(ftctl_xcolo_query_primary_qmp_diag_value "${vm}" "query-migrate-capabilities" "cap:return-path")"
+  checkpoint_delay="$(ftctl_xcolo_query_primary_qmp_diag_value "${vm}" "query-migrate-parameters" "param:x-checkpoint-delay")"
+  filter_qom="$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_ready" 2>/dev/null || true)"
+  filter_qom_reason="$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_reason" 2>/dev/null || true)"
+  chardev="$(ftctl_state_get "${vm}" "xcolo_primary_filter_chardev_ready" 2>/dev/null || true)"
+  chardev_reason="$(ftctl_state_get "${vm}" "xcolo_primary_filter_chardev_reason" 2>/dev/null || true)"
+  channel_mirror="$(ftctl_state_get "${vm}" "xcolo_channel_mirror_established" 2>/dev/null || true)"
+  channel_compare="$(ftctl_state_get "${vm}" "xcolo_channel_compare_established" 2>/dev/null || true)"
+  channel_compare_local="$(ftctl_state_get "${vm}" "xcolo_channel_compare_local_established" 2>/dev/null || true)"
+  channel_compare_out="$(ftctl_state_get "${vm}" "xcolo_channel_compare_out_established" 2>/dev/null || true)"
+
+  ftctl_state_set "${vm}" \
+    "xcolo_premigrate_evidence_ts=${ts}" \
+    "xcolo_premigrate_primary_capability_x_colo=${cap_xcolo}" \
+    "xcolo_premigrate_primary_capability_return_path=${cap_return_path}" \
+    "xcolo_premigrate_primary_checkpoint_delay=${checkpoint_delay}" \
+    "xcolo_premigrate_primary_filter_qom_ready=${filter_qom}" \
+    "xcolo_premigrate_primary_filter_qom_reason=${filter_qom_reason}" \
+    "xcolo_premigrate_primary_filter_chardev_ready=${chardev}" \
+    "xcolo_premigrate_primary_filter_chardev_reason=${chardev_reason}" \
+    "xcolo_premigrate_channel_mirror_established=${channel_mirror}" \
+    "xcolo_premigrate_channel_compare_established=${channel_compare}" \
+    "xcolo_premigrate_channel_compare_local_established=${channel_compare_local}" \
+    "xcolo_premigrate_channel_compare_out_established=${channel_compare_out}" \
+    "xcolo_premigrate_primary_filter_qom_expected_netdev=$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_expected_netdev" 2>/dev/null || true)" \
+    "xcolo_premigrate_primary_filter_qom_m0_netdev=$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_m0_netdev" 2>/dev/null || true)" \
+    "xcolo_premigrate_primary_filter_qom_m0_outdev=$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_m0_outdev" 2>/dev/null || true)" \
+    "xcolo_premigrate_primary_filter_qom_redire0_indev=$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_redire0_indev" 2>/dev/null || true)" \
+    "xcolo_premigrate_primary_filter_qom_redire1_outdev=$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_redire1_outdev" 2>/dev/null || true)" \
+    "xcolo_premigrate_primary_filter_qom_comp0_primary_in=$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_comp0_primary_in" 2>/dev/null || true)" \
+    "xcolo_premigrate_primary_filter_qom_comp0_secondary_in=$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_comp0_secondary_in" 2>/dev/null || true)" \
+    "xcolo_premigrate_primary_filter_qom_comp0_outdev=$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_comp0_outdev" 2>/dev/null || true)"
+
+  ftctl_log_event "colo" "primary.pre_migrate_evidence" "ok" "${vm}" "" \
+    "x_colo=${cap_xcolo} return_path=${cap_return_path} checkpoint_delay=${checkpoint_delay} filter_qom=${filter_qom} chardev=${chardev} mirror=${channel_mirror} compare=${channel_compare} compare_local=${channel_compare_local} compare_out=${channel_compare_out}"
+}
+
 ftctl_xcolo_primary_filter_qom_ready() {
   local vm="${1-}"
   [[ "$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_ready" 2>/dev/null || true)" == "yes" ]]
@@ -1405,6 +1490,7 @@ ftctl_xcolo_validate_pair_runtime() {
   local primary_status="" secondary_status=""
   local primary_colo="" secondary_colo=""
   local primary_migrate="" secondary_migrate=""
+  local primary_migrate_error_desc="" secondary_migrate_error_desc=""
   local primary_qga="" secondary_qga="" qga_policy
   local primary_xml="missing" secondary_xml="missing"
   local channel_mirror="" channel_compare="" channel_compare_local="" channel_compare_out=""
@@ -1434,6 +1520,8 @@ ftctl_xcolo_validate_pair_runtime() {
     secondary_colo=""
     primary_migrate=""
     secondary_migrate=""
+    primary_migrate_error_desc=""
+    secondary_migrate_error_desc=""
     primary_qga=""
     secondary_qga=""
     primary_xml="missing"
@@ -1459,6 +1547,12 @@ ftctl_xcolo_validate_pair_runtime() {
     ftctl_xcolo_query_colo_mode "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" secondary_colo || true
     ftctl_xcolo_query_migrate_status "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" primary_migrate || true
     ftctl_xcolo_query_migrate_status "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" secondary_migrate || true
+    if [[ "${primary_migrate}" == "failed" ]]; then
+      ftctl_xcolo_query_migrate_error_desc "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" primary_migrate_error_desc || true
+    fi
+    if [[ "${secondary_migrate}" == "failed" ]]; then
+      ftctl_xcolo_query_migrate_error_desc "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" secondary_migrate_error_desc || true
+    fi
     if [[ "${qga_policy}" == "off" ]]; then
       primary_qga="off"
       secondary_qga="off"
@@ -1733,6 +1827,8 @@ ftctl_xcolo_validate_pair_runtime() {
       "xcolo_secondary_colo_mode=${secondary_colo}" \
       "xcolo_primary_migrate_status=${primary_migrate}" \
       "xcolo_secondary_migrate_status=${secondary_migrate}" \
+      "xcolo_primary_migrate_error_desc=${primary_migrate_error_desc}" \
+      "xcolo_secondary_migrate_error_desc=${secondary_migrate_error_desc}" \
       "xcolo_primary_qga=${primary_qga}" \
       "xcolo_secondary_qga=${secondary_qga}" \
       "xcolo_primary_runtime_xml=${primary_xml}" \
@@ -1750,8 +1846,8 @@ ftctl_xcolo_validate_pair_runtime() {
       "xcolo_secondary_block_graph_ready=${secondary_block_graph}" \
       "xcolo_secondary_block_graph_reason=${secondary_block_graph_reason}" \
       "last_error=xcolo_runtime_validation_failed:${reason}"
-  ftctl_log_event "colo" "xcolo.runtime_validate" "fail" "${vm}" "" \
-      "reason=${reason} primary_running=${primary_running} secondary_running=${secondary_running} primary_status=${primary_status} secondary_status=${secondary_status} primary_colo=${primary_colo} secondary_colo=${secondary_colo} primary_xml=${primary_xml} secondary_xml=${secondary_xml} primary_migrate=${primary_migrate} secondary_migrate=${secondary_migrate} primary_qga=${primary_qga} secondary_qga=${secondary_qga} filter_qom=${primary_filter_qom} filter_qom_reason=${primary_filter_qom_reason} filter_cmdline=${primary_filter_cmdline} filter_cmdline_reason=${primary_filter_cmdline_reason} chardev=${primary_chardev} chardev_reason=${primary_chardev_reason} mirror=${channel_mirror} compare=${channel_compare} compare_local=${channel_compare_local} compare_out=${channel_compare_out} secondary_block_graph=${secondary_block_graph} attempts=${timeout}"
+    ftctl_log_event "colo" "xcolo.runtime_validate" "fail" "${vm}" "" \
+      "reason=${reason} primary_running=${primary_running} secondary_running=${secondary_running} primary_status=${primary_status} secondary_status=${secondary_status} primary_colo=${primary_colo} secondary_colo=${secondary_colo} primary_xml=${primary_xml} secondary_xml=${secondary_xml} primary_migrate=${primary_migrate} primary_migrate_error_desc=${primary_migrate_error_desc} secondary_migrate=${secondary_migrate} secondary_migrate_error_desc=${secondary_migrate_error_desc} primary_qga=${primary_qga} secondary_qga=${secondary_qga} filter_qom=${primary_filter_qom} filter_qom_reason=${primary_filter_qom_reason} filter_cmdline=${primary_filter_cmdline} filter_cmdline_reason=${primary_filter_cmdline_reason} chardev=${primary_chardev} chardev_reason=${primary_chardev_reason} mirror=${channel_mirror} compare=${channel_compare} compare_local=${channel_compare_local} compare_out=${channel_compare_out} secondary_block_graph=${secondary_block_graph} attempts=${timeout}"
     return 1
   fi
 }
@@ -3455,6 +3551,7 @@ ftctl_xcolo_execute_handshake_with_nodes() {
     "colo" "primary.x_blockdev_change" || return 1
   ftctl_xcolo_attach_primary_net_filters "${vm}" || return 1
   ftctl_xcolo_set_and_verify_migrate_capabilities "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" "${vm}" "primary" "primary" || return 1
+  ftctl_xcolo_record_pre_migrate_evidence "${vm}" || true
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
     "{\"execute\":\"migrate\",\"arguments\":{\"uri\":\"${FTCTL_PROFILE_XCOLO_MIGRATE_URI}\"}}" \
     "colo" "primary.migrate" || return 1
@@ -3522,6 +3619,7 @@ ftctl_xcolo_execute_handshake_with_disk_plan() {
 
   ftctl_xcolo_attach_primary_net_filters "${vm}" || return 1
   ftctl_xcolo_set_and_verify_migrate_capabilities "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" "${vm}" "primary" "primary" || return 1
+  ftctl_xcolo_record_pre_migrate_evidence "${vm}" || true
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
     "{\"execute\":\"migrate\",\"arguments\":{\"uri\":\"${FTCTL_PROFILE_XCOLO_MIGRATE_URI}\"}}" \
     "colo" "primary.migrate" || return 1

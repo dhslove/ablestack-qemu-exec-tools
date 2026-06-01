@@ -91,6 +91,10 @@ For the current `r97-link-01` chain this is tracked in:
 docs/ftctl/399-ft-validation-progress-r97-link-01-20260601.md
 ```
 
+Design 334 extends this rule with a hard repeat gate: the next run must record
+pre-migrate QOM/chardev/channel evidence and `query-migrate.error-desc` before
+any recovery path can erase the generated runtime state.
+
 ## Expected Result
 
 The next run should no longer show primary QEMU command-line filter objects
@@ -101,4 +105,3 @@ before QMP handshaking. The desired runtime evidence is:
   attaches them;
 - channel state remains established after QMP object attach;
 - primary migration does not fail immediately with filter mirror send errors.
-

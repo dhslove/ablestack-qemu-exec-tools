@@ -184,5 +184,7 @@ New selftest coverage:
 - Channel attach is verified before primary QMP migration starts.
 - Primary network filter objects are attached by QMP after block graph preparation.
 - Every mapped writable disk is attached to a COLO block graph before primary migration.
-- Primary is explicitly continued after runtime graph assembly and before primary migration.
+- Primary stays paused after runtime graph assembly; qemu FTCTL issues
+  `migrate-set-capabilities` and then primary `migrate`, while preserving
+  pre-migrate evidence before the migrate command.
 - Runtime recovery preserves both `last_error` and sticky `xcolo_last_runtime_error`.
