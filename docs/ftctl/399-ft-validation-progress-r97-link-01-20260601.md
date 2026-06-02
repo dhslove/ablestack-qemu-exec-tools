@@ -631,3 +631,113 @@ but a lower-level signature or reached stage changed, set
   - if `filter mirror send failed(Operation not permitted)` still appears,
     the failure should be classified as
     `xcolo_runtime_validation_failed:primary_filter_mirror_send_failed`
+
+### Run 60 Result 2026-06-02-11
+
+- User action:
+  - started FT protection for `r97-link-01`
+- Cloud state:
+  - protection row `60`
+  - primary VM `54` / `i-2-54-VM`
+  - standby VM `116` / `i-2-116-VM`
+  - final protection state: `error`
+  - final transport state: `failed`
+  - final active side: `primary`
+  - final error:
+    `xcolo_runtime_validation_failed:primary_filter_mirror_send_failed`
+- Progress evidence:
+  - baseline seed completed for both disks:
+    `xcolo_disk_sda_baseline_seeded=true`,
+    `xcolo_disk_sdb_baseline_seeded=true`
+  - primary generated runtime VM was created successfully
+  - secondary generated runtime VM was created successfully
+  - secondary COLO block graph was built successfully for both `sda` and `sdb`
+  - primary generated commandline contained filter objects with `status=off`
+  - pre-activation QOM topology check passed with expected status `off`
+  - delayed activation passed:
+    `primary.filter_status_on.redire0`,
+    `primary.filter_status_on.redire1`,
+    `primary.filter_status_on.m0`
+  - post-activation QOM topology check passed with expected status `on`
+  - pre-migrate evidence passed:
+    `x_colo=yes`, `return_path=yes`, `checkpoint_delay=yes`,
+    `filter_qom=yes`, `filter_cmdline=yes`, `chardev=yes`,
+    all four channels established
+  - primary `migrate` command returned ok
+  - handshake stage returned ok
+- Failure evidence:
+  - primary runtime validation failed after handshake
+  - primary QEMU log:
+    `Received invalid message 0x0000 length 0x0000`
+  - secondary QEMU log at the same timestamp:
+    `Can't receive COLO message: Input/output error`
+  - validation state after failure:
+    - primary status: `paused`
+    - secondary status: `running`
+    - primary migrate status: `failed`
+    - secondary migrate status: `colo`
+    - primary COLO mode: `none`
+    - secondary COLO mode: `secondary`
+    - strict chardev state after failure:
+      `mirror0:frontend_closed,compare0:frontend_closed,compare_out0:frontend_closed`
+  - recovery returned the primary VM to normal running state on
+    `10.10.32.3`
+- Repetition control:
+  - not a blind repeat of the previous startup/filter activation failures
+  - the delayed activation design worked as intended through QMP status
+    transition, post-activation topology, pre-migrate evidence, and migrate
+    start
+  - the remaining blocker is now the COLO protocol/socket message path after
+    migrate handshake
+- Next improvement direction:
+  - stop changing startup filter timing unless new evidence contradicts Run 60
+  - inspect the COLO message path between:
+    - primary `filter-mirror m0 -> mirror0 -> secondary red0`
+    - secondary `red1 -> primary compare1`
+    - primary local compare loop `compare0/compare0-0` and
+      `compare_out/compare_out0`
+  - validate whether the mirror and compare channel roles match the QEMU COLO
+    reference for the installed QEMU 9.2.4 build
+  - add runtime capture immediately after successful migrate:
+    QOM filter status, chardev frontend state, socket peer/listen state, and
+    QEMU log tail before the validation timeout destroys the secondary
+  - the desired state for the next run is not just `primary.migrate ok`, but:
+    primary migrate status enters COLO, secondary remains COLO secondary, both
+    VMs are not exposed to guest boot independently, and no invalid COLO
+    message is logged
+
+### Change For Next Run 2026-06-02-12
+
+- Design:
+  `docs/ftctl/340-ft-xcolo-virtio-vnet-hdr-support-design-20260602.md`
+- Implementation intent:
+  - detect whether the primary or secondary XCOLO netdev model is virtio based
+  - record:
+    `xcolo_net_vnet_hdr_support=on|off`,
+    `xcolo_net_vnet_hdr_support_reason`,
+    `xcolo_net_vnet_hdr_primary_model`,
+    `xcolo_net_vnet_hdr_secondary_model`
+  - for virtio models, add `vnet_hdr_support` to:
+    - primary `filter-mirror m0`
+    - primary `filter-redirector redire0/redire1`
+    - primary `colo-compare comp0`
+    - secondary `filter-redirector f1/f2`
+    - secondary `filter-rewriter rew0`
+  - apply the same contract to generated XML commandline and QMP object-add
+    fallback/rebuild paths
+  - treat missing primary commandline `vnet_hdr_support` as a pre-migrate
+    blocker with `last_error=xcolo_vnet_hdr_support_missing`
+  - record vnet header state in pre-migrate evidence
+- Validation:
+  - `bash -n lib/ftctl/xcolo.sh`: pass
+  - `bash -n bin/ablestack_vm_ftctl_selftest.sh`: pass
+  - `git diff --check`: pass
+  - full selftest still stops at pre-existing shellcheck warnings; no new
+    syntax failure
+  - added and manually ran a focused mini-check that confirms virtio models
+    produce primary/secondary COLO args containing `vnet_hdr_support`
+- Repetition control:
+  - the next run is not another filter activation timing test
+  - if `xcolo_net_vnet_hdr_support=on` and generated commandline contains
+    `vnet_hdr_support`, but the same invalid COLO message remains, the next
+    blocker is deeper QEMU COLO protocol/device-model behavior

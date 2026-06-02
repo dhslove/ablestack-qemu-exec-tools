@@ -1422,6 +1422,31 @@ selftest_case_xcolo_strict_chardev_binding_rejects_closed_frontends() (
     "mirror0:frontend_closed" "strict reason should include mirror0"
 )
 
+selftest_case_xcolo_virtio_vnet_hdr_support() (
+  selftest_reset_env
+  selftest_info "x-colo virtio net model enables vnet header support"
+
+  local vm="ft-virtio-vnet"
+  ftctl_state_set "${vm}" \
+    "xcolo_primary_netdev_model=virtio" \
+    "xcolo_secondary_netdev_model=virtio" \
+    "xcolo_primary_netdev_id=hostnet0" \
+    "xcolo_secondary_netdev_id=hostnet0"
+
+  local primary_args secondary_args
+  primary_args="$(ftctl_xcolo_build_primary_qemu_args "hostnet0" "${vm}")"
+  secondary_args="$(ftctl_xcolo_build_secondary_qemu_args "hostnet0" "${vm}")"
+
+  selftest_assert_contains "${primary_args}" "filter-mirror,id=m0,netdev=hostnet0,queue=tx,outdev=mirror0,status=off,insert=behind,position=tail,vnet_hdr_support" "primary mirror vnet hdr"
+  selftest_assert_contains "${primary_args}" "filter-redirector,id=redire0,netdev=hostnet0,queue=rx,indev=compare_out,status=off,insert=behind,position=tail,vnet_hdr_support" "primary redirector in vnet hdr"
+  selftest_assert_contains "${primary_args}" "filter-redirector,id=redire1,netdev=hostnet0,queue=rx,outdev=compare0,status=off,insert=behind,position=tail,vnet_hdr_support" "primary redirector out vnet hdr"
+  selftest_assert_contains "${primary_args}" "colo-compare,id=comp0,primary_in=compare0-0,secondary_in=compare1,outdev=compare_out0,iothread=iothread1,vnet_hdr_support" "primary compare vnet hdr"
+  selftest_assert_contains "${secondary_args}" "filter-redirector,id=f1,netdev=hostnet0,queue=tx,indev=red0,vnet_hdr_support" "secondary tx redirector vnet hdr"
+  selftest_assert_contains "${secondary_args}" "filter-redirector,id=f2,netdev=hostnet0,queue=rx,outdev=red1,vnet_hdr_support" "secondary rx redirector vnet hdr"
+  selftest_assert_contains "${secondary_args}" "filter-rewriter,id=rew0,netdev=hostnet0,queue=all,vnet_hdr_support" "secondary rewriter vnet hdr"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_net_vnet_hdr_support")" "on" "vnet hdr state"
+)
+
 selftest_case_xcolo_filter_qom_hard_gate() (
   selftest_reset_env
   selftest_info "x-colo primary filter QOM topology is a hard pre-migrate gate"
@@ -3560,6 +3585,7 @@ selftest_main() {
   selftest_case_xcolo_primary_filter_binding_defers_to_runtime_validation
   selftest_case_xcolo_premigrate_chardev_binding_accepts_listener_endpoints
   selftest_case_xcolo_strict_chardev_binding_rejects_closed_frontends
+  selftest_case_xcolo_virtio_vnet_hdr_support
   selftest_case_xcolo_filter_qom_hard_gate
   selftest_case_xcolo_primary_filter_qmp_order_matches_qemu_doc
   selftest_case_xcolo_primary_netdev_vhost_guard
