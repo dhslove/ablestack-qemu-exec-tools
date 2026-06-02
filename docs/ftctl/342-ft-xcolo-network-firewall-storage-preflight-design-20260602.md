@@ -108,17 +108,18 @@ Each value is a compact summary: `listen`, `established`, `closed`, or
 `unknown`. The full raw snapshot is stored under the existing FTCTL debug/state
 area where possible.
 
-## Storage Symmetry Diagnostic
+## Storage Symmetry Compatibility Gate
 
 Run 62 used asymmetric storage:
 
 - primary: RBD/raw block devices
 - secondary: filesystem/qcow2 file volumes
 
-This is not proven to be the direct cause of the invalid COLO message because
-baseline seed and secondary block graph passed. However, FT aims to run a
-secondary clone with equivalent device semantics, so the mismatch must be
-visible.
+Run 63 proved that firewall and socket paths are healthy while the same invalid
+COLO message remains. The storage mismatch is therefore no longer treated as
+only passive evidence. FT aims to run a secondary clone with equivalent device
+semantics, so backend/format mismatch is a compatibility blocker for the normal
+protection path.
 
 FTCTL records:
 
@@ -127,9 +128,13 @@ FTCTL records:
 - `xcolo_storage_secondary_layout=file/qcow2`
 - `xcolo_storage_symmetry_reason=...`
 
-In strict future mode, this can become a blocker. For this change it is a
-diagnostic warning so that the current test can still isolate the network and
-COLO protocol path.
+Strict default behavior:
+
+- if `xcolo_storage_symmetry=ok`, continue
+- if `xcolo_storage_symmetry=warning`, stop before primary shutdown and record
+  `last_error=xcolo_storage_backend_mismatch`
+- only an explicit experimental override can allow a mismatched storage pair to
+  continue; such a run must be treated as non-default evidence
 
 ## Repeated Invalid-Message Guard
 
@@ -157,14 +162,18 @@ seed, generic filter ordering, or generic channel readiness hypotheses.
 4. Add socket snapshot capture before migrate, after migrate start, and on
    failure.
 5. Add storage symmetry diagnostics after disk plan creation.
-6. Add repeated invalid-message classification in runtime validation.
-7. Record Run 62 progress and the next test expectation in the progress log.
+6. Block storage mismatch before primary shutdown by default.
+7. Add repeated invalid-message classification in runtime validation using
+   pre-migrate readiness evidence.
+8. Record Run progress and the next test expectation in the progress log.
 
 ## Next Test Expectations
 
 The next run is progress if one of these happens:
 
 - firewall preflight blocks before migrate and records the missing port set;
+- storage mismatch blocks before primary shutdown with
+  `xcolo_storage_backend_mismatch`;
 - socket snapshots identify the first channel that closes or is misbound;
 - primary migration no longer fails with the invalid message and enters COLO.
 

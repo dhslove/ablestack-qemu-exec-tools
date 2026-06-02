@@ -1447,6 +1447,25 @@ selftest_case_xcolo_virtio_vnet_hdr_support() (
   selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_net_vnet_hdr_support")" "on" "vnet hdr state"
 )
 
+selftest_case_xcolo_storage_mismatch_gate() (
+  selftest_reset_env
+  selftest_info "x-colo blocks storage backend mismatch by default"
+
+  local vm="ft-storage-mismatch"
+  ftctl_state_set "${vm}" \
+    "xcolo_storage_symmetry=warning" \
+    "xcolo_storage_symmetry_reason=sda:primary_block/raw_secondary_file/qcow2" \
+    "xcolo_storage_primary_layouts=sda:block/raw" \
+    "xcolo_storage_secondary_layouts=sda:file/qcow2"
+
+  local rc=0
+  ftctl_xcolo_require_storage_symmetry "${vm}" || rc=$?
+  selftest_assert_eq "${rc}" "1" "storage mismatch gate return"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" "xcolo_storage_backend_mismatch" "storage mismatch error"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "conversion_stage")" "storage_compatibility_failed" "storage mismatch stage"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_storage_compatibility")" "blocked" "storage mismatch compatibility"
+)
+
 selftest_case_xcolo_filter_qom_hard_gate() (
   selftest_reset_env
   selftest_info "x-colo primary filter QOM topology is a hard pre-migrate gate"
@@ -3662,6 +3681,7 @@ selftest_main() {
   selftest_case_xcolo_premigrate_chardev_binding_accepts_listener_endpoints
   selftest_case_xcolo_strict_chardev_binding_rejects_closed_frontends
   selftest_case_xcolo_virtio_vnet_hdr_support
+  selftest_case_xcolo_storage_mismatch_gate
   selftest_case_xcolo_filter_qom_hard_gate
   selftest_case_xcolo_primary_filter_qmp_order_matches_qemu_doc
   selftest_case_xcolo_primary_netdev_vhost_guard

@@ -1088,3 +1088,29 @@ but a lower-level signature or reached stage changed, set
   - then run an A/B path focused on storage symmetry or QEMU COLO protocol
     behavior, because firewall and socket transport are no longer likely root
     causes for this failure
+
+### Change For Run 64 2026-06-02-17
+
+- Design documents:
+  - `342-ft-xcolo-network-firewall-storage-preflight-design-20260602.md`
+  - `343-ft-xcolo-storage-compatibility-gate-design-20260602.md`
+- Purpose:
+  - promote FT XCOLO storage symmetry from diagnostic warning to default
+    compatibility gate
+  - stop `block/raw -> file/qcow2` FT protection before primary shutdown
+  - classify repeated invalid-message failures using pre-migrate evidence
+    instead of failure-time strict chardev state
+- Code expectations for the next run:
+  - with the current local filesystem/qcow2 target storage, protection should
+    fail early with `last_error=xcolo_storage_backend_mismatch`
+  - primary VM `i-2-54-VM` should not be shut down for the mismatch case
+  - if an explicit experimental override is used, state must record
+    `xcolo_storage_compatibility=experimental`
+  - if the same invalid QEMU message occurs after pre-migrate evidence is
+    healthy, the classifier must set
+    `last_error=xcolo_repeated_protocol_invalid_message`
+- Repetition control:
+  - a Run 64 early storage mismatch block is progress, not failure repetition
+  - if Run 64 again reaches migrate with the same mismatched storage and no
+    override, the gate did not fire and must be fixed before further COLO
+    protocol testing

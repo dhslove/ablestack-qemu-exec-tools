@@ -2034,6 +2034,48 @@ ftctl_xcolo_runtime_primary_topology_ready() {
      ( -z "${disk_plan}" || "${secondary_block_graph}" == "yes" || "${secondary_block_graph}" == "not_applicable" ) ]]
 }
 
+ftctl_xcolo_repeated_invalid_message_evidence_ready() {
+  local vm="${1-}"
+  local primary_filter_qom="${2-}"
+  local primary_filter_cmdline="${3-}"
+  local channel_mirror="${4-}"
+  local channel_compare="${5-}"
+  local channel_compare_local="${6-}"
+  local channel_compare_out="${7-}"
+  local secondary_block_graph="${8-}"
+  local pre_chardev pre_filter_qom pre_filter_cmdline
+  local pre_mirror pre_compare pre_compare_local pre_compare_out
+  local firewall_ready runtime_socket_captured storage_symmetry
+
+  [[ -n "${vm}" ]] || return 1
+  pre_chardev="$(ftctl_state_get "${vm}" "xcolo_premigrate_primary_filter_chardev_ready" 2>/dev/null || true)"
+  pre_filter_qom="$(ftctl_state_get "${vm}" "xcolo_premigrate_primary_filter_qom_ready" 2>/dev/null || true)"
+  pre_filter_cmdline="$(ftctl_state_get "${vm}" "xcolo_premigrate_primary_filter_cmdline_ready" 2>/dev/null || true)"
+  pre_mirror="$(ftctl_state_get "${vm}" "xcolo_premigrate_channel_mirror_established" 2>/dev/null || true)"
+  pre_compare="$(ftctl_state_get "${vm}" "xcolo_premigrate_channel_compare_established" 2>/dev/null || true)"
+  pre_compare_local="$(ftctl_state_get "${vm}" "xcolo_premigrate_channel_compare_local_established" 2>/dev/null || true)"
+  pre_compare_out="$(ftctl_state_get "${vm}" "xcolo_premigrate_channel_compare_out_established" 2>/dev/null || true)"
+  firewall_ready="$(ftctl_state_get "${vm}" "xcolo_firewall_ready" 2>/dev/null || true)"
+  runtime_socket_captured="$(ftctl_state_get "${vm}" "xcolo_socket_runtime_captured" 2>/dev/null || true)"
+  storage_symmetry="$(ftctl_state_get "${vm}" "xcolo_storage_symmetry" 2>/dev/null || true)"
+
+  [[ "${pre_chardev}" == "yes" ]] || return 1
+  [[ "${pre_filter_qom}" == "yes" || "${pre_filter_cmdline}" == "yes" ||
+     "${primary_filter_qom}" == "yes" || "${primary_filter_cmdline}" == "yes" ]] || return 1
+  [[ "${pre_mirror}" == "yes" || "${channel_mirror}" == "yes" ]] || return 1
+  [[ "${pre_compare}" == "yes" || "${channel_compare}" == "yes" ]] || return 1
+  [[ "${pre_compare_local}" == "yes" || "${channel_compare_local}" == "yes" ]] || return 1
+  [[ "${pre_compare_out}" == "yes" || "${channel_compare_out}" == "yes" ]] || return 1
+  [[ "${secondary_block_graph}" == "yes" || "${secondary_block_graph}" == "not_applicable" ]] || return 1
+  [[ -z "${firewall_ready}" || "${firewall_ready}" == "yes" ]] || return 1
+  [[ -z "${runtime_socket_captured}" || "${runtime_socket_captured}" == "yes" ]] || return 1
+
+  ftctl_state_set "${vm}" \
+    "xcolo_repeated_protocol_invalid_message_evidence=premigrate_ready" \
+    "xcolo_repeated_protocol_invalid_message_storage_symmetry=${storage_symmetry}"
+  return 0
+}
+
 ftctl_xcolo_validate_pair_runtime() {
   local vm="${1-}"
   local secondary_vm="${2:-$vm}"
@@ -2148,10 +2190,9 @@ ftctl_xcolo_validate_pair_runtime() {
     if [[ "${primary_migrate}" == "failed" ]]; then
       ftctl_xcolo_capture_socket_snapshot "${vm}" "failure" || true
       if [[ "${primary_migrate_error_desc}" == *"Received invalid message"* ]] &&
-          [[ "${primary_chardev}" == "yes" ]] &&
-          ftctl_xcolo_runtime_primary_topology_ready "${primary_xml}" "${primary_filter_qom}" "${primary_filter_cmdline}" \
+          ftctl_xcolo_repeated_invalid_message_evidence_ready "${vm}" "${primary_filter_qom}" "${primary_filter_cmdline}" \
             "${channel_mirror}" "${channel_compare}" "${channel_compare_local}" "${channel_compare_out}" \
-            "${disk_plan}" "${secondary_block_graph}"; then
+            "${secondary_block_graph}"; then
         reason="repeated_protocol_invalid_message"
         ftctl_state_set "${vm}" "xcolo_repeated_protocol_invalid_message=yes"
       elif [[ "${primary_migrate_error_desc}" == *"Received invalid message"* ]] &&
@@ -3450,6 +3491,51 @@ ftctl_xcolo_record_storage_symmetry() {
   ftctl_log_event "colo" "xcolo.storage_symmetry" "${result}" "${vm}" "" \
     "primary=${layouts} secondary=${secondary_layouts} reason=${reason}"
   return 0
+}
+
+ftctl_xcolo_storage_symmetry_strict_enabled() {
+  case "${FTCTL_XCOLO_ALLOW_STORAGE_MISMATCH:-0}" in
+    1|true|yes|on) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+ftctl_xcolo_require_storage_symmetry() {
+  local vm="${1-}"
+  local symmetry reason primary_layouts secondary_layouts
+
+  [[ -n "${vm}" ]] || return 1
+  symmetry="$(ftctl_state_get "${vm}" "xcolo_storage_symmetry" 2>/dev/null || true)"
+  reason="$(ftctl_state_get "${vm}" "xcolo_storage_symmetry_reason" 2>/dev/null || true)"
+  primary_layouts="$(ftctl_state_get "${vm}" "xcolo_storage_primary_layouts" 2>/dev/null || true)"
+  secondary_layouts="$(ftctl_state_get "${vm}" "xcolo_storage_secondary_layouts" 2>/dev/null || true)"
+
+  if [[ "${symmetry}" != "warning" ]]; then
+    ftctl_log_event "colo" "xcolo.storage_compatibility" "ok" "${vm}" "" \
+      "symmetry=${symmetry:-unknown} primary=${primary_layouts} secondary=${secondary_layouts}"
+    return 0
+  fi
+
+  if ! ftctl_xcolo_storage_symmetry_strict_enabled; then
+    ftctl_state_set "${vm}" \
+      "xcolo_storage_compatibility=experimental" \
+      "xcolo_storage_mismatch_override=true"
+    ftctl_log_event "colo" "xcolo.storage_compatibility" "warn" "${vm}" "" \
+      "override=FTCTL_XCOLO_ALLOW_STORAGE_MISMATCH reason=${reason} primary=${primary_layouts} secondary=${secondary_layouts}"
+    return 0
+  fi
+
+  ftctl_state_set "${vm}" \
+    "xcolo_storage_compatibility=blocked" \
+    "xcolo_storage_mismatch_override=false" \
+    "protection_state=error" \
+    "transport_state=planned" \
+    "conversion_stage=storage_compatibility_failed" \
+    "conversion_state=error" \
+    "last_error=xcolo_storage_backend_mismatch"
+  ftctl_log_event "colo" "xcolo.storage_compatibility" "fail" "${vm}" "" \
+    "reason=${reason} primary=${primary_layouts} secondary=${secondary_layouts}"
+  return 1
 }
 
 ftctl_xcolo_remote_disk_virtual_size_bytes() {
@@ -5599,6 +5685,7 @@ ftctl_xcolo_plan_protect_block_cold_conversion() {
     return 1
   }
   ftctl_xcolo_record_storage_symmetry "${vm}" "${xcolo_disk_plan}" || true
+  ftctl_xcolo_require_storage_symmetry "${vm}" || return 1
 
   secondary_dest="$(ftctl_profile_lookup_map_value "${FTCTL_PROFILE_DISK_MAP}" "${primary_target}" 2>/dev/null || true)"
   if [[ -z "${secondary_dest}" ]]; then
