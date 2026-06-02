@@ -457,3 +457,42 @@ but a lower-level signature or reached stage changed, set
     but still fails with the same `Received invalid message 0x0000 length
     0x0000` signature, the blocker must be treated as lower-level COLO
     protocol/runtime behavior instead of another filter attachment iteration
+
+### Build, Deploy, Cleanup 2026-06-02-09
+
+- Source commit for deployed artifact:
+  `4ffbbc1a43e90e8cd932479d02531a9402980783`
+- GitHub Actions run:
+  `26795058139`
+- Build result: success
+- RPM:
+  `ablestack_vm_ftctl-0.8.0-1.noarch.rpm`
+- RPM SHA256:
+  `708049f6c52ad251df06b4afa199b290b9153dfb0e38d0f82a51d93967a7b2d9`
+- Deployment:
+  - installed on `10.10.32.1`, `10.10.32.2`, `10.10.32.3`
+  - used `aspkg` through `exec -a rpm` because 32.x masks direct `rpm`
+  - `ablestack-vm-ftctl.timer` and `ablestack-vm-hangctl.timer` are active on
+    all three hosts
+  - installed `xcolo.sh` contains `xcolo_primary_filter_cmdline_ready`,
+    `primary_filter_cmdline_topology_missing`, and startup
+    `filter-mirror,id=m0` markers
+- Cleanup:
+  - forced unprotect on `10.10.32.3` removed primary runtime state for
+    `i-2-54-VM`
+  - standby runtime/image leftovers for `i-2-114-VM` and volumes `213`/`214`
+    were removed from `10.10.32.1`
+  - Cloud DB active FT state is clean:
+    `active_protection=0`, `active_protection_volume=0`,
+    `active_ftctl_details=0`, `active_standby_vm=0`,
+    `active_standby_volumes=0`
+  - primary VM `i-2-54-VM` is `Running` on `10.10.32.3`
+  - primary QMP `query-block-jobs` returns an empty list
+  - primary QMP `query-migrate` returns an empty object
+- Next valid test expectation:
+  - generated primary runtime should report
+    `xcolo_primary_net_filters_attach_mode=cmdline`
+  - pre-migrate evidence should include
+    `xcolo_primary_filter_cmdline_ready=yes`
+  - a repeated `Received invalid message 0x0000 length 0x0000` after those
+    markers must be treated as a lower-level COLO protocol/runtime blocker
