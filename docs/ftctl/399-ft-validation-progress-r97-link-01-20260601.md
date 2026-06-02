@@ -1022,3 +1022,69 @@ but a lower-level signature or reached stage changed, set
   - if firewall and socket markers are healthy but invalid COLO message repeats,
     stop treating this as a generic filter ordering issue and proceed to
     storage/QEMU protocol A/B validation
+
+### Run 63 Monitoring 2026-06-02-17
+
+- User action:
+  - started FT protection for `r97-link-01`
+- Evidence directory:
+  - `/home/ablecloud/work/ft-run63-monitor-20260602-172225.log`
+  - `/home/ablecloud/work/ft-run63-final-20260602-172508`
+- Cloud DB final state:
+  - protection row `63`
+  - primary VM `54`
+  - standby VM `119`
+  - `protection_state=error`
+  - `transport_state=failed`
+  - `active_side=primary`
+  - `last_error=xcolo_runtime_validation_failed:primary_migrate_failed`
+- Progress confirmed compared to Run 62:
+  - baseline seed passed both disks again:
+    - `xcolo_disk_sda_baseline_seeded=true`
+    - `xcolo_disk_sdb_baseline_seeded=true`
+  - storage layout evidence is now explicit:
+    - `xcolo_storage_symmetry=warning`
+    - `xcolo_storage_symmetry_reason=sda:primary_block/raw_secondary_file/qcow2,sdb:primary_block/raw_secondary_file/qcow2`
+  - firewall contract is explicitly healthy:
+    - `xcolo_firewall_primary_state=active`
+    - `xcolo_firewall_primary_service=present`
+    - `xcolo_firewall_primary_missing_ports=`
+    - `xcolo_firewall_primary_ready=yes`
+    - `xcolo_firewall_secondary_state=active`
+    - `xcolo_firewall_secondary_service=present`
+    - `xcolo_firewall_secondary_missing_ports=`
+    - `xcolo_firewall_secondary_ready=yes`
+    - `xcolo_firewall_ready=yes`
+  - socket evidence is now explicit:
+    - pre-migrate and runtime primary 9003/9004/9001/9005 are listening
+    - pre-migrate and runtime secondary 9003/9004 are established
+    - NBD endpoint is established/listening as expected
+    - secondary 9998 migrate endpoint is listening
+- Failure evidence:
+  - primary QEMU:
+    - `Received invalid message 0x0000 length 0x0000`
+  - secondary QEMU:
+    - `Can't receive COLO message: Input/output error`
+  - QMP:
+    - primary migrate status reached `failed`
+    - secondary migrate status reached `colo`
+- Repetition control:
+  - this is not a repeat of the previous evidence quality; the run added
+    firewall, socket, and storage layout proof
+  - it is a repeat of the same protocol failure after network/firewall readiness
+    was proven healthy
+  - the next change should not be another generic network/firewall or filter
+    ordering patch
+- Follow-up defect found in the latest classifier:
+  - code did not classify this run as `xcolo_repeated_protocol_invalid_message`
+    because the runtime failure classifier checked current strict chardev state,
+    which becomes `no` after the failed migrate
+  - pre-migrate chardev readiness was `yes`, so repeated-message classification
+    should use pre-migrate readiness plus socket/firewall evidence instead of
+    post-failure strict chardev state
+- Next expected direction:
+  - fix the classifier to mark this exact signature as
+    `xcolo_repeated_protocol_invalid_message`
+  - then run an A/B path focused on storage symmetry or QEMU COLO protocol
+    behavior, because firewall and socket transport are no longer likely root
+    causes for this failure
