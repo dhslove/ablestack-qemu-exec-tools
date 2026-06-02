@@ -1684,6 +1684,82 @@ selftest_case_xcolo_baseline_seed_uses_primary_nbd_before_runtime_graph() (
     "baseline seed state"
 )
 
+selftest_case_xcolo_baseline_seed_retries_ssh_transport_failure() (
+  selftest_reset_env
+  selftest_info "x-colo baseline seed retries transient ssh transport failures"
+
+  local call_log="${SELFTEST_ROOT}/xcolo-baseline-seed-retry.log"
+  local copy_attempts="0"
+  FTCTL_PROFILE_SECONDARY_URI="qemu+ssh://peer/system"
+  FTCTL_PROFILE_FENCING_SSH_USER="root"
+  FTCTL_XCOLO_BASELINE_SEED_RETRY_ATTEMPTS="2"
+  FTCTL_XCOLO_BASELINE_SEED_RETRY_DELAY_1_SEC="0"
+  FTCTL_XCOLO_QMP_TIMEOUT_SEC="3"
+
+  # shellcheck disable=SC2317
+  ftctl_xcolo_primary_connect_host() {
+    printf '%s\n' "10.0.0.1"
+  }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_remote_target_host_user() {
+    printf -v "$1" '%s' "10.0.0.2"
+    printf -v "$2" '%s' "root"
+  }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_krbd_map_local() {
+    printf 'MAP:%s\n' "$1" >> "${call_log}"
+  }
+  # shellcheck disable=SC2317
+  ftctl_cmd_run() {
+    local _timeout="$1" out_var="$2" err_var="$3" rc_var="$4" pid_file="" arg prev=""
+    shift 4
+    [[ "${1-}" == "--" ]] && shift
+    printf 'LOCAL:%s\n' "$*" >> "${call_log}"
+    for arg in "$@"; do
+      if [[ "${prev}" == "--pid-file" ]]; then
+        pid_file="${arg}"
+        break
+      fi
+      prev="${arg}"
+    done
+    [[ -n "${pid_file}" ]] && printf '999999\n' > "${pid_file}"
+    printf -v "${out_var}" '%s' ""
+    printf -v "${err_var}" '%s' ""
+    printf -v "${rc_var}" '%s' "0"
+  }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_remote_exec() {
+    local out_var="$3" err_var="$4" rc_var="$5" remote_cmd="$6"
+    if grep -q 'rm -f --' <<<"${remote_cmd}"; then
+      printf 'REMOTE:CLEANUP\n' >> "${call_log}"
+      printf -v "${out_var}" '%s' ""
+      printf -v "${err_var}" '%s' ""
+      printf -v "${rc_var}" '%s' "0"
+      return 0
+    fi
+    copy_attempts=$((copy_attempts + 1))
+    printf 'REMOTE:COPY:%s\n' "${copy_attempts}" >> "${call_log}"
+    if [[ "${copy_attempts}" == "1" ]]; then
+      printf -v "${out_var}" '%s' ""
+      printf -v "${err_var}" '%s' "Connection closed by remote host"
+      printf -v "${rc_var}" '%s' "255"
+      return 0
+    fi
+    printf -v "${out_var}" '%s' "format=qcow2 virtual=12345 actual=4096"
+    printf -v "${err_var}" '%s' ""
+    printf -v "${rc_var}" '%s' "0"
+  }
+
+  ftctl_xcolo_seed_secondary_baseline_disk \
+    "primary-vm" "sda" "/dev/rbd/rbd/root" "raw" "/var/lib/libvirt/images/root.qcow2" "12345"
+
+  selftest_assert_file_contains "${call_log}" "REMOTE:COPY:1"
+  selftest_assert_file_contains "${call_log}" "REMOTE:CLEANUP"
+  selftest_assert_file_contains "${call_log}" "REMOTE:COPY:2"
+  selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_disk_sda_baseline_seeded")" "true" \
+    "baseline seed retry state"
+)
+
 selftest_case_xcolo_runtime_validation_blocks_false_positive() (
   selftest_reset_env
   selftest_info "x-colo runtime validation blocks false-positive colo_running"
@@ -3590,6 +3666,7 @@ selftest_main() {
   selftest_case_xcolo_primary_filter_qmp_order_matches_qemu_doc
   selftest_case_xcolo_primary_netdev_vhost_guard
   selftest_case_xcolo_baseline_seed_uses_primary_nbd_before_runtime_graph
+  selftest_case_xcolo_baseline_seed_retries_ssh_transport_failure
   selftest_case_xcolo_runtime_validation_blocks_false_positive
   selftest_case_xcolo_runtime_validation_reports_primary_migrate_failure
   selftest_case_xcolo_runtime_validation_reports_pending_convergence

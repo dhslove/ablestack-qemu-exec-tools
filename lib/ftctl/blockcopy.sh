@@ -1611,6 +1611,13 @@ ftctl_blockcopy_remote_exec() {
   ftctl_cmd_run "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC}" "${out_var}" "${err_var}" "${rc_var}" -- \
     bash -lc "${local_wrapper}"
   rm -f -- "${tmp_cmd}" 2>/dev/null || true
+  if [[ "${!rc_var}" == "255" && -z "${!out_var}" && -z "${!err_var}" ]]; then
+    printf -v "${err_var}" 'ssh_transport_failed_without_stderr host=%s user=%s port=%s timeout=%s' \
+      "${ssh_host}" \
+      "${user}" \
+      "${ssh_port:-22}" \
+      "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC}"
+  fi
 }
 
 ftctl_blockcopy_secondary_uri_is_local_system() {

@@ -784,3 +784,71 @@ but a lower-level signature or reached stage changed, set
   - if the invalid COLO message repeats with those markers, report it as a
     deeper QEMU COLO protocol/device-model blocker, not a repeated ftctl
     topology/timing failure
+
+### Run 61 Monitoring 2026-06-02-13
+
+- User action:
+  - started FT protection for `r97-link-01`
+- Cloud DB final state:
+  - protection row `61`
+  - primary VM `54`
+  - standby VM `117`
+  - `protection_state=error`
+  - `transport_state=failed`
+  - `active_side=primary`
+  - `last_error=xcolo_baseline_seed_failed:sdb`
+- Host status:
+  - primary domain `i-2-54-VM` is running on `10.10.32.3`
+  - standby VM `i-2-117-VM` remains stopped on the peer side
+  - QMP `query-block-jobs` is empty
+  - QMP `query-migrate` is empty
+- New marker validation:
+  - `xcolo_primary_netdev_model=virtio`
+  - `xcolo_secondary_netdev_model=virtio`
+  - `xcolo_net_vnet_hdr_support=on`
+  - `xcolo_net_vnet_hdr_support_reason=virtio_net_model`
+  - event log contains:
+    `xcolo.net_vnet_hdr ok required=on reason=virtio_net_model`
+- Disk seed progression:
+  - `sda` baseline seed succeeded
+  - `sdb` baseline seed started, NBD export started, then copy failed with
+    `rc=255`
+  - `sdb` target image remained a small qcow2 seed target, while `sda` target
+    image had a populated qcow2 result
+- Failure evidence:
+  - target host `10.10.32.1` entered `MaxStartups throttling` during the
+    failure window
+  - source host `10.10.32.3` also logged `MaxStartups throttling` in the same
+    window
+  - several SSH preauth sessions were dropped or closed around the seed-copy
+    window
+  - `block_conversion.baseline_seed.copy` recorded `error=""`, which means
+    the remote execution layer did not preserve useful SSH failure detail for
+    this rc=255 case
+- Repetition control:
+  - this is not a repeat of the previous COLO invalid-message failure
+  - the vnet header detection change produced the expected state marker
+  - the run failed before generated runtime filter activation, migration, or
+    pre-migrate evidence could validate the previous COLO protocol hypothesis
+- Next improvement target:
+  - make baseline seed remote copy resilient and diagnosable:
+    capture rc=255 SSH failure detail, add bounded retries for SSH transport
+    failures, and avoid treating an empty remote error as sufficient evidence
+
+### Change For Next Run 2026-06-02-14
+
+- Design:
+  `docs/ftctl/341-ft-xcolo-baseline-seed-ssh-retry-design-20260602.md`
+- Implementation intent:
+  - keep the change local to baseline seed remote copy and shared remote-exec
+    diagnostics
+  - add synthetic diagnostics when SSH returns `rc=255` with empty stdout/stderr
+  - retry FT XCOLO baseline seed copy only for SSH transport failures
+  - remove file-backed `<dest>.ftctl-seed.*` temporaries before retries
+  - emit explicit retry/final-failure events so the next test can distinguish
+    real progress from repeated transport failure
+- Repetition control:
+  - if `sdb` seed passes, the next run should reach the COLO runtime/migration
+    validation that Run 61 could not reach
+  - if `sdb` seed fails again, it must include retry events or non-empty
+    transport diagnostics; otherwise it is a repeated diagnostic gap

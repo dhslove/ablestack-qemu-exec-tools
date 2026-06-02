@@ -3357,6 +3357,42 @@ ftctl_xcolo_prepare_baseline_seed_source() {
     "target=${target} source=${source} source_kind=${source_kind} source_format=${source_format} info=${info_msg}"
 }
 
+ftctl_xcolo_baseline_seed_retry_delay() {
+  local attempt="${1:-1}"
+  case "${attempt}" in
+    1) printf '%s\n' "${FTCTL_XCOLO_BASELINE_SEED_RETRY_DELAY_1_SEC:-5}" ;;
+    2) printf '%s\n' "${FTCTL_XCOLO_BASELINE_SEED_RETRY_DELAY_2_SEC:-15}" ;;
+    *) printf '%s\n' "${FTCTL_XCOLO_BASELINE_SEED_RETRY_DELAY_3_SEC:-30}" ;;
+  esac
+}
+
+ftctl_xcolo_baseline_seed_is_ssh_failure() {
+  local rc="${1-}"
+  local detail="${2-}"
+  [[ "${rc}" == "255" ]] && return 0
+  printf '%s' "${detail}" | grep -Eiq \
+    'ssh_transport|MaxStartups|Connection (closed|reset|refused|timed out)|kex_exchange_identification|Broken pipe|No route to host|Could not resolve hostname|Permission denied|Host key verification failed'
+}
+
+ftctl_xcolo_baseline_seed_cleanup_remote_tmp() {
+  local host="${1-}"
+  local user="${2-}"
+  local dest="${3-}"
+  local q_dest="" out="" err="" rc=0 remote_cmd=""
+
+  [[ -n "${host}" && -n "${dest}" ]] || return 0
+  [[ "${dest}" != /dev/* ]] || return 0
+  printf -v q_dest '%q' "${dest}"
+  remote_cmd="$(cat <<EOF
+set -euo pipefail
+dest=${q_dest}
+rm -f -- "\${dest}".ftctl-seed.* >/dev/null 2>&1 || true
+EOF
+)"
+  ftctl_blockcopy_remote_exec "${host}" "${user}" out err rc "${remote_cmd}" || true
+  : "${out}${err}${rc}"
+}
+
 ftctl_xcolo_seed_secondary_baseline_disk() {
   local vm="${1-}"
   local target="${2-}"
@@ -3368,6 +3404,7 @@ ftctl_xcolo_seed_secondary_baseline_disk() {
   local remote_host="" remote_user="" remote_cmd="" out="" err="" rc=0
   local q_src_uri q_dest q_target_format q_source_format q_expected_size
   local timeout_sec saved_timeout firewall_added="0" bind_host
+  local attempts attempt detail retry_delay last_failure_class
 
   [[ -n "${vm}" && -n "${target}" && -n "${source}" && -n "${secondary_dest}" ]] || return 1
   [[ -n "${source_format}" ]] || source_format="raw"
@@ -3456,12 +3493,47 @@ EOF
 )"
 
   timeout_sec="${FTCTL_XCOLO_BASELINE_SEED_TIMEOUT_SEC:-7200}"
+  attempts="${FTCTL_XCOLO_BASELINE_SEED_RETRY_ATTEMPTS:-3}"
+  [[ "${attempts}" =~ ^[0-9]+$ && "${attempts}" -gt 0 ]] || attempts="3"
   saved_timeout="${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC:-30}"
   FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC="${timeout_sec}"
   out=""
   err=""
   rc=0
-  ftctl_blockcopy_remote_exec "${remote_host}" "${remote_user}" out err rc "${remote_cmd}" || true
+  last_failure_class=""
+  for ((attempt = 1; attempt <= attempts; attempt++)); do
+    ftctl_log_event "colo" "block_conversion.baseline_seed.copy.attempt" "ok" "${vm}" "" \
+      "target=${target} secondary_dest=${secondary_dest} attempt=${attempt}/${attempts} remote_host=${remote_host}"
+    out=""
+    err=""
+    rc=0
+    ftctl_blockcopy_remote_exec "${remote_host}" "${remote_user}" out err rc "${remote_cmd}" || true
+    detail="$(ftctl_xcolo_compact_log_value "${err:-${out}}")"
+    if [[ "${rc}" == "0" ]]; then
+      last_failure_class=""
+      break
+    fi
+    if [[ "${detail}" == baseline_size_mismatch:* ]]; then
+      last_failure_class="size_mismatch"
+      break
+    fi
+    if ftctl_xcolo_baseline_seed_is_ssh_failure "${rc}" "${detail}"; then
+      last_failure_class="ssh"
+      ftctl_log_event "colo" "block_conversion.baseline_seed.copy.ssh_fail" "fail" "${vm}" "${rc}" \
+        "target=${target} secondary_dest=${secondary_dest} attempt=${attempt}/${attempts} remote_host=${remote_host} error=${detail}"
+      if (( attempt < attempts )); then
+        ftctl_xcolo_baseline_seed_cleanup_remote_tmp "${remote_host}" "${remote_user}" "${secondary_dest}"
+        retry_delay="$(ftctl_xcolo_baseline_seed_retry_delay "${attempt}")"
+        ftctl_log_event "colo" "block_conversion.baseline_seed.copy.retry" "ok" "${vm}" "" \
+          "target=${target} secondary_dest=${secondary_dest} attempt=${attempt}/${attempts} next_attempt=$((attempt + 1)) sleep=${retry_delay}"
+        sleep "${retry_delay}"
+        continue
+      fi
+      break
+    fi
+    last_failure_class="copy"
+    break
+  done
   FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC="${saved_timeout}"
   ftctl_xcolo_stop_seed_nbd "${pid_file}" "${export_name}"
   if [[ "${firewall_added}" == "1" ]]; then
@@ -3469,15 +3541,28 @@ EOF
   fi
 
   if [[ "${rc}" != "0" ]]; then
+    detail="$(ftctl_xcolo_compact_log_value "${err:-${out}}")"
+    ftctl_log_event "colo" "block_conversion.baseline_seed.copy.final_fail" "fail" "${vm}" "${rc}" \
+      "target=${target} secondary_dest=${secondary_dest} attempts=${attempts} failure_class=${last_failure_class:-copy} error=${detail}"
     ftctl_log_event "colo" "block_conversion.baseline_seed.copy" "fail" "${vm}" "${rc}" \
-      "target=${target} secondary_dest=${secondary_dest} error=$(ftctl_xcolo_compact_log_value "${err:-${out}}")"
-    ftctl_state_set "${vm}" "last_error=xcolo_baseline_copy_failed:${target}"
+      "target=${target} secondary_dest=${secondary_dest} error=${detail}"
+    case "${last_failure_class}" in
+      ssh)
+        ftctl_state_set "${vm}" "last_error=xcolo_baseline_seed_ssh_failed:${target}"
+        ;;
+      size_mismatch)
+        ftctl_state_set "${vm}" "last_error=xcolo_baseline_seed_size_mismatch:${target}"
+        ;;
+      *)
+        ftctl_state_set "${vm}" "last_error=xcolo_baseline_seed_copy_failed:${target}"
+        ;;
+    esac
     return 1
   fi
 
   ftctl_state_set "${vm}" "xcolo_disk_${suffix}_baseline_seeded=true"
   ftctl_log_event "colo" "block_conversion.baseline_seed.copy" "ok" "${vm}" "" \
-    "target=${target} secondary_dest=${secondary_dest} info=$(printf '%s' "${out}" | tail -n1 | tr ' ' '_')"
+    "target=${target} secondary_dest=${secondary_dest} attempt=${attempt}/${attempts} info=$(printf '%s' "${out}" | tail -n1 | tr ' ' '_')"
 }
 
 ftctl_xcolo_collect_disk_binding_on_uri() {
