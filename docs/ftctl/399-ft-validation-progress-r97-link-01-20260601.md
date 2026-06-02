@@ -893,3 +893,92 @@ but a lower-level signature or reached stage changed, set
     and non-empty transport diagnostics must be recorded
   - if baseline seed passes, the run should proceed to generated runtime
     filter activation and COLO migration validation
+
+### Run 62 Monitoring 2026-06-02-15
+
+- User action:
+  - started FT protection for `r97-link-01`
+- Cloud DB final state:
+  - protection row `62`
+  - primary VM `54`
+  - standby VM `118`
+  - `protection_state=error`
+  - `transport_state=failed`
+  - `active_side=primary`
+  - `last_error=xcolo_runtime_validation_failed:primary_migrate_failed`
+- Host status:
+  - primary domain `i-2-54-VM` is running again on `10.10.32.3` after rollback
+  - standby domain `i-2-118-VM` was started during the run and then destroyed
+    by rollback; standby VM row remains stopped
+  - QMP `query-block-jobs` is empty after rollback
+  - QMP `query-migrate` is empty after rollback
+- Progress compared to Run 61:
+  - Run 61 failed during `sdb` baseline seed copy
+  - Run 62 passed both baseline seed targets:
+    - `xcolo_disk_sda_baseline_seeded=true`
+    - `xcolo_disk_sdb_baseline_seeded=true`
+  - the run reached generated runtime, filter activation, pre-migrate evidence,
+    and migration validation
+- Validated markers:
+  - `xcolo_net_vnet_hdr_support=on`
+  - `xcolo_primary_filter_cmdline_vnet_hdr_required=on`
+  - `xcolo_primary_filter_qom_vnet_hdr_ready=yes`
+  - `xcolo_primary_filter_qom_m0_vnet_hdr_support=on`
+  - `xcolo_primary_filter_qom_redire0_vnet_hdr_support=on`
+  - `xcolo_primary_filter_qom_redire1_vnet_hdr_support=on`
+  - `xcolo_primary_filter_qom_comp0_vnet_hdr_support=on`
+  - `xcolo_premigrate_vnet_hdr_support=on`
+  - `xcolo_premigrate_primary_filter_chardev_ready=yes`
+  - `xcolo_premigrate_channel_mirror_established=yes`
+  - `xcolo_premigrate_channel_compare_established=yes`
+  - `xcolo_premigrate_channel_compare_local_established=yes`
+  - `xcolo_premigrate_channel_compare_out_established=yes`
+  - `xcolo_secondary_block_graph_ready=yes`
+- Failure evidence:
+  - primary migration failed:
+    `xcolo_primary_migrate_status=failed`
+  - primary QEMU log:
+    `Received invalid message 0x0000 length 0x0000`
+  - secondary migration remained in COLO state:
+    `xcolo_secondary_migrate_status=colo`
+  - secondary QEMU log:
+    `Can't receive COLO message: Input/output error`
+  - QEMU command line included `vnet_hdr_support` on primary and secondary
+    filters, but QEMU warned that the short-form boolean is deprecated and
+    recommends `vnet_hdr_support=on`
+- Repetition control:
+  - this is progress compared to Run 61 because the baseline seed transport
+    blocker was cleared
+  - this is now a repeated COLO invalid-message blocker with stronger evidence:
+    vnet header support, QOM filter readiness, chardev readiness, channels, and
+    secondary block graph were all recorded as ready before migrate
+  - the next change must not keep cycling through generic filter-order guesses;
+    it must target the validated remaining mismatch in the COLO runtime
+    protocol path
+
+### Change For Run 63 2026-06-02-16
+
+- Design document:
+  - `342-ft-xcolo-network-firewall-storage-preflight-design-20260602.md`
+- Purpose:
+  - make the network path, firewall contract, and storage backend symmetry
+    explicit before another COLO invalid-message test
+  - prevent another generic "primary_migrate_failed" report when all previous
+    readiness markers have already passed
+- Code expectations for the next run:
+  - generated filter command lines must use `vnet_hdr_support=on`
+  - pre-migrate must record `xcolo_firewall_*` state and stop before migrate if
+    externally required FT ports are missing
+  - pre-migrate/runtime/failure phases must record compact `xcolo_socket_*`
+    summaries for 9003, 9004, loopback compare ports, and the NBD endpoint
+  - disk plan creation must record `xcolo_storage_symmetry` so RBD/raw to
+    filesystem/qcow2 conversion is visible as a warning, not an implicit
+    assumption
+  - if the same invalid COLO message appears with filters, chardevs, channels,
+    and secondary block graph ready, the failure must be classified as
+    `repeated_protocol_invalid_message`
+- Repetition control:
+  - if Run 63 still fails with the same primary/secondary QEMU messages but the
+    new socket and firewall markers are healthy, the next step must be an A/B
+    test around storage/backend symmetry or QEMU COLO protocol behavior, not
+    another filter/chardev readiness patch

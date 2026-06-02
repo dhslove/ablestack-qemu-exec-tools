@@ -1024,8 +1024,159 @@ ftctl_xcolo_update_vnet_hdr_state() {
 ftctl_xcolo_vnet_hdr_arg() {
   local vm="${1-}"
   if ftctl_xcolo_vnet_hdr_required "${vm}"; then
-    printf '%s' ",vnet_hdr_support"
+    printf '%s' ",vnet_hdr_support=on"
   fi
+}
+
+ftctl_xcolo_firewall_probe_cmd() {
+  cat <<'EOF'
+set -euo pipefail
+missing=""
+state="unknown"
+service="unknown"
+if ! command -v firewall-cmd >/dev/null 2>&1; then
+  echo "state=missing"
+  echo "service=unknown"
+  echo "missing_ports="
+  echo "ready=unknown"
+  exit 0
+fi
+if ! systemctl is-active --quiet firewalld 2>/dev/null; then
+  echo "state=inactive"
+  echo "service=unknown"
+  echo "missing_ports="
+  echo "ready=yes"
+  exit 0
+fi
+state="active"
+service="missing"
+if firewall-cmd --query-service=ablestack-vm-ftctl-remote-nbd >/dev/null 2>&1; then
+  service="present"
+fi
+for port in 9000 9003 9004 9998; do
+  if [[ "${service}" == "present" ]] || firewall-cmd --query-port="${port}/tcp" >/dev/null 2>&1; then
+    :
+  else
+    missing="${missing}${missing:+,}${port}/tcp"
+  fi
+done
+if [[ "${service}" == "present" ]] || firewall-cmd --query-port=10809-10872/tcp >/dev/null 2>&1 || firewall-cmd --query-port=10809/tcp >/dev/null 2>&1; then
+  :
+else
+  missing="${missing}${missing:+,}10809-10872/tcp"
+fi
+echo "state=${state}"
+echo "service=${service}"
+echo "missing_ports=${missing}"
+if [[ -z "${missing}" ]]; then
+  echo "ready=yes"
+else
+  echo "ready=no"
+fi
+EOF
+}
+
+ftctl_xcolo_parse_probe_field() {
+  local payload="${1-}"
+  local key="${2-}"
+  printf '%s\n' "${payload}" | awk -F= -v k="${key}" '$1 == k {print substr($0, length(k) + 2); exit}'
+}
+
+ftctl_xcolo_firewall_probe_local() {
+  local out_var="${1}"
+  local err_var="${2}"
+  local rc_var="${3}"
+  local cmd out="" err="" rc=0
+
+  cmd="$(ftctl_xcolo_firewall_probe_cmd)"
+  ftctl_cmd_run "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC:-15}" out err rc -- bash -lc "${cmd}" || true
+  printf -v "${out_var}" '%s' "${out}"
+  printf -v "${err_var}" '%s' "${err}"
+  printf -v "${rc_var}" '%s' "${rc}"
+}
+
+ftctl_xcolo_firewall_probe_remote() {
+  local host="${1-}"
+  local user="${2-}"
+  local out_var="${3}"
+  local err_var="${4}"
+  local rc_var="${5}"
+  local cmd out="" err="" rc=0
+
+  cmd="$(ftctl_xcolo_firewall_probe_cmd)"
+  ftctl_blockcopy_remote_exec "${host}" "${user}" out err rc "${cmd}" || true
+  printf -v "${out_var}" '%s' "${out}"
+  printf -v "${err_var}" '%s' "${err}"
+  printf -v "${rc_var}" '%s' "${rc}"
+}
+
+ftctl_xcolo_preflight_firewall_contract() {
+  local vm="${1-}"
+  local host="" user="" primary_out="" primary_err="" secondary_out="" secondary_err=""
+  local primary_rc=0 secondary_rc=0
+  local primary_state primary_service primary_missing primary_ready
+  local secondary_state secondary_service secondary_missing secondary_ready
+  local missing_summary="" ready="yes"
+
+  [[ -n "${vm}" ]] || return 1
+  ftctl_xcolo_firewall_probe_local primary_out primary_err primary_rc
+  primary_state="$(ftctl_xcolo_parse_probe_field "${primary_out}" state)"
+  primary_service="$(ftctl_xcolo_parse_probe_field "${primary_out}" service)"
+  primary_missing="$(ftctl_xcolo_parse_probe_field "${primary_out}" missing_ports)"
+  primary_ready="$(ftctl_xcolo_parse_probe_field "${primary_out}" ready)"
+  [[ -n "${primary_state}" ]] || primary_state="probe_failed"
+  [[ -n "${primary_service}" ]] || primary_service="unknown"
+  [[ -n "${primary_ready}" ]] || primary_ready="unknown"
+
+  if ftctl_blockcopy_remote_target_host_user host user; then
+    ftctl_xcolo_firewall_probe_remote "${host}" "${user}" secondary_out secondary_err secondary_rc
+    secondary_state="$(ftctl_xcolo_parse_probe_field "${secondary_out}" state)"
+    secondary_service="$(ftctl_xcolo_parse_probe_field "${secondary_out}" service)"
+    secondary_missing="$(ftctl_xcolo_parse_probe_field "${secondary_out}" missing_ports)"
+    secondary_ready="$(ftctl_xcolo_parse_probe_field "${secondary_out}" ready)"
+    [[ -n "${secondary_state}" ]] || secondary_state="probe_failed"
+    [[ -n "${secondary_service}" ]] || secondary_service="unknown"
+    [[ -n "${secondary_ready}" ]] || secondary_ready="unknown"
+  else
+    secondary_state="target_unresolved"
+    secondary_service="unknown"
+    secondary_missing=""
+    secondary_ready="unknown"
+  fi
+
+  if [[ "${primary_ready}" == "no" ]]; then
+    ready="no"
+    missing_summary="${missing_summary}${missing_summary:+;}primary:${primary_missing:-unknown}"
+  fi
+  if [[ "${secondary_ready}" == "no" ]]; then
+    ready="no"
+    missing_summary="${missing_summary}${missing_summary:+;}secondary:${secondary_missing:-unknown}"
+  fi
+
+  ftctl_state_set "${vm}" \
+    "xcolo_firewall_primary_state=${primary_state}" \
+    "xcolo_firewall_primary_service=${primary_service}" \
+    "xcolo_firewall_primary_missing_ports=${primary_missing}" \
+    "xcolo_firewall_primary_ready=${primary_ready}" \
+    "xcolo_firewall_primary_probe_rc=${primary_rc}" \
+    "xcolo_firewall_secondary_state=${secondary_state}" \
+    "xcolo_firewall_secondary_service=${secondary_service}" \
+    "xcolo_firewall_secondary_missing_ports=${secondary_missing}" \
+    "xcolo_firewall_secondary_ready=${secondary_ready}" \
+    "xcolo_firewall_secondary_probe_rc=${secondary_rc}" \
+    "xcolo_firewall_ready=${ready}" \
+    "xcolo_firewall_missing_ports=${missing_summary}"
+
+  if [[ "${ready}" == "no" ]]; then
+    ftctl_state_set "${vm}" "last_error=xcolo_firewall_ports_missing"
+    ftctl_log_event "colo" "xcolo.firewall_preflight" "fail" "${vm}" "" \
+      "primary_state=${primary_state} primary_missing=${primary_missing} secondary_state=${secondary_state} secondary_missing=${secondary_missing}"
+    return 1
+  fi
+
+  ftctl_log_event "colo" "xcolo.firewall_preflight" "ok" "${vm}" "" \
+    "primary_state=${primary_state} primary_ready=${primary_ready} secondary_state=${secondary_state} secondary_ready=${secondary_ready}"
+  return 0
 }
 
 ftctl_xcolo_vnet_hdr_qmp_bool_arg() {
@@ -1215,6 +1366,7 @@ ftctl_xcolo_record_pre_migrate_evidence() {
 
   ts="$(ftctl_now_iso8601)"
   ftctl_xcolo_capture_primary_channel_state "${vm}" || true
+  ftctl_xcolo_capture_socket_snapshot "${vm}" "pre_migrate" || true
   ftctl_xcolo_collect_primary_chardev_binding_state "${vm}" "pre_migrate" || true
   ftctl_xcolo_collect_primary_filter_qom_state "${vm}" || true
   ftctl_xcolo_collect_primary_filter_cmdline_state "${vm}" || true
@@ -1898,6 +2050,7 @@ ftctl_xcolo_validate_pair_runtime() {
   local primary_chardev="unknown" primary_chardev_reason=""
   local disk_plan="" secondary_block_graph="unknown" secondary_block_graph_reason=""
   local reason="" timeout i pending_since pending_elapsed pending_max pending_reason
+  local socket_runtime_captured="no" last_error_value
 
   if [[ "${FTCTL_DRY_RUN}" == "1" ]]; then
     ftctl_log_event "colo" "xcolo.runtime_validate" "skip" "${vm}" "" "reason=dry_run"
@@ -1985,8 +2138,23 @@ ftctl_xcolo_validate_pair_runtime() {
     secondary_block_graph="$(ftctl_state_get "${vm}" "xcolo_secondary_block_graph_ready" 2>/dev/null || true)"
     secondary_block_graph_reason="$(ftctl_state_get "${vm}" "xcolo_secondary_block_graph_reason" 2>/dev/null || true)"
 
+    if [[ "${socket_runtime_captured}" != "yes" &&
+          ( "${primary_migrate}" == "active" || "${primary_migrate}" == "failed" || "${secondary_migrate}" == "colo" ) ]]; then
+      ftctl_xcolo_capture_socket_snapshot "${vm}" "runtime" || true
+      ftctl_state_set "${vm}" "xcolo_socket_runtime_captured=yes"
+      socket_runtime_captured="yes"
+    fi
+
     if [[ "${primary_migrate}" == "failed" ]]; then
+      ftctl_xcolo_capture_socket_snapshot "${vm}" "failure" || true
       if [[ "${primary_migrate_error_desc}" == *"Received invalid message"* ]] &&
+          [[ "${primary_chardev}" == "yes" ]] &&
+          ftctl_xcolo_runtime_primary_topology_ready "${primary_xml}" "${primary_filter_qom}" "${primary_filter_cmdline}" \
+            "${channel_mirror}" "${channel_compare}" "${channel_compare_local}" "${channel_compare_out}" \
+            "${disk_plan}" "${secondary_block_graph}"; then
+        reason="repeated_protocol_invalid_message"
+        ftctl_state_set "${vm}" "xcolo_repeated_protocol_invalid_message=yes"
+      elif [[ "${primary_migrate_error_desc}" == *"Received invalid message"* ]] &&
           ftctl_xcolo_primary_log_has_filter_mirror_send_failure "${vm}"; then
         reason="primary_filter_mirror_send_failed"
         ftctl_state_set "${vm}" "xcolo_primary_filter_mirror_send_failed=yes"
@@ -1995,6 +2163,7 @@ ftctl_xcolo_validate_pair_runtime() {
       fi
       break
     elif [[ "${secondary_migrate}" == "failed" ]]; then
+      ftctl_xcolo_capture_socket_snapshot "${vm}" "failure" || true
       reason="secondary_migrate_failed"
       break
     elif [[ "${primary_xml}" == "ok" &&
@@ -2223,6 +2392,10 @@ ftctl_xcolo_validate_pair_runtime() {
       ftctl_xcolo_collect_runtime_failure_diagnostics "${vm}" "${secondary_vm}" || true
       reason="$(ftctl_xcolo_refine_primary_role_failure_reason "${vm}" "${reason}")"
     fi
+    last_error_value="xcolo_runtime_validation_failed:${reason}"
+    if [[ "${reason}" == "repeated_protocol_invalid_message" ]]; then
+      last_error_value="xcolo_repeated_protocol_invalid_message"
+    fi
     ftctl_state_set "${vm}" \
       "xcolo_primary_running=${primary_running}" \
       "xcolo_secondary_running=${secondary_running}" \
@@ -2250,7 +2423,7 @@ ftctl_xcolo_validate_pair_runtime() {
       "xcolo_channel_compare_out_established=${channel_compare_out}" \
       "xcolo_secondary_block_graph_ready=${secondary_block_graph}" \
       "xcolo_secondary_block_graph_reason=${secondary_block_graph_reason}" \
-      "last_error=xcolo_runtime_validation_failed:${reason}"
+      "last_error=${last_error_value}"
     ftctl_log_event "colo" "xcolo.runtime_validate" "fail" "${vm}" "" \
       "reason=${reason} primary_running=${primary_running} secondary_running=${secondary_running} primary_status=${primary_status} secondary_status=${secondary_status} primary_colo=${primary_colo} secondary_colo=${secondary_colo} primary_xml=${primary_xml} secondary_xml=${secondary_xml} primary_migrate=${primary_migrate} primary_migrate_error_desc=${primary_migrate_error_desc} secondary_migrate=${secondary_migrate} secondary_migrate_error_desc=${secondary_migrate_error_desc} primary_qga=${primary_qga} secondary_qga=${secondary_qga} filter_qom=${primary_filter_qom} filter_qom_reason=${primary_filter_qom_reason} filter_cmdline=${primary_filter_cmdline} filter_cmdline_reason=${primary_filter_cmdline_reason} chardev=${primary_chardev} chardev_reason=${primary_chardev_reason} mirror=${channel_mirror} compare=${channel_compare} compare_local=${channel_compare_local} compare_out=${channel_compare_out} secondary_block_graph=${secondary_block_graph} attempts=${timeout}"
     return 1
@@ -2575,6 +2748,8 @@ ftctl_xcolo_prebuilt_primary_stage() {
     "{\"execute\":\"x-blockdev-change\",\"arguments\":{\"parent\":\"${FTCTL_PROFILE_XCOLO_PARENT_BLOCK_NODE}\",\"node\":\"${FTCTL_PROFILE_XCOLO_NBD_NODE}\"}}" \
     "colo" "primary.x_blockdev_change" || return 1
   ftctl_xcolo_set_and_verify_migrate_capabilities "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" "${vm}" "primary" "primary" || return 1
+  ftctl_xcolo_record_pre_migrate_evidence "${vm}" || true
+  ftctl_xcolo_preflight_firewall_contract "${vm}" || return 1
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
     "{\"execute\":\"migrate\",\"arguments\":{\"uri\":\"${FTCTL_PROFILE_XCOLO_MIGRATE_URI}\"}}" \
     "colo" "primary.migrate" || return 1
@@ -3223,6 +3398,58 @@ ftctl_xcolo_collect_block_disk_plan() {
   printf -v "${plan_var}" '%s' "${plan}"
   printf -v "${primary_map_var}" '%s' "${primary_map}"
   printf -v "${primary_metadata_var}" '%s' "${primary_metadata}"
+}
+
+ftctl_xcolo_record_storage_symmetry() {
+  local vm="${1-}"
+  local plan="${2-}"
+  local entry rest target primary_source primary_format primary_dtype secondary_dest
+  local secondary_layout primary_layout=""
+  local layouts="" secondary_layouts="" symmetry="ok" reason=""
+  local suffix result="ok"
+  local -a _ftctl_xcolo_symmetry_entries=()
+
+  [[ -n "${vm}" && -n "${plan}" ]] || return 1
+  IFS=';' read -r -a _ftctl_xcolo_symmetry_entries <<< "${plan}"
+  for entry in "${_ftctl_xcolo_symmetry_entries[@]}"; do
+    [[ -n "${entry}" ]] || continue
+    target="${entry%%|*}"
+    rest="${entry#*|}"
+    primary_source="${rest%%|*}"
+    rest="${rest#*|}"
+    primary_format="${rest%%|*}"
+    rest="${rest#*|}"
+    primary_dtype="${rest%%|*}"
+    secondary_dest="${rest#*|}"
+    [[ -n "${primary_format}" ]] || primary_format="raw"
+    case "${secondary_dest}" in
+      /dev/*) secondary_layout="block/raw" ;;
+      *) secondary_layout="file/qcow2" ;;
+    esac
+    primary_layout="${primary_dtype}/${primary_format}"
+    layouts="${layouts}${layouts:+,}${target}:${primary_layout}"
+    secondary_layouts="${secondary_layouts}${secondary_layouts:+,}${target}:${secondary_layout}"
+    suffix="$(ftctl_xcolo_disk_suffix "${target}")"
+    ftctl_state_set "${vm}" \
+      "xcolo_disk_${suffix}_primary_layout=${primary_layout}" \
+      "xcolo_disk_${suffix}_secondary_layout=${secondary_layout}" \
+      "xcolo_disk_${suffix}_primary_source=${primary_source}" \
+      "xcolo_disk_${suffix}_secondary_dest=${secondary_dest}"
+    if [[ "${primary_layout}" != "${secondary_layout}" ]]; then
+      symmetry="warning"
+      reason="${reason}${reason:+,}${target}:primary_${primary_layout}_secondary_${secondary_layout}"
+    fi
+  done
+
+  ftctl_state_set "${vm}" \
+    "xcolo_storage_primary_layouts=${layouts}" \
+    "xcolo_storage_secondary_layouts=${secondary_layouts}" \
+    "xcolo_storage_symmetry=${symmetry}" \
+    "xcolo_storage_symmetry_reason=${reason}"
+  [[ "${symmetry}" == "warning" ]] && result="warn"
+  ftctl_log_event "colo" "xcolo.storage_symmetry" "${result}" "${vm}" "" \
+    "primary=${layouts} secondary=${secondary_layouts} reason=${reason}"
+  return 0
 }
 
 ftctl_xcolo_remote_disk_virtual_size_bytes() {
@@ -4136,6 +4363,7 @@ ftctl_xcolo_execute_handshake_with_nodes() {
   ftctl_xcolo_attach_primary_net_filters "${vm}" || return 1
   ftctl_xcolo_set_and_verify_migrate_capabilities "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" "${vm}" "primary" "primary" || return 1
   ftctl_xcolo_record_pre_migrate_evidence "${vm}" || true
+  ftctl_xcolo_preflight_firewall_contract "${vm}" || return 1
   ftctl_xcolo_require_primary_filter_cmdline_ready "${vm}" "pre_migrate" || return 1
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
     "{\"execute\":\"migrate\",\"arguments\":{\"uri\":\"${FTCTL_PROFILE_XCOLO_MIGRATE_URI}\"}}" \
@@ -4205,6 +4433,7 @@ ftctl_xcolo_execute_handshake_with_disk_plan() {
   ftctl_xcolo_attach_primary_net_filters "${vm}" || return 1
   ftctl_xcolo_set_and_verify_migrate_capabilities "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" "${vm}" "primary" "primary" || return 1
   ftctl_xcolo_record_pre_migrate_evidence "${vm}" || true
+  ftctl_xcolo_preflight_firewall_contract "${vm}" || return 1
   ftctl_xcolo_require_primary_filter_cmdline_ready "${vm}" "pre_migrate" || return 1
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
     "{\"execute\":\"migrate\",\"arguments\":{\"uri\":\"${FTCTL_PROFILE_XCOLO_MIGRATE_URI}\"}}" \
@@ -4329,6 +4558,111 @@ ftctl_xcolo_local_tcp_state_bool() {
       ;;
   esac
   printf -v "${out_var}" '%s' "${value}"
+}
+
+ftctl_xcolo_socket_summary_from_ss() {
+  local payload="${1-}"
+  local port="${2-}"
+  local state="closed"
+
+  [[ -n "${port}" ]] || {
+    printf '%s\n' "unknown"
+    return 0
+  }
+  if printf '%s\n' "${payload}" | awk -v p=":${port}" '$1 ~ /^LISTEN/ && ($4 == p || $4 ~ p "$") {found=1} END {exit found ? 0 : 1}'; then
+    state="listen"
+  elif printf '%s\n' "${payload}" | awk -v p=":${port}" '$1 == "ESTAB" && ($4 == p || $4 ~ p "$" || $5 == p || $5 ~ p "$") {found=1} END {exit found ? 0 : 1}'; then
+    state="established"
+  elif ! command -v ss >/dev/null 2>&1; then
+    state="unknown"
+  fi
+  printf '%s\n' "${state}"
+}
+
+ftctl_xcolo_socket_snapshot_cmd() {
+  cat <<'EOF'
+set -euo pipefail
+if command -v ss >/dev/null 2>&1; then
+  ss -H -tanp 2>/dev/null | awk '$4 ~ /:(9000|9001|9002|9003|9004|9005|9998|10809)$/ || $5 ~ /:(9000|9001|9002|9003|9004|9005|9998|10809)$/ {print}'
+else
+  echo "ss_missing"
+fi
+EOF
+}
+
+ftctl_xcolo_socket_snapshot_local() {
+  local out_var="${1}"
+  local err_var="${2}"
+  local rc_var="${3}"
+  local cmd out="" err="" rc=0
+
+  cmd="$(ftctl_xcolo_socket_snapshot_cmd)"
+  ftctl_cmd_run "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC:-15}" out err rc -- bash -lc "${cmd}" || true
+  printf -v "${out_var}" '%s' "${out}"
+  printf -v "${err_var}" '%s' "${err}"
+  printf -v "${rc_var}" '%s' "${rc}"
+}
+
+ftctl_xcolo_socket_snapshot_remote() {
+  local host="${1-}"
+  local user="${2-}"
+  local out_var="${3}"
+  local err_var="${4}"
+  local rc_var="${5}"
+  local cmd out="" err="" rc=0
+
+  cmd="$(ftctl_xcolo_socket_snapshot_cmd)"
+  ftctl_blockcopy_remote_exec "${host}" "${user}" out err rc "${cmd}" || true
+  printf -v "${out_var}" '%s' "${out}"
+  printf -v "${err_var}" '%s' "${err}"
+  printf -v "${rc_var}" '%s' "${rc}"
+}
+
+ftctl_xcolo_capture_socket_snapshot() {
+  local vm="${1-}"
+  local phase="${2:-runtime}"
+  local host="" user=""
+  local primary_out="" primary_err="" secondary_out="" secondary_err=""
+  local primary_rc=0 secondary_rc=0
+  local ctrl_port mirror_port compare_port compare_local_port compare_out_port nbd_port
+
+  [[ -n "${vm}" ]] || return 1
+  ctrl_port="${FTCTL_XCOLO_CTRL_PORT:-9998}"
+  mirror_port="${FTCTL_XCOLO_MIRROR_PORT:-9003}"
+  compare_port="${FTCTL_XCOLO_COMPARE_PORT:-9004}"
+  compare_local_port="${FTCTL_XCOLO_COMPARE_LOCAL_PORT:-9001}"
+  compare_out_port="${FTCTL_XCOLO_COMPARE_OUT_PORT:-9005}"
+  nbd_port="${FTCTL_PROFILE_XCOLO_NBD_ENDPOINT##*:}"
+  [[ "${nbd_port}" =~ ^[0-9]+$ ]] || nbd_port="${FTCTL_REMOTE_NBD_PORT_BASE:-10809}"
+
+  ftctl_xcolo_socket_snapshot_local primary_out primary_err primary_rc
+  if ftctl_blockcopy_remote_target_host_user host user; then
+    ftctl_xcolo_socket_snapshot_remote "${host}" "${user}" secondary_out secondary_err secondary_rc
+  else
+    secondary_out=""
+    secondary_err="target_unresolved"
+    secondary_rc=2
+  fi
+  : "${primary_err}${secondary_err}"
+
+  ftctl_state_set "${vm}" \
+    "xcolo_socket_${phase}_primary_rc=${primary_rc}" \
+    "xcolo_socket_${phase}_secondary_rc=${secondary_rc}" \
+    "xcolo_socket_${phase}_primary_9998=$(ftctl_xcolo_socket_summary_from_ss "${primary_out}" "${ctrl_port}")" \
+    "xcolo_socket_${phase}_primary_9003=$(ftctl_xcolo_socket_summary_from_ss "${primary_out}" "${mirror_port}")" \
+    "xcolo_socket_${phase}_primary_9004=$(ftctl_xcolo_socket_summary_from_ss "${primary_out}" "${compare_port}")" \
+    "xcolo_socket_${phase}_primary_9001=$(ftctl_xcolo_socket_summary_from_ss "${primary_out}" "${compare_local_port}")" \
+    "xcolo_socket_${phase}_primary_9005=$(ftctl_xcolo_socket_summary_from_ss "${primary_out}" "${compare_out_port}")" \
+    "xcolo_socket_${phase}_primary_nbd=$(ftctl_xcolo_socket_summary_from_ss "${primary_out}" "${nbd_port}")" \
+    "xcolo_socket_${phase}_secondary_9998=$(ftctl_xcolo_socket_summary_from_ss "${secondary_out}" "${ctrl_port}")" \
+    "xcolo_socket_${phase}_secondary_9003=$(ftctl_xcolo_socket_summary_from_ss "${secondary_out}" "${mirror_port}")" \
+    "xcolo_socket_${phase}_secondary_9004=$(ftctl_xcolo_socket_summary_from_ss "${secondary_out}" "${compare_port}")" \
+    "xcolo_socket_${phase}_secondary_nbd=$(ftctl_xcolo_socket_summary_from_ss "${secondary_out}" "${nbd_port}")" \
+    "xcolo_socket_${phase}_loopback_9001=$(ftctl_xcolo_socket_summary_from_ss "${primary_out}" "${compare_local_port}")" \
+    "xcolo_socket_${phase}_loopback_9005=$(ftctl_xcolo_socket_summary_from_ss "${primary_out}" "${compare_out_port}")"
+
+  ftctl_log_event "colo" "xcolo.socket_snapshot" "ok" "${vm}" "" \
+    "phase=${phase} primary_rc=${primary_rc} secondary_rc=${secondary_rc} primary_9003=$(ftctl_xcolo_socket_summary_from_ss "${primary_out}" "${mirror_port}") primary_9004=$(ftctl_xcolo_socket_summary_from_ss "${primary_out}" "${compare_port}") secondary_9003=$(ftctl_xcolo_socket_summary_from_ss "${secondary_out}" "${mirror_port}") secondary_9004=$(ftctl_xcolo_socket_summary_from_ss "${secondary_out}" "${compare_port}")"
 }
 
 ftctl_xcolo_capture_primary_channel_state() {
@@ -5264,6 +5598,7 @@ ftctl_xcolo_plan_protect_block_cold_conversion() {
       "last_error=xcolo_block_disk_plan_failed"
     return 1
   }
+  ftctl_xcolo_record_storage_symmetry "${vm}" "${xcolo_disk_plan}" || true
 
   secondary_dest="$(ftctl_profile_lookup_map_value "${FTCTL_PROFILE_DISK_MAP}" "${primary_target}" 2>/dev/null || true)"
   if [[ -z "${secondary_dest}" ]]; then

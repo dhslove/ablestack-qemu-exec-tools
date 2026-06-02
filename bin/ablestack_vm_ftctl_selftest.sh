@@ -1437,13 +1437,13 @@ selftest_case_xcolo_virtio_vnet_hdr_support() (
   primary_args="$(ftctl_xcolo_build_primary_qemu_args "hostnet0" "${vm}")"
   secondary_args="$(ftctl_xcolo_build_secondary_qemu_args "hostnet0" "${vm}")"
 
-  selftest_assert_contains "${primary_args}" "filter-mirror,id=m0,netdev=hostnet0,queue=tx,outdev=mirror0,status=off,insert=behind,position=tail,vnet_hdr_support" "primary mirror vnet hdr"
-  selftest_assert_contains "${primary_args}" "filter-redirector,id=redire0,netdev=hostnet0,queue=rx,indev=compare_out,status=off,insert=behind,position=tail,vnet_hdr_support" "primary redirector in vnet hdr"
-  selftest_assert_contains "${primary_args}" "filter-redirector,id=redire1,netdev=hostnet0,queue=rx,outdev=compare0,status=off,insert=behind,position=tail,vnet_hdr_support" "primary redirector out vnet hdr"
-  selftest_assert_contains "${primary_args}" "colo-compare,id=comp0,primary_in=compare0-0,secondary_in=compare1,outdev=compare_out0,iothread=iothread1,vnet_hdr_support" "primary compare vnet hdr"
-  selftest_assert_contains "${secondary_args}" "filter-redirector,id=f1,netdev=hostnet0,queue=tx,indev=red0,vnet_hdr_support" "secondary tx redirector vnet hdr"
-  selftest_assert_contains "${secondary_args}" "filter-redirector,id=f2,netdev=hostnet0,queue=rx,outdev=red1,vnet_hdr_support" "secondary rx redirector vnet hdr"
-  selftest_assert_contains "${secondary_args}" "filter-rewriter,id=rew0,netdev=hostnet0,queue=all,vnet_hdr_support" "secondary rewriter vnet hdr"
+  selftest_assert_contains "${primary_args}" "filter-mirror,id=m0,netdev=hostnet0,queue=tx,outdev=mirror0,status=off,insert=behind,position=tail,vnet_hdr_support=on" "primary mirror vnet hdr"
+  selftest_assert_contains "${primary_args}" "filter-redirector,id=redire0,netdev=hostnet0,queue=rx,indev=compare_out,status=off,insert=behind,position=tail,vnet_hdr_support=on" "primary redirector in vnet hdr"
+  selftest_assert_contains "${primary_args}" "filter-redirector,id=redire1,netdev=hostnet0,queue=rx,outdev=compare0,status=off,insert=behind,position=tail,vnet_hdr_support=on" "primary redirector out vnet hdr"
+  selftest_assert_contains "${primary_args}" "colo-compare,id=comp0,primary_in=compare0-0,secondary_in=compare1,outdev=compare_out0,iothread=iothread1,vnet_hdr_support=on" "primary compare vnet hdr"
+  selftest_assert_contains "${secondary_args}" "filter-redirector,id=f1,netdev=hostnet0,queue=tx,indev=red0,vnet_hdr_support=on" "secondary tx redirector vnet hdr"
+  selftest_assert_contains "${secondary_args}" "filter-redirector,id=f2,netdev=hostnet0,queue=rx,outdev=red1,vnet_hdr_support=on" "secondary rx redirector vnet hdr"
+  selftest_assert_contains "${secondary_args}" "filter-rewriter,id=rew0,netdev=hostnet0,queue=all,vnet_hdr_support=on" "secondary rewriter vnet hdr"
   selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_net_vnet_hdr_support")" "on" "vnet hdr state"
 )
 
