@@ -363,3 +363,97 @@ but a lower-level signature or reached stage changed, set
   - if `xcolo_primary_netdev_vhost=off` is recorded and the same protocol
     failure remains, the next blocker is not vhost and must move to COLO channel
     payload direction or QEMU behavior
+
+### Run 2026-06-02-08
+
+- Target: `r97-link-01`
+- Primary VM: `i-2-54-VM`
+- Standby VM: `i-2-114-VM`
+- Protection row: `58`
+- Standby volumes:
+  - root: `213`, path `8cbadebb-3480-4459-99ec-4626c20d8ece`
+  - data: `214`, path `6227f4c2-4bdd-49d5-b5e9-7c86a885042f`
+- Result: failed
+- Last reached stage: runtime validation after primary `migrate`
+- Evidence:
+  - the new run was created correctly; this was not a stale row repeat
+  - baseline seed completed for both disks
+  - primary generated runtime started
+  - secondary generated runtime `i-2-114-VM` started on `10.10.32.1`
+  - primary vhost guard passed:
+    `conversion_stage=primary_vhost_guard_passed`
+  - actual primary runtime marker:
+    `xcolo_primary_netdev_vhost=off`
+  - secondary QEMU command line also had no vhost marker:
+    `-netdev {"type":"tap","fd":"79","id":"hostnet0"}`
+  - QOM hard gate still passed:
+    `xcolo_primary_filter_qom_ready=yes`
+  - primary QMP attach order marker still present:
+    `xcolo_primary_filter_qmp_attach_order=qemu-doc-primary`
+  - pre-migrate evidence still passed:
+    `xcolo_premigrate_primary_filter_qom_ready=yes`,
+    `xcolo_premigrate_primary_filter_chardev_ready=yes`,
+    all COLO channels established
+- Failure signature:
+  - Cloud DB:
+    `protection_state=error`, `transport_state=failed`,
+    `last_error=xcolo_runtime_validation_failed:primary_migrate_failed`
+  - primary status after recovery: `Running` on host `10.10.32.3`
+  - standby DB row remains `Running` on host `10.10.32.1`, but the runtime
+    domain was destroyed during failure recovery
+  - primary QEMU log:
+    `Received invalid message 0x0000 length 0x0000`
+  - secondary QEMU log:
+    `Can't receive COLO message: Input/output error`
+  - primary runtime validation:
+    `xcolo_primary_migrate_status=failed`,
+    `xcolo_secondary_migrate_status=colo`,
+    `xcolo_primary_colo_mode=none`,
+    `xcolo_secondary_colo_mode=secondary`
+- Progress judgment:
+  - `repetition_status=progressed_evidence_same_terminal_error`
+  - Design 337 worked: vhost is now explicitly off at the generated primary
+    runtime before the failed migrate
+  - the vhost-backed netdev hypothesis is closed for this failure signature
+  - repeated terminal error after `xcolo_primary_netdev_vhost=off` means the
+    next investigation must move to COLO channel payload direction, chardev
+    endpoint role, or QEMU COLO protocol behavior
+- Next improvement:
+  - stop changing netdev/vhost handling unless new evidence contradicts this
+    run
+  - record the exact primary and secondary chardev endpoint map immediately
+    before `migrate`, including which side is server/client for:
+    `mirror0`, `compare1`, `compare0`, `compare0-0`, `compare_out`,
+    `compare_out0`
+  - validate the COLO compare/redirector data path direction against the QEMU
+    documented primary/secondary command topology before issuing `migrate`
+  - add a repeat guard so another `Received invalid message 0x0000 length
+    0x0000` with `xcolo_primary_netdev_vhost=off` is classified as
+    `colo_channel_payload_direction_failed`, not as another generic primary
+    migrate failure
+
+### Change For Next Run 2026-06-02-08
+
+- Design:
+  `docs/ftctl/338-ft-xcolo-primary-startup-filter-topology-design-20260602.md`
+- Implementation intent:
+  - generate the primary COLO network filter topology in QEMU startup
+    `qemu:commandline`, matching the secondary startup model
+  - keep primary filter object order as:
+    `m0 -> redire0 -> redire1 -> comp0`
+  - use QMP object attach/rebuild only as a fallback/diagnostic path when
+    startup markers are absent
+  - mark the normal path as:
+    `xcolo_primary_net_filters_attach_mode=cmdline`
+  - require `xcolo_primary_filter_cmdline_ready=yes` before primary `migrate`
+  - fail before `migrate` with
+    `last_error=primary_filter_cmdline_topology_missing` if the actual QEMU
+    process commandline does not contain the expected primary filter topology
+- Repetition control:
+  - if the next run records `xcolo_primary_netdev_vhost=off`,
+    `xcolo_primary_net_filters_attach_mode=cmdline`,
+    `xcolo_primary_filter_cmdline_ready=yes`,
+    `xcolo_primary_filter_qom_ready=yes`, and all pre-migrate channels ready,
+    but still fails with the same `Received invalid message 0x0000 length
+    0x0000` signature, the blocker must be treated as lower-level COLO
+    protocol/runtime behavior instead of another filter attachment iteration

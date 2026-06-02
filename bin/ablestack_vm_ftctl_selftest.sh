@@ -139,6 +139,23 @@ selftest_mock_xcolo_primary_channels_ready() {
       "xcolo_primary_filter_qom_redire1_path=/objects/redire1" \
       "xcolo_primary_filter_qom_comp0_path=/objects/comp0"
   }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_require_primary_filter_cmdline_ready() {
+    local vm="${1-}"
+    ftctl_state_set "${vm}" \
+      "xcolo_primary_filter_cmdline_ready=yes" \
+      "xcolo_primary_filter_cmdline_reason=" \
+      "xcolo_primary_filter_cmdline_expected_netdev=hostnet0"
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_domain_xml_has_runtime_markers() {
+    local _uri="${1-}" _vm="${2-}" role="${3-}"
+    [[ "${role}" == "primary" ]]
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_domain_xml_has_primary_chardev_markers() {
+    return 1
+  }
 }
 
 selftest_mock_xcolo_primary_role_diagnostics_ok() {
@@ -923,10 +940,10 @@ EOF
   selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "<iothreads>1</iothreads>"
   selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" '<iothread id="1"'
   selftest_assert_file_not_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "iothread,id=iothread1"
-  selftest_assert_file_not_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "filter-mirror,id=m0"
-  selftest_assert_file_not_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "filter-redirector,id=redire0"
-  selftest_assert_file_not_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "filter-redirector,id=redire1"
-  selftest_assert_file_not_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "colo-compare,id=comp0"
+  selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "filter-mirror,id=m0,netdev=hostnet0,queue=tx,outdev=mirror0,status=on,insert=behind,position=tail"
+  selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "filter-redirector,id=redire0,netdev=hostnet0,queue=rx,indev=compare_out,status=on,insert=behind,position=tail"
+  selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "filter-redirector,id=redire1,netdev=hostnet0,queue=rx,outdev=compare0,status=on,insert=behind,position=tail"
+  selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "colo-compare,id=comp0,primary_in=compare0-0,secondary_in=compare1,outdev=compare_out0,iothread=iothread1"
   selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "socket,id=mirror0,host=0.0.0.0,port=9003,server=on,wait=off"
   selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "socket,id=compare1,host=0.0.0.0,port=9004,server=on,wait=on"
   selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "socket,id=compare0,host=127.0.0.1,port=9001,server=on,wait=off"
@@ -1210,6 +1227,10 @@ selftest_case_xcolo_block_handshake_sets_checkpoint_after_migrate() (
   selftest_assert_file_not_contains "${call_log}" "primary.migrate_set_parameters"
   selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_primary_net_filters_attached")" "true" \
     "primary net filters attached state"
+  selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_primary_net_filters_attach_mode")" "cmdline" \
+    "primary net filters startup attach mode"
+  selftest_assert_file_not_contains "${call_log}" "primary.object_add_mirror"
+  selftest_assert_file_not_contains "${call_log}" "primary.object_add_colo_compare"
   filter_line="$(grep -n '|primary.stop_before_filter_attach|' "${call_log}" | head -n1 | cut -d: -f1)"
   migrate_line="$(grep -n '|primary.migrate|' "${call_log}" | head -n1 | cut -d: -f1)"
   [[ "${filter_line}" -lt "${migrate_line}" ]] || \
