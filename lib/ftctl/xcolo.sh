@@ -986,12 +986,17 @@ ftctl_xcolo_qom_path_has_property() {
 
 ftctl_xcolo_collect_primary_filter_qom_state() {
   local vm="${1-}"
+  local expected_status="${2:-on}"
   local ready="yes"
   local inconclusive="no"
   local reasons=()
   local value expected_netdev path m0_path redire0_path redire1_path comp0_path
   local -a state_args=()
 
+  case "${expected_status}" in
+    on|off) ;;
+    *) expected_status="on" ;;
+  esac
   expected_netdev="$(ftctl_state_get "${vm}" "xcolo_primary_netdev_id" 2>/dev/null || true)"
   expected_netdev="${expected_netdev:-hostnet0}"
 
@@ -1026,6 +1031,7 @@ ftctl_xcolo_collect_primary_filter_qom_state() {
 
   state_args+=(
     "xcolo_primary_filter_qom_expected_netdev=${expected_netdev}"
+    "xcolo_primary_filter_qom_expected_status=${expected_status}"
     "xcolo_primary_filter_qom_m0_path=${m0_path}"
     "xcolo_primary_filter_qom_redire0_path=${redire0_path}"
     "xcolo_primary_filter_qom_redire1_path=${redire1_path}"
@@ -1046,7 +1052,7 @@ ftctl_xcolo_collect_primary_filter_qom_state() {
   _ftctl_xcolo_expect_qom "${m0_path}" "netdev" "${expected_netdev}" "m0_netdev"
   _ftctl_xcolo_expect_qom "${m0_path}" "queue" "tx" "m0_queue"
   _ftctl_xcolo_expect_qom "${m0_path}" "outdev" "mirror0" "m0_outdev"
-  _ftctl_xcolo_expect_qom "${m0_path}" "status" "on" "m0_status"
+  _ftctl_xcolo_expect_qom "${m0_path}" "status" "${expected_status}" "m0_status"
   _ftctl_xcolo_expect_qom "${m0_path}" "insert" "behind" "m0_insert"
   _ftctl_xcolo_expect_qom "${m0_path}" "position" "tail" "m0_position"
 
@@ -1054,7 +1060,7 @@ ftctl_xcolo_collect_primary_filter_qom_state() {
   _ftctl_xcolo_expect_qom "${redire0_path}" "queue" "rx" "redire0_queue"
   _ftctl_xcolo_expect_qom "${redire0_path}" "indev" "compare_out" "redire0_indev"
   _ftctl_xcolo_expect_qom "${redire0_path}" "outdev" "" "redire0_outdev"
-  _ftctl_xcolo_expect_qom "${redire0_path}" "status" "on" "redire0_status"
+  _ftctl_xcolo_expect_qom "${redire0_path}" "status" "${expected_status}" "redire0_status"
   _ftctl_xcolo_expect_qom "${redire0_path}" "insert" "behind" "redire0_insert"
   _ftctl_xcolo_expect_qom "${redire0_path}" "position" "tail" "redire0_position"
 
@@ -1062,7 +1068,7 @@ ftctl_xcolo_collect_primary_filter_qom_state() {
   _ftctl_xcolo_expect_qom "${redire1_path}" "queue" "rx" "redire1_queue"
   _ftctl_xcolo_expect_qom "${redire1_path}" "indev" "" "redire1_indev"
   _ftctl_xcolo_expect_qom "${redire1_path}" "outdev" "compare0" "redire1_outdev"
-  _ftctl_xcolo_expect_qom "${redire1_path}" "status" "on" "redire1_status"
+  _ftctl_xcolo_expect_qom "${redire1_path}" "status" "${expected_status}" "redire1_status"
   _ftctl_xcolo_expect_qom "${redire1_path}" "insert" "behind" "redire1_insert"
   _ftctl_xcolo_expect_qom "${redire1_path}" "position" "tail" "redire1_position"
 
@@ -1158,11 +1164,12 @@ ftctl_xcolo_primary_filter_qom_ready() {
 ftctl_xcolo_require_primary_filter_qom_ready() {
   local vm="${1-}"
   local phase="${2:-pre_migrate}"
+  local expected_status="${3:-on}"
   local reason
 
-  if ftctl_xcolo_collect_primary_filter_qom_state "${vm}"; then
+  if ftctl_xcolo_collect_primary_filter_qom_state "${vm}" "${expected_status}"; then
     ftctl_log_event "colo" "primary.filter_qom_topology" "ok" "${vm}" "" \
-      "phase=${phase} m0=$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_m0_path" 2>/dev/null || true) redire0=$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_redire0_path" 2>/dev/null || true) redire1=$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_redire1_path" 2>/dev/null || true) comp0=$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_comp0_path" 2>/dev/null || true)"
+      "phase=${phase} expected_status=${expected_status} m0=$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_m0_path" 2>/dev/null || true) redire0=$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_redire0_path" 2>/dev/null || true) redire1=$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_redire1_path" 2>/dev/null || true) comp0=$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_comp0_path" 2>/dev/null || true)"
     return 0
   fi
 
@@ -1173,7 +1180,7 @@ ftctl_xcolo_require_primary_filter_qom_ready() {
     "xcolo_primary_filter_qom_topology_failed_reason=${reason}" \
     "last_error=primary_filter_qom_topology_missing"
   ftctl_log_event "colo" "primary.filter_qom_topology" "fail" "${vm}" "" \
-    "phase=${phase} reason=${reason} m0=$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_m0_path" 2>/dev/null || true) redire0=$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_redire0_path" 2>/dev/null || true) redire1=$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_redire1_path" 2>/dev/null || true) comp0=$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_comp0_path" 2>/dev/null || true)"
+    "phase=${phase} expected_status=${expected_status} reason=${reason} m0=$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_m0_path" 2>/dev/null || true) redire0=$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_redire0_path" 2>/dev/null || true) redire1=$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_redire1_path" 2>/dev/null || true) comp0=$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_comp0_path" 2>/dev/null || true)"
   return 1
 }
 
@@ -1532,6 +1539,7 @@ done
   _ftctl_xcolo_expect_cmdline_token "filter-redirector,id=redire1" "redire1"
   _ftctl_xcolo_expect_cmdline_token "colo-compare,id=comp0" "comp0"
   _ftctl_xcolo_expect_cmdline_token "netdev=${expected_netdev}" "primary_netdev"
+  _ftctl_xcolo_expect_cmdline_token "status=off" "startup_status_off"
   _ftctl_xcolo_expect_cmdline_token "outdev=mirror0" "mirror0"
   _ftctl_xcolo_expect_cmdline_token "indev=compare_out" "compare_out_in"
   _ftctl_xcolo_expect_cmdline_token "outdev=compare0" "compare0_out"
@@ -1666,6 +1674,18 @@ ftctl_xcolo_refine_primary_role_failure_reason() {
   else
     printf '%s\n' "primary_qemu_colo_role_transition_failed"
   fi
+}
+
+ftctl_xcolo_primary_log_has_filter_mirror_send_failure() {
+  local vm="${1-}"
+  local out="" err="" rc=0
+
+  [[ -n "${vm}" ]] || return 1
+  # shellcheck disable=SC2016
+  ftctl_cmd_run "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC:-15}" out err rc -- \
+    bash -c 'tail -n 240 "/var/log/libvirt/qemu/${1}.log" 2>/dev/null | grep -Fq "filter mirror send failed"' _ "${vm}" || true
+  : "${out}${err}"
+  [[ "${rc}" == "0" ]]
 }
 
 ftctl_xcolo_domain_xml_has_runtime_markers() {
@@ -1846,7 +1866,13 @@ ftctl_xcolo_validate_pair_runtime() {
     secondary_block_graph_reason="$(ftctl_state_get "${vm}" "xcolo_secondary_block_graph_reason" 2>/dev/null || true)"
 
     if [[ "${primary_migrate}" == "failed" ]]; then
-      reason="primary_migrate_failed"
+      if [[ "${primary_migrate_error_desc}" == *"Received invalid message"* ]] &&
+          ftctl_xcolo_primary_log_has_filter_mirror_send_failure "${vm}"; then
+        reason="primary_filter_mirror_send_failed"
+        ftctl_state_set "${vm}" "xcolo_primary_filter_mirror_send_failed=yes"
+      else
+        reason="primary_migrate_failed"
+      fi
       break
     elif [[ "${secondary_migrate}" == "failed" ]]; then
       reason="secondary_migrate_failed"
@@ -2660,7 +2686,7 @@ ftctl_xcolo_build_primary_qemu_args() {
 
   # Keep the primary COLO network topology in the generated QEMU startup
   # commandline. QMP remains a fallback only when startup markers are absent.
-  printf '%s\n' "-S;-chardev;socket,id=mirror0,host=0.0.0.0,port=${mirror_port},server=on,wait=${mirror_wait};-chardev;socket,id=compare1,host=0.0.0.0,port=${compare_port},server=on,wait=${compare_wait};-chardev;socket,id=compare0,host=127.0.0.1,port=${compare_local_port},server=on,wait=off;-chardev;socket,id=compare0-0,host=127.0.0.1,port=${compare_local_port};-chardev;socket,id=compare_out,host=127.0.0.1,port=${compare_out_port},server=on,wait=off;-chardev;socket,id=compare_out0,host=127.0.0.1,port=${compare_out_port};-object;filter-mirror,id=m0,netdev=${netdev_id},queue=tx,outdev=mirror0,status=on,insert=behind,position=tail;-object;filter-redirector,id=redire0,netdev=${netdev_id},queue=rx,indev=compare_out,status=on,insert=behind,position=tail;-object;filter-redirector,id=redire1,netdev=${netdev_id},queue=rx,outdev=compare0,status=on,insert=behind,position=tail;-object;colo-compare,id=comp0,primary_in=compare0-0,secondary_in=compare1,outdev=compare_out0,iothread=iothread1"
+  printf '%s\n' "-S;-chardev;socket,id=mirror0,host=0.0.0.0,port=${mirror_port},server=on,wait=${mirror_wait};-chardev;socket,id=compare1,host=0.0.0.0,port=${compare_port},server=on,wait=${compare_wait};-chardev;socket,id=compare0,host=127.0.0.1,port=${compare_local_port},server=on,wait=off;-chardev;socket,id=compare0-0,host=127.0.0.1,port=${compare_local_port};-chardev;socket,id=compare_out,host=127.0.0.1,port=${compare_out_port},server=on,wait=off;-chardev;socket,id=compare_out0,host=127.0.0.1,port=${compare_out_port};-object;filter-mirror,id=m0,netdev=${netdev_id},queue=tx,outdev=mirror0,status=off,insert=behind,position=tail;-object;filter-redirector,id=redire0,netdev=${netdev_id},queue=rx,indev=compare_out,status=off,insert=behind,position=tail;-object;filter-redirector,id=redire1,netdev=${netdev_id},queue=rx,outdev=compare0,status=off,insert=behind,position=tail;-object;colo-compare,id=comp0,primary_in=compare0-0,secondary_in=compare1,outdev=compare_out0,iothread=iothread1"
 }
 
 ftctl_xcolo_build_secondary_qemu_args() {
@@ -3687,6 +3713,81 @@ ftctl_xcolo_primary_net_filters_qmp_attach_objects() {
     "source=${source} netdev=${netdev_id}"
 }
 
+ftctl_xcolo_activate_primary_net_filters() {
+  local vm="${1-}"
+  local source="${2:-cmdline}"
+  local reason
+
+  [[ -n "${vm}" ]] || return 1
+
+  ftctl_log_event "colo" "primary.net_filters.activate" "start" "${vm}" "" \
+    "source=${source} order=redire0,redire1,m0"
+
+  ftctl_xcolo_require_primary_filter_qom_ready "${vm}" "pre_activation" "off" || {
+    reason="$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_reason" 2>/dev/null || true)"
+    [[ -n "${reason}" ]] || reason="startup_status_not_off"
+    ftctl_state_set "${vm}" \
+      "xcolo_primary_net_filters_activated=false" \
+      "xcolo_primary_filter_startup_status=unexpected" \
+      "xcolo_primary_filter_activation_failed_reason=${reason}" \
+      "last_error=primary_filter_activation_failed"
+    ftctl_log_event "colo" "primary.net_filters.activate" "fail" "${vm}" "" \
+      "phase=pre_activation reason=${reason}"
+    return 1
+  }
+
+  ftctl_state_set "${vm}" "xcolo_primary_filter_startup_status=off"
+
+  ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
+    '{"execute":"qom-set","arguments":{"path":"/objects/redire0","property":"status","value":"on"}}' \
+    "colo" "primary.filter_status_on.redire0" || {
+      ftctl_state_set "${vm}" \
+        "xcolo_primary_net_filters_activated=false" \
+        "xcolo_primary_filter_activation_failed_reason=redire0_qom_set_failed" \
+        "last_error=primary_filter_activation_failed"
+      return 1
+    }
+  ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
+    '{"execute":"qom-set","arguments":{"path":"/objects/redire1","property":"status","value":"on"}}' \
+    "colo" "primary.filter_status_on.redire1" || {
+      ftctl_state_set "${vm}" \
+        "xcolo_primary_net_filters_activated=false" \
+        "xcolo_primary_filter_activation_failed_reason=redire1_qom_set_failed" \
+        "last_error=primary_filter_activation_failed"
+      return 1
+    }
+  ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
+    '{"execute":"qom-set","arguments":{"path":"/objects/m0","property":"status","value":"on"}}' \
+    "colo" "primary.filter_status_on.m0" || {
+      ftctl_state_set "${vm}" \
+        "xcolo_primary_net_filters_activated=false" \
+        "xcolo_primary_filter_activation_failed_reason=m0_qom_set_failed" \
+        "last_error=primary_filter_activation_failed"
+      return 1
+    }
+
+  if ! ftctl_xcolo_require_primary_filter_qom_ready "${vm}" "post_activation" "on"; then
+    reason="$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_reason" 2>/dev/null || true)"
+    [[ -n "${reason}" ]] || reason="runtime_status_not_on"
+    ftctl_state_set "${vm}" \
+      "xcolo_primary_net_filters_activated=false" \
+      "xcolo_primary_filter_runtime_status=unexpected" \
+      "xcolo_primary_filter_activation_failed_reason=${reason}" \
+      "last_error=primary_filter_activation_failed"
+    ftctl_log_event "colo" "primary.net_filters.activate" "fail" "${vm}" "" \
+      "phase=post_activation reason=${reason}"
+    return 1
+  fi
+
+  ftctl_state_set "${vm}" \
+    "xcolo_primary_net_filters_activation_mode=qom-set-status" \
+    "xcolo_primary_net_filters_activation_order=redire0,redire1,m0" \
+    "xcolo_primary_net_filters_activated=true" \
+    "xcolo_primary_filter_runtime_status=on"
+  ftctl_log_event "colo" "primary.net_filters.activate" "ok" "${vm}" "" \
+    "source=${source} mode=qom-set-status order=redire0,redire1,m0"
+}
+
 ftctl_xcolo_attach_primary_net_filters() {
   local vm="${1-}"
   local netdev_id attach_mode chardev_ready chardev_reason
@@ -3697,10 +3798,11 @@ ftctl_xcolo_attach_primary_net_filters() {
   if ftctl_xcolo_domain_xml_has_runtime_markers "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" primary; then
     ftctl_xcolo_validate_primary_channel_paths "${vm}" || return 1
     ftctl_xcolo_require_primary_filter_cmdline_ready "${vm}" "pre_migrate_xml_runtime" || return 1
-    ftctl_xcolo_require_primary_filter_qom_ready "${vm}" "pre_migrate_xml_runtime" || return 1
+    ftctl_xcolo_require_primary_filter_qom_ready "${vm}" "pre_migrate_xml_runtime" "off" || return 1
     ftctl_xcolo_observe_primary_filter_chardev_binding "${vm}" || true
     chardev_ready="$(ftctl_state_get "${vm}" "xcolo_primary_filter_chardev_ready" 2>/dev/null || true)"
     attach_mode="cmdline"
+    ftctl_xcolo_activate_primary_net_filters "${vm}" "${attach_mode}" || return 1
     ftctl_xcolo_wait_primary_filter_chardev_binding "${vm}" || {
       chardev_reason="$(ftctl_state_get "${vm}" "xcolo_primary_filter_chardev_reason" 2>/dev/null || true)"
       [[ -n "${chardev_reason}" ]] || chardev_reason="unknown"

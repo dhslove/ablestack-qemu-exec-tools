@@ -563,3 +563,31 @@ but a lower-level signature or reached stage changed, set
     context immediately after `migrate` starts
   - cleanup is required before the next valid retest because row `59`, standby
     VM `115`, and standby volumes `215`/`216` remain active in Cloud DB
+
+### Change For Next Run 2026-06-02-09
+
+- Design:
+  `docs/ftctl/339-ft-xcolo-delayed-primary-filter-activation-design-20260602.md`
+- Implementation intent:
+  - keep primary COLO filter objects in generated startup commandline
+  - change primary startup filter status from `on` to `off`
+  - verify startup QOM status is `off` before activation
+  - after channel validation, block graph attachment, and startup QOM topology
+    validation, enable filters with QMP `qom-set`
+  - activate in order: `redire0 -> redire1 -> m0`
+  - verify post-activation QOM status is `on`
+  - run the strict chardev binding gate after activation, because `status=off`
+    may leave filter chardev frontends closed before activation
+  - record:
+    `xcolo_primary_filter_startup_status=off`,
+    `xcolo_primary_net_filters_activation_mode=qom-set-status`,
+    `xcolo_primary_net_filters_activated=true`,
+    `xcolo_primary_filter_runtime_status=on`
+  - if QEMU logs still show `filter mirror send failed(Operation not
+    permitted)`, classify as
+    `xcolo_runtime_validation_failed:primary_filter_mirror_send_failed`
+- Repetition control:
+  - this run tests delayed activation, not topology placement
+  - if startup status is `off`, activation is `true`, runtime status is `on`,
+    and the same mirror-send failure remains, the next blocker is QEMU COLO
+    runtime/protocol behavior rather than ftctl filter activation ordering
