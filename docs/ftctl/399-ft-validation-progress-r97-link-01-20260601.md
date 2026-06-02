@@ -1114,3 +1114,45 @@ but a lower-level signature or reached stage changed, set
   - if Run 64 again reaches migrate with the same mismatched storage and no
     override, the gate did not fire and must be fixed before further COLO
     protocol testing
+
+### Run 64 Preparation Result 2026-06-02-18
+
+- Source commit:
+  - `976e088d79c9c087ed26be0a747b44fb48e512c9`
+  - `fix: block xcolo storage backend mismatch`
+- GitHub Actions build:
+  - workflow: `FTCTL Branch Development Release`
+  - run: `26809595332`
+  - artifact: `ftctl-branch-rpm-26809595332`
+  - RPM SHA256:
+    `075b955e09e2e296a404389b1bf07c54fafd2c7c9ef301d46bb45c38d4dce80e`
+- Deployed hosts:
+  - `10.10.32.1`
+  - `10.10.32.2`
+  - `10.10.32.3`
+- Installed verification:
+  - package: `ablestack_vm_ftctl-0.8.0-1.noarch`
+  - installed `xcolo.sh` contains:
+    - `ftctl_xcolo_require_storage_symmetry`
+    - `xcolo_storage_compatibility=blocked`
+    - `xcolo_storage_compatibility=experimental`
+    - `last_error=xcolo_storage_backend_mismatch`
+    - `xcolo_repeated_protocol_invalid_message_evidence=premigrate_ready`
+- Cleanup verification after Run 63:
+  - active protection rows for primary VM `54`: `0`
+  - active FTCTL VM details for primary/standby scope: `0`
+  - active standby VM rows: `0`
+  - active standby volumes: `0`
+  - primary VM `i-2-54-VM` is `Running` on host `3`
+  - `query-block-jobs` returns an empty list
+  - `query-migrate` returns an empty object
+  - `ablestack_vm_ftctl status --vm i-2-54-VM --json` returns `not_found`
+  - `ablestack-vm-ftctl.timer` and `ablestack-vm-hangctl.timer` are active
+    on all three 32.x hosts
+- Retest readiness:
+  - the next UI protection attempt is expected to stop before primary shutdown
+    with `xcolo_storage_backend_mismatch` while the current target storage
+    remains local filesystem/qcow2
+  - this is the desired guard behavior for the repeated
+    `Received invalid message 0x0000 length 0x0000` / `Can't receive COLO
+    message: Input/output error` path under mismatched storage layout
