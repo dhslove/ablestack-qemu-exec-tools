@@ -982,3 +982,43 @@ but a lower-level signature or reached stage changed, set
     new socket and firewall markers are healthy, the next step must be an A/B
     test around storage/backend symmetry or QEMU COLO protocol behavior, not
     another filter/chardev readiness patch
+
+### Run 63 Preparation 2026-06-02-16
+
+- Source commit built and deployed:
+  - `89f21d1` (`fix: add xcolo network preflight diagnostics`)
+- GitHub Actions:
+  - workflow: `FTCTL Branch Development Release`
+  - run: `26804550257`
+  - result: success
+- RPM:
+  - `/home/ablecloud/work/ftctl-artifacts-run-26804550257/ftctl-rpm-rocky9.6/ablestack_vm_ftctl-0.8.0-1.noarch.rpm`
+  - SHA256:
+    `3ac9ab1220e05accddf5f87889af327b4fd30908e9e13d270d059d7a0bbc86d7`
+- Deployment:
+  - installed on `10.10.32.1`, `10.10.32.2`, `10.10.32.3`
+  - verified installed script markers:
+    - `vnet_hdr_support=on`
+    - `xcolo_firewall_ready`
+    - `xcolo_socket_${phase}_primary_9998`
+    - `xcolo_repeated_protocol_invalid_message`
+  - `ablestack-vm-ftctl.timer` and `ablestack-vm-hangctl.timer` are active on
+    all three hosts
+- Cleanup:
+  - active protection rows for primary VM `54`: `0`
+  - active FTCTL VM details for `r97-link-01` and standby VMs: `0`
+  - active standby VM rows for `r97-link-01-standby`: `0`
+  - active standby volumes for `r97-link-01-standby`: `0`
+  - removed Run 62 standby image files:
+    - `/var/lib/libvirt/images/311d6375-1f14-4e02-b79f-59a9b58cf746`
+    - `/var/lib/libvirt/images/e552ff63-ec12-481e-b0f7-96fde13249bd`
+  - removed stale target profile/state/debug files for `i-2-54-VM`
+  - primary VM `i-2-54-VM` remains running on `10.10.32.3`
+  - primary QMP `query-block-jobs` returns an empty list
+  - primary QMP `query-migrate` returns an empty object
+  - `ablestack_vm_ftctl status --vm i-2-54-VM --json` returns `not_found`
+- Next Run 63 expected decision point:
+  - if firewall preflight fails, fix the explicit port contract first
+  - if firewall and socket markers are healthy but invalid COLO message repeats,
+    stop treating this as a generic filter ordering issue and proceed to
+    storage/QEMU protocol A/B validation
