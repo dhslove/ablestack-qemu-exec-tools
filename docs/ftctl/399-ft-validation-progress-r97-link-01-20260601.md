@@ -496,3 +496,70 @@ but a lower-level signature or reached stage changed, set
     `xcolo_primary_filter_cmdline_ready=yes`
   - a repeated `Received invalid message 0x0000 length 0x0000` after those
     markers must be treated as a lower-level COLO protocol/runtime blocker
+
+### Run 2026-06-02-09
+
+- Target: `r97-link-01`
+- Primary VM: `i-2-54-VM`
+- Standby VM: `i-2-115-VM`
+- Protection row: `59`
+- Standby volumes:
+  - root: `215`, path `9a5ae55d-1e5b-4a24-9b07-5999e64f8bc5`
+  - data: `216`, path `074908e5-8319-4fd6-95b4-ca9b4f3b3852`
+- Result: failed
+- Last reached stage: runtime validation after primary `migrate`
+- Evidence:
+  - baseline seed completed for both disks:
+    `xcolo_disk_sda_baseline_seeded=true`,
+    `xcolo_disk_sdb_baseline_seeded=true`
+  - generated primary and secondary runtimes started
+  - primary vhost guard passed:
+    `xcolo_primary_netdev_vhost=off`
+  - primary startup commandline topology gate passed:
+    `primary.filter_cmdline_topology result=ok`,
+    `phase=pre_migrate_xml_runtime`, `expected_netdev=hostnet0`
+  - primary QOM topology gate passed:
+    `primary.filter_qom_topology result=ok`
+  - normal network filter attach marker is now:
+    `xcolo_primary_net_filters_attach_mode=cmdline`
+  - pre-migrate evidence passed:
+    `filter_qom=yes`, `filter_cmdline=yes`, `chardev=yes`,
+    `mirror=yes`, `compare=yes`, `compare_local=yes`, `compare_out=yes`
+  - primary `migrate` command returned ok and block handshake completed:
+    `primary.migrate result=ok`, `block_conversion.handshake result=ok`
+- Failure signature:
+  - Cloud/ftctl state:
+    `protection_state=error`, `transport_state=failed`,
+    `last_error=xcolo_runtime_validation_failed:primary_migrate_failed`
+  - runtime validation:
+    `xcolo_primary_migrate_status=failed`,
+    `xcolo_secondary_migrate_status=colo`,
+    `xcolo_primary_colo_mode=none`,
+    `xcolo_secondary_colo_mode=secondary`
+  - primary QEMU log:
+    `filter mirror send failed(Operation not permitted)`,
+    then `Received invalid message 0x0000 length 0x0000`
+  - secondary QEMU log:
+    `Can't receive COLO message: Input/output error`
+  - after recovery, primary `i-2-54-VM` is Running on `10.10.32.3`
+  - standby domain `i-2-115-VM` was destroyed during recovery, but Cloud DB
+    still has standby VM row `115` and volumes `215`/`216` as active
+- Progress judgment:
+  - `repetition_status=repeated_terminal_error_after_startup_topology_passed`
+  - this is no longer a vhost or primary filter attachment problem
+  - Design 338 worked: startup commandline topology, QOM topology, and
+    pre-migrate channel evidence all passed before the same protocol failure
+  - the next improvement must focus on lower-level COLO protocol/runtime
+    behavior, especially why primary emits
+    `filter mirror send failed(Operation not permitted)` before the invalid
+    COLO message
+- Next improvement:
+  - stop iterating on startup filter attachment unless new evidence contradicts
+    Run 59
+  - classify this failure as a COLO runtime/protocol blocker
+  - inspect primary filter-mirror failure conditions and the primary/secondary
+    socket endpoint roles at QEMU runtime, not just through ftctl state
+  - add explicit capture of filter object runtime status and socket errno/log
+    context immediately after `migrate` starts
+  - cleanup is required before the next valid retest because row `59`, standby
+    VM `115`, and standby volumes `215`/`216` remain active in Cloud DB
