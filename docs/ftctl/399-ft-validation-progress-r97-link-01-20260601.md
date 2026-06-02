@@ -591,3 +591,43 @@ but a lower-level signature or reached stage changed, set
   - if startup status is `off`, activation is `true`, runtime status is `on`,
     and the same mirror-send failure remains, the next blocker is QEMU COLO
     runtime/protocol behavior rather than ftctl filter activation ordering
+
+### Build, Deploy, Cleanup 2026-06-02-10
+
+- Source commit for deployed artifact:
+  `cad8d0594b97d534bb54d24dee21515f76896501`
+- GitHub Actions run:
+  `26796801104`
+- Build result: success
+- RPM:
+  `ablestack_vm_ftctl-0.8.0-1.noarch.rpm`
+- RPM SHA256:
+  `c4ebe2509d5f2a7f1ed0e733671a4e9d1e1e12ff76ef9b0f2c5cee5458382424`
+- Deployment:
+  - installed on `10.10.32.1`, `10.10.32.2`, `10.10.32.3`
+  - used `aspkg` through `exec -a rpm` because 32.x masks direct `rpm`
+  - `ablestack-vm-ftctl.timer` and `ablestack-vm-hangctl.timer` are active on
+    all three hosts
+  - installed `xcolo.sh` contains `status=off`,
+    `qom-set-status`, `primary_filter_activation_failed`, and
+    `primary_filter_mirror_send_failed` markers
+- Cleanup:
+  - forced unprotect on `10.10.32.3` removed primary runtime state for
+    `i-2-54-VM`
+  - standby runtime/image leftovers for `i-2-115-VM` and volumes `215`/`216`
+    were removed from `10.10.32.1`
+  - Cloud DB active FT state is clean:
+    `active_protection=0`, `active_protection_volume=0`,
+    `active_ftctl_details=0`, `active_standby_vm=0`,
+    `active_standby_volumes=0`
+  - primary VM `i-2-54-VM` is `Running` on `10.10.32.3`
+  - primary QMP `query-block-jobs` returns an empty list
+  - primary QMP `query-migrate` returns an empty object
+- Next valid test expectation:
+  - generated primary runtime should start filter objects with `status=off`
+  - activation should record
+    `xcolo_primary_net_filters_activation_mode=qom-set-status` and
+    `xcolo_primary_net_filters_activated=true`
+  - if `filter mirror send failed(Operation not permitted)` still appears,
+    the failure should be classified as
+    `xcolo_runtime_validation_failed:primary_filter_mirror_send_failed`
