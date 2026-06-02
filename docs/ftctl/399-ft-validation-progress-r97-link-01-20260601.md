@@ -852,3 +852,44 @@ but a lower-level signature or reached stage changed, set
     validation that Run 61 could not reach
   - if `sdb` seed fails again, it must include retry events or non-empty
     transport diagnostics; otherwise it is a repeated diagnostic gap
+
+### Build, Deploy, Cleanup 2026-06-02-14
+
+- Source commit for deployed artifact:
+  `a527be1c935c017b2dab10e822541ec6d2e522ab`
+- GitHub Actions run:
+  `26800381008`
+- Build result: success
+- RPM:
+  `ablestack_vm_ftctl-0.8.0-1.noarch.rpm`
+- RPM SHA256:
+  `f278253e4937dd88294456e1b2c295fa1043a90940d8955981866360ca42d502`
+- Deployment:
+  - installed on `10.10.32.1`, `10.10.32.2`, `10.10.32.3`
+  - used `aspkg` through `exec -a rpm`
+  - installed scripts contain:
+    `ssh_transport_failed_without_stderr`,
+    `block_conversion.baseline_seed.copy.retry`,
+    `xcolo_baseline_seed_ssh_failed`
+  - `ablestack-vm-ftctl.timer` and `ablestack-vm-hangctl.timer` are active on
+    all three hosts
+- Cleanup:
+  - forced unprotect on `10.10.32.3` returned `status not_found` afterward for
+    `i-2-54-VM`
+  - Cloud DB cleanup marked protection row `61` disabled/removed, standby VM
+    `117` expunging, and standby volumes `219`/`220` expunged
+  - removed Run 61 standby image files from `10.10.32.1`:
+    - `/var/lib/libvirt/images/eb48d5d1-60e3-402f-9db7-877de96511eb`
+    - `/var/lib/libvirt/images/f950ff81-4ce4-4dd5-9f60-7ea280da92fe`
+  - active cleanup counters are all zero:
+    active protection, active ftctl details, active standby VM, active standby
+    volumes
+  - primary VM `i-2-54-VM` is `running` on `10.10.32.3`
+  - primary QMP `query-block-jobs` returns an empty list
+  - primary QMP `query-migrate` returns an empty object
+  - `ablestack_vm_ftctl status --vm i-2-54-VM --json` returns `not_found`
+- Next valid test expectation:
+  - if transient SSH failure occurs during `sdb` baseline seed, retry events
+    and non-empty transport diagnostics must be recorded
+  - if baseline seed passes, the run should proceed to generated runtime
+    filter activation and COLO migration validation
