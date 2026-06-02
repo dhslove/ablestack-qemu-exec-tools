@@ -741,3 +741,46 @@ but a lower-level signature or reached stage changed, set
   - if `xcolo_net_vnet_hdr_support=on` and generated commandline contains
     `vnet_hdr_support`, but the same invalid COLO message remains, the next
     blocker is deeper QEMU COLO protocol/device-model behavior
+
+### Build, Deploy, Cleanup 2026-06-02-13
+
+- Source commit for deployed artifact:
+  `d2739cffb82d8a45c05a19589a06f065b0451a0c`
+- GitHub Actions run:
+  `26798436784`
+- Build result: success
+- RPM:
+  `ablestack_vm_ftctl-0.8.0-1.noarch.rpm`
+- RPM SHA256:
+  `ae35c79d777c32566c9f7a9c6934c68bf18d9ff64b8e782bbcd3ef60c6528265`
+- Deployment:
+  - installed on `10.10.32.1`, `10.10.32.2`, `10.10.32.3`
+  - used `aspkg` through `exec -a rpm`
+  - installed `xcolo.sh` contains:
+    `vnet_hdr_support`,
+    `xcolo_net_vnet_hdr_support`,
+    `xcolo_vnet_hdr_support_missing`
+  - `ablestack-vm-ftctl.timer` and `ablestack-vm-hangctl.timer` are active on
+    all three hosts
+- Cleanup:
+  - forced unprotect on `10.10.32.3` returned ok for `i-2-54-VM`
+  - removed Run 60 standby image files from `10.10.32.1`:
+    - `/var/lib/libvirt/images/44c1e6f2-ddc2-4707-b0b0-c56b90fb0861`
+    - `/var/lib/libvirt/images/346e4dca-6811-401b-996a-cc322db8c2f3`
+  - Cloud DB cleanup marked protection row `60` disabled/removed, standby VM
+    `116` expunging, and standby volumes `217`/`218` expunged
+  - active cleanup counters are all zero:
+    active protection, active protection volume, active ftctl details, active
+    standby VM, active standby volumes
+  - primary VM `i-2-54-VM` is `running` on `10.10.32.3`
+  - primary QMP `query-block-jobs` returns an empty list
+  - primary QMP `query-migrate` returns an empty object
+  - `ablestack_vm_ftctl status --vm i-2-54-VM --json` returns `not_found`,
+    which is the expected clean pre-registration state
+- Next valid test expectation:
+  - new generated primary and secondary commandlines must contain
+    `vnet_hdr_support` because both netdev models are `virtio`
+  - pre-migrate evidence must report `vnet_hdr=on`
+  - if the invalid COLO message repeats with those markers, report it as a
+    deeper QEMU COLO protocol/device-model blocker, not a repeated ftctl
+    topology/timing failure
