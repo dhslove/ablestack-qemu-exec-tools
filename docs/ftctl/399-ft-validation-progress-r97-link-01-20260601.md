@@ -1359,3 +1359,56 @@ but a lower-level signature or reached stage changed, set
     - if Run 66 still fails at baseline seed with unmapped or copy-level RBD
       evidence, stop and reassess whether `qemu-img convert` should target an
       `rbd:` URI instead of a host KRBD device
+
+### Run 66 Retest Readiness 2026-06-03-13
+
+- Source commit:
+  - `441a3be` (`fix: map cloud-managed rbd baseline seed targets`)
+- Build:
+  - GitHub Actions run:
+    `https://github.com/dhslove/ablestack-qemu-exec-tools/actions/runs/26864098471`
+  - result: success
+  - RPM:
+    `/home/ablecloud/work/ftctl-artifacts-run-26864098471/ftctl-branch-rpm-26864098471/ftctl-rpm-rocky9.6/ablestack_vm_ftctl-0.8.0-1.noarch.rpm`
+  - RPM SHA256:
+    `82f8d03a994ec55254b16435c26824c33a01288b0fe1af58d83fb81e2ae27be5`
+- Deployment:
+  - installed to `10.10.32.1`, `10.10.32.2`, and `10.10.32.3`
+  - package check:
+    - `ablestack_vm_ftctl-0.8.0-1.noarch`
+  - installed marker checks passed:
+    - `baseline_rbd_map_failed`
+    - `baseline_rbd_device_missing`
+    - `baseline_rbd_unmap_failed`
+    - `rbd map`
+  - `ablestack-vm-ftctl.timer` and `ablestack-vm-hangctl.timer` are active
+    on all three 32.x hosts
+- Cleanup:
+  - removed Run 65 protection row from active scope
+  - removed FTCTL VM details for `r97-link-01` / `r97-link-01-standby`
+  - expunged standby VM `i-2-121-VM`
+  - expunged standby volumes `227` and `228`
+  - removed standby RBD images:
+    - `0f9bac5b-a44d-4427-a3f7-a5da21348ba4`
+    - `f34b6cdb-d357-4af7-b993-ebcc5b3d8281`
+  - removed FTCTL runtime files for `i-2-54-VM`
+- Final readiness verification:
+  - primary VM DB state:
+    - `i-2-54-VM`, `Running`, host `3`, power state `PowerOn`
+  - active protection rows for primary VM `54`: `0`
+  - active FTCTL details for primary/standby scope: `0`
+  - active standby VM rows: `0`
+  - active standby volumes: `0`
+  - host runtime:
+    - `i-2-54-VM` is running on `10.10.32.3`
+    - `query-block-jobs` is empty
+    - `query-migrate` is empty
+    - `ablestack_vm_ftctl status --vm i-2-54-VM --json` returns `not_found`
+- Note:
+  - during cleanup, Cloud DB reported the primary as `Stopped` while libvirt
+    still had `i-2-54-VM` running on host `3`
+  - because QMP block jobs and migrate state were clean, the DB row was restored
+    to match actual Cloud-managed runtime state:
+    - `state=Running`
+    - `host_id=3`
+    - `power_state=PowerOn`
