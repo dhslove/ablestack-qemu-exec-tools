@@ -1412,3 +1412,67 @@ but a lower-level signature or reached stage changed, set
     - `state=Running`
     - `host_id=3`
     - `power_state=PowerOn`
+
+### Run 66 Result 2026-06-03-22
+
+- User action:
+  - FT protection was started again for `r97-link-01` / `i-2-54-VM`
+  - compatible `block/raw -> block/raw` storage was selected
+- Evidence:
+  - monitor log:
+    `/home/ablecloud/work/ft-run66-monitor-20260603-225707.log`
+  - final evidence:
+    `/home/ablecloud/work/ft-run66-final-20260603-225828`
+  - extra evidence:
+    `/home/ablecloud/work/ft-run66-extra-20260603-230009`
+- Final state:
+  - protection row: `66`
+  - primary VM: `54` / `i-2-54-VM`
+  - standby VM: `122` / `i-2-122-VM`
+  - `protection_state=error`
+  - `transport_state=failed`
+  - `active_side=primary`
+  - Cloud DB `last_error`:
+    - `xcolo_block_secondary_create_failed`
+  - UI/API visible error:
+    - `Unable to register FTCTL protection for VM d08503ff-ea56-4e35-bdf8-2f0ebf81382c: timeout`
+- Progress confirmed:
+  - the Run 65 baseline seed failure was fixed
+  - status now includes:
+    - `xcolo_disk_sda_baseline_seeded=true`
+    - `xcolo_disk_sdb_baseline_seeded=true`
+  - storage compatibility remained valid:
+    - `xcolo_storage_symmetry=ok`
+    - `xcolo_storage_primary_layouts=sda:block/raw,sdb:block/raw`
+    - `xcolo_storage_secondary_layouts=sda:block/raw,sdb:block/raw`
+- New failure stage:
+  - baseline seed completed for both disks
+  - generated standby XML pointed secondary disks at:
+    - `/dev/rbd/rbd/cb3f6f83-fb74-46f4-9055-6cdc200a07fa`
+    - `/dev/rbd/rbd/5b727ed2-b320-487d-ae1d-d4ce9fbd8544`
+  - secondary libvirt/QEMU start failed
+  - secondary host libvirt log reported:
+    - `Cannot access storage file '/dev/rbd/rbd/5b727ed2-b320-487d-ae1d-d4ce9fbd8544': No such file or directory`
+- Current root cause:
+  - baseline seed now maps cloud-managed secondary RBD temporarily and unmaps
+    it after copy
+  - however, the subsequent transient secondary runtime still needs the same
+    RBD devices mapped while libvirt starts and while the standby domain runs
+  - preserving `/dev/rbd/rbd/<image>` in XML is not sufficient unless the
+    expected host-side KRBD path exists at create time
+- Required next design:
+  - add a cloud-managed secondary runtime RBD map lifecycle
+  - before `virsh create` on the secondary host, map every secondary RBD target
+    in the generated XML
+  - resolve the real block device from the expected symlink, `rbd map` output,
+    or `rbd device list`
+  - either ensure the generated XML points to an existing mapped block device
+    or rewrite the runtime XML source to the resolved `/dev/rbdN` device for
+    the transient domain
+  - keep the mappings until protection cleanup/error rollback destroys the
+    transient secondary runtime, then unmap only those devices mapped by FTCTL
+- Repetition control:
+  - this is not a repeat of Run 65
+  - Run 65 stopped at baseline seed copy
+  - Run 66 passed baseline seed for both disks and moved to secondary runtime
+    creation
