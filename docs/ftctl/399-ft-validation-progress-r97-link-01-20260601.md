@@ -1975,3 +1975,73 @@ but a lower-level signature or reached stage changed, set
     implementation is incomplete
   - no further checkpoint/firewall/storage/baseline precondition cycling is
     allowed unless the new phase split shows one of those assumptions regressed
+
+### Run 70 Retest Readiness 2026-06-04
+
+- Source commit:
+  - `c0a054f` (`fix: defer xcolo filter activation after migrate`)
+- Local verification:
+  - `bash -n lib/ftctl/xcolo.sh`: pass
+  - `bash -n bin/ablestack_vm_ftctl_selftest.sh`: pass
+  - `git diff --check`: pass
+  - targeted XCOLO selftests: pass
+    - checkpoint-before-migrate ordering
+    - multi-disk export-before-migrate ordering
+    - primary filter binding deferred to runtime validation
+    - repeated invalid COLO protocol classifier
+- GitHub Actions build:
+  - run: `26900041917`
+  - result: success
+  - RPM: `ablestack_vm_ftctl-0.8.0-1.noarch.rpm`
+  - SHA256:
+    `c4f4c99161237d11f0fb94347363f389dce15bc8ba45e498f7d8a5ea27815ecd`
+- RPM marker verification:
+  - extracted RPM includes:
+    - `xcolo.post_migrate_pre_activation_gate`
+    - `xcolo_filter_activation_broke_colo_stream`
+    - `xcolo_protocol_failure_phase`
+    - `xcolo_primary_filter_status_pre_migrate=off`
+- Deployment:
+  - RPM deployed to:
+    - `10.10.32.1`
+    - `10.10.32.2`
+    - `10.10.32.3`
+  - installed host script markers verified on all three hosts:
+    - `xcolo.post_migrate_pre_activation_gate`
+    - `xcolo_filter_activation_broke_colo_stream`
+    - `xcolo_protocol_failure_phase`
+  - host timers verified active on all three hosts:
+    - `ablestack-vm-ftctl.timer`
+    - `ablestack-vm-hangctl.timer`
+- Run 69 cleanup:
+  - active protection row `69`: removed
+  - standby VM `i-2-125-VM`: destroyed/undefined on hosts and marked
+    `Expunging`
+  - standby volumes `235`, `236`: marked `Expunged`
+  - standby RBD images removed:
+    - `f225a7ce-8975-44d2-9c73-fefc9fc30701`
+    - `45ed56b2-aaa0-4f17-9cf3-d7ac62ccb5b4`
+  - FTCTL runtime/profile leftovers for `i-2-54-VM` and `i-2-125-VM`:
+    removed
+- Final readiness:
+  - primary VM `54` / `i-2-54-VM`:
+    - DB state: `Running`
+    - host id: `3`
+    - power state: `PowerOn`
+    - libvirt state on `10.10.32.3`: `running`
+  - active protection rows for primary VM `54`: `0`
+  - active `ftctl.*` details for VM `54`: `0`
+  - active `r97-link-01-standby%` VM rows: `0`
+  - active `r97-link-01-standby%` volume rows: `0`
+  - primary QMP `query-block-jobs`: empty
+  - primary QMP `query-migrate`: empty
+  - `ablestack_vm_ftctl status --vm i-2-54-VM --json`:
+    `not_found`
+- Next retest expectation:
+  - if invalid COLO protocol repeats, the result must include
+    `xcolo_protocol_failure_phase`
+  - acceptable phase values for the next diagnosis:
+    - `pre_filter_activation`
+    - `post_filter_activation`
+    - `role_transition_pre_activation_timeout`
+    - `filter_activation_command`
