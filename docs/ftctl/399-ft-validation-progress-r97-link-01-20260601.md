@@ -1726,3 +1726,57 @@ but a lower-level signature or reached stage changed, set
     - `query-block-jobs` is empty
     - `query-migrate` is empty
     - `ablestack_vm_ftctl status --vm i-2-54-VM --json` returned `not_found`
+
+### Run 68 Result 2026-06-04-01
+
+- User action:
+  - FT protection was started again for `r97-link-01` / `i-2-54-VM`
+  - compatible shared block/raw storage was selected
+- Evidence:
+  - monitor log:
+    `/home/ablecloud/work/ft-run68-monitor-20260604-005907.log`
+  - final evidence:
+    `/home/ablecloud/work/ft-run68-final-20260604-010332`
+- Final state:
+  - protection row: `68`
+  - standby VM: `124` / `i-2-124-VM`
+  - `protection_state=error`
+  - `transport_state=failed`
+  - `active_side=primary`
+  - `last_error=xcolo_repeated_protocol_invalid_message`
+- Code improvement confirmed:
+  - the new post-handshake gate was recorded:
+    - `xcolo_handshake_command_state=accepted`
+    - `xcolo_steady_state_gate=failed`
+  - the repeated invalid-message subreason was recorded:
+    - `xcolo_protocol_invalid_message_reason=primary_role_not_entered_after_migrate`
+  - therefore Run 68 confirmed the new classifier and did not regress the
+    recovery path
+- Runtime evidence:
+  - primary migration state before recovery:
+    - `xcolo_primary_migrate_status=failed`
+    - `xcolo_primary_colo_mode=none`
+  - secondary migration state:
+    - `xcolo_secondary_migrate_status=colo`
+    - `xcolo_secondary_colo_mode=secondary`
+  - primary QEMU log:
+    - `Received invalid message 0x0000 length 0x0000`
+  - secondary QEMU log:
+    - `Can't receive COLO message: Input/output error`
+  - qemu FTCTL recovery restored the primary domain:
+    - primary VM DB state: `Running`, host `3`, power state `PowerOn`
+    - primary libvirt domain `i-2-54-VM` running on `10.10.32.3`
+- Repetition control:
+  - this is the same protocol-role blocker predicted by design 344
+  - no new evidence was produced that reopens storage selection, firewall,
+    socket, baseline seed, secondary RBD mapping, or generic filter attachment
+    as the active hypothesis
+  - next improvement must target QEMU COLO role transition after primary
+    migrate, not another generic pre-migrate readiness iteration
+- Cleanup note:
+  - Run 68 garbage remains at this point:
+    - active protection row `68`
+    - standby VM `i-2-124-VM`
+    - standby volumes `233`, `234`
+    - standby RBD images
+  - cleanup is required before the next retest
