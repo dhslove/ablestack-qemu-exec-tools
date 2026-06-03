@@ -171,3 +171,55 @@ source. If this check fails, record:
 The next expected Run 65 result is that cloud-managed compatible RBD storage
 passes generated XML preparation even when secondary `/dev/rbd/...` paths are
 not mapped before the transient standby runtime starts.
+
+## Cloud-Managed RBD Baseline Seed Mapping
+
+Run 65 confirmed that generated XML preparation passed, but baseline seed copy
+failed at `sda`:
+
+- `last_error=xcolo_baseline_seed_failed:sda`
+- `block_conversion.baseline_seed.nbd_start` succeeded
+- `block_conversion.baseline_seed.copy.final_fail` failed with `rc=95`
+
+The secondary RBD image existed in the pool, but the secondary host still had no
+host-side KRBD path:
+
+```text
+/dev/rbd/rbd/<secondary-image>
+```
+
+Cloud creates and owns the volume lifecycle, but qemu FTCTL performs the
+baseline seed copy before libvirt starts the transient standby runtime. At that
+moment libvirt has not mapped the secondary RBD device yet.
+
+Therefore, during baseline seed copy only, qemu FTCTL must prepare a temporary
+host-side KRBD mapping for cloud-managed RBD targets.
+
+Required behavior:
+
+1. Detect cloud-managed RBD seed targets:
+   - `FTCTL_PROFILE_PROVISIONING_BACKEND=cloud-managed`
+   - secondary destination matches `/dev/rbd/<pool>/<image>`
+   - target layout is `block/raw`
+2. On the secondary host, before `qemu-img convert`, run:
+   - `rbd map <pool>/<image>`
+3. Resolve the actual mapped block device:
+   - prefer the expected `/dev/rbd/<pool>/<image>`
+   - otherwise inspect `rbd device list` for the mapped image
+4. Use the resolved block device only as the seed-copy destination.
+5. Preserve the original `/dev/rbd/<pool>/<image>` in generated XML and runtime
+   state, because libvirt should still open the Cloud-managed volume normally.
+6. Always unmap the temporary device after copy success or failure.
+
+Failure reporting must be specific:
+
+- `xcolo_baseline_seed_rbd_map_failed:<target>`
+- `xcolo_baseline_seed_rbd_device_missing:<target>`
+- `xcolo_baseline_seed_copy_failed:<target>`
+- `xcolo_baseline_seed_rbd_unmap_failed:<target>`
+
+Remote stdout/stderr must be captured into the event details in bounded form so
+the next failure does not appear as `error=""`.
+
+The next expected Run 66 result is that baseline seed passes both `sda` and
+`sdb`, then proceeds to standby/primary generated runtime creation.

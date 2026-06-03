@@ -1760,6 +1760,70 @@ selftest_case_xcolo_baseline_seed_uses_primary_nbd_before_runtime_graph() (
     "baseline seed state"
 )
 
+selftest_case_xcolo_baseline_seed_maps_cloud_managed_rbd() (
+  selftest_reset_env
+  selftest_info "x-colo baseline seed maps cloud-managed secondary RBD targets"
+
+  local call_log="${SELFTEST_ROOT}/xcolo-baseline-seed-cloud-rbd.log"
+  FTCTL_PROFILE_SECONDARY_URI="qemu+ssh://peer/system"
+  FTCTL_PROFILE_FENCING_SSH_USER="root"
+  FTCTL_PROFILE_PROVISIONING_BACKEND="cloud-managed"
+  FTCTL_XCOLO_QMP_TIMEOUT_SEC="3"
+
+  # shellcheck disable=SC2317
+  ftctl_xcolo_primary_connect_host() {
+    printf '%s\n' "10.0.0.1"
+  }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_remote_target_host_user() {
+    printf -v "$1" '%s' "10.0.0.2"
+    printf -v "$2" '%s' "root"
+  }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_krbd_map_local() {
+    printf 'MAP:%s\n' "$1" >> "${call_log}"
+  }
+  # shellcheck disable=SC2317
+  ftctl_cmd_run() {
+    local _timeout="$1" out_var="$2" err_var="$3" rc_var="$4" pid_file="" arg prev=""
+    shift 4
+    [[ "${1-}" == "--" ]] && shift
+    printf 'LOCAL:%s\n' "$*" >> "${call_log}"
+    for arg in "$@"; do
+      if [[ "${prev}" == "--pid-file" ]]; then
+        pid_file="${arg}"
+        break
+      fi
+      prev="${arg}"
+    done
+    [[ -n "${pid_file}" ]] && printf '999999\n' > "${pid_file}"
+    printf -v "${out_var}" '%s' ""
+    printf -v "${err_var}" '%s' ""
+    printf -v "${rc_var}" '%s' "0"
+  }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_remote_exec() {
+    local out_var="$3" err_var="$4" rc_var="$5" remote_cmd="$6"
+    printf 'REMOTE:%s\n' "${remote_cmd}" >> "${call_log}"
+    printf -v "${out_var}" '%s' "format=raw virtual=12345 actual=4096"
+    printf -v "${err_var}" '%s' ""
+    printf -v "${rc_var}" '%s' "0"
+  }
+
+  ftctl_xcolo_seed_secondary_baseline_disk \
+    "primary-vm" "sda" "/dev/rbd/rbd/root" "raw" "/dev/rbd/rbd/secondary-root" "12345"
+
+  selftest_assert_file_contains "${call_log}" "provisioning_backend=cloud-managed"
+  selftest_assert_file_contains "${call_log}" "rbd map"
+  selftest_assert_file_contains "${call_log}" "rbd/secondary-root"
+  selftest_assert_file_contains "${call_log}" "baseline_rbd_map_failed"
+  selftest_assert_file_contains "${call_log}" "baseline_rbd_device_missing"
+  selftest_assert_file_contains "${call_log}" "rbd unmap"
+  selftest_assert_file_contains "${call_log}" 'qemu-img convert -p -f "${source_format}" -O "${target_format}" "${src_uri}" "${seed_dest}"'
+  selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_disk_sda_baseline_seeded")" "true" \
+    "cloud-managed RBD baseline seed state"
+)
+
 selftest_case_xcolo_baseline_seed_retries_ssh_transport_failure() (
   selftest_reset_env
   selftest_info "x-colo baseline seed retries transient ssh transport failures"
@@ -3744,6 +3808,7 @@ selftest_main() {
   selftest_case_xcolo_primary_filter_qmp_order_matches_qemu_doc
   selftest_case_xcolo_primary_netdev_vhost_guard
   selftest_case_xcolo_baseline_seed_uses_primary_nbd_before_runtime_graph
+  selftest_case_xcolo_baseline_seed_maps_cloud_managed_rbd
   selftest_case_xcolo_baseline_seed_retries_ssh_transport_failure
   selftest_case_xcolo_runtime_validation_blocks_false_positive
   selftest_case_xcolo_runtime_validation_reports_primary_migrate_failure

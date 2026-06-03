@@ -1322,3 +1322,40 @@ but a lower-level signature or reached stage changed, set
   - this is not a repeat of Run 64
   - Run 64 stopped at generated XML preparation
   - Run 65 reached baseline seed copy and rolled back primary cleanly
+
+### Run 66 Preparation 2026-06-03-13
+
+- Design update:
+  - cloud-managed RBD baseline seed must not assume that the secondary
+    `/dev/rbd/<pool>/<image>` path is already mapped before libvirt starts the
+    transient standby runtime
+  - qemu FTCTL should temporarily map the secondary RBD image only for the
+    seed-copy operation, copy into the resolved block device, then unmap it
+    again
+  - generated XML and runtime state must still preserve the Cloud-owned
+    `/dev/rbd/<pool>/<image>` target path
+- Code update:
+  - `ftctl_xcolo_seed_secondary_baseline_disk` now detects cloud-managed
+    `/dev/rbd/...` seed targets
+  - the secondary host command now runs `rbd map <pool>/<image>` when the
+    expected block device is absent
+  - the mapped device is resolved from the expected path, map output, or
+    `rbd device list --format json`
+  - failure states are now specific:
+    - `xcolo_baseline_seed_rbd_map_failed:<target>`
+    - `xcolo_baseline_seed_rbd_device_missing:<target>`
+    - `xcolo_baseline_seed_rbd_unmap_failed:<target>`
+- Validation:
+  - `bash -n` passed for `lib/ftctl/xcolo.sh`,
+    `lib/ftctl/standby.sh`, and `bin/ablestack_vm_ftctl_selftest.sh`
+  - `git diff --check` passed
+  - targeted selftests passed:
+    - `selftest_case_xcolo_baseline_seed_maps_cloud_managed_rbd`
+    - `selftest_case_xcolo_cloud_managed_rbd_metadata_inference`
+- Repetition control:
+  - this is not a repeat of Run 65 yet because the code now addresses the
+    exact unmapped secondary RBD condition observed in Run 65
+  - next repeated evidence threshold:
+    - if Run 66 still fails at baseline seed with unmapped or copy-level RBD
+      evidence, stop and reassess whether `qemu-img convert` should target an
+      `rbd:` URI instead of a host KRBD device

@@ -3781,6 +3781,7 @@ ftctl_xcolo_seed_secondary_baseline_disk() {
   local suffix primary_host port export_name pid_file src_uri target_format
   local remote_host="" remote_user="" remote_cmd="" out="" err="" rc=0
   local q_src_uri q_dest q_target_format q_source_format q_expected_size
+  local q_target q_cloud_managed
   local timeout_sec saved_timeout firewall_added="0" bind_host
   local attempts attempt detail retry_delay last_failure_class
 
@@ -3838,19 +3839,75 @@ ftctl_xcolo_seed_secondary_baseline_disk() {
   printf -v q_target_format '%q' "${target_format}"
   printf -v q_source_format '%q' "raw"
   printf -v q_expected_size '%q' "${expected_size}"
+  printf -v q_target '%q' "${target}"
+  printf -v q_cloud_managed '%q' "${FTCTL_PROFILE_PROVISIONING_BACKEND:-}"
   remote_cmd="$(cat <<EOF
 set -euo pipefail
 src_uri=${q_src_uri}
 dest=${q_dest}
+target=${q_target}
 target_format=${q_target_format}
 source_format=${q_source_format}
 expected_size=${q_expected_size}
-if [[ ! -e "\${dest}" ]]; then
-  echo "baseline_target_missing:\${dest}" >&2
+provisioning_backend=${q_cloud_managed}
+seed_dest="\${dest}"
+mapped_device=""
+mapped_by_ftctl=0
+if [[ "\${provisioning_backend}" == "cloud-managed" && "\${dest}" == /dev/rbd/* ]]; then
+  rest="\${dest#/dev/rbd/}"
+  pool="\${rest%%/*}"
+  image="\${rest#*/}"
+  if [[ -z "\${pool}" || -z "\${image}" || "\${pool}" == "\${image}" ]]; then
+    echo "baseline_rbd_path_invalid:\${target}:\${dest}" >&2
+    exit 97
+  fi
+  if [[ ! -b "\${dest}" ]]; then
+    rbd_ref="\${pool}/\${image}"
+    map_out="\$(rbd map "\${rbd_ref}" 2>&1)" || {
+      map_rc="\$?"
+      echo "baseline_rbd_map_failed:\${target}:\${rbd_ref}:rc=\${map_rc}:\${map_out}" >&2
+      exit 97
+    }
+    mapped_by_ftctl=1
+    mapped_device="\$(printf '%s\n' "\${map_out}" | tail -n1)"
+    if [[ -b "\${dest}" ]]; then
+      seed_dest="\${dest}"
+      mapped_device="\${dest}"
+    elif [[ -n "\${mapped_device}" && -b "\${mapped_device}" ]]; then
+      seed_dest="\${mapped_device}"
+    else
+      mapped_device="\$(rbd device list --format json 2>/dev/null | python3 -c 'import json,sys; pool=sys.argv[1]; image=sys.argv[2]; data=json.load(sys.stdin); print(next((str(item.get("device","")) for item in data if str(item.get("pool","")) == pool and str(item.get("name","")) == image), ""))' "\${pool}" "\${image}")"
+      if [[ -n "\${mapped_device}" && -b "\${mapped_device}" ]]; then
+        seed_dest="\${mapped_device}"
+      fi
+    fi
+  fi
+  if [[ ! -b "\${seed_dest}" ]]; then
+    echo "baseline_rbd_device_missing:\${target}:\${dest}:mapped=\${mapped_device}" >&2
+    if [[ "\${mapped_by_ftctl}" == "1" && -n "\${mapped_device}" ]]; then
+      rbd unmap "\${mapped_device}" >/dev/null 2>&1 || true
+    fi
+    exit 98
+  fi
+  if [[ "\${mapped_by_ftctl}" == "1" && -n "\${mapped_device}" ]]; then
+    trap 'rbd unmap "\${mapped_device}" >/dev/null 2>&1 || true' EXIT
+  fi
+elif [[ ! -e "\${dest}" ]]; then
+  echo "baseline_target_missing:\${target}:\${dest}" >&2
   exit 95
 fi
 if [[ "\${dest}" == /dev/* ]]; then
-  qemu-img convert -p -f "\${source_format}" -O "\${target_format}" "\${src_uri}" "\${dest}"
+  qemu-img convert -p -f "\${source_format}" -O "\${target_format}" "\${src_uri}" "\${seed_dest}"
+  info="\$(qemu-img info --force-share --output=json "\${seed_dest}" | python3 -c 'import json,sys; d=json.load(sys.stdin); print("format=%s virtual=%s actual=%s" % (d.get("format",""), d.get("virtual-size",""), d.get("actual-size","")))' )"
+  if [[ "\${mapped_by_ftctl}" == "1" && -n "\${mapped_device}" ]]; then
+    trap - EXIT
+    rbd unmap "\${mapped_device}" >/dev/null 2>&1 || {
+      unmap_rc="\$?"
+      echo "baseline_rbd_unmap_failed:\${target}:\${mapped_device}:rc=\${unmap_rc}" >&2
+      exit 99
+    }
+  fi
+  echo "\${info}"
 else
   mkdir -p "\$(dirname "\${dest}")"
   tmp="\${dest}.ftctl-seed.\$\$"
@@ -3865,8 +3922,8 @@ else
     fi
   fi
   mv -f -- "\${tmp}" "\${dest}"
+  qemu-img info --force-share --output=json "\${dest}" | python3 -c 'import json,sys; d=json.load(sys.stdin); print("format=%s virtual=%s actual=%s" % (d.get("format",""), d.get("virtual-size",""), d.get("actual-size","")))'
 fi
-qemu-img info --force-share --output=json "\${dest}" | python3 -c 'import json,sys; d=json.load(sys.stdin); print("format=%s virtual=%s actual=%s" % (d.get("format",""), d.get("virtual-size",""), d.get("actual-size","")))'
 EOF
 )"
 
@@ -3895,6 +3952,20 @@ EOF
       last_failure_class="size_mismatch"
       break
     fi
+    case "${detail}" in
+      baseline_rbd_map_failed:*)
+        last_failure_class="rbd_map"
+        break
+        ;;
+      baseline_rbd_device_missing:*)
+        last_failure_class="rbd_device_missing"
+        break
+        ;;
+      baseline_rbd_unmap_failed:*)
+        last_failure_class="rbd_unmap"
+        break
+        ;;
+    esac
     if ftctl_xcolo_baseline_seed_is_ssh_failure "${rc}" "${detail}"; then
       last_failure_class="ssh"
       ftctl_log_event "colo" "block_conversion.baseline_seed.copy.ssh_fail" "fail" "${vm}" "${rc}" \
@@ -3930,6 +4001,15 @@ EOF
         ;;
       size_mismatch)
         ftctl_state_set "${vm}" "last_error=xcolo_baseline_seed_size_mismatch:${target}"
+        ;;
+      rbd_map)
+        ftctl_state_set "${vm}" "last_error=xcolo_baseline_seed_rbd_map_failed:${target}"
+        ;;
+      rbd_device_missing)
+        ftctl_state_set "${vm}" "last_error=xcolo_baseline_seed_rbd_device_missing:${target}"
+        ;;
+      rbd_unmap)
+        ftctl_state_set "${vm}" "last_error=xcolo_baseline_seed_rbd_unmap_failed:${target}"
         ;;
       *)
         ftctl_state_set "${vm}" "last_error=xcolo_baseline_seed_copy_failed:${target}"
