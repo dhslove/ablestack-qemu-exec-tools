@@ -1569,3 +1569,61 @@ but a lower-level signature or reached stage changed, set
     runtime path that was a directory rather than a file
   - retry used `rm -rf` for the target-specific runtime path and completed DB
     cleanup plus timer restart
+
+### Run 67 Result 2026-06-03-23
+
+- User action:
+  - FT protection was started again for `r97-link-01` / `i-2-54-VM`
+  - compatible `block/raw -> block/raw` storage was selected
+- Evidence:
+  - monitor log:
+    `/home/ablecloud/work/ft-run67-monitor-20260603-234708.log`
+  - final evidence:
+    `/home/ablecloud/work/ft-run67-final-20260603-235329`
+- Final state:
+  - protection row: `67`
+  - standby VM: `123` / `i-2-123-VM`
+  - `protection_state=error`
+  - `transport_state=failed`
+  - `active_side=primary`
+  - `last_error=xcolo_repeated_protocol_invalid_message`
+- Progress confirmed:
+  - Run 66 `xcolo_block_secondary_create_failed` was fixed
+  - both baseline seeds completed:
+    - `xcolo_disk_sda_baseline_seeded=true`
+    - `xcolo_disk_sdb_baseline_seeded=true`
+  - secondary runtime RBD mapping completed:
+    - `xcolo_secondary_runtime_rbd_prepared=true`
+    - `xcolo_secondary_runtime_rbd_sda=/dev/rbd/rbd/b96309d5-b10d-4ddd-aa9a-2c54a533768c|/dev/rbd/rbd/b96309d5-b10d-4ddd-aa9a-2c54a533768c|1`
+    - `xcolo_secondary_runtime_rbd_sdb=/dev/rbd/rbd/3d72840a-7a2f-41c7-8cbb-5e53374e4316|/dev/rbd/rbd/3d72840a-7a2f-41c7-8cbb-5e53374e4316|1`
+  - secondary domain reached `standby_state=running`
+  - primary migration and block conversion handshake reached:
+    - `primary.migrate=ok`
+    - `block_conversion.handshake=ok`
+  - secondary block graph was present for both disks:
+    - `xcolo_secondary_block_graph_ready=yes`
+  - socket and firewall checks were not the immediate cause:
+    - `xcolo_firewall_ready=yes`
+    - runtime/failure snapshots showed primary 9003/9004 listening and
+      secondary 9003/9004 established
+- Failure evidence:
+  - `conversion_stage=runtime_validation_failed`
+  - `xcolo_repeated_protocol_invalid_message=yes`
+  - primary QEMU/libvirt log:
+    - `Received invalid message 0x0000 length 0x0000`
+  - secondary QEMU/libvirt log:
+    - `Can't receive COLO message: Input/output error`
+  - runtime validation state:
+    - `xcolo_primary_status=paused`
+    - `xcolo_secondary_status=running`
+    - `xcolo_primary_migrate_status=failed`
+    - `xcolo_secondary_migrate_status=colo`
+    - `xcolo_primary_colo_mode=none`
+    - `xcolo_secondary_colo_mode=secondary`
+- Repetition control:
+  - this is a repeat of the known COLO protocol invalid-message class, not a
+    repeat of Run 66 storage/runtime RBD failure
+  - the latest code change did improve the run because it advanced from
+    secondary create failure to runtime validation failure after handshake
+  - the next design must focus on COLO protocol channel sequencing and filter
+    activation timing, not storage type selection or firewall openness
