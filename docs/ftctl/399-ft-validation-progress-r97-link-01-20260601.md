@@ -1813,3 +1813,73 @@ but a lower-level signature or reached stage changed, set
     eliminated as the active cause
   - at that point the next target must be QEMU COLO role-transition timing,
     not storage/firewall/baseline/filter-readiness repetition
+
+### Run 69 Retest Readiness 2026-06-04
+
+- Source commit:
+  - `f8be76c` (`fix: gate xcolo migrate on checkpoint delay`)
+- Local verification:
+  - `bash -n lib/ftctl/xcolo.sh`: pass
+  - `bash -n bin/ablestack_vm_ftctl_selftest.sh`: pass
+  - targeted XCOLO selftests: pass
+    - checkpoint-before-migrate handshake ordering
+    - multi-disk export-before-migrate ordering
+    - primary filter binding runtime validation
+    - repeated invalid COLO protocol classifier
+- GitHub Actions build:
+  - run: `26898235513`
+  - result: success
+  - RPM: `ablestack_vm_ftctl-0.8.0-1.noarch.rpm`
+  - SHA256:
+    `070ca9f884d2482a0f59399f21477bdc61c99f94bb60f98b511ec3285a18c773`
+- RPM marker verification:
+  - extracted RPM includes:
+    - `primary.migrate_set_parameters.pre_migrate`
+    - `xcolo_primary_checkpoint_delay_ready`
+    - `query-migrate-parameters`
+- Deployment:
+  - RPM deployed to:
+    - `10.10.32.1`
+    - `10.10.32.2`
+    - `10.10.32.3`
+  - installed package on each host:
+    - `ablestack_vm_ftctl-0.8.0-1.noarch`
+  - installed host script markers verified on all three hosts:
+    - `primary.migrate_set_parameters.pre_migrate`
+    - `xcolo_primary_checkpoint_delay_ready`
+    - `query-migrate-parameters`
+  - host timers verified active on all three hosts:
+    - `ablestack-vm-ftctl.timer`
+    - `ablestack-vm-hangctl.timer`
+- Run 68 cleanup:
+  - active protection row `68`: removed
+  - standby VM `i-2-124-VM`: destroyed/undefined on hosts and marked
+    `Expunging`
+  - standby volumes `233`, `234`: marked `Expunged`
+  - standby RBD images removed:
+    - `157cd09b-c0ee-4cf5-9fd2-d7344fb6e6c2`
+    - `be68efc6-be51-4309-8de4-84b3dffe3539`
+  - FTCTL runtime/profile leftovers for `i-2-54-VM` and `i-2-124-VM`:
+    removed
+- Final readiness:
+  - primary VM `54` / `i-2-54-VM`:
+    - DB state: `Running`
+    - host id: `3`
+    - power state: `PowerOn`
+    - libvirt state on `10.10.32.3`: `running`
+  - active protection rows for primary VM `54`: `0`
+  - active `ftctl.*` details for VM `54`: `0`
+  - active `r97-link-01-standby%` VM rows: `0`
+  - active `r97-link-01-standby%` volume rows: `0`
+  - primary QMP `query-block-jobs`: empty
+  - primary QMP `query-migrate`: empty
+  - `ablestack_vm_ftctl status --vm i-2-54-VM --json`:
+    `not_found`
+- Next retest expectation:
+  - the next run must show either:
+    - pre-migrate checkpoint gate failure before primary migrate, or
+    - `xcolo_primary_checkpoint_delay_ready=yes` before any repeated
+      `xcolo_repeated_protocol_invalid_message`
+  - if the same protocol invalid-message failure repeats with checkpoint ready,
+    checkpoint setup is eliminated and the next design target becomes QEMU COLO
+    role-transition timing/filter activation around migration.
