@@ -1251,12 +1251,12 @@ selftest_case_xcolo_scsi_root_replace_avoids_lun_collision() (
   selftest_assert_file_contains "${call_log}" "primary.device_add_colo_root"
 )
 
-selftest_case_xcolo_block_handshake_sets_checkpoint_after_migrate() (
+selftest_case_xcolo_block_handshake_sets_checkpoint_before_migrate() (
   selftest_reset_env
-  selftest_info "x-colo block handshake defers checkpoint delay and primary cont until after startup validation"
+  selftest_info "x-colo block handshake sets checkpoint delay before primary migrate"
 
   local call_log="${SELFTEST_ROOT}/xcolo-block-handshake-order.log"
-  local filter_line migrate_line
+  local filter_line checkpoint_line migrate_line
   FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
   FTCTL_PROFILE_SECONDARY_URI="qemu+ssh://peer/system"
   FTCTL_PROFILE_XCOLO_NBD_ENDPOINT="tcp:10.0.0.2:10809"
@@ -1275,13 +1275,28 @@ selftest_case_xcolo_block_handshake_sets_checkpoint_after_migrate() (
     printf -v "$4" '%s' "yes"
     return 0
   }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_qmp() {
+    local _uri="$1" _vm="$2" payload="$3" out_var="$4" rc_var="$5"
+    : "${_uri}${_vm}"
+    if [[ "${payload}" == *"query-migrate-parameters"* ]]; then
+      printf -v "${out_var}" '%s' '{"return":{"x-checkpoint-delay":2000}}'
+    elif [[ "${payload}" == *"query-migrate-capabilities"* ]]; then
+      printf -v "${out_var}" '%s' '{"return":[{"capability":"return-path","state":true},{"capability":"x-colo","state":true}]}'
+    else
+      printf -v "${out_var}" '%s' '{"return":{}}'
+    fi
+    printf -v "${rc_var}" '%s' "0"
+  }
 
   ftctl_xcolo_execute_handshake_with_nodes "primary-vm" "standby-vm" "parent0"
 
   selftest_assert_file_contains "${call_log}" "primary.stop_before_filter_attach"
+  selftest_assert_file_contains "${call_log}" "primary.migrate_set_parameters.pre_migrate"
   selftest_assert_file_contains "${call_log}" "primary.migrate"
   selftest_assert_file_not_contains "${call_log}" "primary.cont_before_migrate"
-  selftest_assert_file_not_contains "${call_log}" "primary.migrate_set_parameters"
+  selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_primary_checkpoint_delay_ready")" "yes" \
+    "primary checkpoint delay pre-migrate gate"
   selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_primary_net_filters_attached")" "true" \
     "primary net filters attached state"
   selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_primary_net_filters_attach_mode")" "cmdline" \
@@ -1293,9 +1308,12 @@ selftest_case_xcolo_block_handshake_sets_checkpoint_after_migrate() (
   selftest_assert_file_not_contains "${call_log}" "primary.object_add_mirror"
   selftest_assert_file_not_contains "${call_log}" "primary.object_add_colo_compare"
   filter_line="$(grep -n '|primary.stop_before_filter_attach|' "${call_log}" | head -n1 | cut -d: -f1)"
+  checkpoint_line="$(grep -n '|primary.migrate_set_parameters.pre_migrate|' "${call_log}" | head -n1 | cut -d: -f1)"
   migrate_line="$(grep -n '|primary.migrate|' "${call_log}" | head -n1 | cut -d: -f1)"
   [[ "${filter_line}" -lt "${migrate_line}" ]] || \
     selftest_fail "primary filter attach gate must run before primary.migrate"
+  [[ "${checkpoint_line}" -lt "${migrate_line}" ]] || \
+    selftest_fail "primary checkpoint delay gate must run before primary.migrate"
 )
 
 selftest_case_xcolo_multi_disk_handshake_exports_all_disks() (
@@ -1332,6 +1350,19 @@ selftest_case_xcolo_multi_disk_handshake_exports_all_disks() (
     printf -v "$4" '%s' "yes"
     return 0
   }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_qmp() {
+    local _uri="$1" _vm="$2" payload="$3" out_var="$4" rc_var="$5"
+    : "${_uri}${_vm}"
+    if [[ "${payload}" == *"query-migrate-parameters"* ]]; then
+      printf -v "${out_var}" '%s' '{"return":{"x-checkpoint-delay":2000}}'
+    elif [[ "${payload}" == *"query-migrate-capabilities"* ]]; then
+      printf -v "${out_var}" '%s' '{"return":[{"capability":"return-path","state":true},{"capability":"x-colo","state":true}]}'
+    else
+      printf -v "${out_var}" '%s' '{"return":{}}'
+    fi
+    printf -v "${rc_var}" '%s' "0"
+  }
 
   ftctl_xcolo_execute_handshake_with_disk_plan \
     "primary-vm" "standby-vm" \
@@ -1360,6 +1391,7 @@ selftest_case_xcolo_multi_disk_handshake_exports_all_disks() (
   selftest_assert_file_not_contains "${call_log}" '"export":"ftctl-colo-sda"'
   selftest_assert_file_not_contains "${call_log}" '"export":"ftctl-colo-sdb"'
   selftest_assert_file_not_contains "${call_log}" "primary.cont_before_migrate"
+  selftest_assert_file_contains "${call_log}" "primary.migrate_set_parameters.pre_migrate"
   sda_export_line="$(grep -n '|secondary.nbd_server_add.sda|' "${call_log}" | head -n1 | cut -d: -f1)"
   sdb_export_line="$(grep -n '|secondary.nbd_server_add.sdb|' "${call_log}" | head -n1 | cut -d: -f1)"
   migrate_line="$(grep -n '|primary.migrate|' "${call_log}" | head -n1 | cut -d: -f1)"
@@ -1392,6 +1424,19 @@ selftest_case_xcolo_primary_filter_binding_defers_to_runtime_validation() (
   ftctl_xcolo_query_migrate_capability_state() {
     printf -v "$4" '%s' "yes"
     return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_qmp() {
+    local _uri="$1" _vm="$2" payload="$3" out_var="$4" rc_var="$5"
+    : "${_uri}${_vm}"
+    if [[ "${payload}" == *"query-migrate-parameters"* ]]; then
+      printf -v "${out_var}" '%s' '{"return":{"x-checkpoint-delay":2000}}'
+    elif [[ "${payload}" == *"query-migrate-capabilities"* ]]; then
+      printf -v "${out_var}" '%s' '{"return":[{"capability":"return-path","state":true},{"capability":"x-colo","state":true}]}'
+    else
+      printf -v "${out_var}" '%s' '{"return":{}}'
+    fi
+    printf -v "${rc_var}" '%s' "0"
   }
   # shellcheck disable=SC2317
   ftctl_xcolo_observe_primary_filter_chardev_binding() {
@@ -3986,7 +4031,7 @@ selftest_main() {
   selftest_case_xcolo_cloud_managed_rbd_metadata_inference
   selftest_case_xcolo_primary_create_maps_rbd_sources
   selftest_case_xcolo_scsi_root_replace_avoids_lun_collision
-  selftest_case_xcolo_block_handshake_sets_checkpoint_after_migrate
+  selftest_case_xcolo_block_handshake_sets_checkpoint_before_migrate
   selftest_case_xcolo_multi_disk_handshake_exports_all_disks
   selftest_case_xcolo_primary_filter_binding_defers_to_runtime_validation
   selftest_case_xcolo_premigrate_chardev_binding_accepts_listener_endpoints

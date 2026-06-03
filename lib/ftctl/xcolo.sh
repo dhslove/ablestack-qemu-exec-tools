@@ -754,6 +754,38 @@ PY
   printf '%s\n' "${value}"
 }
 
+ftctl_xcolo_query_primary_checkpoint_delay_value() {
+  local vm="${1-}"
+  local out="" rc=0 value
+
+  ftctl_xcolo_qmp "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" '{"execute":"query-migrate-parameters"}' out rc
+  if [[ "${rc}" != "0" || -z "${out}" ]]; then
+    printf '%s\n' "unknown"
+    return 0
+  fi
+
+  value="$(python3 - <<'PY' "${out}"
+import json
+import sys
+
+raw = sys.argv[1]
+try:
+    data = json.loads(raw)
+except Exception:
+    print("unknown")
+    raise SystemExit(0)
+
+ret = data.get("return") if isinstance(data, dict) else {}
+value = ret.get("x-checkpoint-delay") if isinstance(ret, dict) else None
+if value is None:
+    print("no")
+else:
+    print(value)
+PY
+)" || value="unknown"
+  printf '%s\n' "${value}"
+}
+
 ftctl_xcolo_collect_primary_chardev_binding_state() {
   local vm="${1-}"
   local phase="${2:-strict}"
@@ -1393,6 +1425,9 @@ ftctl_xcolo_record_pre_migrate_evidence() {
     "xcolo_premigrate_primary_capability_x_colo=${cap_xcolo}" \
     "xcolo_premigrate_primary_capability_return_path=${cap_return_path}" \
     "xcolo_premigrate_primary_checkpoint_delay=${checkpoint_delay}" \
+    "xcolo_premigrate_primary_checkpoint_delay_ready=$(ftctl_state_get "${vm}" "xcolo_primary_checkpoint_delay_ready" 2>/dev/null || true)" \
+    "xcolo_premigrate_primary_checkpoint_delay_expected=$(ftctl_state_get "${vm}" "xcolo_primary_checkpoint_delay_expected" 2>/dev/null || true)" \
+    "xcolo_premigrate_primary_checkpoint_delay_actual=$(ftctl_state_get "${vm}" "xcolo_primary_checkpoint_delay_actual" 2>/dev/null || true)" \
     "xcolo_premigrate_primary_filter_qom_ready=${filter_qom}" \
     "xcolo_premigrate_primary_filter_qom_reason=${filter_qom_reason}" \
     "xcolo_premigrate_primary_filter_cmdline_ready=${filter_cmdline}" \
@@ -1413,7 +1448,7 @@ ftctl_xcolo_record_pre_migrate_evidence() {
     "xcolo_premigrate_primary_filter_qom_comp0_outdev=$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_comp0_outdev" 2>/dev/null || true)"
 
   ftctl_log_event "colo" "primary.pre_migrate_evidence" "ok" "${vm}" "" \
-    "x_colo=${cap_xcolo} return_path=${cap_return_path} checkpoint_delay=${checkpoint_delay} vnet_hdr=$(ftctl_state_get "${vm}" "xcolo_net_vnet_hdr_support" 2>/dev/null || true) filter_qom=${filter_qom} filter_cmdline=${filter_cmdline} chardev=${chardev} mirror=${channel_mirror} compare=${channel_compare} compare_local=${channel_compare_local} compare_out=${channel_compare_out}"
+    "x_colo=${cap_xcolo} return_path=${cap_return_path} checkpoint_delay=${checkpoint_delay} checkpoint_ready=$(ftctl_state_get "${vm}" "xcolo_primary_checkpoint_delay_ready" 2>/dev/null || true) checkpoint_expected=$(ftctl_state_get "${vm}" "xcolo_primary_checkpoint_delay_expected" 2>/dev/null || true) checkpoint_actual=$(ftctl_state_get "${vm}" "xcolo_primary_checkpoint_delay_actual" 2>/dev/null || true) vnet_hdr=$(ftctl_state_get "${vm}" "xcolo_net_vnet_hdr_support" 2>/dev/null || true) filter_qom=${filter_qom} filter_cmdline=${filter_cmdline} chardev=${chardev} mirror=${channel_mirror} compare=${channel_compare} compare_local=${channel_compare_local} compare_out=${channel_compare_out}"
 }
 
 ftctl_xcolo_primary_filter_qom_ready() {
@@ -2760,7 +2795,7 @@ ftctl_xcolo_reconcile_pending_runtime() {
   ftctl_xcolo_validate_pair_runtime "${vm}" "${secondary_vm}" || rc=$?
   case "${rc}" in
     0)
-      ftctl_xcolo_apply_checkpoint_delay_after_start "${vm}" || \
+      ftctl_xcolo_verify_checkpoint_delay_after_start "${vm}" || \
         ftctl_log_event "colo" "primary.migrate_set_parameters.post_start" "warn" "${vm}" "" \
           "checkpoint_delay=${FTCTL_PROFILE_XCOLO_CHECKPOINT_DELAY:-}"
       ftctl_state_set "${vm}" \
@@ -2852,6 +2887,7 @@ ftctl_xcolo_prebuilt_primary_stage() {
     "{\"execute\":\"x-blockdev-change\",\"arguments\":{\"parent\":\"${FTCTL_PROFILE_XCOLO_PARENT_BLOCK_NODE}\",\"node\":\"${FTCTL_PROFILE_XCOLO_NBD_NODE}\"}}" \
     "colo" "primary.x_blockdev_change" || return 1
   ftctl_xcolo_set_and_verify_migrate_capabilities "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" "${vm}" "primary" "primary" || return 1
+  ftctl_xcolo_require_checkpoint_delay_before_migrate "${vm}" || return 1
   ftctl_xcolo_record_pre_migrate_evidence "${vm}" || true
   ftctl_xcolo_preflight_firewall_contract "${vm}" || return 1
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
@@ -4615,17 +4651,59 @@ ftctl_xcolo_resume_primary_before_migrate() {
   ftctl_state_set "${vm}" "xcolo_primary_cont_before_migrate=true"
 }
 
-ftctl_xcolo_apply_checkpoint_delay_after_start() {
+ftctl_xcolo_require_checkpoint_delay_before_migrate() {
   local vm="${1-}"
-  local checkpoint_delay
+  local checkpoint_delay actual_delay
 
   checkpoint_delay="${FTCTL_PROFILE_XCOLO_CHECKPOINT_DELAY:-}"
   [[ -n "${checkpoint_delay}" && "${checkpoint_delay}" =~ ^[0-9]+$ ]] || return 0
 
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
     "{\"execute\":\"migrate-set-parameters\",\"arguments\":{\"x-checkpoint-delay\":${checkpoint_delay}}}" \
-    "colo" "primary.migrate_set_parameters.post_start" || return 1
-  ftctl_state_set "${vm}" "xcolo_primary_checkpoint_delay_post_start=${checkpoint_delay}"
+    "colo" "primary.migrate_set_parameters.pre_migrate" || {
+      ftctl_state_set "${vm}" \
+        "xcolo_primary_checkpoint_delay_ready=no" \
+        "xcolo_primary_checkpoint_delay_expected=${checkpoint_delay}" \
+        "xcolo_primary_checkpoint_delay_reason=set_failed" \
+        "last_error=primary_checkpoint_parameter_set_failed"
+      ftctl_log_event "colo" "primary.checkpoint_delay.pre_migrate_gate" "fail" "${vm}" "" \
+        "expected=${checkpoint_delay} reason=set_failed"
+      return 1
+    }
+
+  actual_delay="$(ftctl_xcolo_query_primary_checkpoint_delay_value "${vm}")"
+  ftctl_state_set "${vm}" \
+    "xcolo_primary_checkpoint_delay_expected=${checkpoint_delay}" \
+    "xcolo_primary_checkpoint_delay_actual=${actual_delay}"
+  if [[ "${actual_delay}" != "${checkpoint_delay}" ]]; then
+    ftctl_state_set "${vm}" \
+      "xcolo_primary_checkpoint_delay_ready=no" \
+      "xcolo_primary_checkpoint_delay_reason=verify_failed" \
+      "last_error=primary_checkpoint_parameter_set_failed"
+    ftctl_log_event "colo" "primary.checkpoint_delay.pre_migrate_gate" "fail" "${vm}" "" \
+      "expected=${checkpoint_delay} actual=${actual_delay} reason=verify_failed"
+    return 1
+  fi
+
+  ftctl_state_set "${vm}" \
+    "xcolo_primary_checkpoint_delay_ready=yes" \
+    "xcolo_primary_checkpoint_delay_reason=" \
+    "xcolo_primary_checkpoint_delay_pre_migrate=${checkpoint_delay}"
+  ftctl_log_event "colo" "primary.checkpoint_delay.pre_migrate_gate" "ok" "${vm}" "" \
+    "expected=${checkpoint_delay} actual=${actual_delay}"
+}
+
+ftctl_xcolo_verify_checkpoint_delay_after_start() {
+  local vm="${1-}"
+  local checkpoint_delay actual_delay
+
+  checkpoint_delay="${FTCTL_PROFILE_XCOLO_CHECKPOINT_DELAY:-}"
+  [[ -n "${checkpoint_delay}" && "${checkpoint_delay}" =~ ^[0-9]+$ ]] || return 0
+
+  actual_delay="$(ftctl_xcolo_query_primary_checkpoint_delay_value "${vm}")"
+  ftctl_state_set "${vm}" \
+    "xcolo_primary_checkpoint_delay_post_start_actual=${actual_delay}"
+  [[ "${actual_delay}" == "${checkpoint_delay}" ]]
 }
 
 ftctl_xcolo_execute_handshake_with_nodes() {
@@ -4656,6 +4734,7 @@ ftctl_xcolo_execute_handshake_with_nodes() {
     "colo" "primary.x_blockdev_change" || return 1
   ftctl_xcolo_attach_primary_net_filters "${vm}" || return 1
   ftctl_xcolo_set_and_verify_migrate_capabilities "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" "${vm}" "primary" "primary" || return 1
+  ftctl_xcolo_require_checkpoint_delay_before_migrate "${vm}" || return 1
   ftctl_xcolo_record_pre_migrate_evidence "${vm}" || true
   ftctl_xcolo_preflight_firewall_contract "${vm}" || return 1
   ftctl_xcolo_require_primary_filter_cmdline_ready "${vm}" "pre_migrate" || return 1
@@ -4726,6 +4805,7 @@ ftctl_xcolo_execute_handshake_with_disk_plan() {
 
   ftctl_xcolo_attach_primary_net_filters "${vm}" || return 1
   ftctl_xcolo_set_and_verify_migrate_capabilities "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" "${vm}" "primary" "primary" || return 1
+  ftctl_xcolo_require_checkpoint_delay_before_migrate "${vm}" || return 1
   ftctl_xcolo_record_pre_migrate_evidence "${vm}" || true
   ftctl_xcolo_preflight_firewall_contract "${vm}" || return 1
   ftctl_xcolo_require_primary_filter_cmdline_ready "${vm}" "pre_migrate" || return 1
@@ -5923,7 +6003,7 @@ ftctl_xcolo_execute_block_cold_conversion() {
       ftctl_state_set "${vm}" "xcolo_steady_state_gate=ok"
       ftctl_log_event "colo" "block_conversion.steady_state_gate" "ok" "${vm}" "" \
         "primary_colo=$(ftctl_state_get "${vm}" "xcolo_primary_colo_mode" 2>/dev/null || true) secondary_colo=$(ftctl_state_get "${vm}" "xcolo_secondary_colo_mode" 2>/dev/null || true)"
-      ftctl_xcolo_apply_checkpoint_delay_after_start "${vm}" || \
+      ftctl_xcolo_verify_checkpoint_delay_after_start "${vm}" || \
         ftctl_log_event "colo" "primary.migrate_set_parameters.post_start" "warn" "${vm}" "" \
           "checkpoint_delay=${FTCTL_PROFILE_XCOLO_CHECKPOINT_DELAY:-}"
       ;;
@@ -6060,7 +6140,7 @@ ftctl_xcolo_plan_protect_prebuilt() {
   ftctl_xcolo_validate_pair_runtime "${vm}" "${vm}" || validate_rc=$?
   case "${validate_rc}" in
     0)
-      ftctl_xcolo_apply_checkpoint_delay_after_start "${vm}" || \
+      ftctl_xcolo_verify_checkpoint_delay_after_start "${vm}" || \
         ftctl_log_event "colo" "primary.migrate_set_parameters.post_start" "warn" "${vm}" "" \
           "checkpoint_delay=${FTCTL_PROFILE_XCOLO_CHECKPOINT_DELAY:-}"
       ;;

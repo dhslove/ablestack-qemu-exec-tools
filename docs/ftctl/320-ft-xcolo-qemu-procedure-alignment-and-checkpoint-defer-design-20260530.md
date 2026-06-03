@@ -2,6 +2,21 @@
 
 Date: 2026-05-30
 
+## Superseded Checkpoint Note - 2026-06-04
+
+The checkpoint-delay portion of this design is superseded by
+[345. FT XCOLO Pre-Migrate Checkpoint Hard Gate Design](345-ft-xcolo-premigrate-checkpoint-hard-gate-design-20260604.md).
+
+The earlier conclusion treated `x-checkpoint-delay` as post-start tuning. Run
+68 later proved that the remaining blocker is primary COLO role transition
+after `primary.migrate`, so ABLESTACK FT validation now requires
+`migrate-set-parameters x-checkpoint-delay` to be set and verified before
+`primary.migrate`.
+
+The filter direction and QEMU topology sections below remain historical design
+context; do not use the "Defer Checkpoint Delay" section as current
+implementation guidance.
+
 ## Context
 
 The retest after design 319 proved two things:

@@ -1780,3 +1780,36 @@ but a lower-level signature or reached stage changed, set
     - standby volumes `233`, `234`
     - standby RBD images
   - cleanup is required before the next retest
+
+### Run 69 Fix Plan 2026-06-04
+
+- Trigger:
+  - Run 68 repeated the Run 67 protocol-role blocker, but now with explicit
+    state:
+    - `xcolo_handshake_command_state=accepted`
+    - `xcolo_steady_state_gate=failed`
+    - `xcolo_protocol_invalid_message_reason=primary_role_not_entered_after_migrate`
+- Design recorded:
+  - [345. FT XCOLO Pre-Migrate Checkpoint Hard Gate Design](345-ft-xcolo-premigrate-checkpoint-hard-gate-design-20260604.md)
+  - checkpoint defer guidance in design 320 is marked superseded
+- Code direction:
+  - move `migrate-set-parameters x-checkpoint-delay` before primary
+    `migrate`
+  - verify `query-migrate-parameters` returns the expected delay before
+    allowing primary `migrate`
+  - record:
+    - `xcolo_primary_checkpoint_delay_expected`
+    - `xcolo_primary_checkpoint_delay_actual`
+    - `xcolo_primary_checkpoint_delay_ready`
+    - `xcolo_premigrate_primary_checkpoint_delay_ready`
+  - stop before primary migrate with
+    `last_error=primary_checkpoint_parameter_set_failed` if the setting cannot
+    be verified
+- Repetition control:
+  - if the next run still reaches
+    `xcolo_repeated_protocol_invalid_message` with
+    `xcolo_protocol_invalid_message_reason=primary_role_not_entered_after_migrate`
+    and `xcolo_primary_checkpoint_delay_ready=yes`, then checkpoint setup is
+    eliminated as the active cause
+  - at that point the next target must be QEMU COLO role-transition timing,
+    not storage/firewall/baseline/filter-readiness repetition
