@@ -1509,3 +1509,63 @@ but a lower-level signature or reached stage changed, set
     runtime `/dev/rbdN` path stored in state
   - do not treat this as a storage type mismatch unless layouts diverge from
     `block/raw -> block/raw`
+
+### Run 67 Retest Readiness 2026-06-03-23
+
+- Source commit:
+  - `dfa1bdc` (`fix: map cloud managed xcolo runtime rbd`)
+- Local verification before build:
+  - `bash -n lib/ftctl/xcolo.sh`
+  - `bash -n lib/ftctl/standby.sh`
+  - `bash -n bin/ablestack_vm_ftctl_selftest.sh`
+  - targeted selftest:
+    - `selftest_case_xcolo_secondary_runtime_maps_cloud_managed_rbd`
+  - `git diff --check`
+- Build:
+  - GitHub Actions run:
+    `https://github.com/dhslove/ablestack-qemu-exec-tools/actions/runs/26891699872`
+  - RPM build and artifact upload completed
+  - final workflow conclusion was failed only at the GitHub Release publish
+    step because GitHub returned a secondary rate-limit error
+  - downloaded RPM artifact:
+    `/home/ablecloud/work/ftctl-artifacts-run-26891699872/ftctl-branch-rpm-26891699872/ftctl-rpm-rocky9.6/ablestack_vm_ftctl-0.8.0-1.noarch.rpm`
+  - RPM SHA256:
+    `487c7ae6ab1d2d3b5d05e2cf8500193d4def679c9cfdc45891561c898d586219`
+- Deployment:
+  - installed to `10.10.32.1`, `10.10.32.2`, and `10.10.32.3`
+  - package check:
+    - `ablestack_vm_ftctl-0.8.0-1.noarch`
+  - installed marker checks passed:
+    - `xcolo_secondary_runtime_rbd_prepare`
+    - `xcolo_secondary_runtime_xml_rewrite_failed`
+    - `rbd unmap`
+    - `standby.deactivate.runtime_rbd_unmap`
+  - `ablestack-vm-ftctl.timer` and `ablestack-vm-hangctl.timer` are active
+    on all three 32.x hosts
+- Cleanup:
+  - removed Run 66 protection row from active scope:
+    - row `66` now `disabled/stopped`, `removed=2026-06-03 23:40:37`
+  - removed FTCTL VM details for `r97-link-01` / `r97-link-01-standby`
+  - expunged standby VM `i-2-122-VM`
+  - expunged standby volumes `229` and `230`
+  - removed standby RBD images:
+    - `cb3f6f83-fb74-46f4-9055-6cdc200a07fa`
+    - `5b727ed2-b320-487d-ae1d-d4ce9fbd8544`
+  - removed FTCTL runtime files for `i-2-54-VM`
+- Final readiness verification:
+  - primary VM DB state:
+    - `i-2-54-VM`, `Running`, host `3`, power state `PowerOn`
+  - active protection rows for primary VM `54`: `0`
+  - active FTCTL details for primary/standby scope: `0`
+  - active standby VM rows: `0`
+  - active standby volumes: `0`
+  - host runtime:
+    - `i-2-54-VM` is running on `10.10.32.3`
+    - `query-block-jobs` is empty
+    - `query-migrate` is empty
+    - `ablestack_vm_ftctl status --vm i-2-54-VM --json` returns `not_found`
+- Cleanup note:
+  - the first cleanup pass removed RBD images successfully but stopped on a
+    runtime path that was a directory rather than a file
+  - retry used `rm -rf` for the target-specific runtime path and completed DB
+    cleanup plus timer restart
