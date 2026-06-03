@@ -2067,6 +2067,124 @@ selftest_case_xcolo_runtime_validation_reports_primary_migrate_failure() (
     "runtime validation terminal failure reason"
 )
 
+selftest_case_xcolo_runtime_validation_classifies_repeated_invalid_message() (
+  selftest_reset_env
+  selftest_info "x-colo runtime validation classifies repeated invalid COLO protocol messages"
+
+  local vm="xcolo-invalid-message"
+  ftctl_state_init_vm "${vm}"
+  ftctl_state_set "${vm}" \
+    "xcolo_premigrate_primary_filter_chardev_ready=yes" \
+    "xcolo_premigrate_primary_filter_qom_ready=yes" \
+    "xcolo_premigrate_primary_filter_cmdline_ready=yes" \
+    "xcolo_premigrate_channel_mirror_established=yes" \
+    "xcolo_premigrate_channel_compare_established=yes" \
+    "xcolo_premigrate_channel_compare_local_established=yes" \
+    "xcolo_premigrate_channel_compare_out_established=yes" \
+    "xcolo_firewall_ready=yes" \
+    "xcolo_storage_symmetry=ok" \
+    "xcolo_socket_runtime_captured=yes"
+  FTCTL_DRY_RUN="0"
+  FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
+  FTCTL_PROFILE_SECONDARY_URI="qemu+ssh://peer/system"
+  FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC="1"
+  FTCTL_XCOLO_RUNTIME_VALIDATE_TIMEOUT_SEC="1"
+  FTCTL_PROFILE_QGA_POLICY="off"
+
+  # shellcheck disable=SC2317
+  ftctl_xcolo_query_running_flag() {
+    local out_var="${3}"
+    printf -v "${out_var}" '%s' "true"
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_query_status_name() {
+    local uri="${1-}" out_var="${3}"
+    if [[ "${uri}" == "${FTCTL_PROFILE_PRIMARY_URI}" ]]; then
+      printf -v "${out_var}" '%s' "paused"
+    else
+      printf -v "${out_var}" '%s' "running"
+    fi
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_query_colo_mode() {
+    local uri="${1-}" out_var="${3}"
+    if [[ "${uri}" == "${FTCTL_PROFILE_PRIMARY_URI}" ]]; then
+      printf -v "${out_var}" '%s' "none"
+    else
+      printf -v "${out_var}" '%s' "secondary"
+    fi
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_query_migrate_status() {
+    local uri="${1-}" out_var="${3}"
+    if [[ "${uri}" == "${FTCTL_PROFILE_PRIMARY_URI}" ]]; then
+      printf -v "${out_var}" '%s' "failed"
+    else
+      printf -v "${out_var}" '%s' "colo"
+    fi
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_query_migrate_error_desc() {
+    local out_var="${3}"
+    printf -v "${out_var}" '%s' "Received invalid message 0x0000 length 0x0000"
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_domain_xml_has_runtime_markers() {
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_capture_socket_snapshot() {
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_capture_primary_channel_state() {
+    local vm="${1-}"
+    ftctl_state_set "${vm}" \
+      "xcolo_channel_mirror_established=yes" \
+      "xcolo_channel_compare_established=yes" \
+      "xcolo_channel_compare_local_established=yes" \
+      "xcolo_channel_compare_out_established=yes"
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_collect_primary_filter_qom_state() {
+    local vm="${1-}"
+    ftctl_state_set "${vm}" "xcolo_primary_filter_qom_ready=yes" "xcolo_primary_filter_qom_reason="
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_collect_primary_filter_cmdline_state() {
+    local vm="${1-}"
+    ftctl_state_set "${vm}" "xcolo_primary_filter_cmdline_ready=yes" "xcolo_primary_filter_cmdline_reason="
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_collect_primary_chardev_binding_state() {
+    local vm="${1-}"
+    ftctl_state_set "${vm}" "xcolo_primary_filter_chardev_ready=yes" "xcolo_primary_filter_chardev_reason="
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_collect_secondary_block_graph_state() {
+    local vm="${1-}"
+    ftctl_state_set "${vm}" "xcolo_secondary_block_graph_ready=yes" "xcolo_secondary_block_graph_reason="
+  }
+
+  if ftctl_xcolo_validate_pair_runtime "${vm}" "${vm}-standby"; then
+    selftest_fail "runtime validation should fail on repeated invalid COLO protocol message"
+  fi
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" \
+    "xcolo_repeated_protocol_invalid_message" \
+    "repeated invalid message keeps stable last_error"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_protocol_invalid_message_reason")" \
+    "primary_role_not_entered_after_migrate" \
+    "repeated invalid message records protocol subreason"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_steady_state_gate")" \
+    "failed" \
+    "repeated invalid message fails steady-state gate"
+)
+
 selftest_case_xcolo_runtime_validation_reports_pending_convergence() (
   selftest_reset_env
   selftest_info "x-colo runtime validation reports missing colo role without hard failure"
@@ -3884,6 +4002,7 @@ selftest_main() {
   selftest_case_xcolo_baseline_seed_retries_ssh_transport_failure
   selftest_case_xcolo_runtime_validation_blocks_false_positive
   selftest_case_xcolo_runtime_validation_reports_primary_migrate_failure
+  selftest_case_xcolo_runtime_validation_classifies_repeated_invalid_message
   selftest_case_xcolo_runtime_validation_reports_pending_convergence
   selftest_case_xcolo_runtime_validation_times_out_stuck_convergence
   selftest_case_xcolo_runtime_validation_reports_one_sided_colo_role

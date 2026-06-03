@@ -2076,6 +2076,57 @@ ftctl_xcolo_repeated_invalid_message_evidence_ready() {
   return 0
 }
 
+ftctl_xcolo_invalid_message_protocol_reason() {
+  local vm="${1-}"
+  local primary_filter_qom="${2-}"
+  local primary_filter_cmdline="${3-}"
+  local channel_mirror="${4-}"
+  local channel_compare="${5-}"
+  local channel_compare_local="${6-}"
+  local channel_compare_out="${7-}"
+  local secondary_block_graph="${8-}"
+  local primary_migrate="${9-}"
+  local secondary_migrate="${10-}"
+  local primary_colo="${11-}"
+  local secondary_colo="${12-}"
+  local firewall_ready storage_symmetry runtime_socket_captured
+  local pre_chardev pre_filter_qom pre_filter_cmdline
+
+  firewall_ready="$(ftctl_state_get "${vm}" "xcolo_firewall_ready" 2>/dev/null || true)"
+  storage_symmetry="$(ftctl_state_get "${vm}" "xcolo_storage_symmetry" 2>/dev/null || true)"
+  runtime_socket_captured="$(ftctl_state_get "${vm}" "xcolo_socket_runtime_captured" 2>/dev/null || true)"
+  pre_chardev="$(ftctl_state_get "${vm}" "xcolo_premigrate_primary_filter_chardev_ready" 2>/dev/null || true)"
+  pre_filter_qom="$(ftctl_state_get "${vm}" "xcolo_premigrate_primary_filter_qom_ready" 2>/dev/null || true)"
+  pre_filter_cmdline="$(ftctl_state_get "${vm}" "xcolo_premigrate_primary_filter_cmdline_ready" 2>/dev/null || true)"
+
+  if [[ "${firewall_ready}" == "no" ]]; then
+    printf '%s\n' "firewall_not_ready"
+  elif [[ -n "${storage_symmetry}" && "${storage_symmetry}" != "ok" ]]; then
+    printf '%s\n' "storage_symmetry_not_ok"
+  elif [[ "${pre_chardev}" != "yes" ]]; then
+    printf '%s\n' "premigrate_chardev_not_ready"
+  elif [[ "${pre_filter_qom}" != "yes" && "${pre_filter_cmdline}" != "yes" &&
+          "${primary_filter_qom}" != "yes" && "${primary_filter_cmdline}" != "yes" ]]; then
+    printf '%s\n' "premigrate_filter_topology_not_ready"
+  elif [[ "${channel_mirror}" != "yes" ||
+          "${channel_compare}" != "yes" ||
+          "${channel_compare_local}" != "yes" ||
+          "${channel_compare_out}" != "yes" ]]; then
+    printf '%s\n' "runtime_channel_not_ready"
+  elif [[ "${secondary_block_graph}" != "yes" && "${secondary_block_graph}" != "not_applicable" ]]; then
+    printf '%s\n' "secondary_block_graph_not_ready"
+  elif [[ -n "${runtime_socket_captured}" && "${runtime_socket_captured}" != "yes" ]]; then
+    printf '%s\n' "runtime_socket_snapshot_missing"
+  elif [[ "${primary_migrate}" == "failed" &&
+          "${secondary_migrate}" == "colo" &&
+          "${primary_colo}" == "none" &&
+          "${secondary_colo}" == "secondary" ]]; then
+    printf '%s\n' "primary_role_not_entered_after_migrate"
+  else
+    printf '%s\n' "qemu_colo_protocol_invalid_message"
+  fi
+}
+
 ftctl_xcolo_validate_pair_runtime() {
   local vm="${1-}"
   local secondary_vm="${2:-$vm}"
@@ -2091,7 +2142,7 @@ ftctl_xcolo_validate_pair_runtime() {
   local primary_filter_cmdline="unknown" primary_filter_cmdline_reason=""
   local primary_chardev="unknown" primary_chardev_reason=""
   local disk_plan="" secondary_block_graph="unknown" secondary_block_graph_reason=""
-  local reason="" timeout i pending_since pending_elapsed pending_max pending_reason
+  local reason="" timeout i pending_since pending_elapsed pending_max pending_reason protocol_reason
   local socket_runtime_captured="no" last_error_value
 
   if [[ "${FTCTL_DRY_RUN}" == "1" ]]; then
@@ -2194,7 +2245,16 @@ ftctl_xcolo_validate_pair_runtime() {
             "${channel_mirror}" "${channel_compare}" "${channel_compare_local}" "${channel_compare_out}" \
             "${secondary_block_graph}"; then
         reason="repeated_protocol_invalid_message"
-        ftctl_state_set "${vm}" "xcolo_repeated_protocol_invalid_message=yes"
+        protocol_reason="$(ftctl_xcolo_invalid_message_protocol_reason "${vm}" "${primary_filter_qom}" "${primary_filter_cmdline}" \
+          "${channel_mirror}" "${channel_compare}" "${channel_compare_local}" "${channel_compare_out}" \
+          "${secondary_block_graph}" "${primary_migrate}" "${secondary_migrate}" "${primary_colo}" "${secondary_colo}")"
+        ftctl_state_set "${vm}" \
+          "xcolo_repeated_protocol_invalid_message=yes" \
+          "xcolo_protocol_invalid_message_reason=${protocol_reason}" \
+          "xcolo_protocol_invalid_message_scope=post_migrate_steady_state" \
+          "xcolo_protocol_steady_state_required=true" \
+          "xcolo_protocol_expected_primary_role=primary" \
+          "xcolo_protocol_expected_secondary_role=secondary"
       elif [[ "${primary_migrate_error_desc}" == *"Received invalid message"* ]] &&
           ftctl_xcolo_primary_log_has_filter_mirror_send_failure "${vm}"; then
         reason="primary_filter_mirror_send_failed"
@@ -2436,6 +2496,8 @@ ftctl_xcolo_validate_pair_runtime() {
     last_error_value="xcolo_runtime_validation_failed:${reason}"
     if [[ "${reason}" == "repeated_protocol_invalid_message" ]]; then
       last_error_value="xcolo_repeated_protocol_invalid_message"
+      protocol_reason="$(ftctl_state_get "${vm}" "xcolo_protocol_invalid_message_reason" 2>/dev/null || true)"
+      [[ -n "${protocol_reason}" ]] || protocol_reason="qemu_colo_protocol_invalid_message"
     fi
     ftctl_state_set "${vm}" \
       "xcolo_primary_running=${primary_running}" \
@@ -2464,9 +2526,10 @@ ftctl_xcolo_validate_pair_runtime() {
       "xcolo_channel_compare_out_established=${channel_compare_out}" \
       "xcolo_secondary_block_graph_ready=${secondary_block_graph}" \
       "xcolo_secondary_block_graph_reason=${secondary_block_graph_reason}" \
+      "xcolo_steady_state_gate=failed" \
       "last_error=${last_error_value}"
     ftctl_log_event "colo" "xcolo.runtime_validate" "fail" "${vm}" "" \
-      "reason=${reason} primary_running=${primary_running} secondary_running=${secondary_running} primary_status=${primary_status} secondary_status=${secondary_status} primary_colo=${primary_colo} secondary_colo=${secondary_colo} primary_xml=${primary_xml} secondary_xml=${secondary_xml} primary_migrate=${primary_migrate} primary_migrate_error_desc=${primary_migrate_error_desc} secondary_migrate=${secondary_migrate} secondary_migrate_error_desc=${secondary_migrate_error_desc} primary_qga=${primary_qga} secondary_qga=${secondary_qga} filter_qom=${primary_filter_qom} filter_qom_reason=${primary_filter_qom_reason} filter_cmdline=${primary_filter_cmdline} filter_cmdline_reason=${primary_filter_cmdline_reason} chardev=${primary_chardev} chardev_reason=${primary_chardev_reason} mirror=${channel_mirror} compare=${channel_compare} compare_local=${channel_compare_local} compare_out=${channel_compare_out} secondary_block_graph=${secondary_block_graph} attempts=${timeout}"
+      "reason=${reason} protocol_reason=${protocol_reason:-} primary_running=${primary_running} secondary_running=${secondary_running} primary_status=${primary_status} secondary_status=${secondary_status} primary_colo=${primary_colo} secondary_colo=${secondary_colo} primary_xml=${primary_xml} secondary_xml=${secondary_xml} primary_migrate=${primary_migrate} primary_migrate_error_desc=${primary_migrate_error_desc} secondary_migrate=${secondary_migrate} secondary_migrate_error_desc=${secondary_migrate_error_desc} primary_qga=${primary_qga} secondary_qga=${secondary_qga} filter_qom=${primary_filter_qom} filter_qom_reason=${primary_filter_qom_reason} filter_cmdline=${primary_filter_cmdline} filter_cmdline_reason=${primary_filter_cmdline_reason} chardev=${primary_chardev} chardev_reason=${primary_chardev_reason} mirror=${channel_mirror} compare=${channel_compare} compare_local=${channel_compare_local} compare_out=${channel_compare_out} secondary_block_graph=${secondary_block_graph} attempts=${timeout}"
     return 1
   fi
 }
@@ -5823,8 +5886,11 @@ ftctl_xcolo_execute_block_cold_conversion() {
     ftctl_xcolo_recover_block_handshake_failure "${vm}" "${handshake_error}" || true
     return 1
   }
+  ftctl_state_set "${vm}" \
+    "xcolo_handshake_command_state=accepted" \
+    "xcolo_steady_state_gate=pending"
   ftctl_log_event "colo" "block_conversion.handshake" "ok" "${vm}" "" \
-    "disk_count=${#disk_entries[@]}"
+    "disk_count=${#disk_entries[@]} state=commands_accepted steady_state=pending"
 
   ftctl_xcolo_state_write "${vm}" \
     "mode=cold-conversion" \
@@ -5849,14 +5915,22 @@ ftctl_xcolo_execute_block_cold_conversion() {
 
   ftctl_xcolo_capture_runtime_snapshot "${vm}" "xcolo_after_handshake" "${secondary_vm}"
   local validate_rc=0 validate_error
+  ftctl_log_event "colo" "block_conversion.steady_state_gate" "start" "${vm}" "" \
+    "disk_count=${#disk_entries[@]}"
   ftctl_xcolo_validate_pair_runtime "${vm}" "${secondary_vm}" || validate_rc=$?
   case "${validate_rc}" in
     0)
+      ftctl_state_set "${vm}" "xcolo_steady_state_gate=ok"
+      ftctl_log_event "colo" "block_conversion.steady_state_gate" "ok" "${vm}" "" \
+        "primary_colo=$(ftctl_state_get "${vm}" "xcolo_primary_colo_mode" 2>/dev/null || true) secondary_colo=$(ftctl_state_get "${vm}" "xcolo_secondary_colo_mode" 2>/dev/null || true)"
       ftctl_xcolo_apply_checkpoint_delay_after_start "${vm}" || \
         ftctl_log_event "colo" "primary.migrate_set_parameters.post_start" "warn" "${vm}" "" \
           "checkpoint_delay=${FTCTL_PROFILE_XCOLO_CHECKPOINT_DELAY:-}"
       ;;
     10)
+      ftctl_state_set "${vm}" "xcolo_steady_state_gate=pending"
+      ftctl_log_event "colo" "block_conversion.steady_state_gate" "pending" "${vm}" "" \
+        "reason=$(ftctl_state_get "${vm}" "xcolo_pending_reason" 2>/dev/null || true)"
       if ftctl_xcolo_candidate_observation_ready "${vm}"; then
         ftctl_xcolo_mark_candidate_observed "${vm}" "block_cold_conversion"
         ftctl_log_event "colo" "xcolo.block_cold_conversion.execute" "pending" "${vm}" "" \
@@ -5871,6 +5945,9 @@ ftctl_xcolo_execute_block_cold_conversion() {
     *)
       validate_error="$(ftctl_state_get "${vm}" "last_error" 2>/dev/null || true)"
       [[ -n "${validate_error}" ]] || validate_error="xcolo_runtime_validation_failed"
+      ftctl_state_set "${vm}" "xcolo_steady_state_gate=failed"
+      ftctl_log_event "colo" "block_conversion.steady_state_gate" "fail" "${vm}" "" \
+        "reason=${validate_error} protocol_reason=$(ftctl_state_get "${vm}" "xcolo_protocol_invalid_message_reason" 2>/dev/null || true)"
       ftctl_xcolo_recover_runtime_convergence_failure "${vm}" "${validate_error}" || true
       ftctl_state_set "${vm}" \
         "xcolo_last_runtime_error=${validate_error}" \

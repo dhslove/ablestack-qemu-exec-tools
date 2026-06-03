@@ -1627,3 +1627,38 @@ but a lower-level signature or reached stage changed, set
     secondary create failure to runtime validation failure after handshake
   - the next design must focus on COLO protocol channel sequencing and filter
     activation timing, not storage type selection or firewall openness
+
+### Run 68 Fix Plan 2026-06-04
+
+- Trigger:
+  - Run 67 reached `primary.migrate=ok` and `block_conversion.handshake=ok`
+    but failed in post-migrate runtime validation
+  - the repeated terminal signature was:
+    - primary QEMU: `Received invalid message 0x0000 length 0x0000`
+    - secondary QEMU: `Can't receive COLO message: Input/output error`
+- Confirmed non-causes from Run 67:
+  - compatible `block/raw -> block/raw` storage was selected
+  - baseline seed completed for both disks
+  - cloud-managed secondary runtime RBD mapping completed
+  - secondary runtime domain started
+  - secondary block graph was ready
+  - firewall and socket evidence were ready
+  - pre-migrate filter, chardev, and 9000-series channel evidence were ready
+- Design recorded:
+  - [344. FT XCOLO Steady-State Gate And Protocol Subreason Design](344-ft-xcolo-steady-state-gate-and-protocol-subreason-design-20260604.md)
+- Code direction:
+  - treat `block_conversion.handshake=ok` as QMP command acceptance only
+  - add an explicit `block_conversion.steady_state_gate` event/state after
+    handshake
+  - keep stable top-level error:
+    `last_error=xcolo_repeated_protocol_invalid_message`
+  - add protocol subreason state for repeated invalid-message failures:
+    `xcolo_protocol_invalid_message_reason`
+  - for the Run 67 shape, expected subreason is:
+    `primary_role_not_entered_after_migrate`
+- Repetition control:
+  - every next FT test must compare the latest failure against this Run 67
+    protocol-role blocker
+  - if the same top-level error and same subreason repeat with the same ready
+    preconditions, report it immediately as the same repeated blocker before
+    another iteration
