@@ -5302,6 +5302,9 @@ ftctl_xcolo_rollback_block_primary_create_failure() {
   ftctl_standby_deactivate "${vm}" || {
     ftctl_log_event "colo" "block_conversion.rollback.secondary_stop" "warn" "${vm}" "" "cause=${reason}"
   }
+  ftctl_xcolo_unmap_secondary_runtime_rbd "${vm}" || {
+    ftctl_log_event "colo" "block_conversion.rollback.secondary_rbd_unmap" "warn" "${vm}" "" "cause=${reason}"
+  }
   ftctl_primary_activate_from_backup "${vm}" || {
     ftctl_log_event "colo" "block_conversion.rollback.primary_restore" "warn" "${vm}" "" "cause=${reason}"
     return 1
@@ -5319,13 +5322,265 @@ ftctl_xcolo_rollback_block_primary_create_failure() {
   ftctl_log_event "colo" "block_conversion.rollback" "ok" "${vm}" "" "cause=${reason}"
 }
 
+ftctl_xcolo_rewrite_disk_source_for_runtime() {
+  local xml_path="${1-}"
+  local target="${2-}"
+  local runtime_path="${3-}"
+
+  command -v python3 >/dev/null 2>&1 || {
+    echo "ERROR: python3 is required for secondary runtime XML rewrite" >&2
+    return 2
+  }
+  [[ -n "${xml_path}" && -f "${xml_path}" && -n "${target}" && -n "${runtime_path}" ]] || return 2
+
+  XML_PATH="${xml_path}" DISK_TARGET="${target}" RUNTIME_PATH="${runtime_path}" python3 - <<'PY'
+import os
+import sys
+import xml.etree.ElementTree as ET
+
+xml_path = os.environ["XML_PATH"]
+disk_target = os.environ["DISK_TARGET"]
+runtime_path = os.environ["RUNTIME_PATH"]
+
+tree = ET.parse(xml_path)
+root = tree.getroot()
+devices = root.find("devices")
+if devices is None:
+    print("missing devices", file=sys.stderr)
+    raise SystemExit(2)
+
+rewritten = False
+for disk in devices.findall("disk"):
+    if disk.get("device") != "disk":
+        continue
+    target = disk.find("target")
+    if target is None or target.get("dev") != disk_target:
+        continue
+    source = disk.find("source")
+    if source is None:
+        source = ET.Element("source")
+        disk.insert(1, source)
+    disk.set("type", "block")
+    source.attrib.clear()
+    source.set("dev", runtime_path)
+    rewritten = True
+    break
+
+if not rewritten:
+    print(f"disk target not found: {disk_target}", file=sys.stderr)
+    raise SystemExit(2)
+
+tree.write(xml_path, encoding="unicode")
+PY
+}
+
+ftctl_xcolo_prepare_secondary_runtime_rbd_disk() {
+  local vm="${1-}"
+  local xml_path="${2-}"
+  local target="${3-}"
+  local secondary_dest="${4-}"
+  local host="" user="" out="" err="" rc=0 remote_cmd="" q_target="" q_dest=""
+  local runtime_device="" mapped_by_ftctl="" state_key suffix
+  local runtime_target="" runtime_dest=""
+
+  [[ "${FTCTL_PROFILE_PROVISIONING_BACKEND:-libvirt-managed}" == "cloud-managed" ]] || return 0
+  [[ "${secondary_dest}" == /dev/rbd/* ]] || return 0
+
+  ftctl_blockcopy_remote_target_host_user host user || return $?
+  printf -v q_target '%q' "${target}"
+  printf -v q_dest '%q' "${secondary_dest}"
+  remote_cmd="$(cat <<EOF
+set -euo pipefail
+target=${q_target}
+dest=${q_dest}
+rest="\${dest#/dev/rbd/}"
+pool="\${rest%%/*}"
+image="\${rest#*/}"
+if [[ -z "\${pool}" || -z "\${image}" || "\${pool}" == "\${image}" ]]; then
+  echo "runtime_rbd_path_invalid:\${target}:\${dest}" >&2
+  exit 97
+fi
+mapped_by_ftctl=0
+runtime_device=""
+if [[ -b "\${dest}" ]]; then
+  runtime_device="\${dest}"
+else
+  runtime_device="\$(rbd device list --format json 2>/dev/null | python3 -c 'import json,sys; pool=sys.argv[1]; image=sys.argv[2]; data=json.load(sys.stdin); print(next((str(item.get("device","")) for item in data if str(item.get("pool","")) == pool and str(item.get("name","")) == image), ""))' "\${pool}" "\${image}")"
+  if [[ -z "\${runtime_device}" || ! -b "\${runtime_device}" ]]; then
+    map_out="\$(rbd map "\${pool}/\${image}" 2>&1)" || {
+      map_rc="\$?"
+      echo "runtime_rbd_map_failed:\${target}:\${pool}/\${image}:rc=\${map_rc}:\${map_out}" >&2
+      exit 98
+    }
+    mapped_by_ftctl=1
+    runtime_device="\$(printf '%s\n' "\${map_out}" | tail -n1)"
+    udevadm settle >/dev/null 2>&1 || true
+    if [[ -b "\${dest}" ]]; then
+      runtime_device="\${dest}"
+    elif [[ -z "\${runtime_device}" || ! -b "\${runtime_device}" ]]; then
+      runtime_device="\$(rbd device list --format json 2>/dev/null | python3 -c 'import json,sys; pool=sys.argv[1]; image=sys.argv[2]; data=json.load(sys.stdin); print(next((str(item.get("device","")) for item in data if str(item.get("pool","")) == pool and str(item.get("name","")) == image), ""))' "\${pool}" "\${image}")"
+    fi
+  fi
+fi
+if [[ -z "\${runtime_device}" || ! -b "\${runtime_device}" ]]; then
+  echo "runtime_rbd_device_missing:\${target}:\${dest}:device=\${runtime_device}" >&2
+  exit 99
+fi
+printf '%s|%s|%s|%s\n' "\${target}" "\${dest}" "\${runtime_device}" "\${mapped_by_ftctl}"
+EOF
+)"
+
+  out=""
+  err=""
+  rc=0
+  ftctl_blockcopy_remote_exec "${host}" "${user}" out err rc "${remote_cmd}" || true
+  if [[ "${rc}" != "0" ]]; then
+    case "${err}" in
+      runtime_rbd_map_failed:*)
+        ftctl_state_set "${vm}" "last_error=xcolo_secondary_runtime_rbd_map_failed:${target}"
+        ;;
+      runtime_rbd_device_missing:*)
+        ftctl_state_set "${vm}" "last_error=xcolo_secondary_runtime_rbd_device_missing:${target}"
+        ;;
+      *)
+        ftctl_state_set "${vm}" "last_error=xcolo_secondary_runtime_rbd_prepare_failed:${target}"
+        ;;
+    esac
+    ftctl_log_event "colo" "block_conversion.secondary_runtime_rbd_prepare" "fail" "${vm}" "${rc}" \
+      "target=${target} dest=${secondary_dest} error=$(printf '%s %s' "${out}" "${err}" | tr '\n' ' ' | cut -c1-220)"
+    return "${rc}"
+  fi
+
+  IFS='|' read -r runtime_target runtime_dest runtime_device mapped_by_ftctl <<< "$(printf '%s\n' "${out}" | tail -n1)"
+  : "${runtime_target}${runtime_dest}"
+  if [[ -z "${runtime_device}" ]]; then
+    ftctl_state_set "${vm}" "last_error=xcolo_secondary_runtime_rbd_device_missing:${target}"
+    ftctl_log_event "colo" "block_conversion.secondary_runtime_rbd_prepare" "fail" "${vm}" "" \
+      "target=${target} dest=${secondary_dest} reason=empty_runtime_device"
+    return 1
+  fi
+
+  ftctl_xcolo_rewrite_disk_source_for_runtime "${xml_path}" "${target}" "${runtime_device}" || {
+    ftctl_state_set "${vm}" "last_error=xcolo_secondary_runtime_xml_rewrite_failed:${target}"
+    ftctl_log_event "colo" "block_conversion.secondary_runtime_xml_rewrite" "fail" "${vm}" "" \
+      "target=${target} runtime_device=${runtime_device} path=${xml_path}"
+    return 1
+  }
+
+  suffix="$(ftctl_xcolo_disk_suffix "${target}")"
+  state_key="xcolo_secondary_runtime_rbd_${suffix}"
+  ftctl_state_set "${vm}" \
+    "${state_key}=${secondary_dest}|${runtime_device}|${mapped_by_ftctl}" \
+    "xcolo_secondary_runtime_rbd_prepared=true"
+  ftctl_log_event "colo" "block_conversion.secondary_runtime_rbd_prepare" "ok" "${vm}" "" \
+    "target=${target} dest=${secondary_dest} runtime_device=${runtime_device} mapped_by_ftctl=${mapped_by_ftctl}"
+}
+
+ftctl_xcolo_prepare_secondary_runtime_rbd() {
+  local vm="${1-}"
+  local xml_path="${2-}"
+  local disk_plan="${3-}"
+  local entry rest target primary_source primary_format primary_dtype secondary_dest
+  local -a runtime_disk_entries=()
+
+  [[ "${FTCTL_PROFILE_PROVISIONING_BACKEND:-libvirt-managed}" == "cloud-managed" ]] || return 0
+  [[ -n "${xml_path}" && -f "${xml_path}" && -n "${disk_plan}" ]] || return 0
+
+  IFS=';' read -r -a runtime_disk_entries <<< "${disk_plan}"
+  for entry in "${runtime_disk_entries[@]}"; do
+    [[ -n "${entry}" ]] || continue
+    target="${entry%%|*}"
+    rest="${entry#*|}"
+    primary_source="${rest%%|*}"
+    rest="${rest#*|}"
+    primary_format="${rest%%|*}"
+    rest="${rest#*|}"
+    primary_dtype="${rest%%|*}"
+    secondary_dest="${rest#*|}"
+    : "${primary_source}${primary_format}${primary_dtype}"
+    ftctl_xcolo_prepare_secondary_runtime_rbd_disk "${vm}" "${xml_path}" "${target}" "${secondary_dest}" || return $?
+  done
+}
+
+ftctl_xcolo_secondary_runtime_disk_source() {
+  local vm="${1-}"
+  local target="${2-}"
+  local fallback="${3-}"
+  local suffix value runtime_dest runtime_device mapped_by_ftctl
+
+  suffix="$(ftctl_xcolo_disk_suffix "${target}")"
+  value="$(ftctl_state_get "${vm}" "xcolo_secondary_runtime_rbd_${suffix}" 2>/dev/null || true)"
+  if [[ -n "${value}" ]]; then
+    IFS='|' read -r runtime_dest runtime_device mapped_by_ftctl <<< "${value}"
+    : "${runtime_dest}${mapped_by_ftctl}"
+    if [[ -n "${runtime_device}" ]]; then
+      printf '%s\n' "${runtime_device}"
+      return 0
+    fi
+  fi
+  printf '%s\n' "${fallback}"
+}
+
+ftctl_xcolo_unmap_secondary_runtime_rbd() {
+  local vm="${1-}"
+  local host="" user="" line key value dest runtime_device mapped_by_ftctl out="" err="" rc=0 q_device remote_cmd
+  local unmap_failed=0 state_path
+
+  state_path="$(ftctl_state_path "${vm}")"
+  [[ -f "${state_path}" ]] || return 0
+
+  while IFS= read -r line; do
+    case "${line}" in
+      xcolo_secondary_runtime_rbd_*=*) ;;
+      *) continue ;;
+    esac
+    key="${line%%=*}"
+    [[ "${key}" != "xcolo_secondary_runtime_rbd_prepared" ]] || continue
+    value="${line#*=}"
+    IFS='|' read -r dest runtime_device mapped_by_ftctl <<< "${value}"
+    : "${dest}"
+    [[ "${mapped_by_ftctl}" == "1" && -n "${runtime_device}" ]] || continue
+    if [[ -z "${host}" ]]; then
+      ftctl_blockcopy_remote_target_host_user host user || {
+        unmap_failed=1
+        break
+      }
+    fi
+    printf -v q_device '%q' "${runtime_device}"
+    remote_cmd="$(cat <<EOF
+set -euo pipefail
+device=${q_device}
+if [[ -b "\${device}" ]]; then
+  rbd unmap "\${device}"
+  udevadm settle >/dev/null 2>&1 || true
+fi
+EOF
+)"
+    out=""
+    err=""
+    rc=0
+    ftctl_blockcopy_remote_exec "${host}" "${user}" out err rc "${remote_cmd}" || true
+    if [[ "${rc}" == "0" ]]; then
+      ftctl_log_event "colo" "block_conversion.secondary_runtime_rbd_unmap" "ok" "${vm}" "" \
+        "key=${key} device=${runtime_device}"
+    else
+      ftctl_log_event "colo" "block_conversion.secondary_runtime_rbd_unmap" "fail" "${vm}" "${rc}" \
+        "key=${key} device=${runtime_device} error=$(printf '%s %s' "${out}" "${err}" | tr '\n' ' ' | cut -c1-220)"
+      unmap_failed=1
+    fi
+  done < "${state_path}"
+
+  [[ "${unmap_failed}" == "0" ]]
+}
+
 ftctl_xcolo_execute_block_cold_conversion() {
   local vm="${1-}"
   local primary_generated_xml standby_generated_xml primary_source secondary_dest
   local primary_overlay secondary_pair secondary_hidden secondary_active
   local primary_base_node primary_qdev secondary_base_node secondary_qdev
   local secondary_vm primary_size secondary_size host user out err rc primary_create_handle
-  local disk_plan entry rest target primary_format primary_dtype suffix seed_error
+  local disk_plan entry rest target primary_format primary_dtype suffix seed_error runtime_prepare_error
+  local secondary_runtime_source
   local -a disk_entries=()
 
   primary_generated_xml="$(ftctl_state_get "${vm}" "primary_xml_generated" 2>/dev/null || true)"
@@ -5384,6 +5639,22 @@ ftctl_xcolo_execute_block_cold_conversion() {
   ftctl_state_set "${vm}" "conversion_stage=baseline_seeded"
   ftctl_log_event "colo" "block_conversion.baseline_seed" "ok" "${vm}" "" \
     "disk_count=${#disk_entries[@]}"
+
+  ftctl_state_set "${vm}" "conversion_stage=secondary_runtime_rbd_preparing"
+  ftctl_xcolo_prepare_secondary_runtime_rbd "${vm}" "${standby_generated_xml}" "${disk_plan}" || {
+    runtime_prepare_error="$(ftctl_state_get "${vm}" "last_error" 2>/dev/null || true)"
+    [[ -n "${runtime_prepare_error}" ]] || runtime_prepare_error="xcolo_secondary_runtime_rbd_prepare_failed"
+    ftctl_state_set "${vm}" \
+      "conversion_stage=secondary_runtime_rbd_prepare_failed" \
+      "conversion_state=error" \
+      "protection_state=error" \
+      "transport_state=failed" \
+      "last_error=${runtime_prepare_error}"
+    ftctl_xcolo_rollback_block_primary_create_failure "${vm}" "${runtime_prepare_error}" || true
+    ftctl_state_set "${vm}" "xcolo_last_runtime_error=${runtime_prepare_error}" "last_error=${runtime_prepare_error}"
+    return 1
+  }
+  ftctl_state_set "${vm}" "conversion_stage=secondary_runtime_rbd_prepared"
 
   ftctl_log_event "colo" "block_conversion.primary_create" "ok" "${vm}" "" \
     "path=${primary_generated_xml}"
@@ -5469,13 +5740,14 @@ ftctl_xcolo_execute_block_cold_conversion() {
     rest="${rest#*|}"
     primary_dtype="${rest%%|*}"
     secondary_dest="${rest#*|}"
+    secondary_runtime_source="$(ftctl_xcolo_secondary_runtime_disk_source "${vm}" "${target}" "${secondary_dest}")"
     : "${primary_format}${primary_dtype}"
     suffix="$(ftctl_xcolo_disk_suffix "${target}")"
 
     primary_size="$(ftctl_xcolo_disk_virtual_size_bytes "${primary_source}" 2>/dev/null || true)"
     secondary_size=""
     if [[ -n "${host}" ]]; then
-      secondary_size="$(ftctl_xcolo_remote_disk_virtual_size_bytes "${host}" "${user}" "${secondary_dest}" 2>/dev/null || true)"
+      secondary_size="$(ftctl_xcolo_remote_disk_virtual_size_bytes "${host}" "${user}" "${secondary_runtime_source}" 2>/dev/null || true)"
     fi
     if [[ -n "${secondary_size}" && -n "${primary_size}" && "${secondary_size}" != "${primary_size}" ]]; then
       ftctl_log_event "colo" "block_conversion.size_validation" "fail" "${vm}" "" \
@@ -5508,9 +5780,9 @@ ftctl_xcolo_execute_block_cold_conversion() {
       ftctl_state_set "${vm}" "last_error=xcolo_block_primary_binding_missing"
       return 1
     }
-    ftctl_xcolo_collect_disk_binding_on_uri "${FTCTL_PROFILE_SECONDARY_URI}" "$(ftctl_profile_secondary_vm_name_resolved "${vm}")" "${secondary_dest}" secondary_base_node secondary_qdev || {
+    ftctl_xcolo_collect_disk_binding_on_uri "${FTCTL_PROFILE_SECONDARY_URI}" "$(ftctl_profile_secondary_vm_name_resolved "${vm}")" "${secondary_runtime_source}" secondary_base_node secondary_qdev || {
       ftctl_log_event "colo" "block_conversion.secondary_binding" "fail" "${vm}" "" \
-        "target=${target} source=${secondary_dest}"
+        "target=${target} source=${secondary_runtime_source} cloud_source=${secondary_dest}"
       ftctl_state_set "${vm}" "last_error=xcolo_block_secondary_binding_missing"
       return 1
     }

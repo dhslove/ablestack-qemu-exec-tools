@@ -1288,6 +1288,13 @@ ftctl_standby_deactivate() {
     return 1
   fi
 
+  if declare -F ftctl_xcolo_unmap_secondary_runtime_rbd >/dev/null 2>&1; then
+    ftctl_xcolo_unmap_secondary_runtime_rbd "${vm}" || {
+      ftctl_log_event "standby" "standby.deactivate.runtime_rbd_unmap" "warn" "${vm}" "" \
+        "secondary_uri=${FTCTL_PROFILE_SECONDARY_URI}"
+    }
+  fi
+
   ftctl_state_set "${vm}" "standby_state=stopped"
   ftctl_log_event "standby" "standby.deactivate" "ok" "${vm}" "" \
     "secondary_uri=${FTCTL_PROFILE_SECONDARY_URI} domains=$(printf '%s,' "${candidates[@]}")"

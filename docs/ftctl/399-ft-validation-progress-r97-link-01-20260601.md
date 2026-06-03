@@ -1476,3 +1476,36 @@ but a lower-level signature or reached stage changed, set
   - Run 65 stopped at baseline seed copy
   - Run 66 passed baseline seed for both disks and moved to secondary runtime
     creation
+
+### Run 67 Fix Plan 2026-06-03-23
+
+- Trigger:
+  - Run 66 failed after both baseline seed copies completed
+  - secondary libvirt could not open a generated XML disk source under
+    `/dev/rbd/rbd/<secondary-image>`
+- Confirmed progress from prior run:
+  - Run 65 failure stage: baseline seed copy
+  - Run 66 failure stage: secondary transient runtime create
+  - therefore this is progress, not the same failure loop
+- Root cause addressed:
+  - cloud-managed RBD images can be mapped as `/dev/rbdN` even when the
+    generated Cloud path `/dev/rbd/<pool>/<image>` is not a block device
+  - the transient standby XML must point at the actual runtime block device
+    that exists on the secondary host
+- Design implemented in source:
+  - before `ftctl_standby_activate`, qemu FTCTL maps each cloud-managed
+    secondary RBD target on the secondary host
+  - generated standby XML disk sources are rewritten to the resolved runtime
+    device, such as `/dev/rbd14`
+  - per-disk runtime mapping state is recorded:
+    - `xcolo_secondary_runtime_rbd_<target>=<cloud-path>|<runtime-device>|<mapped-by-ftctl>`
+  - follow-up secondary disk binding lookup uses the runtime device path rather
+    than the original Cloud path
+  - rollback and standby deactivate unmap only devices mapped by FTCTL
+- Repetition guard for next run:
+  - if secondary create still fails, compare generated XML source paths with
+    the secondary host `rbd device list` output
+  - if QMP binding fails after secondary create, verify binding lookup used the
+    runtime `/dev/rbdN` path stored in state
+  - do not treat this as a storage type mismatch unless layouts diverge from
+    `block/raw -> block/raw`

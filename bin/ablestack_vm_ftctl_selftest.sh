@@ -1824,6 +1824,77 @@ selftest_case_xcolo_baseline_seed_maps_cloud_managed_rbd() (
     "cloud-managed RBD baseline seed state"
 )
 
+selftest_case_xcolo_secondary_runtime_maps_cloud_managed_rbd() (
+  selftest_reset_env
+  selftest_info "x-colo secondary runtime maps cloud-managed RBD targets"
+
+  local call_log="${SELFTEST_ROOT}/xcolo-secondary-runtime-rbd.log"
+  local xml_path="${SELFTEST_ROOT}/standby.generated.xml"
+  FTCTL_PROFILE_SECONDARY_URI="qemu+ssh://peer/system"
+  FTCTL_PROFILE_FENCING_SSH_USER="root"
+  FTCTL_PROFILE_PROVISIONING_BACKEND="cloud-managed"
+
+  cat > "${xml_path}" <<EOF
+<domain type="kvm">
+  <name>standby-vm</name>
+  <devices>
+    <disk type="block" device="disk">
+      <source dev="/dev/rbd/rbd/secondary-root"/>
+      <target dev="sda" bus="virtio"/>
+    </disk>
+    <disk type="block" device="disk">
+      <source dev="/dev/rbd/rbd/secondary-data"/>
+      <target dev="sdb" bus="virtio"/>
+    </disk>
+  </devices>
+</domain>
+EOF
+
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_remote_target_host_user() {
+    printf -v "$1" '%s' "10.0.0.2"
+    printf -v "$2" '%s' "root"
+  }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_remote_exec() {
+    local out_var="$3" err_var="$4" rc_var="$5" remote_cmd="$6"
+    printf 'REMOTE:%s\n' "${remote_cmd}" >> "${call_log}"
+    case "${remote_cmd}" in
+      *"dest=/dev/rbd/rbd/secondary-root"*)
+        printf -v "${out_var}" '%s' "sda|/dev/rbd/rbd/secondary-root|/dev/rbd14|1"
+        ;;
+      *"dest=/dev/rbd/rbd/secondary-data"*)
+        printf -v "${out_var}" '%s' "sdb|/dev/rbd/rbd/secondary-data|/dev/rbd15|1"
+        ;;
+      *"device=/dev/rbd14"*|*"device=/dev/rbd15"*)
+        printf -v "${out_var}" '%s' ""
+        ;;
+      *)
+        printf -v "${out_var}" '%s' ""
+        ;;
+    esac
+    printf -v "${err_var}" '%s' ""
+    printf -v "${rc_var}" '%s' "0"
+  }
+
+  ftctl_xcolo_prepare_secondary_runtime_rbd "primary-vm" "${xml_path}" \
+    "sda|/dev/rbd/rbd/root|raw|block|/dev/rbd/rbd/secondary-root;sdb|/dev/rbd/rbd/data|raw|block|/dev/rbd/rbd/secondary-data"
+
+  selftest_assert_file_contains "${xml_path}" "/dev/rbd14"
+  selftest_assert_file_contains "${xml_path}" "/dev/rbd15"
+  selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_secondary_runtime_rbd_sda")" \
+    "/dev/rbd/rbd/secondary-root|/dev/rbd14|1" "sda runtime RBD state"
+  selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_secondary_runtime_rbd_sdb")" \
+    "/dev/rbd/rbd/secondary-data|/dev/rbd15|1" "sdb runtime RBD state"
+  selftest_assert_eq "$(ftctl_xcolo_secondary_runtime_disk_source "primary-vm" "sda" "/dev/rbd/rbd/secondary-root")" \
+    "/dev/rbd14" "sda runtime source lookup"
+
+  ftctl_xcolo_unmap_secondary_runtime_rbd "primary-vm"
+  selftest_assert_file_contains "${call_log}" "rbd unmap"
+  selftest_assert_file_contains "${call_log}" "device=/dev/rbd14"
+  selftest_assert_file_contains "${call_log}" "device=/dev/rbd15"
+)
+
 selftest_case_xcolo_baseline_seed_retries_ssh_transport_failure() (
   selftest_reset_env
   selftest_info "x-colo baseline seed retries transient ssh transport failures"
@@ -3809,6 +3880,7 @@ selftest_main() {
   selftest_case_xcolo_primary_netdev_vhost_guard
   selftest_case_xcolo_baseline_seed_uses_primary_nbd_before_runtime_graph
   selftest_case_xcolo_baseline_seed_maps_cloud_managed_rbd
+  selftest_case_xcolo_secondary_runtime_maps_cloud_managed_rbd
   selftest_case_xcolo_baseline_seed_retries_ssh_transport_failure
   selftest_case_xcolo_runtime_validation_blocks_false_positive
   selftest_case_xcolo_runtime_validation_reports_primary_migrate_failure
