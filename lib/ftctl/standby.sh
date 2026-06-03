@@ -858,6 +858,79 @@ tree.write(xml_path, encoding="unicode")
 PY
 }
 
+ftctl_xml_validate_disk_map_sources() {
+  local xml_path="${1-}"
+  local disk_map="${2-}"
+
+  command -v python3 >/dev/null 2>&1 || {
+    echo "ERROR: python3 is required for disk map source validation" >&2
+    return 2
+  }
+
+  XML_PATH="${xml_path}" DISK_MAP="${disk_map}" python3 - <<'PY'
+import os
+import sys
+import xml.etree.ElementTree as ET
+
+xml_path = os.environ["XML_PATH"]
+disk_map_raw = os.environ["DISK_MAP"]
+
+expected = {}
+for entry in disk_map_raw.split(";"):
+    if not entry:
+        continue
+    if "=" not in entry:
+        print(f"invalid disk map entry: {entry}", file=sys.stderr)
+        raise SystemExit(2)
+    target, dest = entry.split("=", 1)
+    target = target.strip()
+    dest = dest.strip()
+    if not target or not dest:
+        print(f"invalid disk map entry: {entry}", file=sys.stderr)
+        raise SystemExit(2)
+    expected[target] = dest
+
+if not expected:
+    print("empty disk map", file=sys.stderr)
+    raise SystemExit(2)
+
+root = ET.parse(xml_path).getroot()
+devices = root.find("devices")
+if devices is None:
+    print("missing <devices> in xml", file=sys.stderr)
+    raise SystemExit(2)
+
+seen = set()
+for disk in devices.findall("disk"):
+    if disk.get("device") != "disk":
+        continue
+    target = disk.find("target")
+    source = disk.find("source")
+    if target is None or not target.get("dev"):
+        print("disk target is missing in xml", file=sys.stderr)
+        raise SystemExit(2)
+    target_dev = target.get("dev")
+    if target_dev not in expected:
+        continue
+    if source is None:
+        print(f"disk source is missing for {target_dev}", file=sys.stderr)
+        raise SystemExit(2)
+    actual = source.get("dev") or source.get("file") or ""
+    if actual != expected[target_dev]:
+        print(
+            f"disk source mismatch for {target_dev}: expected {expected[target_dev]} got {actual}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    seen.add(target_dev)
+
+missing = sorted(set(expected) - seen)
+if missing:
+    print("disk map target not found in xml: " + ",".join(missing), file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
 ftctl_xml_validate_unique_disk_targets() {
   local xml_path="${1-}"
 

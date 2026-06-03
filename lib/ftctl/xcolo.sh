@@ -3145,6 +3145,16 @@ ftctl_xcolo_prepare_block_generated_xmls() {
   local primary_disk_metadata="${10-}"
   local primary_generated_xml standby_generated_xml standby_vm_name disk_metadata=""
 
+  ftctl_xcolo_prepare_block_generated_xmls_fail() {
+    local reason="${1-}"
+    local details="${2-}"
+    [[ -n "${reason}" ]] || reason="xcolo_block_generated_xml_prepare_failed"
+    ftctl_state_set "${vm}" "last_error=${reason}"
+    ftctl_log_event "colo" "xcolo.prepare_block_generated_xmls" "fail" "${vm}" "" \
+      "reason=${reason} ${details}"
+    return 1
+  }
+
   [[ -n "${primary_xml_backup}" && -f "${primary_xml_backup}" ]] || return 1
   [[ -n "${standby_xml_seed}" && -f "${standby_xml_seed}" ]] || return 1
 
@@ -3163,25 +3173,41 @@ ftctl_xcolo_prepare_block_generated_xmls() {
   ftctl_xml_remove_qemu_commandline "${primary_generated_xml}" || true
   ftctl_xml_remove_qemu_commandline "${standby_generated_xml}" || true
   if [[ -n "${primary_disk_map}" ]]; then
-    ftctl_xml_rewrite_disk_map_block_runtime "${primary_generated_xml}" "${primary_disk_map}" "${disk_format}" "ro-shareable" "9" "${primary_disk_metadata}" || return 1
+    ftctl_xml_rewrite_disk_map_block_runtime "${primary_generated_xml}" "${primary_disk_map}" "${disk_format}" "ro-shareable" "9" "${primary_disk_metadata}" ||
+      ftctl_xcolo_prepare_block_generated_xmls_fail "xcolo_primary_disk_rewrite_failed" "path=${primary_generated_xml}" || return 1
   else
-    ftctl_xml_rewrite_first_disk_block_runtime "${primary_generated_xml}" "${primary_source}" "${disk_format}" "ro-shareable" "9" || return 1
+    ftctl_xml_rewrite_first_disk_block_runtime "${primary_generated_xml}" "${primary_source}" "${disk_format}" "ro-shareable" "9" ||
+      ftctl_xcolo_prepare_block_generated_xmls_fail "xcolo_primary_disk_rewrite_failed" "path=${primary_generated_xml}" || return 1
   fi
   if [[ "${FTCTL_PROFILE_DISK_MAP}" == "auto" ]]; then
-    ftctl_xml_rewrite_first_disk_block_runtime "${standby_generated_xml}" "${secondary_dest}" "${disk_format}" "rw" "9" || return 1
+    ftctl_xml_rewrite_first_disk_block_runtime "${standby_generated_xml}" "${secondary_dest}" "${disk_format}" "rw" "9" ||
+      ftctl_xcolo_prepare_block_generated_xmls_fail "xcolo_standby_disk_rewrite_failed" "path=${standby_generated_xml}" || return 1
   else
-    ftctl_xcolo_disk_map_runtime_metadata "${FTCTL_PROFILE_DISK_MAP}" disk_metadata || return 1
-    ftctl_xml_rewrite_disk_map_block_runtime "${standby_generated_xml}" "${FTCTL_PROFILE_DISK_MAP}" "${disk_format}" "rw" "9" "${disk_metadata}" || return 1
+    ftctl_xcolo_disk_map_runtime_metadata "${FTCTL_PROFILE_DISK_MAP}" disk_metadata "${vm}" ||
+      ftctl_xcolo_prepare_block_generated_xmls_fail "xcolo_standby_disk_metadata_failed" "path=${standby_generated_xml}" || return 1
+    ftctl_xml_rewrite_disk_map_block_runtime "${standby_generated_xml}" "${FTCTL_PROFILE_DISK_MAP}" "${disk_format}" "rw" "9" "${disk_metadata}" ||
+      ftctl_xcolo_prepare_block_generated_xmls_fail "xcolo_standby_disk_rewrite_failed" "path=${standby_generated_xml}" || return 1
+    ftctl_xml_validate_disk_map_sources "${standby_generated_xml}" "${FTCTL_PROFILE_DISK_MAP}" ||
+      ftctl_xcolo_prepare_block_generated_xmls_fail "xcolo_standby_disk_source_mismatch" "path=${standby_generated_xml}" || return 1
   fi
-  ftctl_xml_apply_xcolo_network_runtime "${primary_generated_xml}" || return 1
-  ftctl_xml_apply_xcolo_network_runtime "${standby_generated_xml}" || return 1
-  ftctl_xml_apply_standby_host_runtime "${standby_generated_xml}" || return 1
-  ftctl_xml_ensure_iothread_id "${primary_generated_xml}" "1" || return 1
-  ftctl_xml_apply_qemu_commandline "${primary_generated_xml}" "${primary_args}" || return 1
-  ftctl_xml_apply_qemu_commandline "${standby_generated_xml}" "${secondary_args}" || return 1
-  ftctl_xml_validate_unique_disk_targets "${primary_generated_xml}" || return 1
-  ftctl_xml_validate_unique_disk_targets "${standby_generated_xml}" || return 1
-  ftctl_xml_validate_xcolo_iothread_contract "${primary_generated_xml}" || return 1
+  ftctl_xml_apply_xcolo_network_runtime "${primary_generated_xml}" ||
+    ftctl_xcolo_prepare_block_generated_xmls_fail "xcolo_primary_network_xml_failed" "path=${primary_generated_xml}" || return 1
+  ftctl_xml_apply_xcolo_network_runtime "${standby_generated_xml}" ||
+    ftctl_xcolo_prepare_block_generated_xmls_fail "xcolo_standby_network_xml_failed" "path=${standby_generated_xml}" || return 1
+  ftctl_xml_apply_standby_host_runtime "${standby_generated_xml}" ||
+    ftctl_xcolo_prepare_block_generated_xmls_fail "xcolo_standby_host_xml_failed" "path=${standby_generated_xml}" || return 1
+  ftctl_xml_ensure_iothread_id "${primary_generated_xml}" "1" ||
+    ftctl_xcolo_prepare_block_generated_xmls_fail "xcolo_primary_iothread_xml_failed" "path=${primary_generated_xml}" || return 1
+  ftctl_xml_apply_qemu_commandline "${primary_generated_xml}" "${primary_args}" ||
+    ftctl_xcolo_prepare_block_generated_xmls_fail "xcolo_primary_qemu_commandline_xml_failed" "path=${primary_generated_xml}" || return 1
+  ftctl_xml_apply_qemu_commandline "${standby_generated_xml}" "${secondary_args}" ||
+    ftctl_xcolo_prepare_block_generated_xmls_fail "xcolo_standby_qemu_commandline_xml_failed" "path=${standby_generated_xml}" || return 1
+  ftctl_xml_validate_unique_disk_targets "${primary_generated_xml}" ||
+    ftctl_xcolo_prepare_block_generated_xmls_fail "xcolo_primary_disk_targets_xml_failed" "path=${primary_generated_xml}" || return 1
+  ftctl_xml_validate_unique_disk_targets "${standby_generated_xml}" ||
+    ftctl_xcolo_prepare_block_generated_xmls_fail "xcolo_standby_disk_targets_xml_failed" "path=${standby_generated_xml}" || return 1
+  ftctl_xml_validate_xcolo_iothread_contract "${primary_generated_xml}" ||
+    ftctl_xcolo_prepare_block_generated_xmls_fail "xcolo_primary_iothread_contract_failed" "path=${primary_generated_xml}" || return 1
 
   ftctl_state_set "${vm}" \
     "primary_xml_generated=${primary_generated_xml}" \
@@ -3301,14 +3327,53 @@ EOF
   printf '%s|%s\n' "${hidden}" "${active}"
 }
 
+ftctl_xcolo_disk_map_infer_cloud_managed_rbd_metadata() {
+  local disk_map="${1-}"
+  local out_var="${2}"
+  local vm="${3-}"
+  local entry target path layout symmetry metadata=""
+  local -a entries=()
+
+  [[ "${FTCTL_PROFILE_PROVISIONING_BACKEND:-}" == "cloud-managed" ]] || return 1
+  [[ -n "${disk_map}" && "${disk_map}" != "auto" ]] || return 1
+
+  IFS=';' read -r -a entries <<<"${disk_map}"
+  [[ "${#entries[@]}" -gt 0 ]] || return 1
+  symmetry="$(ftctl_state_get "${vm}" "xcolo_storage_symmetry" 2>/dev/null || true)"
+
+  for entry in "${entries[@]}"; do
+    [[ -n "${entry}" ]] || continue
+    [[ "${entry}" == *"="* ]] || return 1
+    target="${entry%%=*}"
+    path="${entry#*=}"
+    target="$(printf '%s' "${target}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    path="$(printf '%s' "${path}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    [[ -n "${target}" && -n "${path}" ]] || return 1
+    [[ "${path}" == /dev/rbd/* ]] || return 1
+
+    layout="$(ftctl_state_get "${vm}" "xcolo_disk_${target}_secondary_layout" 2>/dev/null || true)"
+    if [[ "${layout}" != "block/raw" && "${symmetry}" != "ok" ]]; then
+      return 1
+    fi
+    metadata="${metadata}${metadata:+;}${target}=${path}|raw|dev|block"
+  done
+
+  [[ -n "${metadata}" ]] || return 1
+  printf -v "${out_var}" '%s' "${metadata}"
+}
+
 ftctl_xcolo_disk_map_runtime_metadata() {
   local disk_map="${1-}"
   local out_var="${2}"
+  local vm="${3-}"
   local host="" user="" out="" err="" rc=0 remote_cmd="" q_disk_map=""
 
   [[ -n "${disk_map}" && "${disk_map}" != "auto" ]] || return 1
   if [[ -n "${FTCTL_PROFILE_XCOLO_DISK_MAP_METADATA:-}" ]]; then
     printf -v "${out_var}" '%s' "${FTCTL_PROFILE_XCOLO_DISK_MAP_METADATA}"
+    return 0
+  fi
+  if ftctl_xcolo_disk_map_infer_cloud_managed_rbd_metadata "${disk_map}" "${out_var}" "${vm}"; then
     return 0
   fi
 

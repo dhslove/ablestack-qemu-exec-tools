@@ -1156,3 +1156,53 @@ but a lower-level signature or reached stage changed, set
   - this is the desired guard behavior for the repeated
     `Received invalid message 0x0000 length 0x0000` / `Can't receive COLO
     message: Input/output error` path under mismatched storage layout
+
+### Run 64 Result 2026-06-03-12
+
+- User action:
+  - FT protection was started for `r97-link-01` / `i-2-54-VM`
+  - target storage was selected so the standby disks were also `block/raw`
+- Final state:
+  - protection row: `64`
+  - primary VM: `54` / `i-2-54-VM`
+  - standby VM: `120` / `i-2-120-VM`
+  - `protection_state=error`
+  - `transport_state=planned`
+  - `active_side=primary`
+  - `last_error=xcolo_block_generated_xml_prepare_failed`
+- Progress confirmed:
+  - the previous storage mismatch gate did not block this run
+  - the actual storage layouts were compatible:
+    - `xcolo_storage_symmetry=ok`
+    - `xcolo_storage_primary_layouts=sda:block/raw,sdb:block/raw`
+    - `xcolo_storage_secondary_layouts=sda:block/raw,sdb:block/raw`
+  - primary VM remained `Running`
+  - no block jobs or QEMU migration were started
+- Root cause evidence:
+  - profile disk map pointed to secondary RBD paths:
+    - `sda=/dev/rbd/rbd/440e02f0-c616-4837-973c-c3ab2488ba52`
+    - `sdb=/dev/rbd/rbd/32e4619f-a047-470e-9d4f-ae29e808646c`
+  - on the secondary host `10.10.32.1`, those `/dev/rbd/...` KRBD paths did
+    not exist while the cloud-managed standby VM was still stopped
+  - `qemu-img info --force-share` against those paths failed with
+    `No such file or directory`
+  - generated standby XML was left before disk rewrite completion and still
+    referenced the primary RBD paths
+- Interpretation:
+  - this is not a repeat of the invalid COLO message failure
+  - same-format storage selection worked
+  - the new failure is a cloud-managed RBD metadata probe bug: XML preparation
+    assumes the secondary block path is already mapped on the secondary host
+    before the transient standby runtime exists
+- Required next change:
+  - for cloud-managed `block/raw` disk maps, do not require `qemu-img info` on
+    an unmapped secondary `/dev/rbd/...` path during generated XML preparation
+  - derive metadata from the already known storage symmetry result or the
+    disk-map target itself:
+    - `disk_type=block`
+    - `source_attr=dev`
+    - `format=raw`
+  - add sub-step logging for `xcolo_block_generated_xml_prepare_failed` so the
+    exact failed helper is recorded in `last_error` and events
+  - keep preserving primary VM state before retry; this failure is still before
+    primary shutdown and before migration

@@ -1106,6 +1106,63 @@ PY
   fi
 }
 
+selftest_case_xcolo_cloud_managed_rbd_metadata_inference() {
+  selftest_reset_env
+  selftest_info "cloud-managed x-colo RBD metadata does not require mapped secondary paths"
+
+  local vm="cloud-rbd-ftvm"
+  local bundle="${SELFTEST_ROOT}/xml/${vm}"
+  local primary_generated standby_generated
+  mkdir -p "${bundle}"
+  cat > "${bundle}/primary.xml" <<EOF
+<domain type='kvm'>
+  <name>${vm}</name>
+  <devices>
+    <disk type='block' device='disk'>
+      <driver name='qemu' type='raw'/>
+      <source dev='/dev/rbd/rbd/${vm}-primary-root'/>
+      <target dev='sda' bus='scsi'/>
+    </disk>
+    <disk type='block' device='disk'>
+      <driver name='qemu' type='raw'/>
+      <source dev='/dev/rbd/rbd/${vm}-primary-data'/>
+      <target dev='sdb' bus='scsi'/>
+    </disk>
+    <interface type='bridge'>
+      <mac address='52:54:00:12:34:57'/>
+      <source bridge='bridge0'/>
+      <target dev='vnet0'/>
+      <model type='virtio'/>
+    </interface>
+  </devices>
+</domain>
+EOF
+  cp "${bundle}/primary.xml" "${bundle}/standby.xml"
+
+  ftctl_profile_reset
+  FTCTL_PROFILE_PROVISIONING_BACKEND="cloud-managed"
+  FTCTL_PROFILE_SECONDARY_VM_NAME="${vm}-standby"
+  FTCTL_PROFILE_DISK_MAP="sda=/dev/rbd/rbd/${vm}-secondary-root;sdb=/dev/rbd/rbd/${vm}-secondary-data"
+  ftctl_state_set "${vm}" \
+    "xcolo_storage_symmetry=ok" \
+    "xcolo_disk_sda_secondary_layout=block/raw" \
+    "xcolo_disk_sdb_secondary_layout=block/raw"
+
+  ftctl_xcolo_prepare_block_generated_xmls "${vm}" \
+    "${bundle}/primary.xml" "${bundle}/standby.xml" \
+    "/dev/rbd/rbd/${vm}-primary-root" "/dev/rbd/rbd/${vm}-secondary-root" \
+    "raw" "" ""
+
+  primary_generated="$(ftctl_state_get "${vm}" "primary_xml_generated")"
+  standby_generated="$(ftctl_state_get "${vm}" "standby_xml_generated")"
+  selftest_assert_file_contains "${primary_generated}" '<source dev="/dev/rbd/rbd/cloud-rbd-ftvm-primary-root"'
+  selftest_assert_file_contains "${standby_generated}" '<source dev="/dev/rbd/rbd/cloud-rbd-ftvm-secondary-root"'
+  selftest_assert_file_contains "${standby_generated}" '<source dev="/dev/rbd/rbd/cloud-rbd-ftvm-secondary-data"'
+  selftest_assert_file_not_contains "${standby_generated}" 'cloud-rbd-ftvm-primary-root'
+  selftest_assert_file_not_contains "${standby_generated}" 'cloud-rbd-ftvm-primary-data'
+  ftctl_xml_validate_disk_map_sources "${standby_generated}" "${FTCTL_PROFILE_DISK_MAP}"
+}
+
 selftest_case_xcolo_primary_create_maps_rbd_sources() (
   selftest_reset_env
   selftest_info "x-colo primary generated XML maps KRBD sources before create"
@@ -3673,6 +3730,7 @@ selftest_main() {
   selftest_case_xcolo_and_xml
   selftest_case_xcolo_iothread_contract_validation
   selftest_case_xcolo_block_xml_preserves_disk_targets
+  selftest_case_xcolo_cloud_managed_rbd_metadata_inference
   selftest_case_xcolo_primary_create_maps_rbd_sources
   selftest_case_xcolo_scsi_root_replace_avoids_lun_collision
   selftest_case_xcolo_block_handshake_sets_checkpoint_after_migrate

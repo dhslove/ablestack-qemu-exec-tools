@@ -103,3 +103,71 @@ primary VM is shut down.
 
 To continue FT XCOLO runtime validation, the next target storage must match the
 primary layout, for example `block/raw -> block/raw`.
+
+## Cloud-Managed RBD Metadata Inference
+
+Run 64 selected compatible `block/raw -> block/raw` storage, but generated XML
+preparation failed before primary shutdown:
+
+- `xcolo_storage_symmetry=ok`
+- `last_error=xcolo_block_generated_xml_prepare_failed`
+
+The failure was caused by a wrong metadata probe assumption. For cloud-managed
+standby VMs, the secondary RBD volume can be allocated in Cloud while the
+secondary host still has no `/dev/rbd/...` KRBD mapping. The mapping may be
+created only when libvirt starts or attaches the transient standby runtime.
+
+Therefore qemu FTCTL must not require this to succeed during generated XML
+preparation:
+
+```text
+qemu-img info --force-share /dev/rbd/rbd/<secondary-volume-path>
+```
+
+When all of the following are true, qemu FTCTL must infer disk metadata from
+the Cloud-managed plan instead of probing the secondary host path:
+
+- `FTCTL_PROFILE_PROVISIONING_BACKEND=cloud-managed`
+- the selected storage is compatible and recorded as `block/raw`
+- the disk map destination is a `/dev/rbd/...` path
+
+The inferred metadata is:
+
+```text
+<target>=<rbd-path>|raw|dev|block
+```
+
+This keeps generated XML preparation aligned with the Cloud-managed lifecycle:
+Cloud owns VM and volume creation, while qemu FTCTL prepares and runs the FT
+runtime without assuming pre-existing host-side KRBD mappings.
+
+## Generated XML Diagnostics
+
+`xcolo_block_generated_xml_prepare_failed` is too broad for repeated FT test
+iterations. The generated XML preparation function must record the failed
+sub-step in state and events before returning.
+
+Required sub-step errors include:
+
+- `xcolo_primary_disk_rewrite_failed`
+- `xcolo_standby_disk_metadata_failed`
+- `xcolo_standby_disk_rewrite_failed`
+- `xcolo_primary_network_xml_failed`
+- `xcolo_standby_network_xml_failed`
+- `xcolo_standby_host_xml_failed`
+- `xcolo_primary_iothread_xml_failed`
+- `xcolo_primary_qemu_commandline_xml_failed`
+- `xcolo_standby_qemu_commandline_xml_failed`
+- `xcolo_primary_disk_targets_xml_failed`
+- `xcolo_standby_disk_targets_xml_failed`
+- `xcolo_primary_iothread_contract_failed`
+
+After standby disk rewrite, qemu FTCTL should verify that every target in
+`FTCTL_PROFILE_DISK_MAP` appears in the generated standby XML as the final disk
+source. If this check fails, record:
+
+- `last_error=xcolo_standby_disk_source_mismatch`
+
+The next expected Run 65 result is that cloud-managed compatible RBD storage
+passes generated XML preparation even when secondary `/dev/rbd/...` paths are
+not mapped before the transient standby runtime starts.
