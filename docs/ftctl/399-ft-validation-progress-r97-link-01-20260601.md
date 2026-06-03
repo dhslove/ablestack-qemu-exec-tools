@@ -1883,3 +1883,67 @@ but a lower-level signature or reached stage changed, set
   - if the same protocol invalid-message failure repeats with checkpoint ready,
     checkpoint setup is eliminated and the next design target becomes QEMU COLO
     role-transition timing/filter activation around migration.
+
+### Run 69 Result 2026-06-04
+
+- Trigger:
+  - user started FT protection registration after Run 69 readiness cleanup
+- Evidence:
+  - monitor log:
+    `/home/ablecloud/work/ft-run69-monitor-20260604-013518.log`
+  - final evidence:
+    `/home/ablecloud/work/ft-run69-final-20260604-013822`
+- Final state:
+  - protection row: `69`
+  - standby VM: `125` / `i-2-125-VM`
+  - `protection_state=error`
+  - `transport_state=failed`
+  - `active_side=primary`
+  - `last_error=xcolo_repeated_protocol_invalid_message`
+  - standby VM DB state: `Running`, host `1`, power state `PowerOn`
+- Progress confirmed:
+  - the pre-migrate checkpoint hard gate worked:
+    - `xcolo_primary_checkpoint_delay_expected=2000`
+    - `xcolo_primary_checkpoint_delay_actual=2000`
+    - `xcolo_primary_checkpoint_delay_ready=yes`
+    - `xcolo_primary_checkpoint_delay_pre_migrate=2000`
+    - `xcolo_premigrate_primary_checkpoint_delay_ready=yes`
+  - pre-migrate readiness was also recorded as ready:
+    - `xcolo_premigrate_primary_capability_x_colo=yes`
+    - `xcolo_premigrate_primary_capability_return_path=yes`
+    - `xcolo_premigrate_primary_filter_qom_ready=yes`
+    - `xcolo_premigrate_primary_filter_cmdline_ready=yes`
+    - `xcolo_premigrate_primary_filter_chardev_ready=yes`
+    - `xcolo_premigrate_channel_mirror_established=yes`
+    - `xcolo_premigrate_channel_compare_established=yes`
+    - `xcolo_premigrate_channel_compare_local_established=yes`
+    - `xcolo_premigrate_channel_compare_out_established=yes`
+    - `xcolo_firewall_ready=yes`
+- Repeated failure evidence:
+  - `xcolo_handshake_command_state=accepted`
+  - `xcolo_steady_state_gate=failed`
+  - `xcolo_repeated_protocol_invalid_message=yes`
+  - `xcolo_repeated_protocol_invalid_message_evidence=premigrate_ready`
+  - `xcolo_repeated_protocol_invalid_message_storage_symmetry=ok`
+  - `xcolo_protocol_invalid_message_reason=primary_role_not_entered_after_migrate`
+  - `xcolo_primary_migrate_status=failed`
+  - `xcolo_primary_colo_mode=none`
+  - `xcolo_secondary_migrate_status=colo`
+  - `xcolo_secondary_colo_mode=secondary`
+  - primary QEMU log:
+    - `Received invalid message 0x0000 length 0x0000`
+  - secondary QEMU log:
+    - `Can't receive COLO message: Input/output error`
+- Repetition control:
+  - this is the same protocol-role blocker as Run 68
+  - the checkpoint-delay hypothesis is now eliminated because the gate is
+    verified before primary migrate
+  - storage symmetry, firewall, socket establishment, baseline seed, secondary
+    RBD mapping, and generic pre-migrate readiness are not the next active
+    hypothesis
+- Next improvement direction:
+  - target QEMU COLO role-transition timing/filter activation around
+    `primary.migrate`
+  - the next code change must explicitly make the migration role transition
+    observable and gate on it, instead of cycling through already-verified
+    storage/firewall/checkpoint preconditions
