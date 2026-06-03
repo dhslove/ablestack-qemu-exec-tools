@@ -1206,3 +1206,64 @@ but a lower-level signature or reached stage changed, set
     exact failed helper is recorded in `last_error` and events
   - keep preserving primary VM state before retry; this failure is still before
     primary shutdown and before migration
+
+### Run 65 Preparation Result 2026-06-03-13
+
+- Source commit:
+  - `6736bf830bdd9feae36ff3fbdc95f3a9f631cb2c`
+  - `fix: infer cloud-managed rbd xcolo metadata`
+- Design document:
+  - `343-ft-xcolo-storage-compatibility-gate-design-20260602.md`
+- Code changes:
+  - cloud-managed `/dev/rbd/...` disk maps now infer metadata as
+    `raw|dev|block` when the recorded storage symmetry is compatible
+  - generated standby XML source validation now confirms every mapped disk
+    target points at the intended secondary destination
+  - generated XML preparation records sub-step failure reasons such as:
+    - `xcolo_standby_disk_metadata_failed`
+    - `xcolo_standby_disk_rewrite_failed`
+    - `xcolo_standby_disk_source_mismatch`
+- Validation:
+  - `bash -n` passed for `xcolo.sh`, `standby.sh`, and selftest
+  - `git diff --check` passed
+  - targeted selftest passed:
+    - `selftest_case_xcolo_cloud_managed_rbd_metadata_inference`
+  - full selftest still stops at the pre-existing backend validation baseline
+    after shellcheck is no-op'd; this is not a new failure from this change
+- GitHub Actions build:
+  - workflow: `FTCTL Branch Development Release`
+  - run: `26862256891`
+  - result: success
+  - RPM SHA256:
+    `0bb05d570ae051f65c422f7c7290ab56a62cb4fbea834d07b8a05b9a13834025`
+- Deployed hosts:
+  - `10.10.32.1`
+  - `10.10.32.2`
+  - `10.10.32.3`
+- Installed verification:
+  - package: `ablestack_vm_ftctl-0.8.0-1.noarch`
+  - deployed marker checks passed for:
+    - `ftctl_xcolo_disk_map_infer_cloud_managed_rbd_metadata`
+    - `xcolo_standby_disk_metadata_failed`
+    - `ftctl_xml_validate_disk_map_sources`
+  - `ablestack-vm-ftctl.timer` and `ablestack-vm-hangctl.timer` are active
+    on all three 32.x hosts
+- Cleanup verification after Run 64:
+  - active protection rows for primary VM `54`: `0`
+  - active FTCTL VM details for primary/standby scope: `0`
+  - active standby VM rows: `0`
+  - active standby volumes: `0`
+  - removed standby RBD images:
+    - `440e02f0-c616-4837-973c-c3ab2488ba52`
+    - `32e4619f-a047-470e-9d4f-ae29e808646c`
+  - primary VM `i-2-54-VM` is `Running` on host `3`
+  - `query-block-jobs` returns an empty list
+  - `query-migrate` returns an empty object
+  - `ablestack_vm_ftctl status --vm i-2-54-VM --json` returns `not_found`
+- Retest expectation:
+  - compatible `block/raw -> block/raw` cloud-managed RBD should now pass
+    generated XML preparation even when the secondary KRBD paths are not
+    mapped before standby runtime creation
+  - if XML preparation still fails, the next run should include a specific
+    sub-step `last_error` rather than the broad
+    `xcolo_block_generated_xml_prepare_failed`
