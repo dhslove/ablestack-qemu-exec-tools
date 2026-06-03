@@ -1267,3 +1267,58 @@ but a lower-level signature or reached stage changed, set
   - if XML preparation still fails, the next run should include a specific
     sub-step `last_error` rather than the broad
     `xcolo_block_generated_xml_prepare_failed`
+
+### Run 65 Result 2026-06-03-12
+
+- User action:
+  - FT protection was started for `r97-link-01` / `i-2-54-VM`
+  - compatible `block/raw -> block/raw` storage was selected
+- Evidence:
+  - monitor log:
+    `/home/ablecloud/work/ft-run65-monitor-20260603-125151.log`
+  - final evidence:
+    `/home/ablecloud/work/ft-run65-final-20260603-125841`
+- Final state:
+  - protection row: `65`
+  - primary VM: `54` / `i-2-54-VM`
+  - standby VM: `121` / `i-2-121-VM`
+  - `protection_state=error`
+  - `transport_state=failed`
+  - `active_side=primary`
+  - `last_error=xcolo_baseline_seed_failed:sda`
+- Progress confirmed:
+  - generated XML preparation now passes
+  - state includes:
+    - `primary_xml_generated=/var/lib/ablestack-vm-ftctl/xml/i-2-54-VM/primary.generated.xml`
+    - `standby_xml_generated=/var/lib/ablestack-vm-ftctl/xml/i-2-54-VM/standby.generated.xml`
+  - standby generated XML now points `sda` at the secondary RBD image:
+    - `/dev/rbd/rbd/0f9bac5b-a44d-4427-a3f7-a5da21348ba4`
+  - storage compatibility remained valid:
+    - `xcolo_storage_symmetry=ok`
+    - `xcolo_storage_primary_layouts=sda:block/raw,sdb:block/raw`
+    - `xcolo_storage_secondary_layouts=sda:block/raw,sdb:block/raw`
+- Failure stage:
+  - `block_conversion.baseline_seed.start` succeeded for `sda`
+  - primary source readiness succeeded:
+    - `block_conversion.baseline_seed.source_ready`
+  - source NBD export started:
+    - `block_conversion.baseline_seed.nbd_start`
+    - `nbd://10.10.32.3:10916/ftctl-xcolo-seed-i-2-54-VM-sda`
+  - copy failed after three attempts:
+    - `block_conversion.baseline_seed.copy.final_fail`
+    - `rc=95`
+    - `failure_class=copy`
+- Current root cause hypothesis:
+  - the previous XML metadata assumption is fixed
+  - baseline seeding still attempts to copy to secondary KRBD path
+    `/dev/rbd/rbd/0f9bac5b-a44d-4427-a3f7-a5da21348ba4`
+  - that path is not mapped on `10.10.32.1`, although the RBD image exists in
+    the pool
+  - cloud-managed RBD handling therefore needs the same lifecycle correction in
+    baseline seed copy: the code must either map/unmap the secondary RBD path
+    for the copy operation or copy using an RBD URI/path that does not require
+    a pre-existing `/dev/rbd/...` mapping
+- Repetition control:
+  - this is not a repeat of Run 64
+  - Run 64 stopped at generated XML preparation
+  - Run 65 reached baseline seed copy and rolled back primary cleanly
