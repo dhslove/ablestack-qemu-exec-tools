@@ -1947,3 +1947,31 @@ but a lower-level signature or reached stage changed, set
   - the next code change must explicitly make the migration role transition
     observable and gate on it, instead of cycling through already-verified
     storage/firewall/checkpoint preconditions
+
+### Run 70 Fix Plan 2026-06-04
+
+- Trigger:
+  - Run 69 repeated `xcolo_repeated_protocol_invalid_message`, but also proved
+    the pre-migrate checkpoint hard gate is working
+- Design recorded:
+  - [346. FT XCOLO Post-Migrate Filter Activation Gate Design](346-ft-xcolo-post-migrate-filter-activation-gate-design-20260604.md)
+- Code direction:
+  - keep primary filter objects/topology present before migrate
+  - keep primary filter object `status=off` until after `primary.migrate`
+  - insert a post-migrate pre-activation gate that captures:
+    - primary/secondary migrate status
+    - primary/secondary COLO mode
+    - invalid-message evidence before filter activation
+    - socket snapshot
+  - activate primary filters only after that pre-activation gate
+  - insert a post-activation gate that captures whether the invalid message
+    appears after filter activation
+- Required new state split:
+  - `xcolo_protocol_failure_phase=pre_filter_activation`
+  - or `xcolo_protocol_failure_phase=post_filter_activation`
+  - or `xcolo_protocol_failure_phase=role_transition_stalled`
+- Repetition control:
+  - if the same invalid-message failure occurs without a phase split, the
+    implementation is incomplete
+  - no further checkpoint/firewall/storage/baseline precondition cycling is
+    allowed unless the new phase split shows one of those assumptions regressed

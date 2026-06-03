@@ -1256,7 +1256,7 @@ selftest_case_xcolo_block_handshake_sets_checkpoint_before_migrate() (
   selftest_info "x-colo block handshake sets checkpoint delay before primary migrate"
 
   local call_log="${SELFTEST_ROOT}/xcolo-block-handshake-order.log"
-  local filter_line checkpoint_line migrate_line
+  local filter_line checkpoint_line migrate_line activation_line
   FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
   FTCTL_PROFILE_SECONDARY_URI="qemu+ssh://peer/system"
   FTCTL_PROFILE_XCOLO_NBD_ENDPOINT="tcp:10.0.0.2:10809"
@@ -1283,6 +1283,12 @@ selftest_case_xcolo_block_handshake_sets_checkpoint_before_migrate() (
       printf -v "${out_var}" '%s' '{"return":{"x-checkpoint-delay":2000}}'
     elif [[ "${payload}" == *"query-migrate-capabilities"* ]]; then
       printf -v "${out_var}" '%s' '{"return":[{"capability":"return-path","state":true},{"capability":"x-colo","state":true}]}'
+    elif [[ "${payload}" == *"query-migrate"* && "${_uri}" == *"qemu+ssh"* ]]; then
+      printf -v "${out_var}" '%s' '{"return":{"status":"colo"}}'
+    elif [[ "${payload}" == *"query-migrate"* ]]; then
+      printf -v "${out_var}" '%s' '{"return":{"status":"active"}}'
+    elif [[ "${payload}" == *"query-colo-status"* ]]; then
+      printf -v "${out_var}" '%s' '{"return":{"mode":"none"}}'
     else
       printf -v "${out_var}" '%s' '{"return":{}}'
     fi
@@ -1294,6 +1300,7 @@ selftest_case_xcolo_block_handshake_sets_checkpoint_before_migrate() (
   selftest_assert_file_contains "${call_log}" "primary.stop_before_filter_attach"
   selftest_assert_file_contains "${call_log}" "primary.migrate_set_parameters.pre_migrate"
   selftest_assert_file_contains "${call_log}" "primary.migrate"
+  selftest_assert_file_contains "${call_log}" "primary.filter_status_on.redire0"
   selftest_assert_file_not_contains "${call_log}" "primary.cont_before_migrate"
   selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_primary_checkpoint_delay_ready")" "yes" \
     "primary checkpoint delay pre-migrate gate"
@@ -1310,10 +1317,13 @@ selftest_case_xcolo_block_handshake_sets_checkpoint_before_migrate() (
   filter_line="$(grep -n '|primary.stop_before_filter_attach|' "${call_log}" | head -n1 | cut -d: -f1)"
   checkpoint_line="$(grep -n '|primary.migrate_set_parameters.pre_migrate|' "${call_log}" | head -n1 | cut -d: -f1)"
   migrate_line="$(grep -n '|primary.migrate|' "${call_log}" | head -n1 | cut -d: -f1)"
+  activation_line="$(grep -n '|primary.filter_status_on.redire0|' "${call_log}" | head -n1 | cut -d: -f1)"
   [[ "${filter_line}" -lt "${migrate_line}" ]] || \
     selftest_fail "primary filter attach gate must run before primary.migrate"
   [[ "${checkpoint_line}" -lt "${migrate_line}" ]] || \
     selftest_fail "primary checkpoint delay gate must run before primary.migrate"
+  [[ "${migrate_line}" -lt "${activation_line}" ]] || \
+    selftest_fail "primary filter activation must run after primary.migrate"
 )
 
 selftest_case_xcolo_multi_disk_handshake_exports_all_disks() (
@@ -1358,6 +1368,12 @@ selftest_case_xcolo_multi_disk_handshake_exports_all_disks() (
       printf -v "${out_var}" '%s' '{"return":{"x-checkpoint-delay":2000}}'
     elif [[ "${payload}" == *"query-migrate-capabilities"* ]]; then
       printf -v "${out_var}" '%s' '{"return":[{"capability":"return-path","state":true},{"capability":"x-colo","state":true}]}'
+    elif [[ "${payload}" == *"query-migrate"* && "${_uri}" == *"qemu+ssh"* ]]; then
+      printf -v "${out_var}" '%s' '{"return":{"status":"colo"}}'
+    elif [[ "${payload}" == *"query-migrate"* ]]; then
+      printf -v "${out_var}" '%s' '{"return":{"status":"active"}}'
+    elif [[ "${payload}" == *"query-colo-status"* ]]; then
+      printf -v "${out_var}" '%s' '{"return":{"mode":"none"}}'
     else
       printf -v "${out_var}" '%s' '{"return":{}}'
     fi
@@ -1433,6 +1449,12 @@ selftest_case_xcolo_primary_filter_binding_defers_to_runtime_validation() (
       printf -v "${out_var}" '%s' '{"return":{"x-checkpoint-delay":2000}}'
     elif [[ "${payload}" == *"query-migrate-capabilities"* ]]; then
       printf -v "${out_var}" '%s' '{"return":[{"capability":"return-path","state":true},{"capability":"x-colo","state":true}]}'
+    elif [[ "${payload}" == *"query-migrate"* && "${_uri}" == *"qemu+ssh"* ]]; then
+      printf -v "${out_var}" '%s' '{"return":{"status":"colo"}}'
+    elif [[ "${payload}" == *"query-migrate"* ]]; then
+      printf -v "${out_var}" '%s' '{"return":{"status":"active"}}'
+    elif [[ "${payload}" == *"query-colo-status"* ]]; then
+      printf -v "${out_var}" '%s' '{"return":{"mode":"none"}}'
     else
       printf -v "${out_var}" '%s' '{"return":{}}'
     fi
