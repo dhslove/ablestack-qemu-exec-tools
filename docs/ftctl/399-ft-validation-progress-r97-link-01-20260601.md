@@ -1662,3 +1662,67 @@ but a lower-level signature or reached stage changed, set
   - if the same top-level error and same subreason repeat with the same ready
     preconditions, report it immediately as the same repeated blocker before
     another iteration
+
+### Run 68 Retest Readiness 2026-06-04
+
+- Source commit:
+  - `e833a9c` (`fix: classify xcolo steady-state protocol failures`)
+- Local verification:
+  - `bash -n lib/ftctl/xcolo.sh`
+  - `bash -n bin/ablestack_vm_ftctl_selftest.sh`
+  - `git diff --check`
+  - targeted selftest:
+    - `selftest_case_xcolo_runtime_validation_classifies_repeated_invalid_message`
+  - full selftest note:
+    - full selftest did not complete because existing shellcheck/backend
+      validation warnings/errors stop the current runner before the XCOLO
+      runtime cases; the new targeted case passed in isolation
+- Build:
+  - GitHub Actions run:
+    `https://github.com/dhslove/ablestack-qemu-exec-tools/actions/runs/26895838488`
+  - result: success
+  - downloaded RPM artifact:
+    `/home/ablecloud/work/ftctl-artifacts-run-26895838488/ftctl-branch-rpm-26895838488/ftctl-rpm-rocky9.6/ablestack_vm_ftctl-0.8.0-1.noarch.rpm`
+  - RPM SHA256:
+    `6659a2f910c41b513ffb6f07261253df8f86b63f3956e57e81d8d839023e6137`
+  - RPM marker verification passed:
+    - `block_conversion.steady_state_gate`
+    - `xcolo_protocol_invalid_message_reason`
+    - `xcolo_handshake_command_state`
+- Deployment:
+  - installed to `10.10.32.1`, `10.10.32.2`, and `10.10.32.3`
+  - installed package:
+    - `ablestack_vm_ftctl-0.8.0-1.noarch`
+  - installed marker verification passed on all three hosts:
+    - `xcolo_steady_state_gate`
+    - `xcolo_protocol_invalid_message_reason`
+  - `ablestack-vm-ftctl.timer` and `ablestack-vm-hangctl.timer` are active
+    on all three hosts
+- Cleanup:
+  - removed Run 67 from active protection scope:
+    - row `67` now `disabled/stopped`, `removed=2026-06-04 00:48:38`
+  - removed FTCTL VM details for `r97-link-01` / `r97-link-01-standby`
+  - expunged standby VM:
+    - `123` / `i-2-123-VM`
+  - expunged standby volumes:
+    - `231` / `b96309d5-b10d-4ddd-aa9a-2c54a533768c`
+    - `232` / `3d72840a-7a2f-41c7-8cbb-5e53374e4316`
+  - removed standby RBD images:
+    - `b96309d5-b10d-4ddd-aa9a-2c54a533768c`
+    - `3d72840a-7a2f-41c7-8cbb-5e53374e4316`
+  - removed stale FTCTL runtime files for `i-2-54-VM` and `i-2-123-VM`
+- Final readiness verification:
+  - primary VM DB state:
+    - `i-2-54-VM`, `Running`, host `3`, power state `PowerOn`
+  - active protection rows for primary VM `54`: `0`
+  - active FTCTL details for primary/standby scope: `0`
+  - active standby VM rows: `0`
+  - active standby volumes: `0`
+  - host runtime:
+    - `i-2-54-VM` is running on `10.10.32.3`
+    - no Run 67 standby RBD images remain
+    - no target FTCTL runtime files remain under the checked state/profile/xml
+      paths
+    - `query-block-jobs` is empty
+    - `query-migrate` is empty
+    - `ablestack_vm_ftctl status --vm i-2-54-VM --json` returned `not_found`
