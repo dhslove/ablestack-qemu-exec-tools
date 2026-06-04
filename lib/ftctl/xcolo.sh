@@ -4501,15 +4501,59 @@ ftctl_xcolo_primary_net_filters_qmp_attach_objects() {
     "source=${source} netdev=${netdev_id}"
 }
 
+ftctl_xcolo_capture_filter_activation_step_state() {
+  local vm="${1-}"
+  local secondary_vm="${2-}"
+  local step="${3-}"
+  local primary_migrate="" secondary_migrate="" primary_colo="" secondary_colo=""
+  local primary_migrate_error_desc="" secondary_migrate_error_desc=""
+  local invalid_message="no"
+
+  [[ -n "${vm}" && -n "${secondary_vm}" && -n "${step}" ]] || return 0
+
+  ftctl_xcolo_query_migrate_status "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" primary_migrate || true
+  ftctl_xcolo_query_migrate_status "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" secondary_migrate || true
+  ftctl_xcolo_query_colo_mode "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" primary_colo || true
+  ftctl_xcolo_query_colo_mode "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" secondary_colo || true
+  if [[ "${primary_migrate}" == "failed" ]]; then
+    ftctl_xcolo_query_migrate_error_desc "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" primary_migrate_error_desc || true
+  fi
+  if [[ "${secondary_migrate}" == "failed" ]]; then
+    ftctl_xcolo_query_migrate_error_desc "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" secondary_migrate_error_desc || true
+  fi
+  if [[ "${primary_migrate_error_desc}" == *"Received invalid message"* ]] || ftctl_xcolo_primary_invalid_message_observed "${vm}"; then
+    invalid_message="yes"
+  fi
+
+  ftctl_xcolo_capture_socket_snapshot "${vm}" "filter_activation_${step}" || true
+  ftctl_state_set "${vm}" \
+    "xcolo_filter_activation_step=${step}" \
+    "xcolo_filter_activation_${step}_primary_migrate_status=${primary_migrate}" \
+    "xcolo_filter_activation_${step}_secondary_migrate_status=${secondary_migrate}" \
+    "xcolo_filter_activation_${step}_primary_colo_mode=${primary_colo}" \
+    "xcolo_filter_activation_${step}_secondary_colo_mode=${secondary_colo}" \
+    "xcolo_filter_activation_${step}_primary_migrate_error_desc=${primary_migrate_error_desc}" \
+    "xcolo_filter_activation_${step}_secondary_migrate_error_desc=${secondary_migrate_error_desc}" \
+    "xcolo_filter_activation_${step}_invalid_message=${invalid_message}"
+  ftctl_log_event "colo" "xcolo.filter_activation_step" "ok" "${vm}" "" \
+    "step=${step} primary_migrate=${primary_migrate} secondary_migrate=${secondary_migrate} primary_colo=${primary_colo} secondary_colo=${secondary_colo} invalid_message=${invalid_message}"
+}
+
 ftctl_xcolo_activate_primary_net_filters() {
   local vm="${1-}"
   local source="${2:-cmdline}"
-  local reason
+  local secondary_vm="${3-}"
+  local reason step path entry invalid_message primary_migrate primary_migrate_error_desc
+  local -a activation_steps=(
+    "redire1:/objects/redire1"
+    "m0:/objects/m0"
+    "redire0:/objects/redire0"
+  )
 
   [[ -n "${vm}" ]] || return 1
 
   ftctl_log_event "colo" "primary.net_filters.activate" "start" "${vm}" "" \
-    "source=${source} order=redire0,redire1,m0"
+    "source=${source} order=redire1,m0,redire0"
 
   ftctl_xcolo_require_primary_filter_qom_ready "${vm}" "pre_activation" "off" || {
     reason="$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_reason" 2>/dev/null || true)"
@@ -4524,35 +4568,52 @@ ftctl_xcolo_activate_primary_net_filters() {
     return 1
   }
 
-  ftctl_state_set "${vm}" "xcolo_primary_filter_startup_status=off"
+  ftctl_state_set "${vm}" \
+    "xcolo_primary_filter_startup_status=off" \
+    "xcolo_primary_net_filters_activation_order=redire1,m0,redire0"
 
-  ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
-    '{"execute":"qom-set","arguments":{"path":"/objects/redire0","property":"status","value":"on"}}' \
-    "colo" "primary.filter_status_on.redire0" || {
+  for entry in "${activation_steps[@]}"; do
+    step="${entry%%:*}"
+    path="${entry#*:}"
+    ftctl_state_set "${vm}" "xcolo_filter_activation_step=${step}"
+    ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
+      "{\"execute\":\"qom-set\",\"arguments\":{\"path\":\"${path}\",\"property\":\"status\",\"value\":\"on\"}}" \
+      "colo" "primary.filter_status_on.${step}" || {
+        ftctl_state_set "${vm}" \
+          "xcolo_primary_net_filters_activated=false" \
+          "xcolo_filter_activation_failed_step=${step}" \
+          "xcolo_primary_filter_activation_failed_reason=${step}_qom_set_failed" \
+          "last_error=primary_filter_activation_failed"
+        return 1
+      }
+
+    ftctl_xcolo_capture_filter_activation_step_state "${vm}" "${secondary_vm}" "${step}" || true
+    invalid_message="$(ftctl_state_get "${vm}" "xcolo_filter_activation_${step}_invalid_message" 2>/dev/null || true)"
+    primary_migrate="$(ftctl_state_get "${vm}" "xcolo_filter_activation_${step}_primary_migrate_status" 2>/dev/null || true)"
+    primary_migrate_error_desc="$(ftctl_state_get "${vm}" "xcolo_filter_activation_${step}_primary_migrate_error_desc" 2>/dev/null || true)"
+    if [[ "${invalid_message}" == "yes" ]]; then
       ftctl_state_set "${vm}" \
         "xcolo_primary_net_filters_activated=false" \
-        "xcolo_primary_filter_activation_failed_reason=redire0_qom_set_failed" \
-        "last_error=primary_filter_activation_failed"
+        "xcolo_filter_activation_failed_step=${step}" \
+        "xcolo_primary_filter_activation_failed_reason=${step}_broke_colo_stream" \
+        "xcolo_protocol_failure_phase=filter_activation_${step}" \
+        "last_error=xcolo_filter_activation_${step}_broke_colo_stream"
+      ftctl_log_event "colo" "primary.net_filters.activate" "fail" "${vm}" "" \
+        "phase=filter_activation step=${step} reason=invalid_message primary_migrate=${primary_migrate}"
       return 1
-    }
-  ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
-    '{"execute":"qom-set","arguments":{"path":"/objects/redire1","property":"status","value":"on"}}' \
-    "colo" "primary.filter_status_on.redire1" || {
+    fi
+    if [[ "${primary_migrate}" == "failed" ]]; then
       ftctl_state_set "${vm}" \
         "xcolo_primary_net_filters_activated=false" \
-        "xcolo_primary_filter_activation_failed_reason=redire1_qom_set_failed" \
-        "last_error=primary_filter_activation_failed"
+        "xcolo_filter_activation_failed_step=${step}" \
+        "xcolo_primary_filter_activation_failed_reason=${step}_migration_failed" \
+        "xcolo_protocol_failure_phase=filter_activation_${step}" \
+        "last_error=xcolo_filter_activation_${step}_migration_failed"
+      ftctl_log_event "colo" "primary.net_filters.activate" "fail" "${vm}" "" \
+        "phase=filter_activation step=${step} reason=migration_failed error_desc=${primary_migrate_error_desc}"
       return 1
-    }
-  ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
-    '{"execute":"qom-set","arguments":{"path":"/objects/m0","property":"status","value":"on"}}' \
-    "colo" "primary.filter_status_on.m0" || {
-      ftctl_state_set "${vm}" \
-        "xcolo_primary_net_filters_activated=false" \
-        "xcolo_primary_filter_activation_failed_reason=m0_qom_set_failed" \
-        "last_error=primary_filter_activation_failed"
-      return 1
-    }
+    fi
+  done
 
   if ! ftctl_xcolo_require_primary_filter_qom_ready "${vm}" "post_activation" "on"; then
     reason="$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_reason" 2>/dev/null || true)"
@@ -4561,6 +4622,7 @@ ftctl_xcolo_activate_primary_net_filters() {
       "xcolo_primary_net_filters_activated=false" \
       "xcolo_primary_filter_runtime_status=unexpected" \
       "xcolo_primary_filter_activation_failed_reason=${reason}" \
+      "xcolo_protocol_failure_phase=filter_activation_post_verify" \
       "last_error=primary_filter_activation_failed"
     ftctl_log_event "colo" "primary.net_filters.activate" "fail" "${vm}" "" \
       "phase=post_activation reason=${reason}"
@@ -4569,11 +4631,11 @@ ftctl_xcolo_activate_primary_net_filters() {
 
   ftctl_state_set "${vm}" \
     "xcolo_primary_net_filters_activation_mode=qom-set-status" \
-    "xcolo_primary_net_filters_activation_order=redire0,redire1,m0" \
+    "xcolo_primary_net_filters_activation_order=redire1,m0,redire0" \
     "xcolo_primary_net_filters_activated=true" \
     "xcolo_primary_filter_runtime_status=on"
   ftctl_log_event "colo" "primary.net_filters.activate" "ok" "${vm}" "" \
-    "source=${source} mode=qom-set-status order=redire0,redire1,m0"
+    "source=${source} mode=qom-set-status order=redire1,m0,redire0"
 }
 
 ftctl_xcolo_attach_primary_net_filters() {
@@ -4796,12 +4858,15 @@ ftctl_xcolo_activate_primary_filters_after_migrate() {
   local reason invalid_message
 
   ftctl_xcolo_gate_post_migrate_before_filter_activation "${vm}" "${secondary_vm}" || return 1
-  ftctl_xcolo_activate_primary_net_filters "${vm}" "post_migrate" || {
+  ftctl_xcolo_activate_primary_net_filters "${vm}" "post_migrate" "${secondary_vm}" || {
     reason="$(ftctl_state_get "${vm}" "xcolo_primary_filter_activation_failed_reason" 2>/dev/null || true)"
     [[ -n "${reason}" ]] || reason="qom_set_failed"
-    ftctl_state_set "${vm}" \
-      "xcolo_protocol_failure_phase=filter_activation_command" \
-      "last_error=xcolo_post_migrate_filter_activation_failed"
+    if [[ -z "$(ftctl_state_get "${vm}" "xcolo_protocol_failure_phase" 2>/dev/null || true)" ]]; then
+      ftctl_state_set "${vm}" "xcolo_protocol_failure_phase=filter_activation_command"
+    fi
+    if [[ -z "$(ftctl_state_get "${vm}" "last_error" 2>/dev/null || true)" || "$(ftctl_state_get "${vm}" "last_error" 2>/dev/null || true)" == "primary_filter_activation_failed" ]]; then
+      ftctl_state_set "${vm}" "last_error=xcolo_post_migrate_filter_activation_failed"
+    fi
     ftctl_log_event "colo" "xcolo.post_migrate_filter_activation" "fail" "${vm}" "" \
       "reason=${reason}"
     return 1

@@ -1256,7 +1256,7 @@ selftest_case_xcolo_block_handshake_sets_checkpoint_before_migrate() (
   selftest_info "x-colo block handshake sets checkpoint delay before primary migrate"
 
   local call_log="${SELFTEST_ROOT}/xcolo-block-handshake-order.log"
-  local filter_line checkpoint_line migrate_line activation_line
+  local filter_line checkpoint_line migrate_line redire1_line m0_line redire0_line
   FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
   FTCTL_PROFILE_SECONDARY_URI="qemu+ssh://peer/system"
   FTCTL_PROFILE_XCOLO_NBD_ENDPOINT="tcp:10.0.0.2:10809"
@@ -1294,12 +1294,18 @@ selftest_case_xcolo_block_handshake_sets_checkpoint_before_migrate() (
     fi
     printf -v "${rc_var}" '%s' "0"
   }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_capture_socket_snapshot() {
+    return 0
+  }
 
   ftctl_xcolo_execute_handshake_with_nodes "primary-vm" "standby-vm" "parent0"
 
   selftest_assert_file_contains "${call_log}" "primary.stop_before_filter_attach"
   selftest_assert_file_contains "${call_log}" "primary.migrate_set_parameters.pre_migrate"
   selftest_assert_file_contains "${call_log}" "primary.migrate"
+  selftest_assert_file_contains "${call_log}" "primary.filter_status_on.redire1"
+  selftest_assert_file_contains "${call_log}" "primary.filter_status_on.m0"
   selftest_assert_file_contains "${call_log}" "primary.filter_status_on.redire0"
   selftest_assert_file_not_contains "${call_log}" "primary.cont_before_migrate"
   selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_primary_checkpoint_delay_ready")" "yes" \
@@ -1310,6 +1316,8 @@ selftest_case_xcolo_block_handshake_sets_checkpoint_before_migrate() (
     "primary net filters startup attach mode"
   selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_primary_net_filters_activation_mode")" "qom-set-status" \
     "primary net filters activation mode"
+  selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_primary_net_filters_activation_order")" "redire1,m0,redire0" \
+    "primary net filters staged activation order"
   selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_primary_net_filters_activated")" "true" \
     "primary net filters activated"
   selftest_assert_file_not_contains "${call_log}" "primary.object_add_mirror"
@@ -1317,13 +1325,23 @@ selftest_case_xcolo_block_handshake_sets_checkpoint_before_migrate() (
   filter_line="$(grep -n '|primary.stop_before_filter_attach|' "${call_log}" | head -n1 | cut -d: -f1)"
   checkpoint_line="$(grep -n '|primary.migrate_set_parameters.pre_migrate|' "${call_log}" | head -n1 | cut -d: -f1)"
   migrate_line="$(grep -n '|primary.migrate|' "${call_log}" | head -n1 | cut -d: -f1)"
-  activation_line="$(grep -n '|primary.filter_status_on.redire0|' "${call_log}" | head -n1 | cut -d: -f1)"
+  redire1_line="$(grep -n '|primary.filter_status_on.redire1|' "${call_log}" | head -n1 | cut -d: -f1)"
+  m0_line="$(grep -n '|primary.filter_status_on.m0|' "${call_log}" | head -n1 | cut -d: -f1)"
+  redire0_line="$(grep -n '|primary.filter_status_on.redire0|' "${call_log}" | head -n1 | cut -d: -f1)"
   [[ "${filter_line}" -lt "${migrate_line}" ]] || \
     selftest_fail "primary filter attach gate must run before primary.migrate"
   [[ "${checkpoint_line}" -lt "${migrate_line}" ]] || \
     selftest_fail "primary checkpoint delay gate must run before primary.migrate"
-  [[ "${migrate_line}" -lt "${activation_line}" ]] || \
+  [[ "${migrate_line}" -lt "${redire1_line}" ]] || \
     selftest_fail "primary filter activation must run after primary.migrate"
+  [[ "${redire1_line}" -lt "${m0_line}" && "${m0_line}" -lt "${redire0_line}" ]] || \
+    selftest_fail "primary filter activation order must be redire1,m0,redire0"
+  selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_filter_activation_redire1_invalid_message")" "no" \
+    "redire1 activation step records invalid-message state"
+  selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_filter_activation_m0_invalid_message")" "no" \
+    "m0 activation step records invalid-message state"
+  selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_filter_activation_redire0_invalid_message")" "no" \
+    "redire0 activation step records invalid-message state"
 )
 
 selftest_case_xcolo_multi_disk_handshake_exports_all_disks() (
@@ -1379,6 +1397,10 @@ selftest_case_xcolo_multi_disk_handshake_exports_all_disks() (
     fi
     printf -v "${rc_var}" '%s' "0"
   }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_capture_socket_snapshot() {
+    return 0
+  }
 
   ftctl_xcolo_execute_handshake_with_disk_plan \
     "primary-vm" "standby-vm" \
@@ -1413,6 +1435,80 @@ selftest_case_xcolo_multi_disk_handshake_exports_all_disks() (
   migrate_line="$(grep -n '|primary.migrate|' "${call_log}" | head -n1 | cut -d: -f1)"
   [[ "${sda_export_line}" -lt "${migrate_line}" && "${sdb_export_line}" -lt "${migrate_line}" ]] || \
     selftest_fail "all disk exports must be added before primary.migrate"
+)
+
+selftest_case_xcolo_staged_filter_activation_classifies_failed_step() (
+  selftest_reset_env
+  selftest_info "x-colo staged filter activation records the failed filter step"
+
+  local vm="primary-vm"
+  local call_log="${SELFTEST_ROOT}/xcolo-staged-filter-activation.log"
+  FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
+  FTCTL_PROFILE_SECONDARY_URI="qemu+ssh://peer/system"
+
+  # shellcheck disable=SC2317
+  ftctl_xcolo_require_primary_filter_qom_ready() {
+    local vm="${1-}" phase="${2-}" expected="${3-}"
+    ftctl_state_set "${vm}" \
+      "xcolo_primary_filter_qom_ready=yes" \
+      "xcolo_primary_filter_qom_reason=" \
+      "xcolo_primary_filter_qom_phase=${phase}" \
+      "xcolo_primary_filter_qom_expected=${expected}"
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_qmp_require_ok() {
+    local uri="$1" vm="$2" payload="$3" stage="$4" event="$5"
+    printf '%s|%s|%s|%s|%s\n' "${stage}" "${event}" "${uri}" "${vm}" "${payload}" >> "${call_log}"
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_query_migrate_status() {
+    local uri="${1-}" out_var="${3}" step
+    step="$(ftctl_state_get "${vm}" "xcolo_filter_activation_step" 2>/dev/null || true)"
+    if [[ "${uri}" == "${FTCTL_PROFILE_PRIMARY_URI}" && "${step}" == "m0" ]]; then
+      printf -v "${out_var}" '%s' "failed"
+    else
+      printf -v "${out_var}" '%s' "active"
+    fi
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_query_migrate_error_desc() {
+    local out_var="${3}" step
+    step="$(ftctl_state_get "${vm}" "xcolo_filter_activation_step" 2>/dev/null || true)"
+    if [[ "${step}" == "m0" ]]; then
+      printf -v "${out_var}" '%s' "Received invalid message 0x0000 length 0x0000"
+    else
+      printf -v "${out_var}" '%s' ""
+    fi
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_query_colo_mode() {
+    local out_var="${3}"
+    printf -v "${out_var}" '%s' "none"
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_capture_socket_snapshot() {
+    return 0
+  }
+
+  if ftctl_xcolo_activate_primary_net_filters "${vm}" "selftest" "${vm}-standby"; then
+    selftest_fail "staged filter activation should fail when m0 breaks the COLO stream"
+  fi
+
+  selftest_assert_file_contains "${call_log}" "primary.filter_status_on.redire1"
+  selftest_assert_file_contains "${call_log}" "primary.filter_status_on.m0"
+  selftest_assert_file_not_contains "${call_log}" "primary.filter_status_on.redire0"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_primary_net_filters_activation_order")" "redire1,m0,redire0" \
+    "staged activation order recorded"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_filter_activation_failed_step")" "m0" \
+    "failed activation step recorded"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_protocol_failure_phase")" "filter_activation_m0" \
+    "failed activation phase recorded"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" "xcolo_filter_activation_m0_broke_colo_stream" \
+    "failed activation last_error recorded"
 )
 
 selftest_case_xcolo_primary_filter_binding_defers_to_runtime_validation() (
@@ -4055,6 +4151,7 @@ selftest_main() {
   selftest_case_xcolo_scsi_root_replace_avoids_lun_collision
   selftest_case_xcolo_block_handshake_sets_checkpoint_before_migrate
   selftest_case_xcolo_multi_disk_handshake_exports_all_disks
+  selftest_case_xcolo_staged_filter_activation_classifies_failed_step
   selftest_case_xcolo_primary_filter_binding_defers_to_runtime_validation
   selftest_case_xcolo_premigrate_chardev_binding_accepts_listener_endpoints
   selftest_case_xcolo_strict_chardev_binding_rejects_closed_frontends

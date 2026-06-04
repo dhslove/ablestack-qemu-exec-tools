@@ -74,9 +74,9 @@ post-migrate pre-activation gate:
   socket snapshot
 
 activate primary filters:
-  redire0 status=on
   redire1 status=on
   m0 status=on
+  redire0 status=on
 
 post-activation gate:
   primary migrate status
@@ -146,3 +146,14 @@ This design extends:
 - [345. FT XCOLO Pre-Migrate Checkpoint Hard Gate Design](345-ft-xcolo-premigrate-checkpoint-hard-gate-design-20260604.md)
 
 The checkpoint hard gate remains valid, but it is no longer the active cause.
+
+## Extension
+
+The activation boundary in this document remains valid, but the original bulk
+activation direction was refined after Run 70. The concrete activation order is
+now defined by:
+
+- [347. FT XCOLO Staged Filter Activation Order Design](347-ft-xcolo-staged-filter-activation-order-design-20260604.md)
+
+The effective order is `redire1 -> m0 -> redire0`, with a diagnostic gate after
+each step.

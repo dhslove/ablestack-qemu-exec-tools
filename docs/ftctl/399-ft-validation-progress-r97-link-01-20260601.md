@@ -2104,3 +2104,33 @@ but a lower-level signature or reached stage changed, set
     - standby VM `i-2-126-VM`
     - standby volumes and RBD images created for Run 70
   - cleanup is required before the next retest
+
+### Run 71 Fix Plan 2026-06-04
+
+- Design document:
+  - `347-ft-xcolo-staged-filter-activation-order-design-20260604.md`
+- Reason:
+  - Run 70 proved that the COLO stream is valid before primary filter
+    activation and breaks only after filters are switched on
+  - the previous order `redire0 -> redire1 -> m0` enables the compare-output
+    return path before the compare input and mirror paths are both stable
+- Code direction:
+  - activate filters in staged order:
+    - `redire1`
+    - `m0`
+    - `redire0`
+  - after each step, capture:
+    - primary/secondary migrate status
+    - primary/secondary COLO mode
+    - primary migrate error description
+    - invalid-message presence
+    - socket snapshot
+  - if the repeated invalid-message error appears again, record:
+    - `xcolo_filter_activation_failed_step=<step>`
+    - `xcolo_protocol_failure_phase=filter_activation_<step>`
+    - `last_error=xcolo_filter_activation_<step>_broke_colo_stream`
+- Repetition control:
+  - if the same QEMU error repeats without a failed activation step, the fix is
+    incomplete
+  - do not return to checkpoint/firewall/storage/socket precondition changes
+    unless the new per-step evidence shows one of those assumptions regressed
