@@ -2815,3 +2815,76 @@ but a lower-level signature or reached stage changed, set
     - `secondary-qemu-process-cmdline.txt`
     - `primary-qemu-log-tail.txt`
     - `secondary-qemu-log-tail.txt`
+
+### Run 75 Result 2026-06-04
+
+- Result:
+  - failed
+- Protection row:
+  - `75`
+  - UUID: `af83d73b-2ef4-4014-940f-940db0ba86c4`
+  - primary VM: `54` / `i-2-54-VM`
+  - secondary VM: `131` / `i-2-131-VM`
+- Cloud DB state:
+  - `admin_state=active`
+  - `protection_state=error`
+  - `transport_state=failed`
+  - `active_side=primary`
+  - `last_error=xcolo_startup_active_filter_stream_failed`
+- Progress versus Run 74:
+  - topology audit executed and returned `xcolo_topology_audit=ok`
+  - secondary QEMU command line was captured
+  - primary and secondary QEMU log tails were captured
+  - 9003/9004/9998 paths were observable
+- Repeated QEMU signature:
+  - primary:
+    - `filter mirror send failed(Operation not permitted)`
+    - `Received invalid message 0x0000 length 0x0000`
+  - secondary:
+    - `Can't receive COLO message: Input/output error`
+- SELinux/firewall observation:
+  - SELinux was `Permissive` on both involved hosts
+  - no matching AVC denial was found for the failure window
+  - firewalld/nftables were active, but FT port allow rules and packet counters
+    existed for the relevant ports
+- Repetition control:
+  - this is the same protocol failure family as the previous invalid-message
+    runs, but the earliest high-signal log is now
+    `filter mirror send failed(Operation not permitted)`
+  - do not treat the next failure as a new generic timing issue if this exact
+    signature repeats
+  - the next improvement must classify and persist the primary filter-mirror
+    write-path failure before returning from post-migrate startup-active
+    validation
+- Cleanup note:
+  - Run 75 garbage remains before the next fix deployment:
+    - active protection row `75`
+    - standby VM `i-2-131-VM`
+    - standby RBD images observed in secondary command line:
+      - `0ad767dc-e5f2-4cca-bee3-517d7c14a2ec`
+      - `f6aced3f-ae77-4df1-9ca3-c1fc93c2fe04`
+  - cleanup is required before the next retest
+
+### Run 76 Fix Plan 2026-06-04
+
+- Design document:
+  - `352-ft-xcolo-filter-mirror-eperm-diagnostics-design-20260604.md`
+- Reason:
+  - Run 75 proved topology audit can pass while QEMU still fails on the
+    primary mirror write path
+  - the `filter mirror send failed(Operation not permitted)` log is earlier and
+    more specific than the later invalid zero-message header
+- Change direction:
+  - keep the premigrate-active topology and topology audit from designs 350 and
+    351
+  - classify `filter mirror send failed(Operation not permitted)` as
+    `xcolo_filter_mirror_send_eperm`
+  - persist the failing path as `primary:m0->mirror0->secondary:red0`
+  - collect chardev, socket, policy, and QEMU log evidence before returning
+    failure from `ftctl_xcolo_activate_primary_filters_after_migrate`
+- Repetition gate:
+  - if the next run repeats the same signature and reports
+    `xcolo_filter_mirror_send_eperm`, this is diagnostic progress
+  - if the next run still reports only
+    `xcolo_startup_active_filter_stream_failed`, the fix did not cover the
+    actual early return path

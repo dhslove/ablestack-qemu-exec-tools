@@ -2489,6 +2489,51 @@ selftest_case_xcolo_runtime_validation_classifies_repeated_invalid_message() (
     "repeated invalid message fails steady-state gate"
 )
 
+selftest_case_xcolo_startup_active_failure_classifies_filter_mirror_eperm() (
+  selftest_reset_env
+  selftest_info "x-colo startup-active failure classifies filter-mirror EPERM"
+
+  local vm="xcolo-filter-mirror-eperm"
+  ftctl_state_init_vm "${vm}"
+
+  # shellcheck disable=SC2317
+  ftctl_xcolo_collect_runtime_failure_diagnostics() {
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_capture_socket_snapshot() {
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_capture_failure_chardev_snapshot() {
+    local vm="${1-}"
+    ftctl_state_set "${vm}" \
+      "xcolo_failure_primary_chardev_mirror0=present_open" \
+      "xcolo_failure_secondary_chardev_red0=present_open"
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_capture_policy_snapshot() {
+    local vm="${1-}"
+    ftctl_state_set "${vm}" "xcolo_policy_snapshot_captured=yes"
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_primary_filter_mirror_send_errno() {
+    printf '%s\n' "eperm"
+  }
+
+  ftctl_xcolo_classify_startup_active_stream_failure "${vm}" "${vm}-standby"
+
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" \
+    "xcolo_filter_mirror_send_eperm" \
+    "startup-active EPERM last error"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_protocol_invalid_message_reason")" \
+    "filter_mirror_send_eperm" \
+    "startup-active EPERM protocol reason"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_filter_mirror_send_path")" \
+    "primary:m0->mirror0->secondary:red0" \
+    "startup-active EPERM path"
+)
+
 selftest_case_xcolo_runtime_validation_reports_pending_convergence() (
   selftest_reset_env
   selftest_info "x-colo runtime validation reports missing colo role without hard failure"
@@ -4309,6 +4354,7 @@ selftest_main() {
   selftest_case_xcolo_runtime_validation_blocks_false_positive
   selftest_case_xcolo_runtime_validation_reports_primary_migrate_failure
   selftest_case_xcolo_runtime_validation_classifies_repeated_invalid_message
+  selftest_case_xcolo_startup_active_failure_classifies_filter_mirror_eperm
   selftest_case_xcolo_runtime_validation_reports_pending_convergence
   selftest_case_xcolo_runtime_validation_times_out_stuck_convergence
   selftest_case_xcolo_runtime_validation_reports_one_sided_colo_role

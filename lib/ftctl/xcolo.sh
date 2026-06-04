@@ -1787,6 +1787,171 @@ tail -n 360 \"/var/log/libvirt/qemu/\${domain}.log\" 2>/dev/null || true"
     "xcolo_secondary_qemu_log_tail_rc=${rc}"
 }
 
+ftctl_xcolo_primary_filter_mirror_send_errno() {
+  local vm="${1-}"
+  local out="" err="" rc=0
+
+  [[ -n "${vm}" ]] || return 1
+  # shellcheck disable=SC2016
+  ftctl_cmd_run "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC:-15}" out err rc -- \
+    bash -c '
+domain="$1"
+line="$(tail -n 720 "/var/log/libvirt/qemu/${domain}.log" 2>/dev/null |
+  grep -F "filter mirror send failed(" | tail -n 1 || true)"
+if [[ -z "${line}" ]]; then
+  exit 1
+fi
+reason="${line##*filter mirror send failed(}"
+reason="${reason%%)*}"
+case "${reason}" in
+  "Operation not permitted") printf "%s\n" "eperm" ;;
+  "Input/output error") printf "%s\n" "eio" ;;
+  "") printf "%s\n" "unknown" ;;
+  *) printf "%s\n" "${reason//[^A-Za-z0-9_.-]/_}" | tr "[:upper:]" "[:lower:]" ;;
+esac
+' _ "${vm}" || true
+  : "${err}"
+  [[ "${rc}" == "0" && -n "${out}" ]] || return 1
+  printf '%s\n' "${out%%$'\n'*}"
+}
+
+ftctl_xcolo_chardev_label_state() {
+  local payload="${1-}"
+  local label="${2-}"
+  local value
+
+  value="$(python3 - "${payload}" "${label}" <<'PY'
+import json
+import sys
+
+raw = sys.argv[1] if len(sys.argv) > 1 else ""
+target = sys.argv[2] if len(sys.argv) > 2 else ""
+try:
+    data = json.loads(raw)
+except Exception:
+    print("unknown")
+    raise SystemExit(0)
+for item in data.get("return", []):
+    if item.get("label") != target:
+        continue
+    opened = item.get("frontend-open")
+    if opened is True:
+        print("present_open")
+    elif opened is False:
+        print("present_closed")
+    else:
+        print("present_unknown")
+    raise SystemExit(0)
+print("missing")
+PY
+)" || value="unknown"
+  printf '%s\n' "${value}"
+}
+
+ftctl_xcolo_capture_failure_chardev_snapshot() {
+  local vm="${1-}"
+  local secondary_vm="${2:-$vm}"
+  local phase="${3:-post-migrate-failure}"
+  local primary_out="" primary_rc=0 secondary_out="" secondary_rc=0
+
+  [[ -n "${vm}" && -n "${secondary_vm}" ]] || return 0
+  ftctl_xcolo_qmp "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" '{"execute":"query-chardev"}' primary_out primary_rc
+  ftctl_xcolo_qmp "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" '{"execute":"query-chardev"}' secondary_out secondary_rc
+
+  ftctl_xcolo_write_debug_file "${vm}" "primary-query-chardev-${phase}.json" "${primary_out}" || true
+  ftctl_xcolo_write_debug_file "${vm}" "secondary-query-chardev-${phase}.json" "${secondary_out}" || true
+
+  ftctl_state_set "${vm}" \
+    "xcolo_failure_chardev_phase=${phase}" \
+    "xcolo_failure_primary_chardev_rc=${primary_rc}" \
+    "xcolo_failure_secondary_chardev_rc=${secondary_rc}" \
+    "xcolo_failure_primary_chardev_mirror0=$(ftctl_xcolo_chardev_label_state "${primary_out}" "mirror0")" \
+    "xcolo_failure_primary_chardev_compare1=$(ftctl_xcolo_chardev_label_state "${primary_out}" "compare1")" \
+    "xcolo_failure_primary_chardev_compare0=$(ftctl_xcolo_chardev_label_state "${primary_out}" "compare0")" \
+    "xcolo_failure_primary_chardev_compare_out=$(ftctl_xcolo_chardev_label_state "${primary_out}" "compare_out")" \
+    "xcolo_failure_secondary_chardev_red0=$(ftctl_xcolo_chardev_label_state "${secondary_out}" "red0")" \
+    "xcolo_failure_secondary_chardev_red1=$(ftctl_xcolo_chardev_label_state "${secondary_out}" "red1")"
+}
+
+ftctl_xcolo_policy_snapshot_cmd() {
+  cat <<'EOF'
+set -euo pipefail
+echo "== time =="; date -Is; date -u -Is
+echo "== selinux =="; getenforce 2>/dev/null || true
+echo "== firewalld =="; systemctl is-active firewalld 2>/dev/null || true; firewall-cmd --state 2>/dev/null || true; firewall-cmd --list-ports 2>/dev/null || true
+echo "== nft ft ports =="; nft list ruleset 2>/dev/null | grep -En '9000|9001|9003|9004|9005|9998|10809|reject|drop|deny' | head -220 || true
+echo "== iptables ft ports =="; iptables-save 2>/dev/null | grep -En '9000|9001|9003|9004|9005|9998|10809|REJECT|DROP' | head -220 || true
+echo "== audit denied tail =="; grep -Ei 'avc:|type=AVC|denied|qemu|svirt|virt|9003|9004|9998' /var/log/audit/audit.log 2>/dev/null | tail -160 || true
+EOF
+}
+
+ftctl_xcolo_capture_policy_snapshot() {
+  local vm="${1-}"
+  local phase="${2:-post-migrate-failure}"
+  local host="" user="" cmd="" out="" err="" rc=0
+
+  [[ -n "${vm}" ]] || return 0
+  cmd="$(ftctl_xcolo_policy_snapshot_cmd)"
+  ftctl_cmd_run "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC:-15}" out err rc -- bash -lc "${cmd}" || true
+  : "${err}"
+  ftctl_xcolo_write_debug_file "${vm}" "primary-policy-${phase}.txt" "${out}" || true
+
+  out=""
+  err=""
+  rc=0
+  if ftctl_blockcopy_remote_target_host_user host user; then
+    ftctl_blockcopy_remote_exec "${host}" "${user}" out err rc "${cmd}" || true
+  else
+    out="target_unresolved"
+    rc=2
+  fi
+  : "${err}"
+  ftctl_xcolo_write_debug_file "${vm}" "secondary-policy-${phase}.txt" "${out}" || true
+  ftctl_state_set "${vm}" \
+    "xcolo_policy_snapshot_phase=${phase}" \
+    "xcolo_policy_snapshot_captured=yes" \
+    "xcolo_policy_snapshot_secondary_rc=${rc}"
+}
+
+ftctl_xcolo_classify_startup_active_stream_failure() {
+  local vm="${1-}"
+  local secondary_vm="${2:-$vm}"
+  local errno="" reason="qemu_return_path_invalid_zero_header"
+  local last_error="xcolo_startup_active_filter_stream_failed"
+
+  [[ -n "${vm}" && -n "${secondary_vm}" ]] || return 0
+  ftctl_xcolo_collect_runtime_failure_diagnostics "${vm}" "${secondary_vm}" || true
+  ftctl_xcolo_capture_socket_snapshot "${vm}" "post_migrate_failure" || true
+  ftctl_xcolo_capture_failure_chardev_snapshot "${vm}" "${secondary_vm}" "post-migrate-failure" || true
+  ftctl_xcolo_capture_policy_snapshot "${vm}" "post-migrate-failure" || true
+
+  if errno="$(ftctl_xcolo_primary_filter_mirror_send_errno "${vm}")"; then
+    reason="filter_mirror_send_failed"
+    last_error="xcolo_filter_mirror_send_failed"
+    if [[ "${errno}" == "eperm" ]]; then
+      reason="filter_mirror_send_eperm"
+      last_error="xcolo_filter_mirror_send_eperm"
+    fi
+    ftctl_state_set "${vm}" \
+      "xcolo_filter_mirror_send_failed=yes" \
+      "xcolo_filter_mirror_send_errno=${errno}" \
+      "xcolo_filter_mirror_send_path=primary:m0->mirror0->secondary:red0"
+  fi
+
+  ftctl_state_set "${vm}" \
+    "xcolo_repeated_protocol_invalid_message=yes" \
+    "xcolo_protocol_invalid_message_reason=${reason}" \
+    "xcolo_protocol_invalid_message_scope=post_migrate_startup_active_filter" \
+    "xcolo_protocol_failure_phase=post_migrate_startup_active_filter" \
+    "xcolo_protocol_steady_state_required=true" \
+    "xcolo_protocol_expected_primary_role=primary" \
+    "xcolo_protocol_expected_secondary_role=secondary" \
+    "last_error=${last_error}"
+
+  ftctl_log_event "colo" "xcolo.startup_active_stream_failure" "fail" "${vm}" "" \
+    "reason=${reason} errno=${errno:-none} path=primary:m0->mirror0->secondary:red0"
+}
+
 ftctl_xcolo_collect_primary_netdev_vhost_state() {
   local vm="${1-}"
   local out err rc expected_netdev state reason_text
@@ -5199,11 +5364,9 @@ ftctl_xcolo_activate_primary_filters_after_migrate() {
     "xcolo_primary_filter_runtime_status=on"
   invalid_message="$(ftctl_state_get "${vm}" "xcolo_post_migrate_post_activation_validation_invalid_message" 2>/dev/null || true)"
   if [[ "${invalid_message}" == "yes" ]]; then
-    ftctl_state_set "${vm}" \
-      "xcolo_protocol_failure_phase=post_migrate_startup_active_filter" \
-      "last_error=xcolo_startup_active_filter_stream_failed"
+    ftctl_xcolo_classify_startup_active_stream_failure "${vm}" "${secondary_vm}" || true
     ftctl_log_event "colo" "xcolo.post_migrate_filter_activation" "fail" "${vm}" "" \
-      "mode=startup-active reason=invalid_message_after_migrate"
+      "mode=startup-active reason=$(ftctl_state_get "${vm}" "xcolo_protocol_invalid_message_reason" 2>/dev/null || printf '%s' invalid_message_after_migrate)"
     return 1
   fi
 
