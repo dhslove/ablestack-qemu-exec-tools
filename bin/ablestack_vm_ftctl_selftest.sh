@@ -1532,6 +1532,21 @@ selftest_case_xcolo_staged_filter_activation_classifies_failed_step() (
     return 0
   }
 
+  ftctl_state_set "${vm}" \
+    "xcolo_post_migrate_pre_activation_primary_migrate_status=active" \
+    "xcolo_post_migrate_pre_activation_secondary_migrate_status=active" \
+    "xcolo_post_migrate_pre_activation_primary_colo_mode=none" \
+    "xcolo_post_migrate_pre_activation_secondary_colo_mode=none" \
+    "xcolo_post_migrate_pre_activation_primary_migrate_error_desc=" \
+    "xcolo_post_migrate_pre_activation_secondary_migrate_error_desc=" \
+    "xcolo_post_migrate_pre_activation_invalid_message=no" \
+    "xcolo_channel_mirror_established=yes" \
+    "xcolo_channel_compare_established=yes" \
+    "xcolo_channel_compare_local_established=yes" \
+    "xcolo_channel_compare_out_established=yes" \
+    "xcolo_primary_filter_chardev_ready=no" \
+    "xcolo_primary_filter_chardev_reason=mirror0:frontend_closed"
+
   if ftctl_xcolo_activate_primary_net_filters "${vm}" "selftest" "${vm}-standby"; then
     selftest_fail "staged filter activation should fail when m0 breaks the COLO stream"
   fi
@@ -1549,17 +1564,15 @@ selftest_case_xcolo_staged_filter_activation_classifies_failed_step() (
     "failed activation last_error recorded"
 )
 
-selftest_case_xcolo_pre_redire1_gate_blocks_early_activation() (
+selftest_case_xcolo_fast_redire1_gate_allows_secondary_active() (
   selftest_reset_env
-  selftest_info "x-colo pre-redire1 gate blocks early redire1 activation"
+  selftest_info "x-colo fast pre-redire1 gate allows secondary active from cached post-migrate state"
 
   local vm="primary-vm"
-  local call_log="${SELFTEST_ROOT}/xcolo-pre-redire1-gate.log"
+  local call_log="${SELFTEST_ROOT}/xcolo-fast-pre-redire1-gate.log"
   : > "${call_log}"
   FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
   FTCTL_PROFILE_SECONDARY_URI="qemu+ssh://peer/system"
-  FTCTL_XCOLO_PRE_REDIRE1_GATE_WAIT_SEC="1"
-  FTCTL_XCOLO_PRE_REDIRE1_GATE_INTERVAL_SEC="1"
 
   # shellcheck disable=SC2317
   ftctl_xcolo_require_primary_filter_qom_ready() {
@@ -1598,40 +1611,37 @@ selftest_case_xcolo_pre_redire1_gate_blocks_early_activation() (
     fi
     return 0
   }
-  # shellcheck disable=SC2317
-  ftctl_xcolo_capture_primary_channel_state() {
-    local vm="${1-}"
-    ftctl_state_set "${vm}" \
-      "xcolo_channel_mirror_established=yes" \
-      "xcolo_channel_compare_established=yes" \
-      "xcolo_channel_compare_local_established=yes" \
-      "xcolo_channel_compare_out_established=yes"
-  }
-  # shellcheck disable=SC2317
-  ftctl_xcolo_collect_primary_chardev_binding_state() {
-    local vm="${1-}"
-    ftctl_state_set "${vm}" "xcolo_primary_filter_chardev_ready=yes" "xcolo_primary_filter_chardev_reason="
-  }
-  # shellcheck disable=SC2317
-  ftctl_xcolo_capture_socket_snapshot() {
-    return 0
-  }
 
-  if ftctl_xcolo_activate_primary_net_filters "${vm}" "selftest" "${vm}-standby"; then
-    selftest_fail "pre-redire1 gate should fail while secondary migrate is not colo"
-  fi
+  ftctl_state_set "${vm}" \
+    "xcolo_post_migrate_pre_activation_primary_migrate_status=active" \
+    "xcolo_post_migrate_pre_activation_secondary_migrate_status=active" \
+    "xcolo_post_migrate_pre_activation_primary_colo_mode=none" \
+    "xcolo_post_migrate_pre_activation_secondary_colo_mode=none" \
+    "xcolo_post_migrate_pre_activation_primary_migrate_error_desc=" \
+    "xcolo_post_migrate_pre_activation_secondary_migrate_error_desc=" \
+    "xcolo_post_migrate_pre_activation_invalid_message=no" \
+    "xcolo_channel_mirror_established=yes" \
+    "xcolo_channel_compare_established=yes" \
+    "xcolo_channel_compare_local_established=yes" \
+    "xcolo_channel_compare_out_established=yes" \
+    "xcolo_primary_filter_chardev_ready=no" \
+    "xcolo_primary_filter_chardev_reason=mirror0:frontend_closed"
 
-  selftest_assert_file_not_contains "${call_log}" "primary.filter_status_on.redire1"
-  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_pre_redire1_gate")" "timeout" \
-    "pre-redire1 gate should timeout"
-  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_pre_redire1_gate_reason")" "secondary_migrate_not_colo" \
-    "pre-redire1 gate records secondary migrate reason"
-  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_protocol_failure_phase")" "pre_redire1_gate" \
-    "pre-redire1 gate records protocol phase"
-  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_filter_activation_failed_step")" "redire1" \
-    "pre-redire1 gate records failed step"
-  selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" "xcolo_redire1_activation_prerequisite_timeout" \
-    "pre-redire1 gate records timeout last_error"
+  ftctl_xcolo_activate_primary_net_filters "${vm}" "selftest" "${vm}-standby"
+
+  selftest_assert_file_contains "${call_log}" "primary.filter_status_on.redire1"
+  selftest_assert_file_contains "${call_log}" "primary.filter_status_on.m0"
+  selftest_assert_file_contains "${call_log}" "primary.filter_status_on.redire0"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_pre_redire1_gate")" "ready" \
+    "fast pre-redire1 gate should pass from cached post-migrate state"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_pre_redire1_gate_mode")" "fast_cached_post_migrate" \
+    "fast pre-redire1 gate mode recorded"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_pre_redire1_secondary_migrate_status")" "active" \
+    "fast pre-redire1 gate accepts secondary active"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_pre_redire1_strict_chardev_deferred")" "yes" \
+    "strict chardev readiness is deferred before redire1"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_primary_net_filters_activation_order")" "redire1,m0,redire0" \
+    "filter activation order remains staged"
 )
 
 selftest_case_xcolo_primary_filter_binding_defers_to_runtime_validation() (
@@ -4277,7 +4287,7 @@ selftest_main() {
   selftest_case_xcolo_block_handshake_sets_checkpoint_before_migrate
   selftest_case_xcolo_multi_disk_handshake_exports_all_disks
   selftest_case_xcolo_staged_filter_activation_classifies_failed_step
-  selftest_case_xcolo_pre_redire1_gate_blocks_early_activation
+  selftest_case_xcolo_fast_redire1_gate_allows_secondary_active
   selftest_case_xcolo_primary_filter_binding_defers_to_runtime_validation
   selftest_case_xcolo_premigrate_chardev_binding_accepts_listener_endpoints
   selftest_case_xcolo_strict_chardev_binding_rejects_closed_frontends

@@ -2428,6 +2428,7 @@ but a lower-level signature or reached stage changed, set
   - the gate prevented qom-set, so the remaining failure is in the interval
     between post-migrate pre-activation and pre-redire1 readiness
 - Next improvement direction:
+  - superseded by the Run 73 fix plan below after code review
   - do not keep delaying `redire1` until secondary reaches `colo`; that lets
     the stream fail before any filter activation
   - replace the permissive post-migrate pre-activation gate
@@ -2449,3 +2450,32 @@ but a lower-level signature or reached stage changed, set
     - standby volumes `241`, `242`
     - standby RBD images listed above
   - cleanup is required before the next retest
+
+### Run 73 Fix Plan 2026-06-04
+
+- Design document:
+  - `349-ft-xcolo-fast-redire1-activation-gate-design-20260604.md`
+- Repetition control:
+  - this is not a blind repeat of Run 71 or Run 72
+  - Run 71 failed after `redire1` activation
+  - Run 72 failed before `redire1` activation because the strict wait allowed
+    the stream to break before `redire1`
+  - the next run must prove whether fast cached activation reaches
+    `primary.filter_status_on.redire1`
+- Code direction:
+  - replace the strict polling pre-redire1 gate with
+    `fast_cached_post_migrate`
+  - use cached `xcolo_post_migrate_pre_activation_*` values from the previous
+    post-migrate gate
+  - allow secondary migrate status `active` or `colo`
+  - do not wait for secondary COLO mode `secondary` before `redire1`
+  - do not require strict chardev frontend readiness before `redire1`; record
+    it as deferred evidence because `status=off` filters can keep frontends
+    closed
+  - keep activation order `redire1 -> m0 -> redire0`
+- Expected diagnostic distinction:
+  - if no `primary.filter_status_on.redire1` event appears, inspect
+    `xcolo_pre_redire1_gate_reason` and cached prerequisite keys
+  - if `primary.filter_status_on.redire1` appears and the same QEMU protocol
+    error returns, the next target is `redire1` topology or compare channel
+    direction, not another wait loop

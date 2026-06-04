@@ -161,7 +161,11 @@ bulk activation order is superseded by the staged order defined here.
 ## Extension
 
 Run 71 narrowed the failure to the first staged activation step, `redire1`.
-The effective implementation now adds a strict pre-redire1 gate before the
-staged order begins:
+Run 72 then showed that a strict pre-redire1 wait can break the stream before
+`redire1` is activated. The effective implementation keeps this staged order,
+but gates `redire1` with the fast cached post-migrate state from design 349:
 
-- [348. FT XCOLO Pre-Redire1 Activation Gate Design](348-ft-xcolo-pre-redire1-activation-gate-design-20260604.md)
+- [349. FT XCOLO Fast Redire1 Activation Gate Design](349-ft-xcolo-fast-redire1-activation-gate-design-20260604.md)
+
+Design 348 remains historical evidence for the strict wait model that Run 72
+disproved.

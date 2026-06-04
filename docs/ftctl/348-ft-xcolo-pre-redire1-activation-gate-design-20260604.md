@@ -1,5 +1,10 @@
 # FT XCOLO Pre-Redire1 Activation Gate Design - 2026-06-04
 
+> Superseded note: Run 72 disproved the strict wait requirement in this
+> document. The current design is the fast cached gate in
+> [349. FT XCOLO Fast Redire1 Activation Gate Design](349-ft-xcolo-fast-redire1-activation-gate-design-20260604.md).
+> Keep this document as the historical design that led to Run 72 evidence.
+
 ## Background
 
 Run 71 proved that the staged activation classifier works.
@@ -107,3 +112,11 @@ This document extends:
 
 The staged order remains `redire1 -> m0 -> redire0`, but `redire1` now has a
 strict pre-activation gate.
+
+## Superseded By Run 72
+
+Run 72 showed that waiting for secondary migrate status `colo` and strict
+chardev readiness before `redire1` can let the COLO stream fail before any
+filter is activated. The effective successor design is 349, which validates the
+cached post-migrate pre-activation state and enables `redire1` without a fresh
+polling wait.
