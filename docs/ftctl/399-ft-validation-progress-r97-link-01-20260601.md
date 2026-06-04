@@ -2551,3 +2551,63 @@ but a lower-level signature or reached stage changed, set
   - if the same QEMU invalid-message signature returns after `redire1`, the
     next design must target filter topology or compare channel direction, not
     another wait loop
+
+### Run 73 Result 2026-06-04
+
+- Trigger:
+  - user started FT protection registration after Run 73 readiness cleanup
+- Evidence:
+  - monitor log:
+    `/home/ablecloud/work/ft-run73-monitor-20260604-150015.log`
+  - final evidence directory:
+    `/home/ablecloud/work/ft-run73-final-20260604-150405`
+- Final state:
+  - protection row: `73`
+  - standby VM: `129` / `i-2-129-VM`
+  - standby volumes:
+    - `243` / `ef6a84ce-4095-4f9b-871a-7007eb906129`
+    - `244` / `90400d87-7f34-43fb-bb5f-1fb6cb4fbab8`
+  - `protection_state=error`
+  - `transport_state=failed`
+  - `last_error=xcolo_filter_activation_redire1_broke_colo_stream`
+- Progress confirmed:
+  - this is not a repeat of Run 72
+  - Run 72 failed before `redire1`
+  - Run 73 fast gate reached and passed:
+    - `xcolo_pre_redire1_gate=ready`
+    - `xcolo_pre_redire1_gate_mode=fast_cached_post_migrate`
+    - `xcolo_pre_redire1_primary_migrate_status=active`
+    - `xcolo_pre_redire1_secondary_migrate_status=active`
+    - `xcolo_pre_redire1_invalid_message=no`
+    - `xcolo_pre_redire1_strict_chardev_deferred=yes`
+  - post-migrate pre-activation evidence was valid:
+    - `xcolo_post_migrate_pre_activation_primary_migrate_status=active`
+    - `xcolo_post_migrate_pre_activation_secondary_migrate_status=active`
+    - `xcolo_post_migrate_pre_activation_invalid_message=no`
+    - `xcolo_socket_post_migrate_pre_activation_primary_9998=established`
+  - after `redire1` activation, the stream failed:
+    - `xcolo_filter_activation_step=redire1`
+    - `xcolo_filter_activation_failed_step=redire1`
+    - `xcolo_protocol_failure_phase=filter_activation_redire1`
+    - `xcolo_filter_activation_redire1_primary_migrate_status=failed`
+    - `xcolo_filter_activation_redire1_secondary_migrate_status=colo`
+    - `xcolo_filter_activation_redire1_primary_migrate_error_desc=Received invalid message 0x0000 length 0x0000`
+    - `xcolo_filter_activation_redire1_invalid_message=yes`
+- QEMU log evidence:
+  - primary:
+    - `Received invalid message 0x0000 length 0x0000`
+  - secondary:
+    - `Can't receive COLO message: Input/output error`
+- Repetition control:
+  - this is the repeated QEMU protocol signature, but it is a new reached
+    stage versus Run 72
+  - waiting/gating is no longer the active hypothesis
+  - the next improvement must target the primary/secondary network filter
+    topology, especially the `redire1` RX path and compare channel direction
+- Cleanup note:
+  - Run 73 garbage remains at this point:
+    - active protection row `73`
+    - standby VM `i-2-129-VM`
+    - standby volumes `243`, `244`
+    - standby RBD images listed above
+  - cleanup is required before the next retest
