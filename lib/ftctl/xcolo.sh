@@ -1848,6 +1848,142 @@ PY
   printf '%s\n' "${value}"
 }
 
+ftctl_xcolo_capture_colo_chardev_contract() {
+  local vm="${1-}"
+  local secondary_vm="${2:-$vm}"
+  local phase="${3:-runtime}"
+  local primary_out="" primary_rc=0 secondary_out="" secondary_rc=0
+  local payload="" phase_key="" state_args=()
+
+  [[ -n "${vm}" && -n "${secondary_vm}" ]] || return 1
+  phase_key="$(printf '%s' "${phase}" | tr -c 'A-Za-z0-9_' '_' | sed 's/_*$//')"
+  [[ -n "${phase_key}" ]] || phase_key="runtime"
+
+  ftctl_xcolo_qmp "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" '{"execute":"query-chardev"}' primary_out primary_rc
+  ftctl_xcolo_qmp "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" '{"execute":"query-chardev"}' secondary_out secondary_rc
+  ftctl_xcolo_write_debug_file "${vm}" "primary-query-chardev-contract-${phase}.json" "${primary_out}" || true
+  ftctl_xcolo_write_debug_file "${vm}" "secondary-query-chardev-contract-${phase}.json" "${secondary_out}" || true
+
+  payload="$(python3 - "${primary_out}" "${secondary_out}" "${primary_rc}" "${secondary_rc}" <<'PY'
+import json
+import sys
+
+primary_raw = sys.argv[1] if len(sys.argv) > 1 else ""
+secondary_raw = sys.argv[2] if len(sys.argv) > 2 else ""
+primary_rc = sys.argv[3] if len(sys.argv) > 3 else "1"
+secondary_rc = sys.argv[4] if len(sys.argv) > 4 else "1"
+
+def state(raw, label):
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return "unknown"
+    for item in data.get("return", []):
+        if item.get("label") != label:
+            continue
+        opened = item.get("frontend-open")
+        if opened is True:
+            return "present_open"
+        if opened is False:
+            return "present_closed"
+        return "present_unknown"
+    return "missing"
+
+primary_mirror0 = state(primary_raw, "mirror0") if primary_rc == "0" else "query_failed"
+primary_compare1 = state(primary_raw, "compare1") if primary_rc == "0" else "query_failed"
+secondary_red0 = state(secondary_raw, "red0") if secondary_rc == "0" else "query_failed"
+secondary_red1 = state(secondary_raw, "red1") if secondary_rc == "0" else "query_failed"
+
+checks = [
+    ("mirror_path_primary_mirror0", primary_mirror0),
+    ("mirror_path_secondary_red0", secondary_red0),
+    ("compare_path_primary_compare1", primary_compare1),
+    ("compare_path_secondary_red1", secondary_red1),
+]
+reasons = [f"{name}={value}" for name, value in checks if value != "present_open"]
+ready = "yes" if not reasons else "no"
+if primary_rc != "0" or secondary_rc != "0":
+    ready = "unknown" if not reasons else "no"
+
+print(f"ready={ready}")
+print("reason=" + ",".join(reasons))
+print(f"primary_mirror0={primary_mirror0}")
+print(f"primary_compare1={primary_compare1}")
+print(f"secondary_red0={secondary_red0}")
+print(f"secondary_red1={secondary_red1}")
+print(f"mirror_path=primary:m0->mirror0({primary_mirror0})->secondary:red0({secondary_red0})->f1")
+print(f"compare_path=secondary:f2->red1({secondary_red1})->primary:compare1({primary_compare1})->comp0")
+PY
+)" || payload="ready=unknown"$'\n'"reason=query_chardev_contract_parse_failed"
+
+  state_args+=(
+    "xcolo_chardev_contract_phase=${phase}"
+    "xcolo_chardev_contract_primary_rc=${primary_rc}"
+    "xcolo_chardev_contract_secondary_rc=${secondary_rc}"
+  )
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] || continue
+    case "${line}" in
+      ready=*)
+        state_args+=("xcolo_chardev_contract_ready=${line#ready=}")
+        state_args+=("xcolo_${phase_key}_chardev_contract_ready=${line#ready=}")
+        ;;
+      reason=*)
+        state_args+=("xcolo_chardev_contract_reason=${line#reason=}")
+        state_args+=("xcolo_${phase_key}_chardev_contract_reason=${line#reason=}")
+        ;;
+      mirror_path=*)
+        state_args+=("xcolo_chardev_contract_mirror_path=${line#mirror_path=}")
+        state_args+=("xcolo_${phase_key}_chardev_contract_mirror_path=${line#mirror_path=}")
+        ;;
+      compare_path=*)
+        state_args+=("xcolo_chardev_contract_compare_path=${line#compare_path=}")
+        state_args+=("xcolo_${phase_key}_chardev_contract_compare_path=${line#compare_path=}")
+        ;;
+      *=*)
+        state_args+=("xcolo_chardev_contract_${line}")
+        state_args+=("xcolo_${phase_key}_chardev_contract_${line}")
+        ;;
+    esac
+  done <<< "${payload}"
+  ftctl_state_set "${vm}" "${state_args[@]}"
+
+  if [[ "$(ftctl_state_get "${vm}" "xcolo_chardev_contract_ready" 2>/dev/null || true)" == "yes" ]]; then
+    ftctl_log_event "colo" "xcolo.chardev_contract" "ok" "${vm}" "" \
+      "phase=${phase} mirror=$(ftctl_state_get "${vm}" "xcolo_chardev_contract_mirror_path" 2>/dev/null || true) compare=$(ftctl_state_get "${vm}" "xcolo_chardev_contract_compare_path" 2>/dev/null || true)"
+    return 0
+  fi
+
+  ftctl_log_event "colo" "xcolo.chardev_contract" "fail" "${vm}" "" \
+    "phase=${phase} reason=$(ftctl_state_get "${vm}" "xcolo_chardev_contract_reason" 2>/dev/null || true)"
+  return 1
+}
+
+ftctl_xcolo_wait_colo_chardev_contract() {
+  local vm="${1-}"
+  local secondary_vm="${2:-$vm}"
+  local phase="${3:-post_activation}"
+  local timeout="${FTCTL_XCOLO_CHARDEV_CONTRACT_WAIT_SEC:-3}"
+  local i
+
+  [[ "${timeout}" =~ ^[0-9]+$ && "${timeout}" -gt 0 ]] || timeout="3"
+  for ((i=0; i<timeout; i++)); do
+    if ftctl_xcolo_capture_colo_chardev_contract "${vm}" "${secondary_vm}" "${phase}"; then
+      ftctl_state_set "${vm}" \
+        "xcolo_chardev_contract_gate=ready" \
+        "xcolo_chardev_contract_gate_attempts=$((i + 1))"
+      return 0
+    fi
+    sleep 1
+  done
+
+  ftctl_state_set "${vm}" \
+    "xcolo_chardev_contract_gate=failed" \
+    "xcolo_chardev_contract_gate_attempts=${timeout}" \
+    "xcolo_chardev_contract_gate_reason=$(ftctl_state_get "${vm}" "xcolo_chardev_contract_reason" 2>/dev/null || true)"
+  return 1
+}
+
 ftctl_xcolo_capture_failure_chardev_snapshot() {
   local vm="${1-}"
   local secondary_vm="${2:-$vm}"
@@ -1871,6 +2007,7 @@ ftctl_xcolo_capture_failure_chardev_snapshot() {
     "xcolo_failure_primary_chardev_compare_out=$(ftctl_xcolo_chardev_label_state "${primary_out}" "compare_out")" \
     "xcolo_failure_secondary_chardev_red0=$(ftctl_xcolo_chardev_label_state "${secondary_out}" "red0")" \
     "xcolo_failure_secondary_chardev_red1=$(ftctl_xcolo_chardev_label_state "${secondary_out}" "red1")"
+  ftctl_xcolo_capture_colo_chardev_contract "${vm}" "${secondary_vm}" "${phase}" || true
 }
 
 ftctl_xcolo_policy_snapshot_cmd() {
@@ -1935,7 +2072,11 @@ ftctl_xcolo_classify_startup_active_stream_failure() {
     ftctl_state_set "${vm}" \
       "xcolo_filter_mirror_send_failed=yes" \
       "xcolo_filter_mirror_send_errno=${errno}" \
-      "xcolo_filter_mirror_send_path=primary:m0->mirror0->secondary:red0"
+      "xcolo_filter_mirror_send_path=primary:m0->mirror0->secondary:red0" \
+      "xcolo_filter_mirror_send_contract_ready=$(ftctl_state_get "${vm}" "xcolo_chardev_contract_ready" 2>/dev/null || true)" \
+      "xcolo_filter_mirror_send_contract_reason=$(ftctl_state_get "${vm}" "xcolo_chardev_contract_reason" 2>/dev/null || true)" \
+      "xcolo_filter_mirror_send_contract_mirror_path=$(ftctl_state_get "${vm}" "xcolo_chardev_contract_mirror_path" 2>/dev/null || true)" \
+      "xcolo_filter_mirror_send_contract_compare_path=$(ftctl_state_get "${vm}" "xcolo_chardev_contract_compare_path" 2>/dev/null || true)"
   fi
 
   ftctl_state_set "${vm}" \
@@ -1949,7 +2090,7 @@ ftctl_xcolo_classify_startup_active_stream_failure() {
     "last_error=${last_error}"
 
   ftctl_log_event "colo" "xcolo.startup_active_stream_failure" "fail" "${vm}" "" \
-    "reason=${reason} errno=${errno:-none} path=primary:m0->mirror0->secondary:red0"
+    "reason=${reason} errno=${errno:-none} path=primary:m0->mirror0->secondary:red0 contract=$(ftctl_state_get "${vm}" "xcolo_chardev_contract_ready" 2>/dev/null || true) contract_reason=$(ftctl_state_get "${vm}" "xcolo_chardev_contract_reason" 2>/dev/null || true)"
 }
 
 ftctl_xcolo_collect_primary_netdev_vhost_state() {
@@ -5276,6 +5417,9 @@ ftctl_xcolo_capture_post_migrate_transition_state() {
 
   ftctl_xcolo_collect_primary_filter_qom_state "${vm}" "${expected_filter_status}" || true
   ftctl_xcolo_capture_socket_snapshot "${vm}" "post_migrate_${phase}" || true
+  if [[ "${expected_filter_status}" == "on" ]]; then
+    ftctl_xcolo_capture_colo_chardev_contract "${vm}" "${secondary_vm}" "post_migrate_${phase}" || true
+  fi
   ftctl_state_set "${vm}" \
     "xcolo_post_migrate_${phase}_primary_migrate_status=${primary_migrate}" \
     "xcolo_post_migrate_${phase}_secondary_migrate_status=${secondary_migrate}" \
@@ -5286,9 +5430,11 @@ ftctl_xcolo_capture_post_migrate_transition_state() {
     "xcolo_post_migrate_${phase}_invalid_message=${invalid_message}" \
     "xcolo_post_migrate_${phase}_filter_expected_status=${expected_filter_status}" \
     "xcolo_post_migrate_${phase}_filter_qom_ready=$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_ready" 2>/dev/null || true)" \
-    "xcolo_post_migrate_${phase}_filter_qom_reason=$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_reason" 2>/dev/null || true)"
+    "xcolo_post_migrate_${phase}_filter_qom_reason=$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_reason" 2>/dev/null || true)" \
+    "xcolo_post_migrate_${phase}_chardev_contract_ready=$(ftctl_state_get "${vm}" "xcolo_post_migrate_${phase}_chardev_contract_ready" 2>/dev/null || true)" \
+    "xcolo_post_migrate_${phase}_chardev_contract_reason=$(ftctl_state_get "${vm}" "xcolo_post_migrate_${phase}_chardev_contract_reason" 2>/dev/null || true)"
   ftctl_log_event "colo" "xcolo.post_migrate_transition" "ok" "${vm}" "" \
-    "phase=${phase} filter_expected=${expected_filter_status} primary_migrate=${primary_migrate} secondary_migrate=${secondary_migrate} primary_colo=${primary_colo} secondary_colo=${secondary_colo} invalid_message=${invalid_message}"
+    "phase=${phase} filter_expected=${expected_filter_status} primary_migrate=${primary_migrate} secondary_migrate=${secondary_migrate} primary_colo=${primary_colo} secondary_colo=${secondary_colo} invalid_message=${invalid_message} chardev_contract=$(ftctl_state_get "${vm}" "xcolo_post_migrate_${phase}_chardev_contract_ready" 2>/dev/null || true)"
 }
 
 ftctl_xcolo_gate_post_migrate_before_filter_activation() {
@@ -5352,6 +5498,21 @@ ftctl_xcolo_activate_primary_filters_after_migrate() {
   fi
 
   ftctl_xcolo_wait_primary_filter_chardev_binding "${vm}" || true
+  if ! ftctl_xcolo_wait_colo_chardev_contract "${vm}" "${secondary_vm}" "post_activation_contract"; then
+    if ftctl_xcolo_primary_invalid_message_observed "${vm}" ||
+        ftctl_xcolo_primary_log_has_filter_mirror_send_failure "${vm}"; then
+      ftctl_xcolo_classify_startup_active_stream_failure "${vm}" "${secondary_vm}" || true
+    else
+      ftctl_state_set "${vm}" \
+        "xcolo_primary_net_filters_activated=false" \
+        "xcolo_protocol_failure_phase=post_migrate_chardev_contract" \
+        "xcolo_primary_filter_activation_failed_reason=$(ftctl_state_get "${vm}" "xcolo_chardev_contract_gate_reason" 2>/dev/null || true)" \
+        "last_error=xcolo_colo_chardev_contract_not_ready"
+    fi
+    ftctl_log_event "colo" "xcolo.post_migrate_filter_activation" "fail" "${vm}" "" \
+      "mode=startup-active reason=chardev_contract_not_ready contract_reason=$(ftctl_state_get "${vm}" "xcolo_chardev_contract_gate_reason" 2>/dev/null || true)"
+    return 1
+  fi
   ftctl_xcolo_capture_post_migrate_transition_state "${vm}" "${secondary_vm}" "post_activation_validation" "on"
   ftctl_state_set "${vm}" \
     "xcolo_primary_filter_activation_stage=premigrate_active" \

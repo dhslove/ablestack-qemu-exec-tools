@@ -2965,3 +2965,44 @@ but a lower-level signature or reached stage changed, set
     `xcolo_filter_mirror_send_eperm`
   - debug evidence should include chardev query files and policy snapshots for
     the post-migrate failure phase
+
+### Run 76 Monitor Result And Chardev Contract Direction 2026-06-04
+
+- Run 76 repeated the same QEMU symptom but with better classification:
+  - `last_error=xcolo_filter_mirror_send_eperm`
+  - primary QEMU:
+    - `filter mirror send failed(Operation not permitted)`
+    - `Received invalid message 0x0000 length 0x0000`
+  - secondary QEMU:
+    - `Can't receive COLO message: Input/output error`
+- This is diagnostic progress compared with the older generic
+  `xcolo_startup_active_filter_stream_failed` result.
+- The new evidence moved the boundary from TCP reachability to QEMU chardev
+  frontend state:
+  - `xcolo_socket_post_migrate_startup_active_validation_primary_9003=listen`
+  - `xcolo_socket_post_migrate_startup_active_validation_secondary_9003=established`
+  - `xcolo_socket_post_migrate_startup_active_validation_primary_9004=listen`
+  - `xcolo_socket_post_migrate_startup_active_validation_secondary_9004=established`
+  - but failure-time QMP showed:
+    - `xcolo_failure_primary_chardev_mirror0=present_closed`
+    - `xcolo_failure_primary_chardev_compare1=present_open`
+    - `xcolo_failure_secondary_chardev_red0=present_open`
+    - `xcolo_failure_secondary_chardev_red1=present_closed`
+- Repetition control:
+  - do not return to storage symmetry, checkpoint delay, or generic firewall
+    theories unless new evidence contradicts the Run 76 record
+  - the next implementation must verify the COLO chardev contract directly:
+    - `primary m0 -> mirror0 -> secondary red0 -> f1`
+    - `secondary f2 -> red1 -> primary compare1 -> comp0`
+  - if the same QEMU signature appears again, the test report must explicitly
+    include:
+    - `xcolo_chardev_contract_ready`
+    - `xcolo_chardev_contract_reason`
+    - `xcolo_chardev_contract_mirror_path`
+    - `xcolo_chardev_contract_compare_path`
+- Design recorded:
+  - `docs/ftctl/353-ft-xcolo-chardev-contract-gate-design-20260604.md`
+- Expected next useful result:
+  - FT reaches steady state, or
+  - the attempt fails earlier as `xcolo_colo_chardev_contract_not_ready`, or
+  - EPERM repeats but the report identifies the exact closed chardev edge.

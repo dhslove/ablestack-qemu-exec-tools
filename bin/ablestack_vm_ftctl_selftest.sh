@@ -2534,6 +2534,43 @@ selftest_case_xcolo_startup_active_failure_classifies_filter_mirror_eperm() (
     "startup-active EPERM path"
 )
 
+selftest_case_xcolo_chardev_contract_reports_closed_edges() (
+  selftest_reset_env
+  selftest_info "x-colo chardev contract reports closed mirror/compare edges"
+
+  local vm="xcolo-chardev-contract"
+  local rc=0
+  ftctl_state_init_vm "${vm}"
+  FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
+  FTCTL_PROFILE_SECONDARY_URI="qemu+ssh://peer/system"
+
+  # shellcheck disable=SC2317
+  ftctl_xcolo_qmp() {
+    local uri="${1-}" payload="${3-}" out_var="${4}" rc_var="${5}"
+    : "${payload}"
+    if [[ "${uri}" == "${FTCTL_PROFILE_PRIMARY_URI}" ]]; then
+      printf -v "${out_var}" '%s' '{"return":[{"label":"mirror0","frontend-open":false},{"label":"compare1","frontend-open":true}]}'
+    else
+      printf -v "${out_var}" '%s' '{"return":[{"label":"red0","frontend-open":true},{"label":"red1","frontend-open":false}]}'
+    fi
+    printf -v "${rc_var}" '%s' "0"
+    return 0
+  }
+
+  ftctl_xcolo_capture_colo_chardev_contract "${vm}" "${vm}-standby" "post_activation_contract" || rc=$?
+  selftest_assert_eq "${rc}" "1" "closed chardev contract should fail"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_chardev_contract_ready")" \
+    "no" "contract is not ready"
+  selftest_assert_contains "$(ftctl_state_get "${vm}" "xcolo_chardev_contract_reason")" \
+    "mirror_path_primary_mirror0=present_closed" "contract reason includes primary mirror0"
+  selftest_assert_contains "$(ftctl_state_get "${vm}" "xcolo_chardev_contract_reason")" \
+    "compare_path_secondary_red1=present_closed" "contract reason includes secondary red1"
+  selftest_assert_contains "$(ftctl_state_get "${vm}" "xcolo_chardev_contract_mirror_path")" \
+    "mirror0(present_closed)" "mirror path records primary state"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_post_activation_contract_chardev_contract_ready")" \
+    "no" "phase-specific contract state is persisted"
+)
+
 selftest_case_xcolo_runtime_validation_reports_pending_convergence() (
   selftest_reset_env
   selftest_info "x-colo runtime validation reports missing colo role without hard failure"
@@ -4355,6 +4392,7 @@ selftest_main() {
   selftest_case_xcolo_runtime_validation_reports_primary_migrate_failure
   selftest_case_xcolo_runtime_validation_classifies_repeated_invalid_message
   selftest_case_xcolo_startup_active_failure_classifies_filter_mirror_eperm
+  selftest_case_xcolo_chardev_contract_reports_closed_edges
   selftest_case_xcolo_runtime_validation_reports_pending_convergence
   selftest_case_xcolo_runtime_validation_times_out_stuck_convergence
   selftest_case_xcolo_runtime_validation_reports_one_sided_colo_role
