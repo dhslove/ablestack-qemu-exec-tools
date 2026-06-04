@@ -2635,3 +2635,70 @@ but a lower-level signature or reached stage changed, set
     next issue is topology/wiring, not activation timing
   - if `primary.filter_status_on.*` still appears, this fix was not actually
     installed or the dormant-filter path was incorrectly used
+
+### Run 74 Build Deploy Cleanup Readiness 2026-06-04
+
+- Source commit:
+  - `b9b66dc` (`fix: start xcolo filters before migrate`)
+- Local validation:
+  - `bash -n lib/ftctl/xcolo.sh`: passed
+  - `bash -n bin/ablestack_vm_ftctl_selftest.sh`: passed
+  - `git diff --check`: passed
+  - targeted XCOLO selftests passed:
+    - `selftest_case_xcolo_and_xml`
+    - `selftest_case_xcolo_block_handshake_sets_checkpoint_before_migrate`
+    - `selftest_case_xcolo_multi_disk_handshake_exports_all_disks`
+    - `selftest_case_xcolo_virtio_vnet_hdr_support`
+  - full selftest still stops at pre-existing shellcheck warnings before the
+    functional cases run
+- GitHub Actions:
+  - run: `26935917118`
+  - workflow: `FTCTL Branch Development Release`
+  - result: success
+  - head SHA: `b9b66dcafc5c700ae21a6d23270494bd4791d288`
+  - RPM: `ablestack_vm_ftctl-0.8.0-1.noarch.rpm`
+  - RPM SHA256:
+    `d7cd0d4aef2ff543418a5708dfa2800e0827044a46fa6e952e1bc8326fe143d8`
+- RPM marker verification:
+  - installed/extracted script contains:
+    - `xcolo_primary_net_filters_activation_mode=startup-active`
+    - `xcolo_primary_filter_activation_stage=premigrate_active`
+    - `post_migrate_startup_active`
+  - `status=off` remains only in:
+    - generated command-line guard that rejects dormant startup filters
+    - dormant staged activation helper retained for historical repair testing
+- Deployment:
+  - deployed to `10.10.32.1`, `10.10.32.2`, and `10.10.32.3`
+  - all hosts report `ablestack_vm_ftctl-0.8.0-1.noarch`
+  - all hosts have `ablestack-vm-ftctl.timer=active`
+  - all hosts have `ablestack-vm-hangctl.timer=active`
+- Cleanup:
+  - active protection row `73` removed/disabled:
+    - `protection_state=disabled`
+    - `transport_state=stopped`
+    - `last_error=test_cleanup_after_premigrate_active_filter_fix`
+  - standby VM `129` / `i-2-129-VM` marked `Expunging`, removed timestamp set
+  - standby volumes `243`, `244` marked `Expunged`, removed timestamp set
+  - standby RBD images removed:
+    - `ef6a84ce-4095-4f9b-871a-7007eb906129`
+    - `90400d87-7f34-43fb-bb5f-1fb6cb4fbab8`
+  - FTCTL runtime/profile files for `i-2-54-VM`, `i-2-129-VM`, and
+    `r97-link-01` removed
+- Final readiness:
+  - primary VM `54` / `i-2-54-VM`:
+    - DB state: `Running`
+    - host id: `3`
+    - power state: `PowerOn`
+    - libvirt state on `10.10.32.3`: `running`
+  - active protection rows for primary VM `54`: `0`
+  - active `r97-link-01-standby%` VM rows: `0`
+  - active `r97-link-01-standby%` volume rows: `0`
+  - active `ftctl.*` details for VM `54` or `129`: `0`
+  - primary QMP `query-block-jobs`: empty
+  - primary QMP `query-migrate`: empty
+  - `ablestack_vm_ftctl status --vm i-2-54-VM --json`: `not_found`
+- Next retest expectation:
+  - normal path must not emit `primary.filter_status_on.redire1`,
+    `primary.filter_status_on.m0`, or `primary.filter_status_on.redire0`
+  - if the QEMU invalid-message signature repeats without those events, report
+    it as a topology/wiring issue, not another activation timing issue
