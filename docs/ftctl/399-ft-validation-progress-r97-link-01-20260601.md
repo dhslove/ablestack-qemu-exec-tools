@@ -3221,3 +3221,52 @@ but a lower-level signature or reached stage changed, set
     explicitly say whether `xcolo_qemu_doc_topology` was `ok` or `failed`
   - if it was `ok`, the next change must target QEMU runtime frontend binding
     and not command-line topology or staged activation timing
+
+### QEMU Doc Topology Audit Build Deploy Cleanup Readiness 2026-06-05
+
+- Source commit built and deployed:
+  - `4aa8241` (`fix: harden xcolo qemu doc topology audit`)
+- GitHub Actions:
+  - run: `26963481673`
+  - workflow: `FTCTL Branch Development Release`
+  - result: success
+  - source commit: `4aa824135647bca5ec80b9eab4de2f3d00e05af7`
+  - RPM SHA256:
+    `ad830fb62f5c827eff5a4cce5d88cc2f819ae8124c73df0422336a150c66fd74`
+- Deployment:
+  - RPM deployed to:
+    - `10.10.32.1`
+    - `10.10.32.2`
+    - `10.10.32.3`
+  - all hosts report:
+    - `ablestack_vm_ftctl-0.8.0-1.noarch`
+    - `ablestack-vm-ftctl.timer=active`
+    - `ablestack-vm-hangctl.timer=active`
+  - installed scripts contain:
+    - `xcolo_qemu_doc_runtime_frontend_closed`
+    - `xcolo_qemu_doc_topology_mismatch`
+    - `doc_compare1_listener`
+- Run78 cleanup:
+  - protection row `78`: removed/disabled
+  - active protection rows for VM `54`: `0`
+  - active `ftctl.*` details for VM `54` or `r97-link-01-standby%`: `0`
+  - active `r97-link-01-standby%` VM rows: `0`
+  - active `r97-link-01-standby%` volume rows: `0`
+  - standby VM `134` set to `Expunging`
+  - standby volumes `253`, `254` set to `Expunged`
+  - standby RBD images removed:
+    - `d909daa8-7505-4753-8d25-a33f30af6064`
+    - `c392d7e7-8096-4e5c-8a14-69158f86d98d`
+  - stale FTCTL runtime/profile/debug files for `i-2-54-VM`, `i-2-134-VM`,
+    and `r97-link-01` removed from the three hosts.
+- Final readiness:
+  - primary VM `54` / `i-2-54-VM` is `Running` on host `10.10.32.3`
+  - primary QMP `query-block-jobs`: empty
+  - primary QMP `query-migrate`: empty
+  - `ablestack_vm_ftctl status --vm i-2-54-VM --json`: `not_found`
+- Next test report must explicitly include:
+  - `xcolo_qemu_doc_topology`
+  - `xcolo_qemu_doc_topology_reason`
+  - `xcolo_qemu_doc_runtime_frontend`
+  - `xcolo_qemu_doc_runtime_frontend_reason`
+  - whether the closed frontend issue is still `mirror0`, `red1`, or a new edge
