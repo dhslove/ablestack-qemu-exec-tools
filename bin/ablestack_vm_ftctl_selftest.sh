@@ -162,6 +162,19 @@ selftest_mock_xcolo_primary_channels_ready() {
       "xcolo_primary_filter_cmdline_expected_netdev=hostnet0"
   }
   # shellcheck disable=SC2317
+  ftctl_xcolo_require_topology_audit_ready() {
+    local vm="${1-}" secondary_vm="${2:-$1}" phase="${3:-pre_migrate}"
+    : "${secondary_vm}"
+    ftctl_state_set "${vm}" \
+      "xcolo_topology_audit=ok" \
+      "xcolo_topology_audit_phase=${phase}" \
+      "xcolo_topology_audit_reason=" \
+      "xcolo_topology_primary_ready=yes" \
+      "xcolo_topology_secondary_ready=yes" \
+      "xcolo_secondary_filter_cmdline_ready=yes" \
+      "xcolo_secondary_filter_cmdline_reason="
+  }
+  # shellcheck disable=SC2317
   ftctl_xcolo_domain_xml_has_runtime_markers() {
     local _uri="${1-}" _vm="${2-}" role="${3-}"
     [[ "${role}" == "primary" ]]

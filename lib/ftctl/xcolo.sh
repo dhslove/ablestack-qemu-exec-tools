@@ -1676,8 +1676,11 @@ PY
   [[ "$(ftctl_state_get "${vm}" "xcolo_secondary_block_graph_ready" 2>/dev/null || true)" == "yes" ]]
 }
 
-ftctl_xcolo_capture_primary_qemu_cmdline() {
-  local vm="${1-}"
+ftctl_xcolo_capture_qemu_cmdline_local() {
+  local domain="${1-}"
+  local out_var="${2}"
+  local err_var="${3}"
+  local rc_var="${4}"
   local out err rc
 
   out=""
@@ -1694,9 +1697,94 @@ for proc_cmd in /proc/[0-9]*/cmdline; do
   [[ "${cmdline}" == *qemu* ]] || continue
   printf "%s\n" "${cmdline}"
 done
-' _ "${vm}" || true
+' _ "${domain}" || true
+  printf -v "${out_var}" '%s' "${out}"
+  printf -v "${err_var}" '%s' "${err}"
+  printf -v "${rc_var}" '%s' "${rc}"
+}
+
+ftctl_xcolo_capture_primary_qemu_cmdline() {
+  local vm="${1-}"
+  local out="" err="" rc=0
+
+  ftctl_xcolo_capture_qemu_cmdline_local "${vm}" out err rc || true
   : "${err}${rc}"
   ftctl_xcolo_write_debug_file "${vm}" "primary-qemu-process-cmdline.txt" "${out}"
+}
+
+ftctl_xcolo_capture_secondary_qemu_cmdline() {
+  local vm="${1-}"
+  local secondary_vm="${2:-$vm}"
+  local host="" user="" out="" err="" rc=0 remote_cmd="" q_secondary=""
+
+  if ftctl_blockcopy_secondary_uri_is_local_system; then
+    ftctl_xcolo_capture_qemu_cmdline_local "${secondary_vm}" out err rc || true
+  elif ftctl_blockcopy_remote_target_host_user host user; then
+    printf -v q_secondary '%q' "${secondary_vm}"
+    remote_cmd="domain=${q_secondary}
+for proc_cmd in /proc/[0-9]*/cmdline; do
+  [[ -r \"\${proc_cmd}\" ]] || continue
+  cmdline=\"\$(tr '\0' ' ' < \"\${proc_cmd}\" 2>/dev/null || true)\"
+  [[ \"\${cmdline}\" == *\"\${domain}\"* ]] || continue
+  [[ \"\${cmdline}\" == *qemu* ]] || continue
+  printf '%s\n' \"\${cmdline}\"
+done"
+    ftctl_blockcopy_remote_exec "${host}" "${user}" out err rc "${remote_cmd}" || true
+  else
+    err="target_unresolved"
+    rc=2
+  fi
+
+  : "${err}"
+  ftctl_xcolo_write_debug_file "${vm}" "secondary-qemu-process-cmdline.txt" "${out}"
+  ftctl_state_set "${vm}" \
+    "xcolo_secondary_qemu_cmdline_rc=${rc}" \
+    "xcolo_secondary_qemu_cmdline_captured=$([[ -n "${out}" ]] && printf yes || printf no)"
+}
+
+ftctl_xcolo_capture_qemu_log_tail_local() {
+  local domain="${1-}"
+  local out_var="${2}"
+  local err_var="${3}"
+  local rc_var="${4}"
+  local out="" err="" rc=0
+
+  # shellcheck disable=SC2016
+  ftctl_cmd_run "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC:-15}" out err rc -- \
+    bash -c 'domain="$1"; tail -n 360 "/var/log/libvirt/qemu/${domain}.log" 2>/dev/null || true' _ "${domain}" || true
+  printf -v "${out_var}" '%s' "${out}"
+  printf -v "${err_var}" '%s' "${err}"
+  printf -v "${rc_var}" '%s' "${rc}"
+}
+
+ftctl_xcolo_capture_qemu_log_tails() {
+  local vm="${1-}"
+  local secondary_vm="${2:-$vm}"
+  local host="" user="" out="" err="" rc=0 remote_cmd="" q_secondary=""
+
+  ftctl_xcolo_capture_qemu_log_tail_local "${vm}" out err rc || true
+  : "${err}${rc}"
+  ftctl_xcolo_write_debug_file "${vm}" "primary-qemu-log-tail.txt" "${out}"
+
+  out=""
+  err=""
+  rc=0
+  if ftctl_blockcopy_secondary_uri_is_local_system; then
+    ftctl_xcolo_capture_qemu_log_tail_local "${secondary_vm}" out err rc || true
+  elif ftctl_blockcopy_remote_target_host_user host user; then
+    printf -v q_secondary '%q' "${secondary_vm}"
+    remote_cmd="domain=${q_secondary}
+tail -n 360 \"/var/log/libvirt/qemu/\${domain}.log\" 2>/dev/null || true"
+    ftctl_blockcopy_remote_exec "${host}" "${user}" out err rc "${remote_cmd}" || true
+  else
+    err="target_unresolved"
+    rc=2
+  fi
+  : "${err}"
+  ftctl_xcolo_write_debug_file "${vm}" "secondary-qemu-log-tail.txt" "${out}"
+  ftctl_state_set "${vm}" \
+    "xcolo_qemu_log_tail_captured=yes" \
+    "xcolo_secondary_qemu_log_tail_rc=${rc}"
 }
 
 ftctl_xcolo_collect_primary_netdev_vhost_state() {
@@ -1889,6 +1977,116 @@ ftctl_xcolo_require_primary_filter_cmdline_ready() {
   return 1
 }
 
+ftctl_xcolo_collect_secondary_filter_cmdline_state() {
+  local vm="${1-}"
+  local secondary_vm="${2:-$vm}"
+  local out="" ready="yes" reason_text="" expected_netdev
+  local -a reasons=()
+
+  ftctl_xcolo_capture_secondary_qemu_cmdline "${vm}" "${secondary_vm}" || true
+  out="$(ftctl_xcolo_debug_dir "${vm}")/secondary-qemu-process-cmdline.txt"
+  if [[ -f "${out}" ]]; then
+    out="$(cat "${out}" 2>/dev/null || true)"
+  else
+    out=""
+  fi
+
+  if [[ -z "${out}" ]]; then
+    ftctl_state_set "${vm}" \
+      "xcolo_secondary_filter_cmdline_ready=unknown" \
+      "xcolo_secondary_filter_cmdline_reason=secondary_qemu_process_not_found"
+    return 1
+  fi
+
+  expected_netdev="$(ftctl_state_get "${vm}" "xcolo_secondary_netdev_id" 2>/dev/null || true)"
+  expected_netdev="${expected_netdev:-hostnet0}"
+
+  _ftctl_xcolo_expect_secondary_cmdline_token() {
+    local token="${1-}"
+    local key="${2-}"
+    if [[ "${out}" != *"${token}"* ]]; then
+      ready="no"
+      reasons+=("${key}:missing")
+    fi
+  }
+
+  _ftctl_xcolo_expect_secondary_cmdline_token "socket,id=red0" "red0"
+  _ftctl_xcolo_expect_secondary_cmdline_token "socket,id=red1" "red1"
+  _ftctl_xcolo_expect_secondary_cmdline_token "filter-redirector,id=f1" "f1"
+  _ftctl_xcolo_expect_secondary_cmdline_token "filter-redirector,id=f2" "f2"
+  _ftctl_xcolo_expect_secondary_cmdline_token "filter-rewriter,id=rew0" "rew0"
+  _ftctl_xcolo_expect_secondary_cmdline_token "netdev=${expected_netdev}" "secondary_netdev"
+  _ftctl_xcolo_expect_secondary_cmdline_token "queue=tx" "f1_tx"
+  _ftctl_xcolo_expect_secondary_cmdline_token "indev=red0" "f1_indev"
+  _ftctl_xcolo_expect_secondary_cmdline_token "queue=rx" "f2_rx"
+  _ftctl_xcolo_expect_secondary_cmdline_token "outdev=red1" "f2_outdev"
+  _ftctl_xcolo_expect_secondary_cmdline_token "queue=all" "rew0_all"
+  _ftctl_xcolo_expect_secondary_cmdline_token "-incoming" "incoming"
+  if [[ "$(ftctl_state_get "${vm}" "xcolo_net_vnet_hdr_support" 2>/dev/null || true)" == "on" ]]; then
+    _ftctl_xcolo_expect_secondary_cmdline_token "vnet_hdr_support" "vnet_hdr_support"
+  fi
+
+  reason_text="$(IFS=,; printf '%s' "${reasons[*]}")"
+  ftctl_state_set "${vm}" \
+    "xcolo_secondary_filter_cmdline_ready=${ready}" \
+    "xcolo_secondary_filter_cmdline_expected_netdev=${expected_netdev}" \
+    "xcolo_secondary_filter_cmdline_reason=${reason_text}" \
+    "xcolo_secondary_filter_cmdline_vnet_hdr_required=$(ftctl_state_get "${vm}" "xcolo_net_vnet_hdr_support" 2>/dev/null || true)"
+  [[ "${ready}" == "yes" ]]
+}
+
+ftctl_xcolo_require_topology_audit_ready() {
+  local vm="${1-}"
+  local secondary_vm="${2:-$vm}"
+  local phase="${3:-pre_migrate}"
+  local primary_qom primary_qom_reason primary_cmd primary_cmd_reason
+  local secondary_cmd secondary_cmd_reason reason_text
+  local -a reasons=()
+
+  ftctl_xcolo_collect_primary_filter_qom_state "${vm}" "on" || true
+  ftctl_xcolo_collect_primary_filter_cmdline_state "${vm}" || true
+  ftctl_xcolo_collect_secondary_filter_cmdline_state "${vm}" "${secondary_vm}" || true
+  ftctl_xcolo_capture_qemu_log_tails "${vm}" "${secondary_vm}" || true
+
+  primary_qom="$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_ready" 2>/dev/null || true)"
+  primary_qom_reason="$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_reason" 2>/dev/null || true)"
+  primary_cmd="$(ftctl_state_get "${vm}" "xcolo_primary_filter_cmdline_ready" 2>/dev/null || true)"
+  primary_cmd_reason="$(ftctl_state_get "${vm}" "xcolo_primary_filter_cmdline_reason" 2>/dev/null || true)"
+  secondary_cmd="$(ftctl_state_get "${vm}" "xcolo_secondary_filter_cmdline_ready" 2>/dev/null || true)"
+  secondary_cmd_reason="$(ftctl_state_get "${vm}" "xcolo_secondary_filter_cmdline_reason" 2>/dev/null || true)"
+
+  if [[ "${primary_qom}" != "yes" && "${primary_cmd}" != "yes" ]]; then
+    reasons+=("primary:${primary_qom_reason:-${primary_cmd_reason:-unknown}}")
+  fi
+  if [[ "${secondary_cmd}" != "yes" ]]; then
+    reasons+=("secondary:${secondary_cmd_reason:-unknown}")
+  fi
+
+  reason_text="$(IFS=,; printf '%s' "${reasons[*]}")"
+  if [[ "${#reasons[@]}" -eq 0 ]]; then
+    ftctl_state_set "${vm}" \
+      "xcolo_topology_audit=ok" \
+      "xcolo_topology_audit_phase=${phase}" \
+      "xcolo_topology_audit_reason=" \
+      "xcolo_topology_primary_ready=yes" \
+      "xcolo_topology_secondary_ready=yes"
+    ftctl_log_event "colo" "xcolo.topology_audit" "ok" "${vm}" "" \
+      "phase=${phase} primary_qom=${primary_qom} primary_cmdline=${primary_cmd} secondary_cmdline=${secondary_cmd}"
+    return 0
+  fi
+
+  ftctl_state_set "${vm}" \
+    "xcolo_topology_audit=failed" \
+    "xcolo_topology_audit_phase=${phase}" \
+    "xcolo_topology_audit_reason=${reason_text}" \
+    "xcolo_topology_primary_ready=$([[ "${primary_qom}" == "yes" || "${primary_cmd}" == "yes" ]] && printf yes || printf no)" \
+    "xcolo_topology_secondary_ready=$([[ "${secondary_cmd}" == "yes" ]] && printf yes || printf no)" \
+    "last_error=xcolo_topology_audit_failed"
+  ftctl_log_event "colo" "xcolo.topology_audit" "fail" "${vm}" "" \
+    "phase=${phase} reason=${reason_text}"
+  return 1
+}
+
 ftctl_xcolo_collect_runtime_failure_diagnostics() {
   local vm="${1-}"
   local secondary_vm="${2:-$vm}"
@@ -1902,8 +2100,11 @@ ftctl_xcolo_collect_runtime_failure_diagnostics() {
   ftctl_xcolo_qmp_debug_snapshot_one "${vm}" "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" "primary" || true
   ftctl_xcolo_qmp_debug_snapshot_one "${vm}" "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" "secondary" || true
   ftctl_xcolo_capture_primary_qemu_cmdline "${vm}" || true
+  ftctl_xcolo_capture_secondary_qemu_cmdline "${vm}" "${secondary_vm}" || true
+  ftctl_xcolo_capture_qemu_log_tails "${vm}" "${secondary_vm}" || true
   ftctl_xcolo_collect_primary_netdev_vhost_state "${vm}" || true
   ftctl_xcolo_collect_primary_filter_cmdline_state "${vm}" || true
+  ftctl_xcolo_collect_secondary_filter_cmdline_state "${vm}" "${secondary_vm}" || true
   ftctl_xcolo_collect_primary_chardev_binding_state "${vm}" || true
   ftctl_xcolo_collect_primary_filter_qom_state "${vm}" || true
   ftctl_xcolo_collect_primary_block_graph_state "${vm}" "$(ftctl_state_get "${vm}" "xcolo_disk_plan" 2>/dev/null || true)" || true
@@ -2130,11 +2331,15 @@ ftctl_xcolo_invalid_message_protocol_reason() {
   local primary_colo="${11-}"
   local secondary_colo="${12-}"
   local firewall_ready storage_symmetry runtime_socket_captured
+  local topology_audit startup_primary_9998 failure_primary_9998
   local pre_chardev pre_filter_qom pre_filter_cmdline
 
   firewall_ready="$(ftctl_state_get "${vm}" "xcolo_firewall_ready" 2>/dev/null || true)"
   storage_symmetry="$(ftctl_state_get "${vm}" "xcolo_storage_symmetry" 2>/dev/null || true)"
   runtime_socket_captured="$(ftctl_state_get "${vm}" "xcolo_socket_runtime_captured" 2>/dev/null || true)"
+  topology_audit="$(ftctl_state_get "${vm}" "xcolo_topology_audit" 2>/dev/null || true)"
+  startup_primary_9998="$(ftctl_state_get "${vm}" "xcolo_socket_post_migrate_startup_active_validation_primary_9998" 2>/dev/null || true)"
+  failure_primary_9998="$(ftctl_state_get "${vm}" "xcolo_socket_failure_primary_9998" 2>/dev/null || true)"
   pre_chardev="$(ftctl_state_get "${vm}" "xcolo_premigrate_primary_filter_chardev_ready" 2>/dev/null || true)"
   pre_filter_qom="$(ftctl_state_get "${vm}" "xcolo_premigrate_primary_filter_qom_ready" 2>/dev/null || true)"
   pre_filter_cmdline="$(ftctl_state_get "${vm}" "xcolo_premigrate_primary_filter_cmdline_ready" 2>/dev/null || true)"
@@ -2157,13 +2362,20 @@ ftctl_xcolo_invalid_message_protocol_reason() {
     printf '%s\n' "secondary_block_graph_not_ready"
   elif [[ -n "${runtime_socket_captured}" && "${runtime_socket_captured}" != "yes" ]]; then
     printf '%s\n' "runtime_socket_snapshot_missing"
+  elif [[ "${topology_audit}" == "failed" ]]; then
+    printf '%s\n' "topology_audit_failed"
+  elif [[ "${primary_migrate}" == "failed" &&
+          ( "${secondary_migrate}" == "colo" || "${secondary_colo}" == "secondary" ) &&
+          "${startup_primary_9998}" == "established" &&
+          "${failure_primary_9998}" == "closed" ]]; then
+    printf '%s\n' "return_path_protocol_closed_after_startup_active"
   elif [[ "${primary_migrate}" == "failed" &&
           "${secondary_migrate}" == "colo" &&
           "${primary_colo}" == "none" &&
           "${secondary_colo}" == "secondary" ]]; then
     printf '%s\n' "primary_role_not_entered_after_migrate"
   else
-    printf '%s\n' "qemu_colo_protocol_invalid_message"
+    printf '%s\n' "qemu_return_path_invalid_zero_header"
   fi
 }
 
@@ -2284,6 +2496,7 @@ ftctl_xcolo_validate_pair_runtime() {
           ftctl_xcolo_repeated_invalid_message_evidence_ready "${vm}" "${primary_filter_qom}" "${primary_filter_cmdline}" \
             "${channel_mirror}" "${channel_compare}" "${channel_compare_local}" "${channel_compare_out}" \
             "${secondary_block_graph}"; then
+        ftctl_xcolo_collect_runtime_failure_diagnostics "${vm}" "${secondary_vm}" || true
         reason="repeated_protocol_invalid_message"
         protocol_reason="$(ftctl_xcolo_invalid_message_protocol_reason "${vm}" "${primary_filter_qom}" "${primary_filter_cmdline}" \
           "${channel_mirror}" "${channel_compare}" "${channel_compare_local}" "${channel_compare_out}" \
@@ -5030,6 +5243,7 @@ ftctl_xcolo_execute_handshake_with_nodes() {
   ftctl_xcolo_record_pre_migrate_evidence "${vm}" "on" || true
   ftctl_xcolo_preflight_firewall_contract "${vm}" || return 1
   ftctl_xcolo_require_primary_filter_cmdline_ready "${vm}" "pre_migrate" || return 1
+  ftctl_xcolo_require_topology_audit_ready "${vm}" "${secondary_vm}" "pre_migrate" || return 1
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
     "{\"execute\":\"migrate\",\"arguments\":{\"uri\":\"${FTCTL_PROFILE_XCOLO_MIGRATE_URI}\"}}" \
     "colo" "primary.migrate" || return 1
@@ -5102,6 +5316,7 @@ ftctl_xcolo_execute_handshake_with_disk_plan() {
   ftctl_xcolo_record_pre_migrate_evidence "${vm}" "on" || true
   ftctl_xcolo_preflight_firewall_contract "${vm}" || return 1
   ftctl_xcolo_require_primary_filter_cmdline_ready "${vm}" "pre_migrate" || return 1
+  ftctl_xcolo_require_topology_audit_ready "${vm}" "${secondary_vm}" "pre_migrate" || return 1
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
     "{\"execute\":\"migrate\",\"arguments\":{\"uri\":\"${FTCTL_PROFILE_XCOLO_MIGRATE_URI}\"}}" \
     "colo" "primary.migrate" || return 1

@@ -2702,3 +2702,37 @@ but a lower-level signature or reached stage changed, set
     `primary.filter_status_on.m0`, or `primary.filter_status_on.redire0`
   - if the QEMU invalid-message signature repeats without those events, report
     it as a topology/wiring issue, not another activation timing issue
+
+### Run 75 Fix Plan 2026-06-04
+
+- Design document:
+  - `351-ft-xcolo-return-path-topology-audit-design-20260604.md`
+- Reason:
+  - Run 74 proved the premigrate-active topology was installed
+  - no normal-path `primary.filter_status_on.*` event was emitted
+  - the same QEMU protocol signature still occurred after sockets had been
+    established
+  - therefore the next active hypothesis is return-path/topology wiring, not
+    filter activation timing
+- Change direction:
+  - keep the premigrate-active startup topology from design 350
+  - add a combined topology audit before `primary.migrate`
+  - validate secondary commandline topology in addition to the existing primary
+    checks
+  - capture primary and secondary QEMU command lines in the XCOLO debug
+    directory
+  - capture primary and secondary libvirt/QEMU log tails in the XCOLO debug
+    directory
+  - classify repeated invalid-message failures with narrower subreasons:
+    - `topology_audit_failed`
+    - `return_path_protocol_closed_after_startup_active`
+    - `qemu_return_path_invalid_zero_header`
+- Repetition gate:
+  - if the next run blocks before `primary.migrate` with
+    `xcolo_topology_audit_failed`, this is progress because a concrete topology
+    mismatch was found
+  - if the next run repeats the invalid-message signature with
+    `xcolo_topology_audit=ok`, the next target must be QEMU return-path
+    protocol semantics or QEMU runtime parity
+  - do not return to wait-loop, checkpoint-delay, or post-migrate filter
+    activation timing changes unless new evidence contradicts Run 74
