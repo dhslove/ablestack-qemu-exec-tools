@@ -2373,3 +2373,79 @@ but a lower-level signature or reached stage changed, set
     - `xcolo_pre_redire1_chardev_ready`
   - if the gate passes and `redire1` still breaks the stream, the next target is
     `redire1 outdev=compare0` topology rather than timing
+
+### Run 72 Result 2026-06-04
+
+- Trigger:
+  - user started FT protection registration after Run 72 readiness cleanup
+- Evidence:
+  - monitor log:
+    `/home/ablecloud/work/ft-run72-monitor-20260604-142437.log`
+  - final evidence directory:
+    `/home/ablecloud/work/ft-run72-final-20260604-142437`
+  - extra evidence:
+    `/home/ablecloud/work/ft-run72-final-extra-20260604-142616/extra-evidence.log`
+- Final state:
+  - protection row: `72`
+  - standby VM: `128` / `i-2-128-VM`
+  - standby volumes:
+    - `241` / `fabdab34-d577-41a7-985f-7e8a7f3c3af1`
+    - `242` / `7b54484b-3c45-461c-92cd-17c2799e5584`
+  - `protection_state=error`
+  - `transport_state=failed`
+  - `last_error=xcolo_redire1_activation_prerequisite_failed`
+- Progress confirmed:
+  - pre-redire1 gate was executed
+  - no Run 72 event shows `primary.filter_status_on.redire1`
+  - therefore `redire1` was not activated in this run
+  - post-migrate pre-activation was still valid:
+    - `xcolo_post_migrate_pre_activation_primary_migrate_status=active`
+    - `xcolo_post_migrate_pre_activation_secondary_migrate_status=active`
+    - `xcolo_post_migrate_pre_activation_invalid_message=no`
+    - `xcolo_socket_post_migrate_pre_activation_primary_9998=established`
+  - pre-redire1 gate saw the stream already broken:
+    - `xcolo_pre_redire1_gate=failed`
+    - `xcolo_protocol_failure_phase=pre_redire1_gate`
+    - `xcolo_pre_redire1_gate_reason=invalid_message_before_redire1`
+    - `xcolo_pre_redire1_primary_migrate_status=failed`
+    - `xcolo_pre_redire1_secondary_migrate_status=colo`
+    - `xcolo_pre_redire1_secondary_colo_mode=secondary`
+    - `xcolo_pre_redire1_primary_migrate_error_desc=Received invalid message 0x0000 length 0x0000`
+    - `xcolo_pre_redire1_invalid_message=yes`
+  - strict chardev check also failed at pre-redire1:
+    - `xcolo_pre_redire1_chardev_ready=no`
+    - `xcolo_pre_redire1_chardev_reason=mirror0:frontend_closed,compare0:frontend_closed,compare_out0:frontend_closed`
+- QEMU log evidence:
+  - primary:
+    - QEMU waited for `compare1` listener connection
+    - then reported `Received invalid message 0x0000 length 0x0000`
+  - secondary:
+    - `Can't receive COLO message: Input/output error`
+- Repetition control:
+  - this is not the same result as Run 71
+  - Run 71 failed after `redire1` activation
+  - Run 72 failed before `redire1` activation
+  - the gate prevented qom-set, so the remaining failure is in the interval
+    between post-migrate pre-activation and pre-redire1 readiness
+- Next improvement direction:
+  - do not keep delaying `redire1` until secondary reaches `colo`; that lets
+    the stream fail before any filter activation
+  - replace the permissive post-migrate pre-activation gate
+    `secondary_migrate=active|colo` with a tighter role-transition sequence
+    that does not leave QEMU in an unsupported no-filter/no-role window
+  - likely candidate:
+    - prepare strict chardev readiness immediately after `primary.migrate`
+    - activate `redire1` during the narrow window while primary migrate is
+      still `active` and before primary reports invalid-message
+    - then verify secondary reaches `colo`
+  - if strict chardevs stay closed before activation, investigate whether
+    `status=off` filter objects intentionally keep those frontend chardevs
+    closed; in that case strict chardev readiness cannot be a precondition for
+    `redire1`
+- Cleanup note:
+  - Run 72 garbage remains at this point:
+    - active protection row `72`
+    - standby VM `i-2-128-VM`
+    - standby volumes `241`, `242`
+    - standby RBD images listed above
+  - cleanup is required before the next retest
