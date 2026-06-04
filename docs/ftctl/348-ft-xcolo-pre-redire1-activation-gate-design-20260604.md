@@ -120,3 +120,11 @@ chardev readiness before `redire1` can let the COLO stream fail before any
 filter is activated. The effective successor design is 349, which validates the
 cached post-migrate pre-activation state and enables `redire1` without a fresh
 polling wait.
+
+## Superseded By Active Startup Topology
+
+Run 73 then showed that even the fast activation path breaks the COLO stream at
+`redire1`. For the normal cloud-managed enable path, this document is superseded
+by [350. FT XCOLO Premigrate Active Filter Topology Design](350-ft-xcolo-premigrate-active-filter-topology-design-20260604.md).
+The normal path now starts primary and secondary filter topology active before
+`primary.migrate` instead of waiting for a redire1 activation gate.

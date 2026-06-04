@@ -954,9 +954,10 @@ EOF
   selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "<iothreads>1</iothreads>"
   selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" '<iothread id="1"'
   selftest_assert_file_not_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "iothread,id=iothread1"
-  selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "filter-mirror,id=m0,netdev=hostnet0,queue=tx,outdev=mirror0,status=off,insert=behind,position=tail"
-  selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "filter-redirector,id=redire0,netdev=hostnet0,queue=rx,indev=compare_out,status=off,insert=behind,position=tail"
-  selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "filter-redirector,id=redire1,netdev=hostnet0,queue=rx,outdev=compare0,status=off,insert=behind,position=tail"
+  selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "filter-mirror,id=m0,netdev=hostnet0,queue=tx,outdev=mirror0,insert=behind,position=tail"
+  selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "filter-redirector,id=redire0,netdev=hostnet0,queue=rx,indev=compare_out,insert=behind,position=tail"
+  selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "filter-redirector,id=redire1,netdev=hostnet0,queue=rx,outdev=compare0,insert=behind,position=tail"
+  selftest_assert_file_not_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "status=off"
   selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "colo-compare,id=comp0,primary_in=compare0-0,secondary_in=compare1,outdev=compare_out0,iothread=iothread1"
   selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "socket,id=mirror0,host=0.0.0.0,port=9003,server=on,wait=off"
   selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "socket,id=compare1,host=0.0.0.0,port=9004,server=on,wait=on"
@@ -1270,7 +1271,7 @@ selftest_case_xcolo_block_handshake_sets_checkpoint_before_migrate() (
   selftest_info "x-colo block handshake sets checkpoint delay before primary migrate"
 
   local call_log="${SELFTEST_ROOT}/xcolo-block-handshake-order.log"
-  local filter_line checkpoint_line migrate_line redire1_line m0_line redire0_line
+  local filter_line checkpoint_line migrate_line
   FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
   FTCTL_PROFILE_SECONDARY_URI="qemu+ssh://peer/system"
   FTCTL_PROFILE_XCOLO_NBD_ENDPOINT="tcp:10.0.0.2:10809"
@@ -1320,9 +1321,9 @@ selftest_case_xcolo_block_handshake_sets_checkpoint_before_migrate() (
   selftest_assert_file_contains "${call_log}" "primary.stop_before_filter_attach"
   selftest_assert_file_contains "${call_log}" "primary.migrate_set_parameters.pre_migrate"
   selftest_assert_file_contains "${call_log}" "primary.migrate"
-  selftest_assert_file_contains "${call_log}" "primary.filter_status_on.redire1"
-  selftest_assert_file_contains "${call_log}" "primary.filter_status_on.m0"
-  selftest_assert_file_contains "${call_log}" "primary.filter_status_on.redire0"
+  selftest_assert_file_not_contains "${call_log}" "primary.filter_status_on.redire1"
+  selftest_assert_file_not_contains "${call_log}" "primary.filter_status_on.m0"
+  selftest_assert_file_not_contains "${call_log}" "primary.filter_status_on.redire0"
   selftest_assert_file_not_contains "${call_log}" "primary.cont_before_migrate"
   selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_primary_checkpoint_delay_ready")" "yes" \
     "primary checkpoint delay pre-migrate gate"
@@ -1330,34 +1331,25 @@ selftest_case_xcolo_block_handshake_sets_checkpoint_before_migrate() (
     "primary net filters attached state"
   selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_primary_net_filters_attach_mode")" "cmdline" \
     "primary net filters startup attach mode"
-  selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_primary_net_filters_activation_mode")" "qom-set-status" \
+  selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_primary_net_filters_activation_mode")" "startup-active" \
     "primary net filters activation mode"
-  selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_primary_net_filters_activation_order")" "redire1,m0,redire0" \
-    "primary net filters staged activation order"
+  selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_primary_net_filters_activation_order")" "premigrate-active" \
+    "primary net filters active before migrate"
   selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_primary_net_filters_activated")" "true" \
     "primary net filters activated"
+  selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_primary_filter_status_pre_migrate")" "on" \
+    "primary filter status pre-migrate"
+  selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_primary_filter_status_post_migrate")" "on" \
+    "primary filter status post-migrate"
   selftest_assert_file_not_contains "${call_log}" "primary.object_add_mirror"
   selftest_assert_file_not_contains "${call_log}" "primary.object_add_colo_compare"
   filter_line="$(grep -n '|primary.stop_before_filter_attach|' "${call_log}" | head -n1 | cut -d: -f1)"
   checkpoint_line="$(grep -n '|primary.migrate_set_parameters.pre_migrate|' "${call_log}" | head -n1 | cut -d: -f1)"
   migrate_line="$(grep -n '|primary.migrate|' "${call_log}" | head -n1 | cut -d: -f1)"
-  redire1_line="$(grep -n '|primary.filter_status_on.redire1|' "${call_log}" | head -n1 | cut -d: -f1)"
-  m0_line="$(grep -n '|primary.filter_status_on.m0|' "${call_log}" | head -n1 | cut -d: -f1)"
-  redire0_line="$(grep -n '|primary.filter_status_on.redire0|' "${call_log}" | head -n1 | cut -d: -f1)"
   [[ "${filter_line}" -lt "${migrate_line}" ]] || \
     selftest_fail "primary filter attach gate must run before primary.migrate"
   [[ "${checkpoint_line}" -lt "${migrate_line}" ]] || \
     selftest_fail "primary checkpoint delay gate must run before primary.migrate"
-  [[ "${migrate_line}" -lt "${redire1_line}" ]] || \
-    selftest_fail "primary filter activation must run after primary.migrate"
-  [[ "${redire1_line}" -lt "${m0_line}" && "${m0_line}" -lt "${redire0_line}" ]] || \
-    selftest_fail "primary filter activation order must be redire1,m0,redire0"
-  selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_filter_activation_redire1_invalid_message")" "no" \
-    "redire1 activation step records invalid-message state"
-  selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_filter_activation_m0_invalid_message")" "no" \
-    "m0 activation step records invalid-message state"
-  selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_filter_activation_redire0_invalid_message")" "no" \
-    "redire0 activation step records invalid-message state"
 )
 
 selftest_case_xcolo_multi_disk_handshake_exports_all_disks() (
@@ -1792,9 +1784,10 @@ selftest_case_xcolo_virtio_vnet_hdr_support() (
   primary_args="$(ftctl_xcolo_build_primary_qemu_args "hostnet0" "${vm}")"
   secondary_args="$(ftctl_xcolo_build_secondary_qemu_args "hostnet0" "${vm}")"
 
-  selftest_assert_contains "${primary_args}" "filter-mirror,id=m0,netdev=hostnet0,queue=tx,outdev=mirror0,status=off,insert=behind,position=tail,vnet_hdr_support=on" "primary mirror vnet hdr"
-  selftest_assert_contains "${primary_args}" "filter-redirector,id=redire0,netdev=hostnet0,queue=rx,indev=compare_out,status=off,insert=behind,position=tail,vnet_hdr_support=on" "primary redirector in vnet hdr"
-  selftest_assert_contains "${primary_args}" "filter-redirector,id=redire1,netdev=hostnet0,queue=rx,outdev=compare0,status=off,insert=behind,position=tail,vnet_hdr_support=on" "primary redirector out vnet hdr"
+  selftest_assert_contains "${primary_args}" "filter-mirror,id=m0,netdev=hostnet0,queue=tx,outdev=mirror0,insert=behind,position=tail,vnet_hdr_support=on" "primary mirror vnet hdr"
+  selftest_assert_contains "${primary_args}" "filter-redirector,id=redire0,netdev=hostnet0,queue=rx,indev=compare_out,insert=behind,position=tail,vnet_hdr_support=on" "primary redirector in vnet hdr"
+  selftest_assert_contains "${primary_args}" "filter-redirector,id=redire1,netdev=hostnet0,queue=rx,outdev=compare0,insert=behind,position=tail,vnet_hdr_support=on" "primary redirector out vnet hdr"
+  selftest_assert_not_contains "${primary_args}" "status=off" "primary filters must start active"
   selftest_assert_contains "${primary_args}" "colo-compare,id=comp0,primary_in=compare0-0,secondary_in=compare1,outdev=compare_out0,iothread=iothread1,vnet_hdr_support=on" "primary compare vnet hdr"
   selftest_assert_contains "${secondary_args}" "filter-redirector,id=f1,netdev=hostnet0,queue=tx,indev=red0,vnet_hdr_support=on" "secondary tx redirector vnet hdr"
   selftest_assert_contains "${secondary_args}" "filter-redirector,id=f2,netdev=hostnet0,queue=rx,outdev=red1,vnet_hdr_support=on" "secondary rx redirector vnet hdr"

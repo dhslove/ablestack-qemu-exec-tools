@@ -2611,3 +2611,27 @@ but a lower-level signature or reached stage changed, set
     - standby volumes `243`, `244`
     - standby RBD images listed above
   - cleanup is required before the next retest
+
+### Run 74 Fix Plan 2026-06-04
+
+- Design document:
+  - `350-ft-xcolo-premigrate-active-filter-topology-design-20260604.md`
+- Reason:
+  - Run 73 proved that waiting/gating was no longer the active hypothesis
+  - the QEMU protocol stream failed exactly when dormant `redire1` was enabled
+    after `primary.migrate`
+  - QEMU COLO documentation describes the primary/secondary network filter
+    topology as present before `migrate`
+- Change direction:
+  - remove `status=off` from generated primary COLO filters
+  - create QMP fallback filter objects active by default
+  - require primary filter QOM status `on` before `primary.migrate`
+  - keep post-migrate filter handling as validation only
+  - do not emit `primary.filter_status_on.redire1`, `primary.filter_status_on.m0`,
+    or `primary.filter_status_on.redire0` in the normal enable path
+- Repetition gate:
+  - if the same QEMU `Received invalid message 0x0000 length 0x0000` signature
+    returns without any post-migrate `primary.filter_status_on.*` event, the
+    next issue is topology/wiring, not activation timing
+  - if `primary.filter_status_on.*` still appears, this fix was not actually
+    installed or the dormant-filter path was incorrectly used

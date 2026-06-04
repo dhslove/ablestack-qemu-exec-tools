@@ -110,3 +110,15 @@ The staged activation order remains:
 1. `redire1`
 2. `m0`
 3. `redire0`
+
+## Superseded By Active Startup Topology
+
+Run 73 proved that the fast gate reached `redire1` and that the COLO stream
+failed at the first post-migrate filter activation. Therefore the normal
+cloud-managed enable path no longer uses this staged activation model.
+
+[350. FT XCOLO Premigrate Active Filter Topology Design](350-ft-xcolo-premigrate-active-filter-topology-design-20260604.md)
+supersedes this document for the normal path. The primary and secondary network
+filter topology must be active before `primary.migrate`; post-migrate
+`qom-set status=on` is retained only as historical diagnostic context or a
+separate dormant-filter repair experiment.

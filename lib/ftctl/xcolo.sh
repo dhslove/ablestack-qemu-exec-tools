@@ -1837,7 +1837,10 @@ done
   _ftctl_xcolo_expect_cmdline_token "filter-redirector,id=redire1" "redire1"
   _ftctl_xcolo_expect_cmdline_token "colo-compare,id=comp0" "comp0"
   _ftctl_xcolo_expect_cmdline_token "netdev=${expected_netdev}" "primary_netdev"
-  _ftctl_xcolo_expect_cmdline_token "status=off" "startup_status_off"
+  if [[ "${out}" == *"status=off"* ]]; then
+    ready="no"
+    reasons+=("startup_status_off:present")
+  fi
   _ftctl_xcolo_expect_cmdline_token "outdev=mirror0" "mirror0"
   _ftctl_xcolo_expect_cmdline_token "indev=compare_out" "compare_out_in"
   _ftctl_xcolo_expect_cmdline_token "outdev=compare0" "compare0_out"
@@ -2891,7 +2894,7 @@ ftctl_xcolo_prebuilt_primary_stage() {
     "colo" "primary.x_blockdev_change" || return 1
   ftctl_xcolo_set_and_verify_migrate_capabilities "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" "${vm}" "primary" "primary" || return 1
   ftctl_xcolo_require_checkpoint_delay_before_migrate "${vm}" || return 1
-  ftctl_xcolo_record_pre_migrate_evidence "${vm}" "off" || true
+  ftctl_xcolo_record_pre_migrate_evidence "${vm}" "on" || true
   ftctl_xcolo_preflight_firewall_contract "${vm}" || return 1
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
     "{\"execute\":\"migrate\",\"arguments\":{\"uri\":\"${FTCTL_PROFILE_XCOLO_MIGRATE_URI}\"}}" \
@@ -3131,7 +3134,7 @@ ftctl_xcolo_build_primary_qemu_args() {
 
   # Keep the primary COLO network topology in the generated QEMU startup
   # commandline. QMP remains a fallback only when startup markers are absent.
-  printf '%s\n' "-S;-chardev;socket,id=mirror0,host=0.0.0.0,port=${mirror_port},server=on,wait=${mirror_wait};-chardev;socket,id=compare1,host=0.0.0.0,port=${compare_port},server=on,wait=${compare_wait};-chardev;socket,id=compare0,host=127.0.0.1,port=${compare_local_port},server=on,wait=off;-chardev;socket,id=compare0-0,host=127.0.0.1,port=${compare_local_port};-chardev;socket,id=compare_out,host=127.0.0.1,port=${compare_out_port},server=on,wait=off;-chardev;socket,id=compare_out0,host=127.0.0.1,port=${compare_out_port};-object;filter-mirror,id=m0,netdev=${netdev_id},queue=tx,outdev=mirror0,status=off,insert=behind,position=tail${vnet_hdr_arg};-object;filter-redirector,id=redire0,netdev=${netdev_id},queue=rx,indev=compare_out,status=off,insert=behind,position=tail${vnet_hdr_arg};-object;filter-redirector,id=redire1,netdev=${netdev_id},queue=rx,outdev=compare0,status=off,insert=behind,position=tail${vnet_hdr_arg};-object;colo-compare,id=comp0,primary_in=compare0-0,secondary_in=compare1,outdev=compare_out0,iothread=iothread1${vnet_hdr_arg}"
+  printf '%s\n' "-S;-chardev;socket,id=mirror0,host=0.0.0.0,port=${mirror_port},server=on,wait=${mirror_wait};-chardev;socket,id=compare1,host=0.0.0.0,port=${compare_port},server=on,wait=${compare_wait};-chardev;socket,id=compare0,host=127.0.0.1,port=${compare_local_port},server=on,wait=off;-chardev;socket,id=compare0-0,host=127.0.0.1,port=${compare_local_port};-chardev;socket,id=compare_out,host=127.0.0.1,port=${compare_out_port},server=on,wait=off;-chardev;socket,id=compare_out0,host=127.0.0.1,port=${compare_out_port};-object;filter-mirror,id=m0,netdev=${netdev_id},queue=tx,outdev=mirror0,insert=behind,position=tail${vnet_hdr_arg};-object;filter-redirector,id=redire0,netdev=${netdev_id},queue=rx,indev=compare_out,insert=behind,position=tail${vnet_hdr_arg};-object;filter-redirector,id=redire1,netdev=${netdev_id},queue=rx,outdev=compare0,insert=behind,position=tail${vnet_hdr_arg};-object;colo-compare,id=comp0,primary_in=compare0-0,secondary_in=compare1,outdev=compare_out0,iothread=iothread1${vnet_hdr_arg}"
 }
 
 ftctl_xcolo_build_secondary_qemu_args() {
@@ -4419,20 +4422,20 @@ ftctl_xcolo_primary_net_filters_qmp_rebuild() {
     "colo" "primary.chardev_add.compare_out_client" || return 1
 
   ftctl_xcolo_qmp_require_ok_or_exists "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
-    "{\"execute\":\"object-add\",\"arguments\":{\"qom-type\":\"filter-mirror\",\"id\":\"m0\",\"netdev\":\"${netdev_id}\",\"queue\":\"tx\",\"outdev\":\"mirror0\",\"status\":\"off\",\"insert\":\"behind\",\"position\":\"tail\"${vnet_hdr_qmp}}}" \
+    "{\"execute\":\"object-add\",\"arguments\":{\"qom-type\":\"filter-mirror\",\"id\":\"m0\",\"netdev\":\"${netdev_id}\",\"queue\":\"tx\",\"outdev\":\"mirror0\",\"insert\":\"behind\",\"position\":\"tail\"${vnet_hdr_qmp}}}" \
     "colo" "primary.object_add_filter_mirror" || return 1
   ftctl_xcolo_qmp_require_ok_or_exists "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
-    "{\"execute\":\"object-add\",\"arguments\":{\"qom-type\":\"filter-redirector\",\"id\":\"redire0\",\"netdev\":\"${netdev_id}\",\"queue\":\"rx\",\"indev\":\"compare_out\",\"status\":\"off\",\"insert\":\"behind\",\"position\":\"tail\"${vnet_hdr_qmp}}}" \
+    "{\"execute\":\"object-add\",\"arguments\":{\"qom-type\":\"filter-redirector\",\"id\":\"redire0\",\"netdev\":\"${netdev_id}\",\"queue\":\"rx\",\"indev\":\"compare_out\",\"insert\":\"behind\",\"position\":\"tail\"${vnet_hdr_qmp}}}" \
     "colo" "primary.object_add_redirector_in" || return 1
   ftctl_xcolo_qmp_require_ok_or_exists "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
-    "{\"execute\":\"object-add\",\"arguments\":{\"qom-type\":\"filter-redirector\",\"id\":\"redire1\",\"netdev\":\"${netdev_id}\",\"queue\":\"rx\",\"outdev\":\"compare0\",\"status\":\"off\",\"insert\":\"behind\",\"position\":\"tail\"${vnet_hdr_qmp}}}" \
+    "{\"execute\":\"object-add\",\"arguments\":{\"qom-type\":\"filter-redirector\",\"id\":\"redire1\",\"netdev\":\"${netdev_id}\",\"queue\":\"rx\",\"outdev\":\"compare0\",\"insert\":\"behind\",\"position\":\"tail\"${vnet_hdr_qmp}}}" \
     "colo" "primary.object_add_redirector_out" || return 1
   ftctl_xcolo_qmp_require_ok_or_exists "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
     "{\"execute\":\"object-add\",\"arguments\":{\"qom-type\":\"colo-compare\",\"id\":\"comp0\",\"primary_in\":\"compare0-0\",\"secondary_in\":\"compare1\",\"outdev\":\"compare_out0\",\"iothread\":\"iothread1\"${vnet_hdr_qmp}}}" \
     "colo" "primary.object_add_colo_compare" || return 1
 
   ftctl_xcolo_collect_primary_chardev_binding_state "${vm}" || true
-  ftctl_xcolo_require_primary_filter_qom_ready "${vm}" "qmp-rebuild" "off" || return 1
+  ftctl_xcolo_require_primary_filter_qom_ready "${vm}" "qmp-rebuild" "on" || return 1
   ftctl_state_set "${vm}" \
     "xcolo_primary_net_filters_attached=true" \
     "xcolo_primary_net_filters_attach_mode=qmp-rebuild" \
@@ -4440,8 +4443,9 @@ ftctl_xcolo_primary_net_filters_qmp_rebuild() {
     "xcolo_primary_filter_qmp_attach_order=qemu-doc-primary" \
     "xcolo_primary_filter_runtime_repair_attempted=yes" \
     "xcolo_primary_filter_runtime_repair_source=${source}" \
-    "xcolo_primary_net_filters_activated=false" \
-    "xcolo_primary_filter_runtime_status=off"
+    "xcolo_primary_net_filters_activated=true" \
+    "xcolo_primary_filter_runtime_status=on" \
+    "xcolo_primary_net_filters_activation_mode=startup-active"
   ftctl_log_event "colo" "primary.net_filters.rebuild" "ok" "${vm}" "" \
     "source=${source} netdev=${netdev_id}"
 }
@@ -4474,20 +4478,20 @@ ftctl_xcolo_primary_net_filters_qmp_attach_objects() {
     "colo" "primary.object_del_colo_compare"
 
   ftctl_xcolo_qmp_require_ok_or_exists "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
-    "{\"execute\":\"object-add\",\"arguments\":{\"qom-type\":\"filter-mirror\",\"id\":\"m0\",\"netdev\":\"${netdev_id}\",\"queue\":\"tx\",\"outdev\":\"mirror0\",\"status\":\"off\",\"insert\":\"behind\",\"position\":\"tail\"${vnet_hdr_qmp}}}" \
+    "{\"execute\":\"object-add\",\"arguments\":{\"qom-type\":\"filter-mirror\",\"id\":\"m0\",\"netdev\":\"${netdev_id}\",\"queue\":\"tx\",\"outdev\":\"mirror0\",\"insert\":\"behind\",\"position\":\"tail\"${vnet_hdr_qmp}}}" \
     "colo" "primary.object_add_filter_mirror" || return 1
   ftctl_xcolo_qmp_require_ok_or_exists "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
-    "{\"execute\":\"object-add\",\"arguments\":{\"qom-type\":\"filter-redirector\",\"id\":\"redire0\",\"netdev\":\"${netdev_id}\",\"queue\":\"rx\",\"indev\":\"compare_out\",\"status\":\"off\",\"insert\":\"behind\",\"position\":\"tail\"${vnet_hdr_qmp}}}" \
+    "{\"execute\":\"object-add\",\"arguments\":{\"qom-type\":\"filter-redirector\",\"id\":\"redire0\",\"netdev\":\"${netdev_id}\",\"queue\":\"rx\",\"indev\":\"compare_out\",\"insert\":\"behind\",\"position\":\"tail\"${vnet_hdr_qmp}}}" \
     "colo" "primary.object_add_redirector_in" || return 1
   ftctl_xcolo_qmp_require_ok_or_exists "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
-    "{\"execute\":\"object-add\",\"arguments\":{\"qom-type\":\"filter-redirector\",\"id\":\"redire1\",\"netdev\":\"${netdev_id}\",\"queue\":\"rx\",\"outdev\":\"compare0\",\"status\":\"off\",\"insert\":\"behind\",\"position\":\"tail\"${vnet_hdr_qmp}}}" \
+    "{\"execute\":\"object-add\",\"arguments\":{\"qom-type\":\"filter-redirector\",\"id\":\"redire1\",\"netdev\":\"${netdev_id}\",\"queue\":\"rx\",\"outdev\":\"compare0\",\"insert\":\"behind\",\"position\":\"tail\"${vnet_hdr_qmp}}}" \
     "colo" "primary.object_add_redirector_out" || return 1
   ftctl_xcolo_qmp_require_ok_or_exists "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
     "{\"execute\":\"object-add\",\"arguments\":{\"qom-type\":\"colo-compare\",\"id\":\"comp0\",\"primary_in\":\"compare0-0\",\"secondary_in\":\"compare1\",\"outdev\":\"compare_out0\",\"iothread\":\"iothread1\"${vnet_hdr_qmp}}}" \
     "colo" "primary.object_add_colo_compare" || return 1
 
   ftctl_xcolo_collect_primary_chardev_binding_state "${vm}" || true
-  ftctl_xcolo_require_primary_filter_qom_ready "${vm}" "qmp-objects" "off" || return 1
+  ftctl_xcolo_require_primary_filter_qom_ready "${vm}" "qmp-objects" "on" || return 1
   ftctl_state_set "${vm}" \
     "xcolo_primary_net_filters_attached=true" \
     "xcolo_primary_net_filters_attach_mode=qmp-objects" \
@@ -4495,8 +4499,9 @@ ftctl_xcolo_primary_net_filters_qmp_attach_objects() {
     "xcolo_primary_filter_qmp_attach_order=qemu-doc-primary" \
     "xcolo_primary_filter_runtime_repair_attempted=no" \
     "xcolo_primary_filter_runtime_repair_source=${source}" \
-    "xcolo_primary_net_filters_activated=false" \
-    "xcolo_primary_filter_runtime_status=off"
+    "xcolo_primary_net_filters_activated=true" \
+    "xcolo_primary_filter_runtime_status=on" \
+    "xcolo_primary_net_filters_activation_mode=startup-active"
   ftctl_log_event "colo" "primary.net_filters.qmp_objects" "ok" "${vm}" "" \
     "source=${source} netdev=${netdev_id}"
 }
@@ -4737,7 +4742,7 @@ ftctl_xcolo_attach_primary_net_filters() {
   if ftctl_xcolo_domain_xml_has_runtime_markers "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" primary; then
     ftctl_xcolo_validate_primary_channel_paths "${vm}" || return 1
     ftctl_xcolo_require_primary_filter_cmdline_ready "${vm}" "pre_migrate_xml_runtime" || return 1
-    ftctl_xcolo_require_primary_filter_qom_ready "${vm}" "pre_migrate_xml_runtime" "off" || return 1
+    ftctl_xcolo_require_primary_filter_qom_ready "${vm}" "pre_migrate_xml_runtime" "on" || return 1
     ftctl_xcolo_observe_primary_filter_chardev_binding "${vm}" || true
     chardev_ready="$(ftctl_state_get "${vm}" "xcolo_primary_filter_chardev_ready" 2>/dev/null || true)"
     attach_mode="cmdline"
@@ -4748,12 +4753,14 @@ ftctl_xcolo_attach_primary_net_filters() {
       "xcolo_primary_filter_qmp_attach_order=qemu-doc-primary" \
       "xcolo_primary_filter_runtime_repair_attempted=no" \
       "xcolo_primary_filter_runtime_repair_source=cmdline" \
-      "xcolo_primary_net_filters_activated=false" \
-      "xcolo_primary_filter_runtime_status=off" \
-      "xcolo_primary_filter_activation_stage=post_migrate" \
-      "xcolo_primary_filter_status_pre_migrate=off"
+      "xcolo_primary_net_filters_activated=true" \
+      "xcolo_primary_filter_runtime_status=on" \
+      "xcolo_primary_net_filters_activation_mode=startup-active" \
+      "xcolo_primary_filter_activation_stage=premigrate_active" \
+      "xcolo_primary_filter_status_pre_migrate=on" \
+      "xcolo_primary_filter_startup_status=on"
     ftctl_log_event "colo" "primary.net_filters" "ok" "${vm}" "" \
-      "mode=${attach_mode} chardev_initial=${chardev_ready:-unknown} activation=deferred"
+      "mode=${attach_mode} chardev_initial=${chardev_ready:-unknown} activation=startup-active"
     return 0
   fi
 
@@ -4767,10 +4774,13 @@ ftctl_xcolo_attach_primary_net_filters() {
       "xcolo_primary_net_filters_attached=true" \
       "xcolo_primary_net_filters_attach_mode=qmp-objects" \
       "xcolo_primary_net_filters_netdev=${netdev_id}" \
-      "xcolo_primary_filter_activation_stage=post_migrate" \
-      "xcolo_primary_filter_status_pre_migrate=off"
+      "xcolo_primary_filter_activation_stage=premigrate_active" \
+      "xcolo_primary_filter_status_pre_migrate=on" \
+      "xcolo_primary_net_filters_activated=true" \
+      "xcolo_primary_filter_runtime_status=on" \
+      "xcolo_primary_net_filters_activation_mode=startup-active"
     ftctl_log_event "colo" "primary.net_filters" "ok" "${vm}" "" \
-      "mode=qmp-objects activation=deferred"
+      "mode=qmp-objects activation=startup-active"
     return 0
   fi
 
@@ -4783,10 +4793,13 @@ ftctl_xcolo_attach_primary_net_filters() {
     "xcolo_primary_net_filters_attached=true" \
     "xcolo_primary_net_filters_attach_mode=qmp-rebuild" \
     "xcolo_primary_net_filters_netdev=${netdev_id}" \
-    "xcolo_primary_filter_activation_stage=post_migrate" \
-    "xcolo_primary_filter_status_pre_migrate=off"
+    "xcolo_primary_filter_activation_stage=premigrate_active" \
+    "xcolo_primary_filter_status_pre_migrate=on" \
+    "xcolo_primary_net_filters_activated=true" \
+    "xcolo_primary_filter_runtime_status=on" \
+    "xcolo_primary_net_filters_activation_mode=startup-active"
   ftctl_log_event "colo" "primary.net_filters" "ok" "${vm}" "" \
-    "mode=qmp-rebuild activation=deferred"
+    "mode=qmp-rebuild activation=startup-active"
 }
 
 ftctl_xcolo_resume_primary_before_migrate() {
@@ -4946,37 +4959,43 @@ ftctl_xcolo_activate_primary_filters_after_migrate() {
   local secondary_vm="${2-}"
   local reason invalid_message
 
-  ftctl_xcolo_gate_post_migrate_before_filter_activation "${vm}" "${secondary_vm}" || return 1
-  ftctl_xcolo_activate_primary_net_filters "${vm}" "post_migrate" "${secondary_vm}" || {
-    reason="$(ftctl_state_get "${vm}" "xcolo_primary_filter_activation_failed_reason" 2>/dev/null || true)"
-    [[ -n "${reason}" ]] || reason="qom_set_failed"
-    if [[ -z "$(ftctl_state_get "${vm}" "xcolo_protocol_failure_phase" 2>/dev/null || true)" ]]; then
-      ftctl_state_set "${vm}" "xcolo_protocol_failure_phase=filter_activation_command"
-    fi
-    if [[ -z "$(ftctl_state_get "${vm}" "last_error" 2>/dev/null || true)" || "$(ftctl_state_get "${vm}" "last_error" 2>/dev/null || true)" == "primary_filter_activation_failed" ]]; then
-      ftctl_state_set "${vm}" "last_error=xcolo_post_migrate_filter_activation_failed"
-    fi
+  ftctl_xcolo_capture_post_migrate_transition_state "${vm}" "${secondary_vm}" "startup_active_validation" "on"
+  if ! ftctl_xcolo_require_primary_filter_qom_ready "${vm}" "post_migrate_startup_active" "on"; then
+    reason="$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_reason" 2>/dev/null || true)"
+    [[ -n "${reason}" ]] || reason="startup_active_filter_not_on"
+    ftctl_state_set "${vm}" \
+      "xcolo_primary_net_filters_activated=false" \
+      "xcolo_primary_filter_activation_failed_reason=${reason}" \
+      "xcolo_protocol_failure_phase=post_migrate_startup_active_filter_validation" \
+      "last_error=xcolo_startup_active_filter_validation_failed"
     ftctl_log_event "colo" "xcolo.post_migrate_filter_activation" "fail" "${vm}" "" \
-      "reason=${reason}"
+      "mode=startup-active reason=${reason}"
     return 1
-  }
+  fi
+
   ftctl_xcolo_wait_primary_filter_chardev_binding "${vm}" || true
-  ftctl_xcolo_capture_post_migrate_transition_state "${vm}" "${secondary_vm}" "post_activation" "on"
+  ftctl_xcolo_capture_post_migrate_transition_state "${vm}" "${secondary_vm}" "post_activation_validation" "on"
   ftctl_state_set "${vm}" \
-    "xcolo_primary_filter_activation_stage=post_migrate" \
-    "xcolo_primary_filter_status_post_activation=on"
-  invalid_message="$(ftctl_state_get "${vm}" "xcolo_post_migrate_post_activation_invalid_message" 2>/dev/null || true)"
+    "xcolo_primary_filter_activation_stage=premigrate_active" \
+    "xcolo_primary_filter_status_pre_migrate=on" \
+    "xcolo_primary_filter_status_post_migrate=on" \
+    "xcolo_primary_filter_status_post_activation=on" \
+    "xcolo_primary_net_filters_activation_mode=startup-active" \
+    "xcolo_primary_net_filters_activation_order=premigrate-active" \
+    "xcolo_primary_net_filters_activated=true" \
+    "xcolo_primary_filter_runtime_status=on"
+  invalid_message="$(ftctl_state_get "${vm}" "xcolo_post_migrate_post_activation_validation_invalid_message" 2>/dev/null || true)"
   if [[ "${invalid_message}" == "yes" ]]; then
     ftctl_state_set "${vm}" \
-      "xcolo_protocol_failure_phase=post_filter_activation" \
-      "last_error=xcolo_filter_activation_broke_colo_stream"
+      "xcolo_protocol_failure_phase=post_migrate_startup_active_filter" \
+      "last_error=xcolo_startup_active_filter_stream_failed"
     ftctl_log_event "colo" "xcolo.post_migrate_filter_activation" "fail" "${vm}" "" \
-      "reason=invalid_message_after_filter_activation"
+      "mode=startup-active reason=invalid_message_after_migrate"
     return 1
   fi
 
   ftctl_log_event "colo" "xcolo.post_migrate_filter_activation" "ok" "${vm}" "" \
-    "phase=post_filter_activation"
+    "mode=startup-active action=validate-only"
 }
 
 ftctl_xcolo_execute_handshake_with_nodes() {
@@ -5008,7 +5027,7 @@ ftctl_xcolo_execute_handshake_with_nodes() {
   ftctl_xcolo_attach_primary_net_filters "${vm}" || return 1
   ftctl_xcolo_set_and_verify_migrate_capabilities "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" "${vm}" "primary" "primary" || return 1
   ftctl_xcolo_require_checkpoint_delay_before_migrate "${vm}" || return 1
-  ftctl_xcolo_record_pre_migrate_evidence "${vm}" "off" || true
+  ftctl_xcolo_record_pre_migrate_evidence "${vm}" "on" || true
   ftctl_xcolo_preflight_firewall_contract "${vm}" || return 1
   ftctl_xcolo_require_primary_filter_cmdline_ready "${vm}" "pre_migrate" || return 1
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
@@ -5080,7 +5099,7 @@ ftctl_xcolo_execute_handshake_with_disk_plan() {
   ftctl_xcolo_attach_primary_net_filters "${vm}" || return 1
   ftctl_xcolo_set_and_verify_migrate_capabilities "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" "${vm}" "primary" "primary" || return 1
   ftctl_xcolo_require_checkpoint_delay_before_migrate "${vm}" || return 1
-  ftctl_xcolo_record_pre_migrate_evidence "${vm}" "off" || true
+  ftctl_xcolo_record_pre_migrate_evidence "${vm}" "on" || true
   ftctl_xcolo_preflight_firewall_contract "${vm}" || return 1
   ftctl_xcolo_require_primary_filter_cmdline_ready "${vm}" "pre_migrate" || return 1
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
