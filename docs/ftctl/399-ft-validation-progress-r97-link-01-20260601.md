@@ -2301,3 +2301,75 @@ but a lower-level signature or reached stage changed, set
     missing prerequisite
   - if the gate passes and `redire1` still breaks the stream, the next target is
     the `redire1 outdev=compare0` topology itself
+
+### Run 72 Retest Readiness 2026-06-04
+
+- Source commit built:
+  - `56fcc40` (`fix: gate redire1 xcolo activation readiness`)
+- Local verification:
+  - `bash -n lib/ftctl/xcolo.sh`: pass
+  - `bash -n bin/ablestack_vm_ftctl_selftest.sh`: pass
+  - `git diff --check`: pass
+  - targeted XCOLO selftests: pass
+    - checkpoint-before-migrate ordering
+    - multi-disk export-before-migrate ordering
+    - staged filter activation failed-step classifier
+    - pre-redire1 gate blocks early activation
+    - primary filter binding deferred to runtime validation
+    - repeated invalid COLO protocol classifier
+- GitHub Actions build:
+  - run: `26932125476`
+  - result: success
+  - RPM: `ablestack_vm_ftctl-0.8.0-1.noarch.rpm`
+  - SHA256:
+    `dd0ae0b85598bc88ea8e1f51bafa907e8f141af46d22d53bc094d50c0c89a693`
+- RPM marker verification:
+  - extracted RPM includes:
+    - `xcolo.pre_redire1_gate`
+    - `xcolo_redire1_activation_prerequisite_timeout`
+    - `ftctl_xcolo_gate_before_redire1_activation`
+- Deployment:
+  - RPM deployed to:
+    - `10.10.32.1`
+    - `10.10.32.2`
+    - `10.10.32.3`
+  - installed host script markers verified on all three hosts:
+    - `xcolo.pre_redire1_gate`
+    - `xcolo_redire1_activation_prerequisite_timeout`
+  - host timers verified active on all three hosts:
+    - `ablestack-vm-ftctl.timer`
+    - `ablestack-vm-hangctl.timer`
+- Run 71 cleanup:
+  - active protection row `71`: removed
+  - standby VM `127` / `i-2-127-VM`: destroyed/undefined on hosts and marked
+    `Expunging`
+  - standby volumes `239`, `240`: marked `Expunged`
+  - standby RBD images removed:
+    - `5d3bfa1e-b782-4c98-9033-304d954f73c1`
+    - `237e3dcb-151b-425b-8ca4-89fc58915b2e`
+  - FTCTL runtime/profile leftovers for `i-2-54-VM` and `i-2-127-VM`:
+    removed
+- Final readiness:
+  - primary VM `54` / `i-2-54-VM`:
+    - DB state: `Running`
+    - host id: `3`
+    - power state: `PowerOn`
+    - libvirt state on `10.10.32.3`: `running`
+  - active protection rows for primary VM `54`: `0`
+  - active `ftctl.*` details for VM `54`: `0`
+  - active `r97-link-01-standby%` VM rows: `0`
+  - active `r97-link-01-standby%` volume rows: `0`
+  - primary QMP `query-block-jobs`: empty
+  - primary QMP `query-migrate`: empty
+  - `ablestack_vm_ftctl status --vm i-2-54-VM --json`:
+    `not_found`
+- Next retest expectation:
+  - if secondary/compare readiness is not sufficient, the next failure should
+    be classified as `xcolo_protocol_failure_phase=pre_redire1_gate`
+  - expected diagnostic keys include:
+    - `xcolo_pre_redire1_gate_reason`
+    - `xcolo_pre_redire1_secondary_migrate_status`
+    - `xcolo_pre_redire1_secondary_colo_mode`
+    - `xcolo_pre_redire1_chardev_ready`
+  - if the gate passes and `redire1` still breaks the stream, the next target is
+    `redire1 outdev=compare0` topology rather than timing
