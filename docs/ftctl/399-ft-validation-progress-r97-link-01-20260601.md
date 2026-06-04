@@ -3077,3 +3077,51 @@ but a lower-level signature or reached stage changed, set
   - mirror path state
   - compare path state
   - whether a repeated EPERM signature is now narrowed by contract evidence.
+
+### Run77 Pre-Guest Contract Follow-up 2026-06-04
+
+- Retest evidence directory:
+  - `/home/ablecloud/work/ft-run-monitor-20260604-234241`
+- Protection row:
+  - `77`
+- Primary:
+  - `i-2-54-VM` on `10.10.32.3`
+- Secondary:
+  - `i-2-133-VM` on `10.10.32.1`
+- Result:
+  - final DB state: `protection_state=error`, `transport_state=failed`
+  - `last_error=xcolo_filter_mirror_send_eperm`
+  - primary QEMU logged `filter mirror send failed(Operation not permitted)`
+  - primary later logged `Received invalid message 0x0000 length 0x0000`
+  - secondary logged `Can't receive COLO message: Input/output error`
+- New evidence captured by the chardev contract diagnostics:
+  - `xcolo_chardev_contract_ready=no`
+  - `xcolo_chardev_contract_reason=mirror_path_primary_mirror0=present_closed,compare_path_secondary_red1=present_closed`
+  - mirror path:
+    `primary:m0->mirror0(present_closed)->secondary:red0(present_open)->f1`
+  - compare path:
+    `secondary:f2->red1(present_closed)->primary:compare1(present_open)->comp0`
+- Interpretation:
+  - this is progress over generic invalid-message diagnosis
+  - TCP reachability and topology audit are not sufficient
+  - the failure boundary is now the QEMU chardev frontend lifecycle
+  - the existing post-migrate contract check is too late because primary
+    startup-active filters can already send before that check runs
+- Design recorded:
+  - `docs/ftctl/354-ft-xcolo-pre-guest-chardev-contract-gate-design-20260604.md`
+- Implementation direction:
+  - add a `pre_guest_traffic_contract` gate before primary `migrate`
+  - capture primary/secondary `query-status`, socket state, and
+    primary/secondary `query-chardev`
+  - require primary `mirror0`, primary `compare1`, secondary `red0`, and
+    secondary `red1` to be `present_open`
+  - fail with
+    `xcolo_colo_chardev_contract_not_ready_before_guest_traffic` if the
+    contract is not ready
+  - keep the post-migrate contract check as a secondary validation point
+- Repetition guard:
+  - if the next run again reaches `xcolo_filter_mirror_send_eperm` before the
+    pre-guest gate result, the new gate is still too late
+  - if the next run fails at the pre-guest gate with closed chardev edges and
+    no QEMU EPERM, the implementation improved failure containment and the next
+    question is why QEMU keeps `mirror0` or `red1` closed before migrate

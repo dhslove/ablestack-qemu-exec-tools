@@ -1307,7 +1307,13 @@ selftest_case_xcolo_block_handshake_sets_checkpoint_before_migrate() (
   ftctl_xcolo_qmp() {
     local _uri="$1" _vm="$2" payload="$3" out_var="$4" rc_var="$5"
     : "${_uri}${_vm}"
-    if [[ "${payload}" == *"query-migrate-parameters"* ]]; then
+    if [[ "${payload}" == *"query-chardev"* && "${_uri}" == *"qemu+ssh"* ]]; then
+      printf -v "${out_var}" '%s' '{"return":[{"label":"red0","frontend-open":true},{"label":"red1","frontend-open":true}]}'
+    elif [[ "${payload}" == *"query-chardev"* ]]; then
+      printf -v "${out_var}" '%s' '{"return":[{"label":"mirror0","frontend-open":true},{"label":"compare1","frontend-open":true}]}'
+    elif [[ "${payload}" == *"query-status"* ]]; then
+      printf -v "${out_var}" '%s' '{"return":{"running":false,"status":"paused"}}'
+    elif [[ "${payload}" == *"query-migrate-parameters"* ]]; then
       printf -v "${out_var}" '%s' '{"return":{"x-checkpoint-delay":2000}}'
     elif [[ "${payload}" == *"query-migrate-capabilities"* ]]; then
       printf -v "${out_var}" '%s' '{"return":[{"capability":"return-path","state":true},{"capability":"x-colo","state":true}]}'
@@ -1354,6 +1360,8 @@ selftest_case_xcolo_block_handshake_sets_checkpoint_before_migrate() (
     "primary filter status pre-migrate"
   selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_primary_filter_status_post_migrate")" "on" \
     "primary filter status post-migrate"
+  selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_pre_guest_traffic_gate")" "ready" \
+    "pre guest traffic chardev gate"
   selftest_assert_file_not_contains "${call_log}" "primary.object_add_mirror"
   selftest_assert_file_not_contains "${call_log}" "primary.object_add_colo_compare"
   filter_line="$(grep -n '|primary.stop_before_filter_attach|' "${call_log}" | head -n1 | cut -d: -f1)"
@@ -1403,7 +1411,13 @@ selftest_case_xcolo_multi_disk_handshake_exports_all_disks() (
   ftctl_xcolo_qmp() {
     local _uri="$1" _vm="$2" payload="$3" out_var="$4" rc_var="$5"
     : "${_uri}${_vm}"
-    if [[ "${payload}" == *"query-migrate-parameters"* ]]; then
+    if [[ "${payload}" == *"query-chardev"* && "${_uri}" == *"qemu+ssh"* ]]; then
+      printf -v "${out_var}" '%s' '{"return":[{"label":"red0","frontend-open":true},{"label":"red1","frontend-open":true}]}'
+    elif [[ "${payload}" == *"query-chardev"* ]]; then
+      printf -v "${out_var}" '%s' '{"return":[{"label":"mirror0","frontend-open":true},{"label":"compare1","frontend-open":true}]}'
+    elif [[ "${payload}" == *"query-status"* ]]; then
+      printf -v "${out_var}" '%s' '{"return":{"running":false,"status":"paused"}}'
+    elif [[ "${payload}" == *"query-migrate-parameters"* ]]; then
       printf -v "${out_var}" '%s' '{"return":{"x-checkpoint-delay":2000}}'
     elif [[ "${payload}" == *"query-migrate-capabilities"* ]]; then
       printf -v "${out_var}" '%s' '{"return":[{"capability":"return-path","state":true},{"capability":"x-colo","state":true}]}'
@@ -1453,6 +1467,8 @@ selftest_case_xcolo_multi_disk_handshake_exports_all_disks() (
   selftest_assert_file_not_contains "${call_log}" '"export":"ftctl-colo-sdb"'
   selftest_assert_file_not_contains "${call_log}" "primary.cont_before_migrate"
   selftest_assert_file_contains "${call_log}" "primary.migrate_set_parameters.pre_migrate"
+  selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_pre_guest_traffic_gate")" "ready" \
+    "multi disk pre guest traffic chardev gate"
   sda_export_line="$(grep -n '|secondary.nbd_server_add.sda|' "${call_log}" | head -n1 | cut -d: -f1)"
   sdb_export_line="$(grep -n '|secondary.nbd_server_add.sdb|' "${call_log}" | head -n1 | cut -d: -f1)"
   migrate_line="$(grep -n '|primary.migrate|' "${call_log}" | head -n1 | cut -d: -f1)"
@@ -2569,6 +2585,50 @@ selftest_case_xcolo_chardev_contract_reports_closed_edges() (
     "mirror0(present_closed)" "mirror path records primary state"
   selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_post_activation_contract_chardev_contract_ready")" \
     "no" "phase-specific contract state is persisted"
+)
+
+selftest_case_xcolo_pre_guest_gate_blocks_closed_chardev_contract() (
+  selftest_reset_env
+  selftest_info "x-colo pre-guest gate blocks closed chardev contract before migrate"
+
+  local vm="xcolo-pre-guest-contract"
+  local rc=0
+  ftctl_state_init_vm "${vm}"
+  FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
+  FTCTL_PROFILE_SECONDARY_URI="qemu+ssh://peer/system"
+  FTCTL_XCOLO_CHARDEV_CONTRACT_WAIT_SEC="1"
+
+  # shellcheck disable=SC2317
+  ftctl_xcolo_qmp() {
+    local uri="${1-}" payload="${3-}" out_var="${4}" rc_var="${5}"
+    if [[ "${payload}" == *"query-status"* ]]; then
+      printf -v "${out_var}" '%s' '{"return":{"running":false,"status":"paused"}}'
+    elif [[ "${payload}" == *"query-chardev"* && "${uri}" == "${FTCTL_PROFILE_PRIMARY_URI}" ]]; then
+      printf -v "${out_var}" '%s' '{"return":[{"label":"mirror0","frontend-open":false},{"label":"compare1","frontend-open":true}]}'
+    elif [[ "${payload}" == *"query-chardev"* ]]; then
+      printf -v "${out_var}" '%s' '{"return":[{"label":"red0","frontend-open":true},{"label":"red1","frontend-open":false}]}'
+    else
+      printf -v "${out_var}" '%s' '{"return":{}}'
+    fi
+    printf -v "${rc_var}" '%s' "0"
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_capture_socket_snapshot() {
+    return 0
+  }
+
+  ftctl_xcolo_gate_before_guest_traffic "${vm}" "${vm}-standby" || rc=$?
+  selftest_assert_eq "${rc}" "1" "pre-guest closed contract should fail"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" \
+    "xcolo_colo_chardev_contract_not_ready_before_guest_traffic" \
+    "pre-guest gate last error"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_protocol_failure_phase")" \
+    "pre_guest_traffic_contract" "pre-guest protocol phase"
+  selftest_assert_contains "$(ftctl_state_get "${vm}" "xcolo_pre_guest_traffic_gate_reason")" \
+    "mirror_path_primary_mirror0=present_closed" "pre-guest reason includes mirror0"
+  selftest_assert_contains "$(ftctl_state_get "${vm}" "xcolo_pre_guest_traffic_gate_reason")" \
+    "compare_path_secondary_red1=present_closed" "pre-guest reason includes red1"
 )
 
 selftest_case_xcolo_runtime_validation_reports_pending_convergence() (
@@ -4393,6 +4453,7 @@ selftest_main() {
   selftest_case_xcolo_runtime_validation_classifies_repeated_invalid_message
   selftest_case_xcolo_startup_active_failure_classifies_filter_mirror_eperm
   selftest_case_xcolo_chardev_contract_reports_closed_edges
+  selftest_case_xcolo_pre_guest_gate_blocks_closed_chardev_contract
   selftest_case_xcolo_runtime_validation_reports_pending_convergence
   selftest_case_xcolo_runtime_validation_times_out_stuck_convergence
   selftest_case_xcolo_runtime_validation_reports_one_sided_colo_role

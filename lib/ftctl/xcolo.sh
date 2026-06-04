@@ -1984,6 +1984,77 @@ ftctl_xcolo_wait_colo_chardev_contract() {
   return 1
 }
 
+ftctl_xcolo_capture_guest_traffic_gate_state() {
+  local vm="${1-}"
+  local secondary_vm="${2:-$vm}"
+  local phase="${3:-pre_guest_traffic_contract}"
+  local phase_key primary_running="" primary_status="" secondary_running="" secondary_status=""
+
+  [[ -n "${vm}" && -n "${secondary_vm}" ]] || return 0
+  phase_key="$(printf '%s' "${phase}" | tr -c 'A-Za-z0-9_' '_' | sed 's/_*$//')"
+  [[ -n "${phase_key}" ]] || phase_key="pre_guest_traffic_contract"
+
+  ftctl_xcolo_query_running_flag "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" primary_running || true
+  ftctl_xcolo_query_status_name "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" primary_status || true
+  ftctl_xcolo_query_running_flag "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" secondary_running || true
+  ftctl_xcolo_query_status_name "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" secondary_status || true
+  ftctl_xcolo_capture_socket_snapshot "${vm}" "${phase}" || true
+  ftctl_xcolo_capture_colo_chardev_contract "${vm}" "${secondary_vm}" "${phase}" || true
+
+  ftctl_state_set "${vm}" \
+    "xcolo_${phase_key}_primary_running=${primary_running}" \
+    "xcolo_${phase_key}_primary_status=${primary_status}" \
+    "xcolo_${phase_key}_secondary_running=${secondary_running}" \
+    "xcolo_${phase_key}_secondary_status=${secondary_status}"
+  ftctl_log_event "colo" "xcolo.guest_traffic_gate.snapshot" "ok" "${vm}" "" \
+    "phase=${phase} primary_running=${primary_running} primary_status=${primary_status} secondary_running=${secondary_running} secondary_status=${secondary_status} chardev_contract=$(ftctl_state_get "${vm}" "xcolo_${phase_key}_chardev_contract_ready" 2>/dev/null || true)"
+}
+
+ftctl_xcolo_gate_before_guest_traffic() {
+  local vm="${1-}"
+  local secondary_vm="${2:-$vm}"
+  local primary_running="" primary_status="" contract_reason=""
+
+  [[ -n "${vm}" && -n "${secondary_vm}" ]] || return 1
+  ftctl_xcolo_capture_guest_traffic_gate_state "${vm}" "${secondary_vm}" "pre_guest_traffic_contract" || true
+
+  primary_running="$(ftctl_state_get "${vm}" "xcolo_pre_guest_traffic_contract_primary_running" 2>/dev/null || true)"
+  primary_status="$(ftctl_state_get "${vm}" "xcolo_pre_guest_traffic_contract_primary_status" 2>/dev/null || true)"
+  if [[ "${primary_running}" == "true" ]]; then
+    ftctl_state_set "${vm}" \
+      "xcolo_pre_guest_traffic_gate=failed" \
+      "xcolo_pre_guest_traffic_gate_reason=primary_running_before_contract" \
+      "xcolo_protocol_failure_phase=pre_guest_traffic_contract" \
+      "last_error=xcolo_pre_guest_primary_not_paused"
+    ftctl_log_event "colo" "xcolo.guest_traffic_gate" "fail" "${vm}" "" \
+      "reason=primary_running_before_contract primary_status=${primary_status}"
+    return 1
+  fi
+
+  if ftctl_xcolo_wait_colo_chardev_contract "${vm}" "${secondary_vm}" "pre_guest_traffic_contract"; then
+    ftctl_xcolo_capture_guest_traffic_gate_state "${vm}" "${secondary_vm}" "pre_guest_traffic_contract_ready" || true
+    ftctl_state_set "${vm}" \
+      "xcolo_pre_guest_traffic_gate=ready" \
+      "xcolo_pre_guest_traffic_gate_reason=" \
+      "xcolo_pre_guest_traffic_gate_primary_status=${primary_status}"
+    ftctl_log_event "colo" "xcolo.guest_traffic_gate" "ok" "${vm}" "" \
+      "phase=pre_guest_traffic contract=ready primary_status=${primary_status}"
+    return 0
+  fi
+
+  contract_reason="$(ftctl_state_get "${vm}" "xcolo_chardev_contract_gate_reason" 2>/dev/null || true)"
+  [[ -n "${contract_reason}" ]] || contract_reason="$(ftctl_state_get "${vm}" "xcolo_chardev_contract_reason" 2>/dev/null || true)"
+  ftctl_xcolo_capture_guest_traffic_gate_state "${vm}" "${secondary_vm}" "pre_guest_traffic_contract_failed" || true
+  ftctl_state_set "${vm}" \
+    "xcolo_pre_guest_traffic_gate=failed" \
+    "xcolo_pre_guest_traffic_gate_reason=${contract_reason}" \
+    "xcolo_protocol_failure_phase=pre_guest_traffic_contract" \
+    "last_error=xcolo_colo_chardev_contract_not_ready_before_guest_traffic"
+  ftctl_log_event "colo" "xcolo.guest_traffic_gate" "fail" "${vm}" "" \
+    "reason=${contract_reason} primary_status=${primary_status}"
+  return 1
+}
+
 ftctl_xcolo_capture_failure_chardev_snapshot() {
   local vm="${1-}"
   local secondary_vm="${2:-$vm}"
@@ -5568,6 +5639,7 @@ ftctl_xcolo_execute_handshake_with_nodes() {
   ftctl_xcolo_preflight_firewall_contract "${vm}" || return 1
   ftctl_xcolo_require_primary_filter_cmdline_ready "${vm}" "pre_migrate" || return 1
   ftctl_xcolo_require_topology_audit_ready "${vm}" "${secondary_vm}" "pre_migrate" || return 1
+  ftctl_xcolo_gate_before_guest_traffic "${vm}" "${secondary_vm}" || return 1
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
     "{\"execute\":\"migrate\",\"arguments\":{\"uri\":\"${FTCTL_PROFILE_XCOLO_MIGRATE_URI}\"}}" \
     "colo" "primary.migrate" || return 1
@@ -5641,6 +5713,7 @@ ftctl_xcolo_execute_handshake_with_disk_plan() {
   ftctl_xcolo_preflight_firewall_contract "${vm}" || return 1
   ftctl_xcolo_require_primary_filter_cmdline_ready "${vm}" "pre_migrate" || return 1
   ftctl_xcolo_require_topology_audit_ready "${vm}" "${secondary_vm}" "pre_migrate" || return 1
+  ftctl_xcolo_gate_before_guest_traffic "${vm}" "${secondary_vm}" || return 1
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
     "{\"execute\":\"migrate\",\"arguments\":{\"uri\":\"${FTCTL_PROFILE_XCOLO_MIGRATE_URI}\"}}" \
     "colo" "primary.migrate" || return 1
