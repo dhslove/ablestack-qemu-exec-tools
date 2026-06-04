@@ -2736,3 +2736,82 @@ but a lower-level signature or reached stage changed, set
     protocol semantics or QEMU runtime parity
   - do not return to wait-loop, checkpoint-delay, or post-migrate filter
     activation timing changes unless new evidence contradicts Run 74
+
+### Run 75 Build Deploy Cleanup Readiness 2026-06-04
+
+- Source commit built and deployed:
+  - `4d5dbb6` (`fix: audit xcolo return path topology`)
+- Local validation:
+  - `bash -n lib/ftctl/xcolo.sh`: passed
+  - `bash -n bin/ablestack_vm_ftctl_selftest.sh`: passed
+  - `git diff --check`: passed
+  - direct PowerShell `shellcheck`: not available in the local shell
+  - full selftest remains blocked by pre-existing shellcheck warnings before
+    functional cases run
+- GitHub Actions:
+  - run: `26939390717`
+  - workflow: `FTCTL Branch Development Release`
+  - source commit: `4d5dbb664a71f842525206388cc4afdc369f5996`
+  - RPM build and artifact upload: passed
+  - release publish step: failed with GitHub secondary rate limit after artifact
+    upload
+  - deployed artifact source: run artifact from `26939390717`
+  - RPM: `ablestack_vm_ftctl-0.8.0-1.noarch.rpm`
+  - RPM SHA256:
+    `b90f1eab3c2115b92c9ca5baab1e29aa6c7bef52edcda19fe3c3b4e66162bbb9`
+- Deployment:
+  - deployed to:
+    - `10.10.32.1`
+    - `10.10.32.2`
+    - `10.10.32.3`
+  - all hosts report:
+    - `ablestack_vm_ftctl-0.8.0-1.noarch`
+  - installed script markers verified on all three hosts:
+    - `ftctl_xcolo_require_topology_audit_ready`
+    - `return_path_protocol_closed_after_startup_active`
+    - `secondary-qemu-process-cmdline.txt`
+  - all hosts have:
+    - `ablestack-vm-ftctl.timer=active`
+    - `ablestack-vm-hangctl.timer=active`
+- Run 74 cleanup:
+  - protection row `74` removed/disabled:
+    - `admin_state=inactive`
+    - `protection_state=disabled`
+    - `transport_state=stopped`
+    - `removed=2026-06-04 17:18:17`
+    - `last_error=test_cleanup_after_return_path_topology_audit_fix`
+  - standby VM `130` / `i-2-130-VM`:
+    - `state=Expunging`
+    - `removed=2026-06-04 17:18:17`
+    - `power_state=PowerOff`
+  - standby volumes `245`, `246`:
+    - `state=Expunged`
+    - `removed=2026-06-04 17:18:17`
+  - active `ftctl.*` details for VM `54` or `130`: `0`
+  - stale runtime/profile/debug files for `i-2-54-VM`, `i-2-130-VM`, and
+    `r97-link-01`: removed from the three hosts
+  - target Run74 standby RBD images removed:
+    - `fdc548bc-4a7b-4ad4-848f-66af4f3ee247`
+    - `846ed980-465b-46ca-9fe8-85bb28d765d8`
+- Final readiness:
+  - primary VM `54` / `i-2-54-VM`:
+    - DB state: `Running`
+    - host id: `3`
+    - power state: `PowerOn`
+    - libvirt state on `10.10.32.3`: `running`
+  - active protection rows for primary VM `54`: `0`
+  - active `r97-link-01-standby%` VM rows: `0`
+  - active `r97-link-01-standby%` volume rows: `0`
+  - primary QMP `query-block-jobs`: empty
+  - primary QMP `query-migrate`: empty
+  - `ablestack_vm_ftctl status --vm i-2-54-VM --json`: `not_found`
+- Next retest expectation:
+  - if protection blocks before `primary.migrate`, inspect
+    `xcolo_topology_audit` and `xcolo_topology_audit_reason`
+  - if the invalid-message signature repeats, inspect
+    `xcolo_protocol_invalid_message_reason`
+  - expected new debug artifacts on failure:
+    - `primary-qemu-process-cmdline.txt`
+    - `secondary-qemu-process-cmdline.txt`
+    - `primary-qemu-log-tail.txt`
+    - `secondary-qemu-log-tail.txt`
