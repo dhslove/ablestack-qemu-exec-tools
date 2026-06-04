@@ -2479,3 +2479,75 @@ but a lower-level signature or reached stage changed, set
   - if `primary.filter_status_on.redire1` appears and the same QEMU protocol
     error returns, the next target is `redire1` topology or compare channel
     direction, not another wait loop
+
+### Run 73 Retest Readiness 2026-06-04
+
+- Source commit built:
+  - `9d27797` (`fix: fast gate xcolo redire1 activation`)
+- Local verification:
+  - `bash -n lib/ftctl/xcolo.sh`: pass
+  - `bash -n bin/ablestack_vm_ftctl_selftest.sh`: pass
+  - `git diff --check`: pass
+  - targeted XCOLO selftests: pass
+    - checkpoint-before-migrate ordering
+    - multi-disk export-before-migrate ordering
+    - staged filter activation failed-step classifier
+    - fast pre-redire1 gate allows secondary `active`
+    - primary filter binding deferred to runtime validation
+    - repeated invalid COLO protocol classifier
+- GitHub Actions build:
+  - run: `26933405464`
+  - head SHA: `9d27797242674107a8148fd4569c12524b41b28b`
+  - RPM build and artifact upload: pass
+  - workflow conclusion: failure at release-publish step after artifact upload
+  - deployment RPM source: Actions artifact from the same run
+  - RPM SHA256:
+    `ad0b98e5c8e0a916c0168ad2d13efcb7104d2fd2b3d0a1122d07054983a91ad9`
+- RPM marker verification:
+  - extracted RPM includes:
+    - `fast_cached_post_migrate`
+    - `xcolo_redire1_fast_activation_prerequisite_failed`
+    - `xcolo_pre_redire1_strict_chardev_deferred=yes`
+- Deployment:
+  - RPM deployed to:
+    - `10.10.32.1`
+    - `10.10.32.2`
+    - `10.10.32.3`
+  - installed host script markers verified on all three hosts:
+    - `fast_cached_post_migrate`
+    - `xcolo_redire1_fast_activation_prerequisite_failed`
+    - `xcolo_pre_redire1_strict_chardev_deferred=yes`
+  - host timers verified active on all three hosts:
+    - `ablestack-vm-ftctl.timer`
+    - `ablestack-vm-hangctl.timer`
+- Run 72 cleanup:
+  - active protection row `72`: removed and marked `disabled/stopped`
+  - standby VM `128` / `i-2-128-VM`: destroyed/undefined and marked
+    `Expunging`
+  - standby volumes `241`, `242`: marked `Expunged`
+  - standby RBD images removed:
+    - `fabdab34-d577-41a7-985f-7e8a7f3c3af1`
+    - `7b54484b-3c45-461c-92cd-17c2799e5584`
+  - FTCTL runtime/profile leftovers for `i-2-54-VM`, `i-2-128-VM`, and
+    `r97-link-01`: removed
+- Final readiness:
+  - primary VM `54` / `i-2-54-VM`:
+    - DB state: `Running`
+    - host id: `3`
+    - power state: `PowerOn`
+    - libvirt state on `10.10.32.3`: `running`
+  - active protection rows for primary VM `54`: `0`
+  - active `r97-link-01-standby%` VM rows: `0`
+  - active `r97-link-01-standby%` volume rows: `0`
+  - active `ftctl.*` details for VM `54` or `128`: `0`
+  - primary QMP `query-block-jobs`: empty
+  - primary QMP `query-migrate`: empty
+  - `ablestack_vm_ftctl status --vm i-2-54-VM --json`:
+    `not_found`
+  - target Run72 standby RBD images: absent
+- Next retest expectation:
+  - Run 73 must show whether `primary.filter_status_on.redire1` is reached
+    with the fast cached gate
+  - if the same QEMU invalid-message signature returns after `redire1`, the
+    next design must target filter topology or compare channel direction, not
+    another wait loop
