@@ -2271,3 +2271,33 @@ but a lower-level signature or reached stage changed, set
     - standby volumes `239`, `240`
     - standby RBD images listed above
   - cleanup is required before the next retest
+
+### Run 72 Fix Plan 2026-06-04
+
+- Design document:
+  - `348-ft-xcolo-pre-redire1-activation-gate-design-20260604.md`
+- Reason:
+  - Run 71 narrowed the repeated invalid-message failure to the first filter
+    activation step, `redire1`
+  - pre-activation migration/socket state was valid before `redire1`
+  - therefore the next fix must protect the `redire1` readiness boundary
+- Code direction:
+  - add a strict pre-redire1 gate before
+    `qom-set /objects/redire1 status=on`
+  - require:
+    - primary migrate status `active`
+    - secondary migrate status `colo`
+    - secondary COLO mode `secondary`
+    - no invalid-message before redire1
+    - strict primary chardev binding ready, not `accepted_closed`
+    - primary compare channels established
+  - if the gate does not pass, do not activate `redire1`
+  - classify the failure as:
+    - `xcolo_protocol_failure_phase=pre_redire1_gate`
+    - `xcolo_filter_activation_failed_step=redire1`
+    - `last_error=xcolo_redire1_activation_prerequisite_timeout`
+- Repetition control:
+  - the next run must either pass the pre-redire1 gate or report the exact
+    missing prerequisite
+  - if the gate passes and `redire1` still breaks the stream, the next target is
+    the `redire1 outdev=compare0` topology itself

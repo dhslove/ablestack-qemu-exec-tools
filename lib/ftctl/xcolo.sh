@@ -4539,6 +4539,133 @@ ftctl_xcolo_capture_filter_activation_step_state() {
     "step=${step} primary_migrate=${primary_migrate} secondary_migrate=${secondary_migrate} primary_colo=${primary_colo} secondary_colo=${secondary_colo} invalid_message=${invalid_message}"
 }
 
+ftctl_xcolo_gate_before_redire1_activation_reason() {
+  local vm="${1-}"
+  local primary_migrate="${2-}"
+  local secondary_migrate="${3-}"
+  local secondary_colo="${4-}"
+  local invalid_message="${5-}"
+  local chardev_ready="${6-}"
+
+  if [[ "${invalid_message}" == "yes" ]]; then
+    printf '%s\n' "invalid_message_before_redire1"
+  elif [[ "${primary_migrate}" != "active" ]]; then
+    printf '%s\n' "primary_migrate_not_active"
+  elif [[ "${secondary_migrate}" != "colo" ]]; then
+    printf '%s\n' "secondary_migrate_not_colo"
+  elif [[ "${secondary_colo}" != "secondary" ]]; then
+    printf '%s\n' "secondary_colo_not_secondary"
+  elif [[ "$(ftctl_state_get "${vm}" "xcolo_channel_mirror_established" 2>/dev/null || true)" != "yes" ]]; then
+    printf '%s\n' "mirror_channel_not_established"
+  elif [[ "$(ftctl_state_get "${vm}" "xcolo_channel_compare_established" 2>/dev/null || true)" != "yes" ]]; then
+    printf '%s\n' "compare_channel_not_established"
+  elif [[ "$(ftctl_state_get "${vm}" "xcolo_channel_compare_local_established" 2>/dev/null || true)" != "yes" ]]; then
+    printf '%s\n' "compare_local_channel_not_established"
+  elif [[ "$(ftctl_state_get "${vm}" "xcolo_channel_compare_out_established" 2>/dev/null || true)" != "yes" ]]; then
+    printf '%s\n' "compare_out_channel_not_established"
+  elif [[ "${chardev_ready}" != "yes" ]]; then
+    printf '%s\n' "strict_chardev_not_ready"
+  else
+    printf '%s\n' ""
+  fi
+}
+
+ftctl_xcolo_gate_before_redire1_activation() {
+  local vm="${1-}"
+  local secondary_vm="${2-}"
+  local timeout="${FTCTL_XCOLO_PRE_REDIRE1_GATE_WAIT_SEC:-10}"
+  local interval="${FTCTL_XCOLO_PRE_REDIRE1_GATE_INTERVAL_SEC:-1}"
+  local attempts i primary_migrate secondary_migrate primary_colo secondary_colo
+  local primary_migrate_error_desc="" secondary_migrate_error_desc=""
+  local invalid_message chardev_ready chardev_reason reason
+
+  [[ -n "${vm}" && -n "${secondary_vm}" ]] || return 0
+  [[ "${timeout}" =~ ^[0-9]+$ && "${timeout}" -gt 0 ]] || timeout="10"
+  [[ "${interval}" =~ ^[0-9]+$ && "${interval}" -gt 0 ]] || interval="1"
+  attempts=$(( (timeout + interval - 1) / interval ))
+  [[ "${attempts}" -gt 0 ]] || attempts=1
+
+  ftctl_log_event "colo" "xcolo.pre_redire1_gate" "start" "${vm}" "" \
+    "timeout=${timeout} interval=${interval}"
+
+  for ((i=0; i<attempts; i++)); do
+    primary_migrate=""
+    secondary_migrate=""
+    primary_colo=""
+    secondary_colo=""
+    primary_migrate_error_desc=""
+    secondary_migrate_error_desc=""
+    invalid_message="no"
+    ftctl_xcolo_query_migrate_status "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" primary_migrate || true
+    ftctl_xcolo_query_migrate_status "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" secondary_migrate || true
+    ftctl_xcolo_query_colo_mode "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" primary_colo || true
+    ftctl_xcolo_query_colo_mode "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" secondary_colo || true
+    if [[ "${primary_migrate}" == "failed" ]]; then
+      ftctl_xcolo_query_migrate_error_desc "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" primary_migrate_error_desc || true
+    fi
+    if [[ "${secondary_migrate}" == "failed" ]]; then
+      ftctl_xcolo_query_migrate_error_desc "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" secondary_migrate_error_desc || true
+    fi
+    if [[ "${primary_migrate_error_desc}" == *"Received invalid message"* ]] || ftctl_xcolo_primary_invalid_message_observed "${vm}"; then
+      invalid_message="yes"
+    fi
+
+    ftctl_xcolo_capture_primary_channel_state "${vm}" || true
+    ftctl_xcolo_collect_primary_chardev_binding_state "${vm}" "pre_redire1" || true
+    ftctl_xcolo_capture_socket_snapshot "${vm}" "pre_redire1" || true
+    chardev_ready="$(ftctl_state_get "${vm}" "xcolo_primary_filter_chardev_ready" 2>/dev/null || true)"
+    chardev_reason="$(ftctl_state_get "${vm}" "xcolo_primary_filter_chardev_reason" 2>/dev/null || true)"
+    reason="$(ftctl_xcolo_gate_before_redire1_activation_reason "${vm}" "${primary_migrate}" "${secondary_migrate}" "${secondary_colo}" "${invalid_message}" "${chardev_ready}")"
+
+    ftctl_state_set "${vm}" \
+      "xcolo_pre_redire1_gate_attempts=$((i + 1))" \
+      "xcolo_pre_redire1_primary_migrate_status=${primary_migrate}" \
+      "xcolo_pre_redire1_secondary_migrate_status=${secondary_migrate}" \
+      "xcolo_pre_redire1_primary_colo_mode=${primary_colo}" \
+      "xcolo_pre_redire1_secondary_colo_mode=${secondary_colo}" \
+      "xcolo_pre_redire1_primary_migrate_error_desc=${primary_migrate_error_desc}" \
+      "xcolo_pre_redire1_secondary_migrate_error_desc=${secondary_migrate_error_desc}" \
+      "xcolo_pre_redire1_invalid_message=${invalid_message}" \
+      "xcolo_pre_redire1_chardev_ready=${chardev_ready}" \
+      "xcolo_pre_redire1_chardev_reason=${chardev_reason}" \
+      "xcolo_pre_redire1_channel_mirror_established=$(ftctl_state_get "${vm}" "xcolo_channel_mirror_established" 2>/dev/null || true)" \
+      "xcolo_pre_redire1_channel_compare_established=$(ftctl_state_get "${vm}" "xcolo_channel_compare_established" 2>/dev/null || true)" \
+      "xcolo_pre_redire1_channel_compare_local_established=$(ftctl_state_get "${vm}" "xcolo_channel_compare_local_established" 2>/dev/null || true)" \
+      "xcolo_pre_redire1_channel_compare_out_established=$(ftctl_state_get "${vm}" "xcolo_channel_compare_out_established" 2>/dev/null || true)" \
+      "xcolo_pre_redire1_gate_reason=${reason}"
+
+    if [[ -z "${reason}" ]]; then
+      ftctl_state_set "${vm}" "xcolo_pre_redire1_gate=ready"
+      ftctl_log_event "colo" "xcolo.pre_redire1_gate" "ok" "${vm}" "" \
+        "attempts=$((i + 1)) primary_migrate=${primary_migrate} secondary_migrate=${secondary_migrate} secondary_colo=${secondary_colo} chardev=${chardev_ready}"
+      return 0
+    fi
+
+    if [[ "${reason}" == "invalid_message_before_redire1" ]]; then
+      ftctl_state_set "${vm}" \
+        "xcolo_pre_redire1_gate=failed" \
+        "xcolo_protocol_failure_phase=pre_redire1_gate" \
+        "xcolo_filter_activation_failed_step=redire1" \
+        "last_error=xcolo_redire1_activation_prerequisite_failed"
+      ftctl_log_event "colo" "xcolo.pre_redire1_gate" "fail" "${vm}" "" \
+        "reason=${reason} attempts=$((i + 1)) primary_migrate=${primary_migrate} secondary_migrate=${secondary_migrate}"
+      return 1
+    fi
+
+    sleep "${interval}"
+  done
+
+  ftctl_state_set "${vm}" \
+    "xcolo_pre_redire1_gate=timeout" \
+    "xcolo_protocol_failure_phase=pre_redire1_gate" \
+    "xcolo_filter_activation_failed_step=redire1" \
+    "xcolo_primary_filter_activation_failed_reason=redire1_prerequisite_timeout" \
+    "last_error=xcolo_redire1_activation_prerequisite_timeout"
+  ftctl_log_event "colo" "xcolo.pre_redire1_gate" "fail" "${vm}" "" \
+    "reason=$(ftctl_state_get "${vm}" "xcolo_pre_redire1_gate_reason" 2>/dev/null || true) attempts=${attempts}"
+  return 1
+}
+
 ftctl_xcolo_activate_primary_net_filters() {
   local vm="${1-}"
   local source="${2:-cmdline}"
@@ -4576,6 +4703,9 @@ ftctl_xcolo_activate_primary_net_filters() {
     step="${entry%%:*}"
     path="${entry#*:}"
     ftctl_state_set "${vm}" "xcolo_filter_activation_step=${step}"
+    if [[ "${step}" == "redire1" ]]; then
+      ftctl_xcolo_gate_before_redire1_activation "${vm}" "${secondary_vm}" || return 1
+    fi
     ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
       "{\"execute\":\"qom-set\",\"arguments\":{\"path\":\"${path}\",\"property\":\"status\",\"value\":\"on\"}}" \
       "colo" "primary.filter_status_on.${step}" || {

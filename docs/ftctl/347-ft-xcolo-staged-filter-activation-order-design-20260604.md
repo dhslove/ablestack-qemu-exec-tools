@@ -157,3 +157,11 @@ This document extends and narrows:
 
 Document 346 remains valid for the post-migrate activation boundary, but its
 bulk activation order is superseded by the staged order defined here.
+
+## Extension
+
+Run 71 narrowed the failure to the first staged activation step, `redire1`.
+The effective implementation now adds a strict pre-redire1 gate before the
+staged order begins:
+
+- [348. FT XCOLO Pre-Redire1 Activation Gate Design](348-ft-xcolo-pre-redire1-activation-gate-design-20260604.md)

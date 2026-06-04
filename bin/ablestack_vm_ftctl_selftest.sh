@@ -129,6 +129,20 @@ selftest_mock_xcolo_primary_channels_ready() {
       "xcolo_primary_filter_chardev_reason="
   }
   # shellcheck disable=SC2317
+  ftctl_xcolo_collect_primary_chardev_binding_state() {
+    local vm="${1-}" phase="${2:-strict}"
+    ftctl_state_set "${vm}" \
+      "xcolo_primary_chardev_mirror0=yes" \
+      "xcolo_primary_chardev_compare1=yes" \
+      "xcolo_primary_chardev_compare0=yes" \
+      "xcolo_primary_chardev_compare0-0=yes" \
+      "xcolo_primary_chardev_compare_out=yes" \
+      "xcolo_primary_chardev_compare_out0=yes" \
+      "xcolo_primary_filter_chardev_ready=yes" \
+      "xcolo_primary_filter_chardev_reason=" \
+      "xcolo_primary_filter_chardev_phase=${phase}"
+  }
+  # shellcheck disable=SC2317
   ftctl_xcolo_require_primary_filter_qom_ready() {
     local vm="${1-}"
     ftctl_state_set "${vm}" \
@@ -1287,6 +1301,8 @@ selftest_case_xcolo_block_handshake_sets_checkpoint_before_migrate() (
       printf -v "${out_var}" '%s' '{"return":{"status":"colo"}}'
     elif [[ "${payload}" == *"query-migrate"* ]]; then
       printf -v "${out_var}" '%s' '{"return":{"status":"active"}}'
+    elif [[ "${payload}" == *"query-colo-status"* && "${_uri}" == *"qemu+ssh"* ]]; then
+      printf -v "${out_var}" '%s' '{"return":{"mode":"secondary"}}'
     elif [[ "${payload}" == *"query-colo-status"* ]]; then
       printf -v "${out_var}" '%s' '{"return":{"mode":"none"}}'
     else
@@ -1390,6 +1406,8 @@ selftest_case_xcolo_multi_disk_handshake_exports_all_disks() (
       printf -v "${out_var}" '%s' '{"return":{"status":"colo"}}'
     elif [[ "${payload}" == *"query-migrate"* ]]; then
       printf -v "${out_var}" '%s' '{"return":{"status":"active"}}'
+    elif [[ "${payload}" == *"query-colo-status"* && "${_uri}" == *"qemu+ssh"* ]]; then
+      printf -v "${out_var}" '%s' '{"return":{"mode":"secondary"}}'
     elif [[ "${payload}" == *"query-colo-status"* ]]; then
       printf -v "${out_var}" '%s' '{"return":{"mode":"none"}}'
     else
@@ -1467,6 +1485,8 @@ selftest_case_xcolo_staged_filter_activation_classifies_failed_step() (
     step="$(ftctl_state_get "${vm}" "xcolo_filter_activation_step" 2>/dev/null || true)"
     if [[ "${uri}" == "${FTCTL_PROFILE_PRIMARY_URI}" && "${step}" == "m0" ]]; then
       printf -v "${out_var}" '%s' "failed"
+    elif [[ "${uri}" == "${FTCTL_PROFILE_SECONDARY_URI}" ]]; then
+      printf -v "${out_var}" '%s' "colo"
     else
       printf -v "${out_var}" '%s' "active"
     fi
@@ -1485,9 +1505,27 @@ selftest_case_xcolo_staged_filter_activation_classifies_failed_step() (
   }
   # shellcheck disable=SC2317
   ftctl_xcolo_query_colo_mode() {
-    local out_var="${3}"
-    printf -v "${out_var}" '%s' "none"
+    local uri="${1-}" out_var="${3}"
+    if [[ "${uri}" == "${FTCTL_PROFILE_SECONDARY_URI}" ]]; then
+      printf -v "${out_var}" '%s' "secondary"
+    else
+      printf -v "${out_var}" '%s' "none"
+    fi
     return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_capture_primary_channel_state() {
+    local vm="${1-}"
+    ftctl_state_set "${vm}" \
+      "xcolo_channel_mirror_established=yes" \
+      "xcolo_channel_compare_established=yes" \
+      "xcolo_channel_compare_local_established=yes" \
+      "xcolo_channel_compare_out_established=yes"
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_collect_primary_chardev_binding_state() {
+    local vm="${1-}"
+    ftctl_state_set "${vm}" "xcolo_primary_filter_chardev_ready=yes" "xcolo_primary_filter_chardev_reason="
   }
   # shellcheck disable=SC2317
   ftctl_xcolo_capture_socket_snapshot() {
@@ -1509,6 +1547,91 @@ selftest_case_xcolo_staged_filter_activation_classifies_failed_step() (
     "failed activation phase recorded"
   selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" "xcolo_filter_activation_m0_broke_colo_stream" \
     "failed activation last_error recorded"
+)
+
+selftest_case_xcolo_pre_redire1_gate_blocks_early_activation() (
+  selftest_reset_env
+  selftest_info "x-colo pre-redire1 gate blocks early redire1 activation"
+
+  local vm="primary-vm"
+  local call_log="${SELFTEST_ROOT}/xcolo-pre-redire1-gate.log"
+  : > "${call_log}"
+  FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
+  FTCTL_PROFILE_SECONDARY_URI="qemu+ssh://peer/system"
+  FTCTL_XCOLO_PRE_REDIRE1_GATE_WAIT_SEC="1"
+  FTCTL_XCOLO_PRE_REDIRE1_GATE_INTERVAL_SEC="1"
+
+  # shellcheck disable=SC2317
+  ftctl_xcolo_require_primary_filter_qom_ready() {
+    local vm="${1-}"
+    ftctl_state_set "${vm}" "xcolo_primary_filter_qom_ready=yes" "xcolo_primary_filter_qom_reason="
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_qmp_require_ok() {
+    local uri="$1" vm="$2" payload="$3" stage="$4" event="$5"
+    printf '%s|%s|%s|%s|%s\n' "${stage}" "${event}" "${uri}" "${vm}" "${payload}" >> "${call_log}"
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_query_migrate_status() {
+    local uri="${1-}" out_var="${3}"
+    if [[ "${uri}" == "${FTCTL_PROFILE_SECONDARY_URI}" ]]; then
+      printf -v "${out_var}" '%s' "active"
+    else
+      printf -v "${out_var}" '%s' "active"
+    fi
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_query_migrate_error_desc() {
+    local out_var="${3}"
+    printf -v "${out_var}" '%s' ""
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_query_colo_mode() {
+    local uri="${1-}" out_var="${3}"
+    if [[ "${uri}" == "${FTCTL_PROFILE_SECONDARY_URI}" ]]; then
+      printf -v "${out_var}" '%s' "none"
+    else
+      printf -v "${out_var}" '%s' "none"
+    fi
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_capture_primary_channel_state() {
+    local vm="${1-}"
+    ftctl_state_set "${vm}" \
+      "xcolo_channel_mirror_established=yes" \
+      "xcolo_channel_compare_established=yes" \
+      "xcolo_channel_compare_local_established=yes" \
+      "xcolo_channel_compare_out_established=yes"
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_collect_primary_chardev_binding_state() {
+    local vm="${1-}"
+    ftctl_state_set "${vm}" "xcolo_primary_filter_chardev_ready=yes" "xcolo_primary_filter_chardev_reason="
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_capture_socket_snapshot() {
+    return 0
+  }
+
+  if ftctl_xcolo_activate_primary_net_filters "${vm}" "selftest" "${vm}-standby"; then
+    selftest_fail "pre-redire1 gate should fail while secondary migrate is not colo"
+  fi
+
+  selftest_assert_file_not_contains "${call_log}" "primary.filter_status_on.redire1"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_pre_redire1_gate")" "timeout" \
+    "pre-redire1 gate should timeout"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_pre_redire1_gate_reason")" "secondary_migrate_not_colo" \
+    "pre-redire1 gate records secondary migrate reason"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_protocol_failure_phase")" "pre_redire1_gate" \
+    "pre-redire1 gate records protocol phase"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_filter_activation_failed_step")" "redire1" \
+    "pre-redire1 gate records failed step"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" "xcolo_redire1_activation_prerequisite_timeout" \
+    "pre-redire1 gate records timeout last_error"
 )
 
 selftest_case_xcolo_primary_filter_binding_defers_to_runtime_validation() (
@@ -1549,6 +1672,8 @@ selftest_case_xcolo_primary_filter_binding_defers_to_runtime_validation() (
       printf -v "${out_var}" '%s' '{"return":{"status":"colo"}}'
     elif [[ "${payload}" == *"query-migrate"* ]]; then
       printf -v "${out_var}" '%s' '{"return":{"status":"active"}}'
+    elif [[ "${payload}" == *"query-colo-status"* && "${_uri}" == *"qemu+ssh"* ]]; then
+      printf -v "${out_var}" '%s' '{"return":{"mode":"secondary"}}'
     elif [[ "${payload}" == *"query-colo-status"* ]]; then
       printf -v "${out_var}" '%s' '{"return":{"mode":"none"}}'
     else
@@ -4152,6 +4277,7 @@ selftest_main() {
   selftest_case_xcolo_block_handshake_sets_checkpoint_before_migrate
   selftest_case_xcolo_multi_disk_handshake_exports_all_disks
   selftest_case_xcolo_staged_filter_activation_classifies_failed_step
+  selftest_case_xcolo_pre_redire1_gate_blocks_early_activation
   selftest_case_xcolo_primary_filter_binding_defers_to_runtime_validation
   selftest_case_xcolo_premigrate_chardev_binding_accepts_listener_endpoints
   selftest_case_xcolo_strict_chardev_binding_rejects_closed_frontends
