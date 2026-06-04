@@ -980,6 +980,11 @@ EOF
   selftest_assert_file_not_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "socket,id=compare1,host=0.0.0.0,port=9004,server=on,wait=off"
   selftest_assert_file_contains "$(ftctl_state_get "${vm}" "standby_xml_generated")" "qemu:commandline"
   selftest_assert_file_contains "$(ftctl_state_get "${vm}" "standby_xml_generated")" "/mirror/${vm}-vda.qcow2"
+  selftest_assert_file_contains "$(ftctl_state_get "${vm}" "standby_xml_generated")" "socket,id=red0,host=10.10.10.21,port=9003,reconnect-ms=1000"
+  selftest_assert_file_contains "$(ftctl_state_get "${vm}" "standby_xml_generated")" "socket,id=red1,host=10.10.20.21,port=9004,reconnect-ms=1000"
+  selftest_assert_file_contains "$(ftctl_state_get "${vm}" "standby_xml_generated")" "filter-redirector,id=f1,netdev=hostnet0,queue=tx,indev=red0"
+  selftest_assert_file_contains "$(ftctl_state_get "${vm}" "standby_xml_generated")" "filter-redirector,id=f2,netdev=hostnet0,queue=rx,outdev=red1"
+  selftest_assert_file_contains "$(ftctl_state_get "${vm}" "standby_xml_generated")" "filter-rewriter,id=rew0,netdev=hostnet0,queue=all"
 
   ftctl_xcolo_failover "${vm}"
   selftest_assert_eq "$(ftctl_state_get "${vm}" "active_side")" "secondary" "xcolo failover side"
@@ -2594,6 +2599,7 @@ selftest_case_xcolo_pre_guest_gate_blocks_closed_chardev_contract() (
   local vm="xcolo-pre-guest-contract"
   local rc=0
   ftctl_state_init_vm "${vm}"
+  ftctl_state_set "${vm}" "xcolo_qemu_doc_topology=ok"
   FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
   FTCTL_PROFILE_SECONDARY_URI="qemu+ssh://peer/system"
   FTCTL_XCOLO_CHARDEV_CONTRACT_WAIT_SEC="1"
@@ -2621,10 +2627,12 @@ selftest_case_xcolo_pre_guest_gate_blocks_closed_chardev_contract() (
   ftctl_xcolo_gate_before_guest_traffic "${vm}" "${vm}-standby" || rc=$?
   selftest_assert_eq "${rc}" "1" "pre-guest closed contract should fail"
   selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" \
-    "xcolo_colo_chardev_contract_not_ready_before_guest_traffic" \
+    "xcolo_qemu_doc_runtime_frontend_closed" \
     "pre-guest gate last error"
   selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_protocol_failure_phase")" \
-    "pre_guest_traffic_contract" "pre-guest protocol phase"
+    "pre_guest_traffic_doc_frontend_contract" "pre-guest protocol phase"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_qemu_doc_runtime_frontend")" \
+    "closed" "pre-guest doc frontend classification"
   selftest_assert_contains "$(ftctl_state_get "${vm}" "xcolo_pre_guest_traffic_gate_reason")" \
     "mirror_path_primary_mirror0=present_closed" "pre-guest reason includes mirror0"
   selftest_assert_contains "$(ftctl_state_get "${vm}" "xcolo_pre_guest_traffic_gate_reason")" \

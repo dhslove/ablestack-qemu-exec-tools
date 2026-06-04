@@ -93,6 +93,19 @@ If the chardev contract is not ready:
 - `xcolo_pre_guest_traffic_gate=failed`
 - `xcolo_pre_guest_traffic_gate_reason=<closed edge list>`
 
+If the QEMU COLO document startup topology audit has already passed, but the
+contract still shows closed chardev frontends, the failure is classified more
+specifically:
+
+- `last_error=xcolo_qemu_doc_runtime_frontend_closed`
+- `xcolo_protocol_failure_phase=pre_guest_traffic_doc_frontend_contract`
+- `xcolo_qemu_doc_runtime_frontend=closed`
+- `xcolo_qemu_doc_runtime_frontend_reason=<closed edge list>`
+
+This distinction is important: it means the command line shape follows the
+documented COLO sample, and the remaining issue is the runtime frontend state
+of the QEMU chardev graph.
+
 Expected evidence includes:
 
 - `xcolo_pre_guest_traffic_contract_primary_running`

@@ -3172,3 +3172,52 @@ but a lower-level signature or reached stage changed, set
   - `xcolo_pre_guest_traffic_gate_reason`
   - `xcolo_pre_guest_traffic_contract_chardev_contract_ready`
   - whether QEMU EPERM appears before or after the pre-guest gate
+
+### Run78 QEMU Doc Topology Audit Follow-up 2026-06-05
+
+- Retest evidence directory:
+  - `/home/ablecloud/work/ft-run-monitor-20260605-003019`
+- Protection row:
+  - `78`
+- Primary:
+  - `i-2-54-VM` on `10.10.32.3`
+- Secondary:
+  - `i-2-134-VM` on `10.10.32.1`
+- Result:
+  - final DB state: `protection_state=error`, `transport_state=failed`
+  - `last_error=xcolo_colo_chardev_contract_not_ready_before_guest_traffic`
+  - `xcolo_protocol_failure_phase=pre_guest_traffic_contract`
+  - primary remained `paused`
+  - secondary remained `inmigrate`
+- Captured contract:
+  - `xcolo_chardev_contract_ready=no`
+  - `xcolo_chardev_contract_reason=mirror_path_primary_mirror0=present_closed,compare_path_secondary_red1=present_closed`
+  - mirror path:
+    `primary:m0->mirror0(present_closed)->secondary:red0(present_open)->f1`
+  - compare path:
+    `secondary:f2->red1(present_closed)->primary:compare1(present_open)->comp0`
+- Log interpretation:
+  - the pre-guest gate contained the failure before a new current-run
+    `Received invalid message 0x0000 length 0x0000` was observed
+  - the remaining ambiguity is whether the generated command line differs from
+    the QEMU COLO sample or whether QEMU keeps a documented chardev frontend
+    closed at runtime
+- Design recorded:
+  - `docs/ftctl/355-ft-xcolo-qemu-doc-hard-topology-audit-design-20260605.md`
+- Implementation direction:
+  - keep startup-active filter topology
+  - do not reintroduce staged `status=off` / `qom-set status=on` activation
+  - hard-check primary QEMU command line against documented `mirror0`,
+    `compare1`, `compare0`, `compare0-0`, `compare_out`, and `compare_out0`
+    socket semantics
+  - hard-check secondary command line against documented `red0`, `red1`,
+    `f1`, `f2`, `rew0`, and `-incoming`
+  - classify document-topology failures as
+    `xcolo_qemu_doc_topology_mismatch`
+  - classify document-topology-ok but closed runtime frontend failures as
+    `xcolo_qemu_doc_runtime_frontend_closed`
+- Repetition guard:
+  - if the next run again reports closed `mirror0` or `red1`, the report must
+    explicitly say whether `xcolo_qemu_doc_topology` was `ok` or `failed`
+  - if it was `ok`, the next change must target QEMU runtime frontend binding
+    and not command-line topology or staged activation timing

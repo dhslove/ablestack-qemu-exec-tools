@@ -2013,7 +2013,8 @@ ftctl_xcolo_capture_guest_traffic_gate_state() {
 ftctl_xcolo_gate_before_guest_traffic() {
   local vm="${1-}"
   local secondary_vm="${2:-$vm}"
-  local primary_running="" primary_status="" contract_reason=""
+  local primary_running="" primary_status="" contract_reason="" last_error="" failure_phase=""
+  local doc_topology=""
 
   [[ -n "${vm}" && -n "${secondary_vm}" ]] || return 1
   ftctl_xcolo_capture_guest_traffic_gate_state "${vm}" "${secondary_vm}" "pre_guest_traffic_contract" || true
@@ -2045,13 +2046,23 @@ ftctl_xcolo_gate_before_guest_traffic() {
   contract_reason="$(ftctl_state_get "${vm}" "xcolo_chardev_contract_gate_reason" 2>/dev/null || true)"
   [[ -n "${contract_reason}" ]] || contract_reason="$(ftctl_state_get "${vm}" "xcolo_chardev_contract_reason" 2>/dev/null || true)"
   ftctl_xcolo_capture_guest_traffic_gate_state "${vm}" "${secondary_vm}" "pre_guest_traffic_contract_failed" || true
+  doc_topology="$(ftctl_state_get "${vm}" "xcolo_qemu_doc_topology" 2>/dev/null || true)"
+  last_error="xcolo_colo_chardev_contract_not_ready_before_guest_traffic"
+  failure_phase="pre_guest_traffic_contract"
+  if [[ "${doc_topology}" == "ok" && "${contract_reason}" == *"present_closed"* ]]; then
+    last_error="xcolo_qemu_doc_runtime_frontend_closed"
+    failure_phase="pre_guest_traffic_doc_frontend_contract"
+    ftctl_state_set "${vm}" \
+      "xcolo_qemu_doc_runtime_frontend=closed" \
+      "xcolo_qemu_doc_runtime_frontend_reason=${contract_reason}"
+  fi
   ftctl_state_set "${vm}" \
     "xcolo_pre_guest_traffic_gate=failed" \
     "xcolo_pre_guest_traffic_gate_reason=${contract_reason}" \
-    "xcolo_protocol_failure_phase=pre_guest_traffic_contract" \
-    "last_error=xcolo_colo_chardev_contract_not_ready_before_guest_traffic"
+    "xcolo_protocol_failure_phase=${failure_phase}" \
+    "last_error=${last_error}"
   ftctl_log_event "colo" "xcolo.guest_traffic_gate" "fail" "${vm}" "" \
-    "reason=${contract_reason} primary_status=${primary_status}"
+    "reason=${contract_reason} primary_status=${primary_status} doc_topology=${doc_topology:-unknown} last_error=${last_error}"
   return 1
 }
 
@@ -2258,6 +2269,7 @@ ftctl_xcolo_require_primary_netdev_vhost_off() {
 ftctl_xcolo_collect_primary_filter_cmdline_state() {
   local vm="${1-}"
   local out err rc ready reason_text expected_netdev
+  local mirror_port compare_port compare_local_port compare_out_port
   local -a reasons=()
 
   out=""
@@ -2286,6 +2298,10 @@ done
 
   expected_netdev="$(ftctl_state_get "${vm}" "xcolo_primary_netdev_id" 2>/dev/null || true)"
   expected_netdev="${expected_netdev:-hostnet0}"
+  mirror_port="${FTCTL_XCOLO_MIRROR_PORT:-9003}"
+  compare_port="${FTCTL_XCOLO_COMPARE_PORT:-9004}"
+  compare_local_port="${FTCTL_XCOLO_COMPARE_LOCAL_PORT:-9001}"
+  compare_out_port="${FTCTL_XCOLO_COMPARE_OUT_PORT:-9005}"
   ftctl_xcolo_update_vnet_hdr_state "${vm}" || true
   ready="yes"
   _ftctl_xcolo_expect_cmdline_token() {
@@ -2302,6 +2318,12 @@ done
   _ftctl_xcolo_expect_cmdline_token "filter-redirector,id=redire1" "redire1"
   _ftctl_xcolo_expect_cmdline_token "colo-compare,id=comp0" "comp0"
   _ftctl_xcolo_expect_cmdline_token "netdev=${expected_netdev}" "primary_netdev"
+  _ftctl_xcolo_expect_cmdline_token "socket,id=mirror0,host=0.0.0.0,port=${mirror_port},server=on,wait=off" "doc_mirror0_listener"
+  _ftctl_xcolo_expect_cmdline_token "socket,id=compare1,host=0.0.0.0,port=${compare_port},server=on,wait=on" "doc_compare1_listener"
+  _ftctl_xcolo_expect_cmdline_token "socket,id=compare0,host=127.0.0.1,port=${compare_local_port},server=on,wait=off" "doc_compare0_loopback_server"
+  _ftctl_xcolo_expect_cmdline_token "socket,id=compare0-0,host=127.0.0.1,port=${compare_local_port}" "doc_compare0_loopback_client"
+  _ftctl_xcolo_expect_cmdline_token "socket,id=compare_out,host=127.0.0.1,port=${compare_out_port},server=on,wait=off" "doc_compare_out_loopback_server"
+  _ftctl_xcolo_expect_cmdline_token "socket,id=compare_out0,host=127.0.0.1,port=${compare_out_port}" "doc_compare_out_loopback_client"
   if [[ "${out}" == *"status=off"* ]]; then
     ready="no"
     reasons+=("startup_status_off:present")
@@ -2358,6 +2380,7 @@ ftctl_xcolo_collect_secondary_filter_cmdline_state() {
   local vm="${1-}"
   local secondary_vm="${2:-$vm}"
   local out="" ready="yes" reason_text="" expected_netdev
+  local mirror_port compare_port
   local -a reasons=()
 
   ftctl_xcolo_capture_secondary_qemu_cmdline "${vm}" "${secondary_vm}" || true
@@ -2377,6 +2400,8 @@ ftctl_xcolo_collect_secondary_filter_cmdline_state() {
 
   expected_netdev="$(ftctl_state_get "${vm}" "xcolo_secondary_netdev_id" 2>/dev/null || true)"
   expected_netdev="${expected_netdev:-hostnet0}"
+  mirror_port="${FTCTL_XCOLO_MIRROR_PORT:-9003}"
+  compare_port="${FTCTL_XCOLO_COMPARE_PORT:-9004}"
 
   _ftctl_xcolo_expect_secondary_cmdline_token() {
     local token="${1-}"
@@ -2389,6 +2414,8 @@ ftctl_xcolo_collect_secondary_filter_cmdline_state() {
 
   _ftctl_xcolo_expect_secondary_cmdline_token "socket,id=red0" "red0"
   _ftctl_xcolo_expect_secondary_cmdline_token "socket,id=red1" "red1"
+  _ftctl_xcolo_expect_secondary_cmdline_token "port=${mirror_port},reconnect-ms=1000" "doc_red0_reconnect"
+  _ftctl_xcolo_expect_secondary_cmdline_token "port=${compare_port},reconnect-ms=1000" "doc_red1_reconnect"
   _ftctl_xcolo_expect_secondary_cmdline_token "filter-redirector,id=f1" "f1"
   _ftctl_xcolo_expect_secondary_cmdline_token "filter-redirector,id=f2" "f2"
   _ftctl_xcolo_expect_secondary_cmdline_token "filter-rewriter,id=rew0" "rew0"
@@ -2432,11 +2459,14 @@ ftctl_xcolo_require_topology_audit_ready() {
   secondary_cmd="$(ftctl_state_get "${vm}" "xcolo_secondary_filter_cmdline_ready" 2>/dev/null || true)"
   secondary_cmd_reason="$(ftctl_state_get "${vm}" "xcolo_secondary_filter_cmdline_reason" 2>/dev/null || true)"
 
-  if [[ "${primary_qom}" != "yes" && "${primary_cmd}" != "yes" ]]; then
-    reasons+=("primary:${primary_qom_reason:-${primary_cmd_reason:-unknown}}")
+  if [[ "${primary_qom}" != "yes" ]]; then
+    reasons+=("primary_qom:${primary_qom_reason:-unknown}")
+  fi
+  if [[ "${primary_cmd}" != "yes" ]]; then
+    reasons+=("primary_cmdline:${primary_cmd_reason:-unknown}")
   fi
   if [[ "${secondary_cmd}" != "yes" ]]; then
-    reasons+=("secondary:${secondary_cmd_reason:-unknown}")
+    reasons+=("secondary_cmdline:${secondary_cmd_reason:-unknown}")
   fi
 
   reason_text="$(IFS=,; printf '%s' "${reasons[*]}")"
@@ -2446,7 +2476,13 @@ ftctl_xcolo_require_topology_audit_ready() {
       "xcolo_topology_audit_phase=${phase}" \
       "xcolo_topology_audit_reason=" \
       "xcolo_topology_primary_ready=yes" \
-      "xcolo_topology_secondary_ready=yes"
+      "xcolo_topology_secondary_ready=yes" \
+      "xcolo_qemu_doc_topology=ok" \
+      "xcolo_qemu_doc_topology_phase=${phase}" \
+      "xcolo_qemu_doc_topology_reason=" \
+      "xcolo_qemu_doc_primary_qom_ready=${primary_qom}" \
+      "xcolo_qemu_doc_primary_cmdline_ready=${primary_cmd}" \
+      "xcolo_qemu_doc_secondary_cmdline_ready=${secondary_cmd}"
     ftctl_log_event "colo" "xcolo.topology_audit" "ok" "${vm}" "" \
       "phase=${phase} primary_qom=${primary_qom} primary_cmdline=${primary_cmd} secondary_cmdline=${secondary_cmd}"
     return 0
@@ -2456,9 +2492,15 @@ ftctl_xcolo_require_topology_audit_ready() {
     "xcolo_topology_audit=failed" \
     "xcolo_topology_audit_phase=${phase}" \
     "xcolo_topology_audit_reason=${reason_text}" \
-    "xcolo_topology_primary_ready=$([[ "${primary_qom}" == "yes" || "${primary_cmd}" == "yes" ]] && printf yes || printf no)" \
+    "xcolo_topology_primary_ready=$([[ "${primary_qom}" == "yes" && "${primary_cmd}" == "yes" ]] && printf yes || printf no)" \
     "xcolo_topology_secondary_ready=$([[ "${secondary_cmd}" == "yes" ]] && printf yes || printf no)" \
-    "last_error=xcolo_topology_audit_failed"
+    "xcolo_qemu_doc_topology=failed" \
+    "xcolo_qemu_doc_topology_phase=${phase}" \
+    "xcolo_qemu_doc_topology_reason=${reason_text}" \
+    "xcolo_qemu_doc_primary_qom_ready=${primary_qom}" \
+    "xcolo_qemu_doc_primary_cmdline_ready=${primary_cmd}" \
+    "xcolo_qemu_doc_secondary_cmdline_ready=${secondary_cmd}" \
+    "last_error=xcolo_qemu_doc_topology_mismatch"
   ftctl_log_event "colo" "xcolo.topology_audit" "fail" "${vm}" "" \
     "phase=${phase} reason=${reason_text}"
   return 1
@@ -3695,7 +3737,6 @@ PY
 ftctl_xcolo_build_primary_qemu_args() {
   local netdev_id="${1:-hostnet0}"
   local vm="${2:-${FTCTL_CURRENT_VM:-}}"
-  local proxy_host proxy_port nbd_host nbd_port
   local mirror_port compare_port compare_local_port compare_out_port
   local mirror_wait compare_wait
   local vnet_hdr_arg=""
@@ -3705,8 +3746,6 @@ ftctl_xcolo_build_primary_qemu_args() {
     ftctl_xcolo_update_vnet_hdr_state "${vm}" || true
     vnet_hdr_arg="$(ftctl_xcolo_vnet_hdr_arg "${vm}")"
   fi
-  ftctl_xcolo_parse_tcp_endpoint "${FTCTL_PROFILE_XCOLO_PROXY_ENDPOINT}" proxy_host proxy_port
-  ftctl_xcolo_parse_tcp_endpoint "${FTCTL_PROFILE_XCOLO_NBD_ENDPOINT}" nbd_host nbd_port
   mirror_port="${FTCTL_XCOLO_MIRROR_PORT:-9003}"
   compare_port="${FTCTL_XCOLO_COMPARE_PORT:-9004}"
   compare_local_port="${FTCTL_XCOLO_COMPARE_LOCAL_PORT:-9001}"
@@ -3730,7 +3769,7 @@ ftctl_xcolo_build_primary_qemu_args() {
 ftctl_xcolo_build_secondary_qemu_args() {
   local netdev_id="${1:-hostnet0}"
   local vm="${2:-${FTCTL_CURRENT_VM:-}}"
-  local connect_ctrl connect_data proxy_host proxy_port nbd_host nbd_port
+  local connect_ctrl connect_data
   local mirror_port compare_port
   local vnet_hdr_arg=""
 
@@ -3739,8 +3778,6 @@ ftctl_xcolo_build_secondary_qemu_args() {
     ftctl_xcolo_update_vnet_hdr_state "${vm}" || true
     vnet_hdr_arg="$(ftctl_xcolo_vnet_hdr_arg "${vm}")"
   fi
-  ftctl_xcolo_parse_tcp_endpoint "${FTCTL_PROFILE_XCOLO_PROXY_ENDPOINT}" proxy_host proxy_port
-  ftctl_xcolo_parse_tcp_endpoint "${FTCTL_PROFILE_XCOLO_NBD_ENDPOINT}" nbd_host nbd_port
   connect_ctrl="$(ftctl_xcolo_primary_listen_host control)"
   connect_data="$(ftctl_xcolo_primary_listen_host data)"
   mirror_port="${FTCTL_XCOLO_MIRROR_PORT:-9003}"
@@ -3757,7 +3794,8 @@ COLO startup alignment checklist
    - mirror0 server wait=off
    - compare1 server wait=on
    - compare0 / compare0-0 / compare_out / compare_out0 loopback sockets
-   - primary filter objects are attached by QMP after block graph readiness
+   - filter-mirror, filter-redirector, and colo-compare objects are present
+     in the startup qemu:commandline and start active
    - root disk on if=ide quorum node
    - startup paused with -S
 2. Secondary startup:
