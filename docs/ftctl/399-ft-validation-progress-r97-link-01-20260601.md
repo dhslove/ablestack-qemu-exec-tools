@@ -2134,3 +2134,71 @@ but a lower-level signature or reached stage changed, set
     incomplete
   - do not return to checkpoint/firewall/storage/socket precondition changes
     unless the new per-step evidence shows one of those assumptions regressed
+
+### Run 71 Retest Readiness 2026-06-04
+
+- Source commit built:
+  - `bed56bb` (`fix: stage xcolo filter activation diagnostics`)
+- Local verification:
+  - `bash -n lib/ftctl/xcolo.sh`: pass
+  - `bash -n bin/ablestack_vm_ftctl_selftest.sh`: pass
+  - `git diff --check`: pass
+  - targeted XCOLO selftests: pass
+    - checkpoint-before-migrate ordering
+    - multi-disk export-before-migrate ordering
+    - staged filter activation failed-step classifier
+    - primary filter binding deferred to runtime validation
+    - repeated invalid COLO protocol classifier
+- GitHub Actions build:
+  - run: `26930959064`
+  - result: success
+  - RPM: `ablestack_vm_ftctl-0.8.0-1.noarch.rpm`
+  - SHA256:
+    `38771298103b4663f28823dcf9bb3df6f96b94b35e4ae752f64f97c924c35793`
+- RPM marker verification:
+  - extracted RPM includes:
+    - `xcolo.filter_activation_step`
+    - `xcolo_filter_activation_failed_step`
+    - `redire1,m0,redire0`
+- Deployment:
+  - RPM deployed to:
+    - `10.10.32.1`
+    - `10.10.32.2`
+    - `10.10.32.3`
+  - installed host script markers verified on all three hosts:
+    - `redire1,m0,redire0`
+    - `xcolo_filter_activation_failed_step`
+  - host timers verified active on all three hosts:
+    - `ablestack-vm-ftctl.timer`
+    - `ablestack-vm-hangctl.timer`
+- Run 70 cleanup:
+  - active protection row `70`: removed
+  - standby VM `126` / `i-2-126-VM`: destroyed/undefined on hosts and marked
+    `Expunging`
+  - standby volumes `237`, `238`: marked `Expunged`
+  - standby RBD images removed:
+    - `7a900119-c499-4ecb-ac64-1d0fb1a56679`
+    - `66e83b2d-3a20-4759-b8fa-ac3bc5aa26b6`
+  - FTCTL runtime/profile leftovers for `i-2-54-VM` and `i-2-126-VM`:
+    removed
+- Final readiness:
+  - primary VM `54` / `i-2-54-VM`:
+    - DB state: `Running`
+    - host id: `3`
+    - power state: `PowerOn`
+    - libvirt state on `10.10.32.3`: `running`
+  - active protection rows for primary VM `54`: `0`
+  - active `ftctl.*` details for VM `54`: `0`
+  - active `r97-link-01-standby%` VM rows: `0`
+  - active `r97-link-01-standby%` volume rows: `0`
+  - primary QMP `query-block-jobs`: empty
+  - primary QMP `query-migrate`: empty
+  - `ablestack_vm_ftctl status --vm i-2-54-VM --json`:
+    `not_found`
+- Next retest expectation:
+  - if `Received invalid message 0x0000 length 0x0000` repeats, the result must
+    include:
+    - `xcolo_filter_activation_failed_step`
+    - `xcolo_protocol_failure_phase=filter_activation_<step>`
+  - this run must distinguish whether `redire1`, `m0`, or `redire0` breaks the
+    COLO stream
