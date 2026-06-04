@@ -2202,3 +2202,72 @@ but a lower-level signature or reached stage changed, set
     - `xcolo_protocol_failure_phase=filter_activation_<step>`
   - this run must distinguish whether `redire1`, `m0`, or `redire0` breaks the
     COLO stream
+
+### Run 71 Result 2026-06-04
+
+- Trigger:
+  - user started FT protection registration after Run 71 readiness cleanup
+- Evidence:
+  - initial monitor log:
+    `/home/ablecloud/work/ft-run71-monitor-20260604-134649.log`
+  - final monitor log:
+    `/home/ablecloud/work/ft-run71-monitor2-20260604-134739.log`
+  - final evidence directory:
+    `/home/ablecloud/work/ft-run71-final2-20260604-134739`
+- Final state:
+  - protection row: `71`
+  - standby VM: `127` / `i-2-127-VM`
+  - standby volumes:
+    - `239` / `5d3bfa1e-b782-4c98-9033-304d954f73c1`
+    - `240` / `237e3dcb-151b-425b-8ca4-89fc58915b2e`
+  - `protection_state=error`
+  - `transport_state=failed`
+  - Cloud-side last error:
+    `Unable to register FTCTL protection for VM d08503ff-ea56-4e35-bdf8-2f0ebf81382c: timeout`
+  - FTCTL host-side last error:
+    `xcolo_filter_activation_redire1_broke_colo_stream`
+- Progress confirmed:
+  - the staged activation classifier worked
+  - pre-activation stream was still valid:
+    - `xcolo_post_migrate_pre_activation_primary_migrate_status=active`
+    - `xcolo_post_migrate_pre_activation_secondary_migrate_status=active`
+    - `xcolo_post_migrate_pre_activation_invalid_message=no`
+    - `xcolo_socket_post_migrate_pre_activation_primary_9998=established`
+  - first activation step:
+    - `xcolo_primary_net_filters_activation_order=redire1,m0,redire0`
+    - `xcolo_filter_activation_step=redire1`
+    - `xcolo_filter_activation_failed_step=redire1`
+    - `xcolo_protocol_failure_phase=filter_activation_redire1`
+    - `xcolo_filter_activation_redire1_primary_migrate_status=failed`
+    - `xcolo_filter_activation_redire1_secondary_migrate_status=colo`
+    - `xcolo_filter_activation_redire1_primary_migrate_error_desc=Received invalid message 0x0000 length 0x0000`
+    - `xcolo_filter_activation_redire1_invalid_message=yes`
+- QEMU log evidence:
+  - secondary:
+    - `Can't receive COLO message: Input/output error`
+  - primary migrate error:
+    - `Received invalid message 0x0000 length 0x0000`
+- Repetition control:
+  - this is not a blind repeat of Run 70
+  - Run 70 classified the failure as post-filter-activation
+  - Run 71 narrowed that to the first filter activation step, `redire1`
+  - the next active hypothesis is not checkpoint, storage, firewall, baseline
+    seeding, or generic socket reachability
+- Next improvement direction:
+  - focus on `redire1` RX redirect activation semantics
+  - validate whether `redire1` can be enabled only after a stronger secondary
+    COLO readiness signal than `query-migrate status=active`
+  - inspect whether primary `redire1 outdev=compare0` is wired to a chardev
+    endpoint that is still in listener/not-yet-bound state at activation time
+  - if QEMU requires compare input to be active only after secondary has entered
+    `colo` mode, add a gate before `redire1`
+  - if `redire1` activation itself always breaks the stream in this topology,
+    the next design must test reversing the RX activation model rather than
+    cycling through storage/firewall/checkpoint fixes
+- Cleanup note:
+  - Run 71 garbage remains at this point:
+    - active protection row `71`
+    - standby VM `i-2-127-VM`
+    - standby volumes `239`, `240`
+    - standby RBD images listed above
+  - cleanup is required before the next retest
