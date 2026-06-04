@@ -2888,3 +2888,80 @@ but a lower-level signature or reached stage changed, set
   - if the next run still reports only
     `xcolo_startup_active_filter_stream_failed`, the fix did not cover the
     actual early return path
+
+### Run 76 Build Deploy Cleanup Readiness 2026-06-04
+
+- Source commit built and deployed:
+  - `bc677d9` (`fix: classify xcolo mirror eperm failures`)
+- Local validation:
+  - `bash -n lib/ftctl/xcolo.sh`: passed
+  - `bash -n bin/ablestack_vm_ftctl_selftest.sh`: passed
+  - `git diff --check`: passed
+  - full selftest still stops at pre-existing shellcheck warnings before the
+    functional cases run
+  - a focused selftest case was added for startup-active
+    `filter_mirror_send_eperm` classification
+- GitHub Actions:
+  - run: `26955017185`
+  - workflow: `FTCTL Branch Development Release`
+  - result: success
+  - source commit: `bc677d9e`
+  - RPM: `ablestack_vm_ftctl-0.8.0-1.noarch.rpm`
+  - RPM SHA256:
+    `77b0db802c797ad063e7d6b5dd01dd1c76e08b92589e9020e5073af663e6bb03`
+- RPM marker verification:
+  - extracted RPM script contains:
+    - `ftctl_xcolo_classify_startup_active_stream_failure`
+    - `xcolo_filter_mirror_send_eperm`
+    - `primary-query-chardev`
+    - `secondary-query-chardev`
+    - `primary-policy`
+    - `secondary-policy`
+- Deployment:
+  - deployed to:
+    - `10.10.32.1`
+    - `10.10.32.2`
+    - `10.10.32.3`
+  - all hosts report:
+    - `ablestack_vm_ftctl-0.8.0-1.noarch`
+  - all hosts have:
+    - `ablestack-vm-ftctl.timer=active`
+    - `ablestack-vm-hangctl.timer=active`
+  - installed host scripts contain the new EPERM/chardev/policy markers
+- Run 75 cleanup:
+  - protection row `75` removed/disabled:
+    - `admin_state=inactive`
+    - `protection_state=disabled`
+    - `transport_state=stopped`
+    - `removed=2026-06-04 22:39:50`
+    - `last_error=test_cleanup_after_filter_mirror_eperm_fix`
+  - standby VM `131` / `i-2-131-VM`:
+    - `state=Expunging`
+    - `removed=2026-06-04 22:39:50`
+    - `power_state=PowerOff`
+  - standby volumes `247`, `248`:
+    - `state=Expunged`
+    - `removed=2026-06-04 22:39:50`
+  - active `ftctl.*` details for VM `54` or `131`: `0`
+  - stale runtime/profile/debug files for `i-2-54-VM`, `i-2-131-VM`, and
+    `r97-link-01`: removed from the three hosts
+  - target Run75 standby RBD images removed:
+    - `0ad767dc-e5f2-4cca-bee3-517d7c14a2ec`
+    - `f6aced3f-ae77-4df1-9ca3-c1fc93c2fe04`
+- Final readiness:
+  - primary VM `54` / `i-2-54-VM`:
+    - DB state: `Running`
+    - host id: `3`
+    - power state: `PowerOn`
+    - libvirt state on `10.10.32.3`: `running`
+  - active protection rows for primary VM `54`: `0`
+  - active `r97-link-01-standby%` VM rows: `0`
+  - active `r97-link-01-standby%` volume rows: `0`
+  - primary QMP `query-block-jobs`: empty
+  - primary QMP `query-migrate`: empty
+  - `ablestack_vm_ftctl status --vm i-2-54-VM --json`: `not_found`
+- Next retest expectation:
+  - if the same QEMU signature repeats, `last_error` should now be
+    `xcolo_filter_mirror_send_eperm`
+  - debug evidence should include chardev query files and policy snapshots for
+    the post-migrate failure phase
