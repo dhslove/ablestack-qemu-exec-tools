@@ -3006,3 +3006,74 @@ but a lower-level signature or reached stage changed, set
   - FT reaches steady state, or
   - the attempt fails earlier as `xcolo_colo_chardev_contract_not_ready`, or
   - EPERM repeats but the report identifies the exact closed chardev edge.
+
+### Chardev Contract Gate Build Deploy Cleanup Readiness 2026-06-04
+
+- Source commit built and deployed:
+  - `1b0a581` (`fix: gate xcolo chardev contract readiness`)
+- Design and implementation:
+  - added `docs/ftctl/353-ft-xcolo-chardev-contract-gate-design-20260604.md`
+  - added QMP contract capture for:
+    - `primary m0 -> mirror0 -> secondary red0 -> f1`
+    - `secondary f2 -> red1 -> primary compare1 -> comp0`
+  - persisted report fields:
+    - `xcolo_chardev_contract_ready`
+    - `xcolo_chardev_contract_reason`
+    - `xcolo_chardev_contract_mirror_path`
+    - `xcolo_chardev_contract_compare_path`
+  - startup-active validation now briefly waits for the contract and either:
+    - reports `xcolo_colo_chardev_contract_not_ready`, or
+    - preserves `xcolo_filter_mirror_send_eperm` with contract details if QEMU
+      already reached the EPERM/invalid-message failure.
+- Local validation:
+  - `bash -n lib/ftctl/xcolo.sh`: passed
+  - `bash -n bin/ablestack_vm_ftctl_selftest.sh`: passed
+  - `git diff --check`: passed
+  - full selftest still stops at pre-existing shellcheck warnings
+  - focused harness for the Run76 chardev pattern passed:
+    - `ready=no`
+    - `mirror_path_primary_mirror0=present_closed`
+    - `compare_path_secondary_red1=present_closed`
+- GitHub Actions:
+  - run: `26958027782`
+  - workflow: `FTCTL Branch Development Release`
+  - result: success
+  - source commit: `1b0a581c9ead6593b77dea71120ced691d6871fd`
+  - RPM SHA256:
+    `72b044de2c2b7a0e50d00b0bafab159757267d5300caba0c223f1303d1c09604`
+- Deployment:
+  - RPM deployed to:
+    - `10.10.32.1`
+    - `10.10.32.2`
+    - `10.10.32.3`
+  - all hosts report:
+    - `ablestack_vm_ftctl-0.8.0-1.noarch`
+    - `ablestack-vm-ftctl.timer=active`
+    - `ablestack-vm-hangctl.timer=active`
+  - installed scripts contain:
+    - `ftctl_xcolo_capture_colo_chardev_contract`
+    - `xcolo_chardev_contract_ready`
+    - `xcolo_colo_chardev_contract_not_ready`
+- Run76 cleanup:
+  - protection row `76`: removed/disabled
+  - active protection rows for VM `54`: `0`
+  - active `ftctl.*` details for VM `54` or `132`: `0`
+  - active `r97-link-01-standby%` VM rows: `0`
+  - active `r97-link-01-standby%` volume rows: `0`
+  - standby VM `132` set to `Expunging`
+  - standby volumes `249`, `250` set to `Expunged`
+  - standby RBD images removed:
+    - `0214d02b-56c0-436d-9190-de9cef942696`
+    - `9b0ca780-1ee8-4856-b673-45fa7d6467b3`
+  - stale FTCTL runtime/profile/debug files for `i-2-54-VM`, `i-2-132-VM`,
+    and `r97-link-01` removed from the three hosts.
+- Final readiness:
+  - primary VM `54` / `i-2-54-VM` is `Running` on host `10.10.32.3`
+  - primary QMP `query-block-jobs`: empty
+  - primary QMP `query-migrate`: empty
+  - `ablestack_vm_ftctl status --vm i-2-54-VM --json`: `not_found`
+- Next test report must explicitly include:
+  - chardev contract gate result
+  - mirror path state
+  - compare path state
+  - whether a repeated EPERM signature is now narrowed by contract evidence.
