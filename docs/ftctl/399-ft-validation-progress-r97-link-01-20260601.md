@@ -3125,3 +3125,50 @@ but a lower-level signature or reached stage changed, set
   - if the next run fails at the pre-guest gate with closed chardev edges and
     no QEMU EPERM, the implementation improved failure containment and the next
     question is why QEMU keeps `mirror0` or `red1` closed before migrate
+
+### Pre-Guest Contract Gate Build Deploy Cleanup Readiness 2026-06-05
+
+- Source commit built and deployed:
+  - `8702f81` (`fix: gate xcolo before guest traffic`)
+- GitHub Actions:
+  - run: `26960622235`
+  - workflow: `FTCTL Branch Development Release`
+  - result: success
+  - source commit: `8702f81c3f1314217d2911e000b724c9c5389c98`
+  - RPM SHA256:
+    `51797527417397a6f160bfadce8297b3e923d9b5f591d9b7b93497f2277b763d`
+- Deployment:
+  - RPM deployed to:
+    - `10.10.32.1`
+    - `10.10.32.2`
+    - `10.10.32.3`
+  - all hosts report:
+    - `ablestack_vm_ftctl-0.8.0-1.noarch`
+    - `ablestack-vm-ftctl.timer=active`
+    - `ablestack-vm-hangctl.timer=active`
+  - installed scripts contain:
+    - `ftctl_xcolo_gate_before_guest_traffic`
+    - `xcolo_colo_chardev_contract_not_ready_before_guest_traffic`
+- Run77 cleanup:
+  - protection row `77`: removed/disabled
+  - active protection rows for VM `54`: `0`
+  - active `ftctl.*` details for VM `54` or `r97-link-01-standby%`: `0`
+  - active `r97-link-01-standby%` VM rows: `0`
+  - active `r97-link-01-standby%` volume rows: `0`
+  - standby VM `133` set to `Expunging`
+  - standby volumes `251`, `252` set to `Expunged`
+  - standby RBD images removed or confirmed absent:
+    - `2471d059-e967-48c6-82a8-f52157be4d7d`
+    - `3e8d93fb-2060-45f7-b4e9-796731bf8af2`
+  - stale FTCTL runtime/profile/debug files for `i-2-54-VM`, `i-2-133-VM`,
+    and `r97-link-01` removed from the three hosts.
+- Final readiness:
+  - primary VM `54` / `i-2-54-VM` is `Running` on host `10.10.32.3`
+  - primary QMP `query-block-jobs`: empty
+  - primary QMP `query-migrate`: empty
+  - `ablestack_vm_ftctl status --vm i-2-54-VM --json`: `not_found`
+- Next test report must explicitly include:
+  - `xcolo_pre_guest_traffic_gate`
+  - `xcolo_pre_guest_traffic_gate_reason`
+  - `xcolo_pre_guest_traffic_contract_chardev_contract_ready`
+  - whether QEMU EPERM appears before or after the pre-guest gate
