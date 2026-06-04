@@ -2045,3 +2045,62 @@ but a lower-level signature or reached stage changed, set
     - `post_filter_activation`
     - `role_transition_pre_activation_timeout`
     - `filter_activation_command`
+
+### Run 70 Result 2026-06-04
+
+- Trigger:
+  - user started FT protection registration after Run 70 readiness cleanup
+- Evidence:
+  - monitor log:
+    `/home/ablecloud/work/ft-run70-monitor-20260604-125517.log`
+  - final evidence:
+    `/home/ablecloud/work/ft-run70-final-20260604-125757`
+- Final state:
+  - protection row: `70`
+  - standby VM: `126` / `i-2-126-VM`
+  - `protection_state=error`
+  - `transport_state=failed`
+  - `active_side=primary`
+  - `last_error=xcolo_filter_activation_broke_colo_stream`
+- Progress confirmed:
+  - the new phase split worked
+  - pre-activation state:
+    - `xcolo_primary_filter_status_pre_activation=off`
+    - `xcolo_post_migrate_pre_activation_primary_migrate_status=active`
+    - `xcolo_post_migrate_pre_activation_secondary_migrate_status=active`
+    - `xcolo_post_migrate_pre_activation_primary_colo_mode=none`
+    - `xcolo_post_migrate_pre_activation_secondary_colo_mode=none`
+    - `xcolo_post_migrate_pre_activation_invalid_message=no`
+    - `xcolo_socket_post_migrate_pre_activation_primary_9998=established`
+  - post-activation state:
+    - `xcolo_primary_filter_status_post_activation=on`
+    - `xcolo_post_migrate_post_activation_primary_migrate_status=failed`
+    - `xcolo_post_migrate_post_activation_secondary_migrate_status=colo`
+    - `xcolo_post_migrate_post_activation_primary_colo_mode=none`
+    - `xcolo_post_migrate_post_activation_secondary_colo_mode=secondary`
+    - `xcolo_post_migrate_post_activation_invalid_message=yes`
+    - `xcolo_protocol_failure_phase=post_filter_activation`
+- QEMU log evidence:
+  - primary:
+    - `Received invalid message 0x0000 length 0x0000`
+  - secondary:
+    - `Can't receive COLO message: Input/output error`
+- Repetition control:
+  - this is not an unclassified repetition
+  - the failure moved from generic repeated invalid message to a classified
+    post-filter-activation failure
+  - checkpoint, storage symmetry, firewall, socket preflight, and migration
+    pre-activation stream establishment are not the next active hypothesis
+- Next improvement direction:
+  - focus on primary filter activation semantics after migration
+  - specifically inspect whether `redire0`, `redire1`, and `m0` are being
+    activated in the wrong order for this qemu-ablestack COLO path, or whether
+    activation must be staged around a primary COLO role transition signal
+  - the next code change must not return to storage/firewall/checkpoint
+    precondition loops unless this post-activation diagnosis regresses
+- Cleanup note:
+  - Run 70 garbage remains at this point:
+    - active protection row `70`
+    - standby VM `i-2-126-VM`
+    - standby volumes and RBD images created for Run 70
+  - cleanup is required before the next retest
