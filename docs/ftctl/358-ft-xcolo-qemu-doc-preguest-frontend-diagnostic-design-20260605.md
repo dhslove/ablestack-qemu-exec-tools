@@ -1,5 +1,11 @@
 # FT XCOLO QEMU Doc Pre-Guest Frontend Diagnostic Design - 2026-06-05
 
+> Superseded by
+> `360-ft-xcolo-frontend-hard-gate-and-cloud-managed-runtime-reconcile-design-20260605.md`.
+> Run 82 proved that allowing `present_closed` as diagnostic-only evidence lets
+> FTCTL issue `migrate` even though the COLO guest traffic frontend is not
+> usable. The current rule is now a hard pre-migrate frontend contract.
+
 ## Problem
 
 Run 81 proved that the previous stable RBD fix worked:

@@ -3412,6 +3412,48 @@ but a lower-level signature or reached stage changed, set
   - `ablestack_vm_ftctl status --vm i-2-54-VM --json` returned `not_found`
   - the removed standby RBD images now return `No such file or directory`
 
+### Run 82 Async Protect Frontend Contract Failure 2026-06-05
+
+- Source state before the fix:
+  - qemu source commit: `f145a8f`
+  - Cloud async protect had already accepted the long-running FT job.
+- Observed state:
+  - protection row: `82`
+  - primary VM: `54` / `i-2-54-VM`
+  - standby VM: `138` / `i-2-138-VM`
+  - final FTCTL state: `protection_state=error`, `transport_state=failed`
+  - last error: `xcolo_filter_mirror_send_eperm`
+- Repeated symptom family:
+  - primary QEMU reported `Received invalid message 0x0000 length 0x0000`
+  - secondary QEMU reported `Can't receive COLO message: Input/output error`
+  - this is the same visible protocol family as earlier runs, so it must be
+    treated as repeated unless the phase evidence changes.
+- New decisive evidence:
+  - socket reachability passed for the COLO ports
+  - topology, storage symmetry, RBD contract, firewall, and QEMU document
+    topology gates passed
+  - the actual guest traffic frontend contract was already closed before
+    migrate:
+    - `primary mirror0=present_closed`
+    - `secondary red1=present_closed`
+  - the previous diagnostic-only rule allowed `migrate` despite that contract
+    failure.
+- Cloud runtime mismatch:
+  - Cloud DB showed standby VM `i-2-138-VM` as `Running` on host `1`
+  - host `10.10.32.1` libvirt reported `failed to get domain 'i-2-138-VM'`
+  - code inspection showed qemu recovery called standby deactivate, which used
+    `virsh destroy` and `virsh undefine` on the secondary side.
+- Corrected design:
+  - `docs/ftctl/360-ft-xcolo-frontend-hard-gate-and-cloud-managed-runtime-reconcile-design-20260605.md`
+- Code direction:
+  - fail before `primary.migrate` unless primary `mirror0`, primary `compare1`,
+    secondary `red0`, and secondary `red1` are all `present_open`
+  - classify this as `last_error=xcolo_pre_migrate_frontend_not_open`
+  - keep socket/firewall checks as separate transport diagnostics
+  - for cloud-managed FT standby recovery, do not run generic undefine cleanup;
+    restore or start from `standby_xml_seed` and verify libvirt runtime exists
+    so Cloud DB `Running` does not silently diverge from host runtime state
+
 ### Cloud Timeout Structural Fix 2026-06-05
 
 - New failure symptom:

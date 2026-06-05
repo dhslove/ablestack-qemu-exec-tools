@@ -2104,30 +2104,36 @@ ftctl_xcolo_gate_before_guest_traffic() {
   [[ -n "${contract_reason}" ]] || contract_reason="$(ftctl_state_get "${vm}" "xcolo_chardev_contract_reason" 2>/dev/null || true)"
   doc_topology="$(ftctl_state_get "${vm}" "xcolo_qemu_doc_topology" 2>/dev/null || true)"
 
-  if [[ "${doc_topology}" == "ok" && "${contract_reason}" == *"present_closed"* ]]; then
-    frontend_contract="diagnostic_closed"
+  frontend_contract="${contract_ready:-unknown}"
+  if [[ "${contract_ready}" != "yes" ]]; then
+    if [[ "${contract_reason}" == *"present_closed"* ]]; then
+      frontend_contract="closed"
+    fi
     ftctl_state_set "${vm}" \
-      "xcolo_qemu_doc_runtime_frontend=diagnostic_closed" \
+      "xcolo_qemu_doc_runtime_frontend=${frontend_contract}" \
       "xcolo_qemu_doc_runtime_frontend_reason=${contract_reason}" \
-      "xcolo_pre_guest_traffic_frontend_contract=diagnostic_closed" \
-      "xcolo_pre_guest_traffic_frontend_contract_reason=${contract_reason}"
-  else
-    frontend_contract="${contract_ready:-unknown}"
+      "xcolo_pre_guest_traffic_frontend_contract=${frontend_contract}" \
+      "xcolo_pre_guest_traffic_frontend_contract_reason=${contract_reason}" \
+      "xcolo_pre_guest_traffic_gate=failed" \
+      "xcolo_pre_guest_traffic_gate_reason=${contract_reason}" \
+      "xcolo_pre_guest_traffic_gate_primary_status=${primary_status}" \
+      "xcolo_pre_guest_traffic_gate_policy=qemu_doc_frontend_hard_contract" \
+      "xcolo_pre_guest_traffic_chardev_contract=${contract_ready:-unknown}" \
+      "xcolo_protocol_failure_phase=pre_guest_traffic_contract" \
+      "last_error=xcolo_pre_migrate_frontend_not_open"
+    ftctl_log_event "colo" "xcolo.guest_traffic_gate" "fail" "${vm}" "" \
+      "phase=pre_guest_traffic policy=qemu_doc_frontend_hard_contract frontend_contract=${frontend_contract} contract=${contract_ready:-unknown} reason=${contract_reason} primary_status=${primary_status} doc_topology=${doc_topology:-unknown}"
+    return 1
   fi
 
   ftctl_state_set "${vm}" \
     "xcolo_pre_guest_traffic_gate=ready" \
     "xcolo_pre_guest_traffic_gate_reason=${contract_reason}" \
     "xcolo_pre_guest_traffic_gate_primary_status=${primary_status}" \
-    "xcolo_pre_guest_traffic_gate_policy=qemu_doc_topology_socket" \
+    "xcolo_pre_guest_traffic_gate_policy=qemu_doc_frontend_hard_contract" \
     "xcolo_pre_guest_traffic_chardev_contract=${contract_ready:-unknown}"
-  if [[ "${frontend_contract}" == "diagnostic_closed" ]]; then
-    ftctl_log_event "colo" "xcolo.guest_traffic_gate" "warn" "${vm}" "" \
-      "phase=pre_guest_traffic policy=qemu_doc_topology_socket frontend_contract=diagnostic_closed reason=${contract_reason} primary_status=${primary_status} doc_topology=${doc_topology:-unknown}"
-  else
-    ftctl_log_event "colo" "xcolo.guest_traffic_gate" "ok" "${vm}" "" \
-      "phase=pre_guest_traffic policy=qemu_doc_topology_socket contract=${contract_ready:-unknown} primary_status=${primary_status}"
-  fi
+  ftctl_log_event "colo" "xcolo.guest_traffic_gate" "ok" "${vm}" "" \
+    "phase=pre_guest_traffic policy=qemu_doc_frontend_hard_contract contract=${contract_ready:-unknown} primary_status=${primary_status}"
   return 0
 }
 
@@ -3599,6 +3605,7 @@ ftctl_xcolo_prebuilt_primary_stage() {
   ftctl_xcolo_require_checkpoint_delay_before_migrate "${vm}" || return 1
   ftctl_xcolo_record_pre_migrate_evidence "${vm}" "on" || true
   ftctl_xcolo_preflight_firewall_contract "${vm}" || return 1
+  ftctl_xcolo_gate_before_guest_traffic "${vm}" "${vm}" || return 1
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
     "{\"execute\":\"migrate\",\"arguments\":{\"uri\":\"${FTCTL_PROFILE_XCOLO_MIGRATE_URI}\"}}" \
     "colo" "primary.migrate" || return 1
