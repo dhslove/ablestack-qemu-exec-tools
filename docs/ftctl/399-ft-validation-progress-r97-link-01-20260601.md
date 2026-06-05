@@ -3447,3 +3447,50 @@ but a lower-level signature or reached stage changed, set
   - classify QMP `Node ... is busy` failures as
     `last_error=xcolo_block_graph_busy` rather than folding them into protocol
     invalid-message failures
+
+### Stable RBD Contract Build And Retest Readiness 2026-06-05
+
+- Source commit for deployed code:
+  - `d7bd2c99a74d54f8913ea5d7831c329b6f6f4904`
+  - `fix: enforce stable rbd contract for xcolo`
+- Build:
+  - GitHub Actions run: `26996870710`
+  - workflow conclusion: `success`
+  - deployed RPM artifact:
+    - `ablestack_vm_ftctl-0.8.0-1.noarch.rpm`
+    - SHA256:
+      `3c252d71a7be1fe259d63a89d36e78740fd49d65248fa512e8521fe7aaeb031a`
+- Deployment:
+  - deployed to `10.10.32.1`, `10.10.32.2`, and `10.10.32.3`
+  - installation used 32.x administrator wrapper:
+    `aspkg -Uvh --replacepkgs`
+  - verified installed script markers on all three hosts:
+    - `xcolo_rbd_contract_ready`
+    - `xcolo_primary_listener_bootstrap`
+    - `xcolo_block_graph_busy`
+  - verified the removed XML rewrite helper is absent:
+    - `ftctl_xcolo_rewrite_disk_source_for_runtime`
+  - verified timers active on all three hosts:
+    - `ablestack-vm-ftctl.timer`
+    - `ablestack-vm-hangctl.timer`
+- Cleanup after Run 80:
+  - removed active protection row `80` by marking it disabled/stopped/removed
+    with `last_error=test_cleanup_after_stable_rbd_listener_bootstrap_fix`
+  - removed `ftctl.*` VM details for primary VM `54` and standby VM `136`
+  - marked standby VM `136` (`i-2-136-VM`) as `Expunging`
+  - marked standby volumes `257` and `258` as `Expunged`
+  - removed standby RBD images:
+    - `rbd/74101fa6-d0c0-4ad0-b0cc-8a7c0cd18851`
+    - `rbd/444da800-5898-406e-8592-87bc64ff36fe`
+  - removed stale FTCTL runtime/profile/debug files for `i-2-54-VM`,
+    `i-2-136-VM`, and `r97-link-01` from the 32.x hosts
+- Final readiness verification:
+  - active protection rows for primary VM `54`: `0`
+  - active `ftctl.*` details for `r97-link-01`: `0`
+  - active standby VM rows: `0`
+  - active standby volumes: `0`
+  - primary VM `i-2-54-VM` is `running` on `10.10.32.3`
+  - primary QMP `query-block-jobs` returned an empty list
+  - primary QMP `query-migrate` returned an empty object
+  - `ablestack_vm_ftctl status --vm i-2-54-VM --json` returned `not_found`
+  - the removed standby RBD images now return `No such file or directory`
