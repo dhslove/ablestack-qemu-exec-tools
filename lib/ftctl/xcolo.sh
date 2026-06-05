@@ -122,6 +122,14 @@ PY
     fi
   fi
   if [[ "${rc}" != "0" || "${has_error}" == "1" ]]; then
+    if [[ "${error_desc}" == *"Node '"* && "${error_desc}" == *" is busy"* ]]; then
+      ftctl_state_set "${vm}" \
+        "xcolo_block_graph_busy=yes" \
+        "xcolo_block_graph_busy_event=${event}" \
+        "xcolo_block_graph_busy_desc=${error_desc}" \
+        "xcolo_protocol_failure_phase=block_graph_busy" \
+        "last_error=xcolo_block_graph_busy"
+    fi
     ftctl_log_event "${stage}" "${event}" "fail" "${vm}" "${rc}" "uri=${uri} desc=${error_desc:-qmp_error}"
     [[ "${rc}" == "0" ]] && rc=1
     return "${rc}"
@@ -3826,8 +3834,9 @@ ftctl_xcolo_build_primary_qemu_args() {
   esac
 
   # Keep the primary COLO network topology in the generated QEMU startup
-  # commandline. QMP remains a fallback only when startup markers are absent.
-  printf '%s\n' "-S;-chardev;socket,id=mirror0,host=0.0.0.0,port=${mirror_port},server=on,wait=${mirror_wait};-chardev;socket,id=compare1,host=0.0.0.0,port=${compare_port},server=on,wait=${compare_wait};-chardev;socket,id=compare0,host=127.0.0.1,port=${compare_local_port},server=on,wait=off;-chardev;socket,id=compare0-0,host=127.0.0.1,port=${compare_local_port};-chardev;socket,id=compare_out,host=127.0.0.1,port=${compare_out_port},server=on,wait=off;-chardev;socket,id=compare_out0,host=127.0.0.1,port=${compare_out_port};-object;filter-mirror,id=m0,netdev=${netdev_id},queue=tx,outdev=mirror0,insert=behind,position=tail${vnet_hdr_arg};-object;filter-redirector,id=redire0,netdev=${netdev_id},queue=rx,indev=compare_out,insert=behind,position=tail${vnet_hdr_arg};-object;filter-redirector,id=redire1,netdev=${netdev_id},queue=rx,outdev=compare0,insert=behind,position=tail${vnet_hdr_arg};-object;colo-compare,id=comp0,primary_in=compare0-0,secondary_in=compare1,outdev=compare_out0,iothread=iothread1${vnet_hdr_arg}"
+  # commandline. The compare listener is emitted before mirror0 so secondary
+  # red1 has a listener before the primary blocks at mirror0 wait=on.
+  printf '%s\n' "-S;-chardev;socket,id=compare1,host=0.0.0.0,port=${compare_port},server=on,wait=${compare_wait};-chardev;socket,id=compare0,host=127.0.0.1,port=${compare_local_port},server=on,wait=off;-chardev;socket,id=compare0-0,host=127.0.0.1,port=${compare_local_port};-chardev;socket,id=compare_out,host=127.0.0.1,port=${compare_out_port},server=on,wait=off;-chardev;socket,id=compare_out0,host=127.0.0.1,port=${compare_out_port};-chardev;socket,id=mirror0,host=0.0.0.0,port=${mirror_port},server=on,wait=${mirror_wait};-object;filter-mirror,id=m0,netdev=${netdev_id},queue=tx,outdev=mirror0,insert=behind,position=tail${vnet_hdr_arg};-object;filter-redirector,id=redire0,netdev=${netdev_id},queue=rx,indev=compare_out,insert=behind,position=tail${vnet_hdr_arg};-object;filter-redirector,id=redire1,netdev=${netdev_id},queue=rx,outdev=compare0,insert=behind,position=tail${vnet_hdr_arg};-object;colo-compare,id=comp0,primary_in=compare0-0,secondary_in=compare1,outdev=compare_out0,iothread=iothread1${vnet_hdr_arg}"
 }
 
 ftctl_xcolo_build_secondary_qemu_args() {
@@ -6306,9 +6315,9 @@ ftctl_xcolo_start_primary_generated_async() {
 ftctl_xcolo_wait_primary_generated_listeners() {
   local vm="${1-}"
   local handle="${2-}"
-  local timeout_sec mirror_port compare_port compare_wait i
+  local timeout_sec mirror_port compare_port compare_local_port compare_out_port mirror_wait compare_wait i
   local pid="" rc_file="" out_file="" err_file="" tmp_dir=""
-  local create_rc
+  local create_rc ready_reason
 
   IFS='|' read -r pid rc_file out_file err_file tmp_dir <<< "${handle}"
   : "${pid}${out_file}${err_file}${tmp_dir}"
@@ -6319,16 +6328,39 @@ ftctl_xcolo_wait_primary_generated_listeners() {
   timeout_sec="$(ftctl_xcolo_domain_create_timeout_sec)"
   mirror_port="${FTCTL_XCOLO_MIRROR_PORT:-9003}"
   compare_port="${FTCTL_XCOLO_COMPARE_PORT:-9004}"
+  compare_local_port="${FTCTL_XCOLO_COMPARE_LOCAL_PORT:-9001}"
+  compare_out_port="${FTCTL_XCOLO_COMPARE_OUT_PORT:-9005}"
+  mirror_wait="${FTCTL_XCOLO_MIRROR_WAIT:-on}"
   compare_wait="${FTCTL_XCOLO_COMPARE_WAIT:-on}"
+  case "${mirror_wait}" in
+    on|off) ;;
+    *) mirror_wait="on" ;;
+  esac
   case "${compare_wait}" in
     on|off) ;;
     *) compare_wait="on" ;;
   esac
   for ((i=0; i<timeout_sec; i++)); do
-    if ftctl_xcolo_local_tcp_listen_port_ready "${mirror_port}" &&
-       { [[ "${compare_wait}" == "on" ]] || ftctl_xcolo_local_tcp_listen_port_ready "${compare_port}"; }; then
+    ready_reason=""
+    if [[ "${compare_wait}" == "on" && "${mirror_wait}" == "on" ]]; then
+      if ftctl_xcolo_local_tcp_listen_port_ready "${compare_port}"; then
+        ready_reason="compare_bootstrap"
+      fi
+    elif [[ "${mirror_wait}" == "on" ]]; then
+      if ftctl_xcolo_local_tcp_listen_port_ready "${mirror_port}"; then
+        ready_reason="mirror_bootstrap"
+      fi
+    elif ftctl_xcolo_local_tcp_listen_port_ready "${mirror_port}" &&
+         { [[ "${compare_wait}" == "on" ]] || ftctl_xcolo_local_tcp_listen_port_ready "${compare_port}"; }; then
+      ready_reason="mirror_listener"
+    fi
+    if [[ -n "${ready_reason}" ]]; then
+      ftctl_state_set "${vm}" \
+        "xcolo_primary_listener_bootstrap=${ready_reason}" \
+        "xcolo_primary_listener_bootstrap_mirror_wait=${mirror_wait}" \
+        "xcolo_primary_listener_bootstrap_compare_wait=${compare_wait}"
       ftctl_log_event "colo" "primary.create_generated.listeners" "ok" "${vm}" "" \
-        "mirror_port=${mirror_port} compare_port=${compare_port} compare_wait=${compare_wait}"
+        "reason=${ready_reason} mirror_port=${mirror_port} compare_port=${compare_port} compare_local_port=${compare_local_port} compare_out_port=${compare_out_port} mirror_wait=${mirror_wait} compare_wait=${compare_wait}"
       return 0
     fi
     if ftctl_xcolo_primary_create_async_done "${handle}"; then
@@ -6342,7 +6374,7 @@ ftctl_xcolo_wait_primary_generated_listeners() {
     sleep 1
   done
   ftctl_log_event "colo" "primary.create_generated.listeners" "fail" "${vm}" "" \
-    "reason=timeout mirror_port=${mirror_port} compare_port=${compare_port} compare_wait=${compare_wait} log_dir=${tmp_dir}"
+    "reason=timeout mirror_port=${mirror_port} compare_port=${compare_port} compare_local_port=${compare_local_port} compare_out_port=${compare_out_port} mirror_wait=${mirror_wait} compare_wait=${compare_wait} log_dir=${tmp_dir}"
   return 1
 }
 
@@ -6480,58 +6512,6 @@ ftctl_xcolo_rollback_block_primary_create_failure() {
   ftctl_log_event "colo" "block_conversion.rollback" "ok" "${vm}" "" "cause=${reason}"
 }
 
-ftctl_xcolo_rewrite_disk_source_for_runtime() {
-  local xml_path="${1-}"
-  local target="${2-}"
-  local runtime_path="${3-}"
-
-  command -v python3 >/dev/null 2>&1 || {
-    echo "ERROR: python3 is required for secondary runtime XML rewrite" >&2
-    return 2
-  }
-  [[ -n "${xml_path}" && -f "${xml_path}" && -n "${target}" && -n "${runtime_path}" ]] || return 2
-
-  XML_PATH="${xml_path}" DISK_TARGET="${target}" RUNTIME_PATH="${runtime_path}" python3 - <<'PY'
-import os
-import sys
-import xml.etree.ElementTree as ET
-
-xml_path = os.environ["XML_PATH"]
-disk_target = os.environ["DISK_TARGET"]
-runtime_path = os.environ["RUNTIME_PATH"]
-
-tree = ET.parse(xml_path)
-root = tree.getroot()
-devices = root.find("devices")
-if devices is None:
-    print("missing devices", file=sys.stderr)
-    raise SystemExit(2)
-
-rewritten = False
-for disk in devices.findall("disk"):
-    if disk.get("device") != "disk":
-        continue
-    target = disk.find("target")
-    if target is None or target.get("dev") != disk_target:
-        continue
-    source = disk.find("source")
-    if source is None:
-        source = ET.Element("source")
-        disk.insert(1, source)
-    disk.set("type", "block")
-    source.attrib.clear()
-    source.set("dev", runtime_path)
-    rewritten = True
-    break
-
-if not rewritten:
-    print(f"disk target not found: {disk_target}", file=sys.stderr)
-    raise SystemExit(2)
-
-tree.write(xml_path, encoding="unicode")
-PY
-}
-
 ftctl_xcolo_prepare_secondary_runtime_rbd_disk() {
   local vm="${1-}"
   local xml_path="${2-}"
@@ -6584,6 +6564,10 @@ if [[ -z "\${runtime_device}" || ! -b "\${runtime_device}" ]]; then
   echo "runtime_rbd_device_missing:\${target}:\${dest}:device=\${runtime_device}" >&2
   exit 99
 fi
+if [[ ! -b "\${dest}" ]]; then
+  echo "runtime_rbd_stable_path_missing:\${target}:\${dest}:device=\${runtime_device}" >&2
+  exit 100
+fi
 printf '%s|%s|%s|%s\n' "\${target}" "\${dest}" "\${runtime_device}" "\${mapped_by_ftctl}"
 EOF
 )"
@@ -6599,6 +6583,9 @@ EOF
         ;;
       runtime_rbd_device_missing:*)
         ftctl_state_set "${vm}" "last_error=xcolo_secondary_runtime_rbd_device_missing:${target}"
+        ;;
+      runtime_rbd_stable_path_missing:*)
+        ftctl_state_set "${vm}" "last_error=xcolo_secondary_runtime_rbd_stable_path_missing:${target}"
         ;;
       *)
         ftctl_state_set "${vm}" "last_error=xcolo_secondary_runtime_rbd_prepare_failed:${target}"
@@ -6618,20 +6605,15 @@ EOF
     return 1
   fi
 
-  ftctl_xcolo_rewrite_disk_source_for_runtime "${xml_path}" "${target}" "${runtime_device}" || {
-    ftctl_state_set "${vm}" "last_error=xcolo_secondary_runtime_xml_rewrite_failed:${target}"
-    ftctl_log_event "colo" "block_conversion.secondary_runtime_xml_rewrite" "fail" "${vm}" "" \
-      "target=${target} runtime_device=${runtime_device} path=${xml_path}"
-    return 1
-  }
-
   suffix="$(ftctl_xcolo_disk_suffix "${target}")"
   state_key="xcolo_secondary_runtime_rbd_${suffix}"
   ftctl_state_set "${vm}" \
     "${state_key}=${secondary_dest}|${runtime_device}|${mapped_by_ftctl}" \
+    "xcolo_secondary_runtime_rbd_stable_${suffix}=${secondary_dest}" \
+    "xcolo_secondary_runtime_rbd_resolved_${suffix}=${runtime_device}" \
     "xcolo_secondary_runtime_rbd_prepared=true"
   ftctl_log_event "colo" "block_conversion.secondary_runtime_rbd_prepare" "ok" "${vm}" "" \
-    "target=${target} dest=${secondary_dest} runtime_device=${runtime_device} mapped_by_ftctl=${mapped_by_ftctl}"
+    "target=${target} stable_path=${secondary_dest} resolved_device=${runtime_device} mapped_by_ftctl=${mapped_by_ftctl}"
 }
 
 ftctl_xcolo_prepare_secondary_runtime_rbd() {
@@ -6660,6 +6642,85 @@ ftctl_xcolo_prepare_secondary_runtime_rbd() {
   done
 }
 
+ftctl_xcolo_verify_stable_rbd_contract() {
+  local vm="${1-}"
+  local disk_plan="${2-}"
+  local phase="${3:-runtime}"
+  local phase_key entry rest target primary_source primary_format primary_dtype secondary_dest
+  local host="" user="" map_msg="" ready="yes" reason="" suffix
+  local -a entries=() state_args=()
+
+  [[ -n "${vm}" && -n "${disk_plan}" ]] || return 0
+  phase_key="$(printf '%s' "${phase}" | tr -c 'A-Za-z0-9_' '_' | sed 's/_*$//')"
+  [[ -n "${phase_key}" ]] || phase_key="runtime"
+
+  IFS=';' read -r -a entries <<< "${disk_plan}"
+  for entry in "${entries[@]}"; do
+    [[ -n "${entry}" ]] || continue
+    target="${entry%%|*}"
+    rest="${entry#*|}"
+    primary_source="${rest%%|*}"
+    rest="${rest#*|}"
+    primary_format="${rest%%|*}"
+    rest="${rest#*|}"
+    primary_dtype="${rest%%|*}"
+    secondary_dest="${rest#*|}"
+    : "${primary_format}${primary_dtype}"
+    suffix="$(ftctl_xcolo_disk_suffix "${target}")"
+
+    if ftctl_blockcopy_is_krbd_path "${primary_source}"; then
+      map_msg="$(ftctl_blockcopy_krbd_map_local "${primary_source}" 2>&1)" || {
+        ready="no"
+        reason="${reason:+${reason},}primary_${target}_stable_rbd_unmapped"
+        state_args+=("xcolo_${phase_key}_rbd_primary_${suffix}=fail:${primary_source}")
+        ftctl_log_event "colo" "xcolo.rbd_contract.primary" "fail" "${vm}" "" \
+          "phase=${phase} target=${target} stable_path=${primary_source} error=$(ftctl_xcolo_compact_log_value "${map_msg}")"
+        continue
+      }
+      state_args+=("xcolo_${phase_key}_rbd_primary_${suffix}=ok:${primary_source}")
+    fi
+
+    if ftctl_blockcopy_is_krbd_path "${secondary_dest}"; then
+      if [[ -z "${host}" ]]; then
+        ftctl_blockcopy_remote_target_host_user host user || {
+          ready="no"
+          reason="${reason:+${reason},}secondary_host_unresolved"
+          state_args+=("xcolo_${phase_key}_rbd_secondary_${suffix}=fail:${secondary_dest}")
+          continue
+        }
+      fi
+      map_msg="$(ftctl_blockcopy_map_remote_krbd_path "${host}" "${user}" "${secondary_dest}" 2>&1)" || {
+        ready="no"
+        reason="${reason:+${reason},}secondary_${target}_stable_rbd_unmapped"
+        state_args+=("xcolo_${phase_key}_rbd_secondary_${suffix}=fail:${secondary_dest}")
+        ftctl_log_event "colo" "xcolo.rbd_contract.secondary" "fail" "${vm}" "" \
+          "phase=${phase} target=${target} stable_path=${secondary_dest} error=$(ftctl_xcolo_compact_log_value "${map_msg}")"
+        continue
+      }
+      state_args+=("xcolo_${phase_key}_rbd_secondary_${suffix}=ok:${secondary_dest}")
+    fi
+  done
+
+  [[ -n "${reason}" ]] || reason=""
+  state_args+=(
+    "xcolo_${phase_key}_rbd_contract_ready=${ready}"
+    "xcolo_${phase_key}_rbd_contract_reason=${reason}"
+    "xcolo_rbd_contract_last_phase=${phase}"
+    "xcolo_rbd_contract_ready=${ready}"
+    "xcolo_rbd_contract_reason=${reason}"
+  )
+  if [[ "${ready}" != "yes" ]]; then
+    state_args+=(
+      "xcolo_protocol_failure_phase=rbd_stable_path_contract"
+      "last_error=xcolo_rbd_stable_path_unmapped"
+    )
+  fi
+  ftctl_state_set "${vm}" "${state_args[@]}"
+  ftctl_log_event "colo" "xcolo.rbd_contract" "$( [[ "${ready}" == "yes" ]] && printf ok || printf fail )" "${vm}" "" \
+    "phase=${phase} reason=${reason}"
+  [[ "${ready}" == "yes" ]]
+}
+
 ftctl_xcolo_secondary_runtime_disk_source() {
   local vm="${1-}"
   local target="${2-}"
@@ -6670,9 +6731,9 @@ ftctl_xcolo_secondary_runtime_disk_source() {
   value="$(ftctl_state_get "${vm}" "xcolo_secondary_runtime_rbd_${suffix}" 2>/dev/null || true)"
   if [[ -n "${value}" ]]; then
     IFS='|' read -r runtime_dest runtime_device mapped_by_ftctl <<< "${value}"
-    : "${runtime_dest}${mapped_by_ftctl}"
-    if [[ -n "${runtime_device}" ]]; then
-      printf '%s\n' "${runtime_device}"
+    : "${runtime_device}${mapped_by_ftctl}"
+    if [[ -n "${runtime_dest}" ]]; then
+      printf '%s\n' "${runtime_dest}"
       return 0
     fi
   fi
@@ -6704,7 +6765,7 @@ ftctl_xcolo_unmap_secondary_runtime_rbd() {
         break
       }
     fi
-    printf -v q_device '%q' "${runtime_device}"
+    printf -v q_device '%q' "${dest}"
     remote_cmd="$(cat <<EOF
 set -euo pipefail
 device=${q_device}
@@ -6720,10 +6781,10 @@ EOF
     ftctl_blockcopy_remote_exec "${host}" "${user}" out err rc "${remote_cmd}" || true
     if [[ "${rc}" == "0" ]]; then
       ftctl_log_event "colo" "block_conversion.secondary_runtime_rbd_unmap" "ok" "${vm}" "" \
-        "key=${key} device=${runtime_device}"
+        "key=${key} stable_path=${dest} resolved_device=${runtime_device}"
     else
       ftctl_log_event "colo" "block_conversion.secondary_runtime_rbd_unmap" "fail" "${vm}" "${rc}" \
-        "key=${key} device=${runtime_device} error=$(printf '%s %s' "${out}" "${err}" | tr '\n' ' ' | cut -c1-220)"
+        "key=${key} stable_path=${dest} resolved_device=${runtime_device} error=$(printf '%s %s' "${out}" "${err}" | tr '\n' ' ' | cut -c1-220)"
       unmap_failed=1
     fi
   done < "${state_path}"
@@ -6763,6 +6824,16 @@ ftctl_xcolo_execute_block_cold_conversion() {
 
   ftctl_state_set "${vm}" "conversion_stage=primary_stopped"
   ftctl_log_event "colo" "block_conversion.primary_stop" "ok" "${vm}" "" ""
+
+  ftctl_xcolo_verify_stable_rbd_contract "${vm}" "${disk_plan}" "after_primary_stop" || {
+    ftctl_xcolo_rollback_block_primary_create_failure "${vm}" "xcolo_rbd_stable_path_unmapped" || true
+    ftctl_state_set "${vm}" \
+      "conversion_state=error" \
+      "protection_state=error" \
+      "transport_state=failed" \
+      "xcolo_last_runtime_error=xcolo_rbd_stable_path_unmapped"
+    return 1
+  }
 
   ftctl_state_set "${vm}" "conversion_stage=baseline_seeding"
   IFS=';' read -r -a disk_entries <<< "${disk_plan}"
@@ -6814,6 +6885,16 @@ ftctl_xcolo_execute_block_cold_conversion() {
   }
   ftctl_state_set "${vm}" "conversion_stage=secondary_runtime_rbd_prepared"
 
+  ftctl_xcolo_verify_stable_rbd_contract "${vm}" "${disk_plan}" "before_primary_create" || {
+    ftctl_xcolo_rollback_block_primary_create_failure "${vm}" "xcolo_rbd_stable_path_unmapped" || true
+    ftctl_state_set "${vm}" \
+      "conversion_state=error" \
+      "protection_state=error" \
+      "transport_state=failed" \
+      "xcolo_last_runtime_error=xcolo_rbd_stable_path_unmapped"
+    return 1
+  }
+
   ftctl_log_event "colo" "block_conversion.primary_create" "ok" "${vm}" "" \
     "path=${primary_generated_xml}"
   primary_create_handle=""
@@ -6834,6 +6915,17 @@ ftctl_xcolo_execute_block_cold_conversion() {
     return 1
   }
   ftctl_state_set "${vm}" "conversion_stage=primary_listening"
+
+  ftctl_xcolo_verify_stable_rbd_contract "${vm}" "${disk_plan}" "before_secondary_create" || {
+    ftctl_xcolo_abort_primary_generated_async "${vm}" "${primary_create_handle}"
+    ftctl_xcolo_rollback_block_primary_create_failure "${vm}" "xcolo_rbd_stable_path_unmapped" || true
+    ftctl_state_set "${vm}" \
+      "conversion_state=error" \
+      "protection_state=error" \
+      "transport_state=failed" \
+      "xcolo_last_runtime_error=xcolo_rbd_stable_path_unmapped"
+    return 1
+  }
 
   ftctl_log_event "colo" "block_conversion.secondary_create" "ok" "${vm}" "" \
     "path=${standby_generated_xml}"
@@ -6980,6 +7072,16 @@ ftctl_xcolo_execute_block_cold_conversion() {
     ftctl_log_event "colo" "block_conversion.primary_attach" "skip" "${vm}" "" \
       "target=${target} base=${primary_base_node} qdev=${primary_qdev} reason=await_remote_nbd"
   done
+
+  ftctl_xcolo_verify_stable_rbd_contract "${vm}" "${disk_plan}" "before_migrate" || {
+    ftctl_xcolo_rollback_block_primary_create_failure "${vm}" "xcolo_rbd_stable_path_unmapped" || true
+    ftctl_state_set "${vm}" \
+      "conversion_state=error" \
+      "protection_state=error" \
+      "transport_state=failed" \
+      "xcolo_last_runtime_error=xcolo_rbd_stable_path_unmapped"
+    return 1
+  }
 
   ftctl_xcolo_execute_handshake_with_disk_plan "${vm}" "${secondary_vm}" "${disk_plan}" || {
     local handshake_error

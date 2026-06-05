@@ -3411,3 +3411,39 @@ but a lower-level signature or reached stage changed, set
   - primary QMP `query-migrate` returned an empty object
   - `ablestack_vm_ftctl status --vm i-2-54-VM --json` returned `not_found`
   - the removed standby RBD images now return `No such file or directory`
+
+### Stable RBD Contract And Listener Bootstrap Design 2026-06-05
+
+- Run 80 failure summary:
+  - protection row: `80`
+  - primary VM: `54` / `i-2-54-VM`
+  - standby VM: `136` / `i-2-136-VM`
+  - final state: `protection_state=error`, `transport_state=failed`
+  - primary `compare1` was open, but primary `mirror0` stayed closed
+  - secondary `red0` was open, but secondary `red1` stayed closed
+  - secondary QEMU reported `red1` connection refused to primary port `9004`
+  - primary and secondary QMP also showed busy block graph cleanup messages
+- Repetition analysis:
+  - this is the same visible COLO protocol symptom family as the previous
+    `invalid message 0x0000` / `Can't receive COLO message` failures
+  - it is not acceptable to keep changing adjacent startup guesses without
+    recording the exact phase and contract state
+  - the next run must report RBD contract phase results, listener bootstrap
+    result, frontend open state, and block-graph-busy classification
+- Corrected design:
+  - `docs/ftctl/357-ft-xcolo-stable-rbd-contract-and-listener-bootstrap-design-20260605.md`
+- Critical correction from the previous direction:
+  - generated primary and secondary XML must not be rewritten to `/dev/rbdN`
+  - XML must keep the stable `/dev/rbd/rbd/<image-id>` path
+  - `/dev/rbdN` may be recorded only as a diagnostic resolved device
+- Code direction:
+  - verify stable RBD paths after primary stop, before primary create, before
+    secondary create, and before migrate
+  - keep secondary runtime disk binding lookup on the stable Cloud path
+  - emit primary `compare1` before `mirror0`
+  - when both compare and mirror listeners use `wait=on`, treat `compare1` as
+    the primary generated-create bootstrap listener so secondary `red1` can
+    connect before primary blocks at `mirror0`
+  - classify QMP `Node ... is busy` failures as
+    `last_error=xcolo_block_graph_busy` rather than folding them into protocol
+    invalid-message failures

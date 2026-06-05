@@ -247,6 +247,14 @@ Design decision:
 3. qemu FTCTL must not create, delete, or otherwise own the Cloud volume
    itself in this runtime step.
 
+Superseded behavior note:
+
+- The earlier revision of this document required rewriting transient secondary
+  XML to a resolved `/dev/rbdN` device.
+- That direction is rejected by the ABLESTACK stable RBD path rule.
+- The current authoritative design is
+  `357-ft-xcolo-stable-rbd-contract-and-listener-bootstrap-design-20260605.md`.
+
 Required behavior before `ftctl_standby_activate`:
 
 1. For each `xcolo_disk_plan` entry whose secondary destination is
@@ -257,19 +265,21 @@ Required behavior before `ftctl_standby_activate`:
    - `rbd device list --format json` contains the pool/image
    - `rbd map <pool>/<image>` output
    - `rbd device list --format json` after mapping
-3. Rewrite only the transient generated standby XML disk source for that target
-   to the resolved runtime block device, for example `/dev/rbd14`.
-4. Store state per disk:
+3. Verify that the stable path itself exists as a block device after mapping.
+4. Keep generated primary and secondary XML disk sources on the stable
+   `/dev/rbd/<pool>/<image>` path. Do not rewrite XML to `/dev/rbdN`.
+5. Store state per disk:
 
 ```text
 xcolo_secondary_runtime_rbd_<target>=<cloud-path>|<runtime-device>|<mapped-by-ftctl>
+xcolo_secondary_runtime_rbd_stable_<target>=<cloud-path>
+xcolo_secondary_runtime_rbd_resolved_<target>=<runtime-device>
 ```
 
-5. Use the runtime block device for later secondary QMP/libvirt disk binding
-   lookup, because the transient domain source no longer necessarily equals the
-   Cloud path.
-6. Keep mappings alive while the transient secondary domain runs.
-7. During rollback, standby deactivate, or cleanup, destroy/undefine the
+6. Use the stable Cloud path for later secondary QMP/libvirt disk binding
+   lookup, because the transient domain XML must also use that stable path.
+7. Keep mappings alive while the transient secondary domain runs.
+8. During rollback, standby deactivate, or cleanup, destroy/undefine the
    transient secondary domain first, then unmap only runtime devices where
    `mapped-by-ftctl=1`.
 
@@ -277,12 +287,12 @@ Failure reporting must be specific:
 
 - `xcolo_secondary_runtime_rbd_map_failed:<target>`
 - `xcolo_secondary_runtime_rbd_device_missing:<target>`
+- `xcolo_secondary_runtime_rbd_stable_path_missing:<target>`
 - `xcolo_secondary_runtime_rbd_prepare_failed:<target>`
-- `xcolo_secondary_runtime_xml_rewrite_failed:<target>`
 
 Repetition control:
 
 - This is not a repeat of the baseline seed copy failure.
 - If the next run reaches secondary create and then fails at QMP binding,
-  inspect whether every secondary binding lookup used the runtime `/dev/rbdN`
-  device rather than the original Cloud path.
+  inspect whether every secondary binding lookup used the stable Cloud path and
+  whether the stable RBD contract passed at all conversion boundaries.

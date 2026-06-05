@@ -2191,7 +2191,7 @@ EOF
       *"dest=/dev/rbd/rbd/secondary-data"*)
         printf -v "${out_var}" '%s' "sdb|/dev/rbd/rbd/secondary-data|/dev/rbd15|1"
         ;;
-      *"device=/dev/rbd14"*|*"device=/dev/rbd15"*)
+      *"device=/dev/rbd/rbd/secondary-root"*|*"device=/dev/rbd/rbd/secondary-data"*)
         printf -v "${out_var}" '%s' ""
         ;;
       *)
@@ -2205,19 +2205,60 @@ EOF
   ftctl_xcolo_prepare_secondary_runtime_rbd "primary-vm" "${xml_path}" \
     "sda|/dev/rbd/rbd/root|raw|block|/dev/rbd/rbd/secondary-root;sdb|/dev/rbd/rbd/data|raw|block|/dev/rbd/rbd/secondary-data"
 
-  selftest_assert_file_contains "${xml_path}" "/dev/rbd14"
-  selftest_assert_file_contains "${xml_path}" "/dev/rbd15"
+  selftest_assert_file_contains "${xml_path}" "/dev/rbd/rbd/secondary-root"
+  selftest_assert_file_contains "${xml_path}" "/dev/rbd/rbd/secondary-data"
+  selftest_assert_file_not_contains "${xml_path}" "/dev/rbd14"
+  selftest_assert_file_not_contains "${xml_path}" "/dev/rbd15"
   selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_secondary_runtime_rbd_sda")" \
     "/dev/rbd/rbd/secondary-root|/dev/rbd14|1" "sda runtime RBD state"
   selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_secondary_runtime_rbd_sdb")" \
     "/dev/rbd/rbd/secondary-data|/dev/rbd15|1" "sdb runtime RBD state"
+  selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_secondary_runtime_rbd_stable_sda")" \
+    "/dev/rbd/rbd/secondary-root" "sda stable RBD state"
+  selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_secondary_runtime_rbd_resolved_sda")" \
+    "/dev/rbd14" "sda resolved RBD diagnostic"
   selftest_assert_eq "$(ftctl_xcolo_secondary_runtime_disk_source "primary-vm" "sda" "/dev/rbd/rbd/secondary-root")" \
-    "/dev/rbd14" "sda runtime source lookup"
+    "/dev/rbd/rbd/secondary-root" "sda runtime source lookup keeps stable path"
 
   ftctl_xcolo_unmap_secondary_runtime_rbd "primary-vm"
   selftest_assert_file_contains "${call_log}" "rbd unmap"
-  selftest_assert_file_contains "${call_log}" "device=/dev/rbd14"
-  selftest_assert_file_contains "${call_log}" "device=/dev/rbd15"
+  selftest_assert_file_contains "${call_log}" "device=/dev/rbd/rbd/secondary-root"
+  selftest_assert_file_contains "${call_log}" "device=/dev/rbd/rbd/secondary-data"
+)
+
+selftest_case_xcolo_stable_rbd_contract_remaps_cloud_paths() (
+  selftest_reset_env
+  selftest_info "x-colo stable RBD contract remaps cloud paths at phase gates"
+
+  local call_log="${SELFTEST_ROOT}/xcolo-stable-rbd-contract.log"
+  : > "${call_log}"
+
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_krbd_map_local() {
+    printf 'LOCAL:%s\n' "$1" >> "${call_log}"
+  }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_remote_target_host_user() {
+    printf -v "$1" '%s' "10.0.0.2"
+    printf -v "$2" '%s' "root"
+  }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_map_remote_krbd_path() {
+    printf 'REMOTE:%s:%s:%s\n' "$1" "$2" "$3" >> "${call_log}"
+  }
+
+  ftctl_xcolo_verify_stable_rbd_contract "primary-vm" \
+    "sda|/dev/rbd/rbd/root|raw|block|/dev/rbd/rbd/secondary-root;sdb|/dev/rbd/rbd/data|raw|block|/dev/rbd/rbd/secondary-data" \
+    "before_migrate"
+
+  selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_before_migrate_rbd_contract_ready")" \
+    "yes" "stable RBD contract ready"
+  selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_before_migrate_rbd_primary_sda")" \
+    "ok:/dev/rbd/rbd/root" "primary stable RBD state"
+  selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_before_migrate_rbd_secondary_sdb")" \
+    "ok:/dev/rbd/rbd/secondary-data" "secondary stable RBD state"
+  selftest_assert_file_contains "${call_log}" "LOCAL:/dev/rbd/rbd/root"
+  selftest_assert_file_contains "${call_log}" "REMOTE:10.0.0.2:root:/dev/rbd/rbd/secondary-root"
 )
 
 selftest_case_xcolo_baseline_seed_retries_ssh_transport_failure() (
@@ -4455,6 +4496,7 @@ selftest_main() {
   selftest_case_xcolo_baseline_seed_uses_primary_nbd_before_runtime_graph
   selftest_case_xcolo_baseline_seed_maps_cloud_managed_rbd
   selftest_case_xcolo_secondary_runtime_maps_cloud_managed_rbd
+  selftest_case_xcolo_stable_rbd_contract_remaps_cloud_paths
   selftest_case_xcolo_baseline_seed_retries_ssh_transport_failure
   selftest_case_xcolo_runtime_validation_blocks_false_positive
   selftest_case_xcolo_runtime_validation_reports_primary_migrate_failure

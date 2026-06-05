@@ -74,8 +74,8 @@ For file-based FT, implementation must follow the QEMU COLO test procedure as th
 Startup alignment checklist:
 
 1. Primary startup
+   - `compare1` is emitted before `mirror0` and listens with `wait=on`
    - `mirror0` listens with `wait=on` by default in the active cloud-managed/libvirt path so primary QEMU cannot pass the mirror listener before the secondary `red0` peer attaches
-   - `compare1` listens with `wait=on`
    - `compare0`, `compare0-0`, `compare_out`, `compare_out0` use local loopback
    - `filter-mirror`, `filter-redirector`, `colo-compare` are attached later through QMP after the block graph is ready
    - root disk is attached as `if=ide` quorum
@@ -87,6 +87,9 @@ Startup alignment checklist:
    - `-incoming` is present
    - startup does not use `-S`
 3. Protect QMP sequence
+   - when both primary compare and mirror listeners use `wait=on`, the primary
+     generated-create wait treats `compare1` as the bootstrap listener so the
+     secondary `red1` path can connect before the primary reaches `mirror0`
    - secondary: `qmp_capabilities`
    - secondary: `migrate-set-capabilities` with `x-colo`
    - secondary: `nbd-server-start`
