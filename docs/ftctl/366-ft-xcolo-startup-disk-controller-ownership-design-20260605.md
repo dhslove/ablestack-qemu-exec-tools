@@ -36,13 +36,23 @@ For the X-COLO cold conversion startup graph:
 
 ## Startup Graph Contract
 
-FTCTL now prepends the disk graph with:
+FTCTL now prepends the disk graph with an explicitly placed controller. If the
+generated libvirt XML already has an unused `pcie-root-port`, FTCTL attaches to
+that bus:
 
 ```text
--device virtio-scsi-pci,id=ftctl-xcolo-scsi0
+-device virtio-scsi-pci,id=ftctl-xcolo-scsi0,bus=pci.N,addr=0x0
 ```
 
-Protected disk devices then attach to:
+If no unused libvirt root port exists, FTCTL creates its own root-port and then
+attaches the SCSI controller behind it:
+
+```text
+-device pcie-root-port,id=ftctl-xcolo-pci0,bus=pcie.0,addr=<free-root-slot>,...
+-device virtio-scsi-pci,id=ftctl-xcolo-scsi0,bus=ftctl-xcolo-pci0,addr=0x0
+```
+
+Protected disk devices attach to the FTCTL controller bus:
 
 ```text
 bus=ftctl-xcolo-scsi0.0
@@ -63,6 +73,9 @@ The startup argument validator must reject:
 - protected disk devices whose `drive=` does not reference a `-bb` backend;
 - protected disk devices attached to a libvirt-owned `scsiN.0` bus;
 - protected disk devices when the FTCTL-owned SCSI controller is missing;
+- FTCTL-owned SCSI controller args without explicit `bus=` and `addr=`;
+- FTCTL-owned SCSI controller args that fall back to the root slot used by
+  `cirrus-vga` in the observed q35 layout;
 - any leaked `/dev/rbd/` path in qemu commandline args.
 
 The new classifier for this failure family is:
@@ -82,3 +95,16 @@ Bus 'scsi0.0' not found
 If it fails, the failure should move past generated primary/secondary startup
 into channel attach, QMP block graph, migrate, or post-migrate protocol
 validation.
+
+## Run 89 Follow-Up
+
+Run 89 confirmed that `bus=ftctl-xcolo-scsi0.0` fixed the previous
+`scsi0.0` bus-not-found failure. The next boundary was PCI placement:
+
+```text
+PCI: slot 1 function 0 not available for cirrus-vga,
+in use by virtio-scsi-pci,id=ftctl-xcolo-scsi0
+```
+
+The correction is to make the FTCTL-owned controller placement deterministic,
+not to revisit the RBD backend or BlockBackend/node-name fixes.

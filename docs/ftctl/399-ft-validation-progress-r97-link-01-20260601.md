@@ -3532,6 +3532,48 @@ but a lower-level signature or reached stage changed, set
   - primary HMP `info migrate` returned no active migration session
   - removed standby RBD images now return absent
 
+### Run 89 Monitoring Result 2026-06-05
+
+- Test start:
+  - protection row: `89`
+  - primary VM: `54` / `i-2-54-VM`
+  - standby VM: `145` / `i-2-145-VM`
+  - standby volumes:
+    - root: `275`, RBD image `b37f3ad0-647e-4013-8f55-710a2944ed55`
+    - data: `276`, RBD image `1e26c6fc-efcb-41fc-b578-e53e801d16e1`
+- Final observed state:
+  - Cloud DB row: `protection_state=error`, `transport_state=failed`
+  - host state: `conversion_stage=rollback_after_primary_create_failed`
+  - host `last_error=xcolo_block_primary_listener_wait_failed`
+  - primary VM was rollback-restored and running on `10.10.32.3`
+  - standby VM stayed `Stopped`
+- Confirmed improvement:
+  - Run 88 `Bus 'scsi0.0' not found` did not recur
+  - generated primary and secondary qemu args now include:
+    - `-device virtio-scsi-pci,id=ftctl-xcolo-scsi0`
+    - `bus=ftctl-xcolo-scsi0.0`
+  - native RBD backend and BlockBackend/node-name split remained active
+- New failure boundary:
+  - both primary and secondary generated QEMU startups failed with PCI slot
+    collision:
+    `PCI: slot 1 function 0 not available for cirrus-vga, in use by virtio-scsi-pci,id=ftctl-xcolo-scsi0`
+  - root cause: the FTCTL-owned `virtio-scsi-pci` controller was added without
+    explicit PCI placement, so QEMU chose the default root slot `0x1`, which is
+    already occupied by the libvirt video device
+- Repetition analysis:
+  - this is not the previous `scsi0.0` bus-not-found loop
+  - it is the next topology ownership boundary: the FTCTL-owned controller is
+    valid, but it needs deterministic PCI address placement
+- Next design direction:
+  - when generating the FTCTL-owned disk controller, also allocate or reuse a
+    deterministic free PCI attachment point
+  - for this VM shape, the simplest guarded approach is to attach
+    `ftctl-xcolo-scsi0` behind an existing free pcie-root-port if available,
+    or create an FTCTL-owned pcie-root-port plus controller pair in the same
+    qemu:commandline graph
+  - add validation that rejects FTCTL-owned controller args without explicit
+    `bus=` and `addr=`, or with an address already used in generated XML
+
 ### Run 86 Startup Disk Graph Monitor Result 2026-06-05
 
 - Test trigger:

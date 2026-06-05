@@ -4072,6 +4072,74 @@ def parse_runtime(raw):
         })
     return entries
 
+def pci_int(value, default=None):
+    if value is None or value == "":
+        return default
+    try:
+        return int(str(value), 0)
+    except ValueError:
+        return default
+
+def find_ft_scsi_attachment(root):
+    devices = root.find("devices")
+    if devices is None:
+        raise SystemExit("missing <devices> in xml")
+
+    root_slots = set()
+    used_controller_indices = set()
+    root_port_indices = []
+    max_chassis = 0
+    max_port = 0x0f
+
+    for elem in devices.iter():
+        addr = elem.find("address")
+        if addr is None or addr.get("type") != "pci":
+            continue
+        bus = pci_int(addr.get("bus"), -1)
+        slot = pci_int(addr.get("slot"), -1)
+        if bus == 0 and slot >= 0:
+            root_slots.add(slot)
+        elif bus > 0:
+            used_controller_indices.add(bus)
+
+    for ctl in devices.findall("controller"):
+        if ctl.get("type") != "pci":
+            continue
+        index = pci_int(ctl.get("index"), None)
+        model = ctl.get("model") or ""
+        if model != "pcie-root-port" or index is None:
+            continue
+        root_port_indices.append(index)
+        target = ctl.find("target")
+        if target is not None:
+            max_chassis = max(max_chassis, pci_int(target.get("chassis"), max_chassis))
+            max_port = max(max_port, pci_int(target.get("port"), max_port))
+
+    for index in sorted(root_port_indices):
+        if index not in used_controller_indices:
+            return {
+                "prefix": [],
+                "controller_bus": f"pci.{index}",
+                "controller_addr": "0x0",
+                "mode": "existing-root-port",
+            }
+
+    for slot in range(3, 31):
+        if slot in root_slots:
+            continue
+        port_id = "ftctl-xcolo-pci0"
+        return {
+            "prefix": [
+                "-device",
+                f"pcie-root-port,id={port_id},bus=pcie.0,addr=0x{slot:x},chassis={max_chassis + 1},port=0x{max_port + 1:x}",
+            ],
+            "controller_bus": port_id,
+            "controller_addr": "0x0",
+            "mode": "ftctl-root-port",
+        }
+
+    raise SystemExit("no free PCI attachment point for FTCTL X-COLO SCSI controller")
+
 tree = ET.parse(xml_path)
 root = tree.getroot()
 devices = root.find("devices")
@@ -4091,11 +4159,15 @@ entries = parse_runtime(runtime_raw)
 args = []
 state = []
 controller_id = "ftctl-xcolo-scsi0"
+attachment = find_ft_scsi_attachment(root)
+controller_parent_bus = attachment["controller_bus"]
+controller_addr = attachment["controller_addr"]
 controller_bus = f"{controller_id}.0"
 if entries:
+    args.extend(attachment["prefix"])
     args.extend([
         "-device",
-        f"virtio-scsi-pci,id={controller_id}",
+        f"virtio-scsi-pci,id={controller_id},bus={controller_parent_bus},addr={controller_addr}",
     ])
 for order, item in enumerate(entries):
     target = item["target"]
@@ -4156,6 +4228,9 @@ for order, item in enumerate(entries):
         f"{target}.colo_backend={colo_bb}",
         f"{target}.device={colo_dev}",
         f"{target}.controller={controller_id}",
+        f"{target}.controller_bus={controller_parent_bus}",
+        f"{target}.controller_addr={controller_addr}",
+        f"{target}.controller_mode={attachment['mode']}",
     ])
 
 print(";".join(args))
@@ -4180,6 +4255,7 @@ parts = os.environ.get("XCOLO_QEMU_ARGS", "").split(";")
 errors = []
 controller_id = "ftctl-xcolo-scsi0"
 controller_seen = False
+controller_fields = {}
 protected_disk_count = 0
 for idx, part in enumerate(parts):
     if part == "-device" and idx + 1 < len(parts):
@@ -4192,6 +4268,7 @@ for idx, part in enumerate(parts):
                     fields[k] = v
             if fields.get("id") == controller_id:
                 controller_seen = True
+                controller_fields = fields
     if part != "-drive":
         continue
     if idx + 1 >= len(parts):
@@ -4230,6 +4307,11 @@ for idx, part in enumerate(parts):
 
 if protected_disk_count and not controller_seen:
     errors.append(f"controller_missing:{controller_id}")
+if protected_disk_count and controller_seen:
+    if not controller_fields.get("bus") or not controller_fields.get("addr"):
+        errors.append(f"controller_placement_missing:{controller_id}")
+    if controller_fields.get("bus") == "pcie.0" and controller_fields.get("addr") == "0x1":
+        errors.append(f"controller_placement_reserved:{controller_id}:pcie.0/0x1")
 
 if errors:
     print(",".join(errors))
@@ -4242,7 +4324,7 @@ PY
         "xcolo_startup_disk_backend=invalid" \
         "xcolo_protocol_failure_phase=startup_disk_graph" \
         "last_error=xcolo_startup_block_backend_node_conflict"
-    elif [[ "${out}" == *"guest_bus_controller_mismatch:"* || "${out}" == *"guest_bus_libvirt_owned:"* || "${out}" == *"controller_missing:"* ]]; then
+    elif [[ "${out}" == *"guest_bus_controller_mismatch:"* || "${out}" == *"guest_bus_libvirt_owned:"* || "${out}" == *"controller_missing:"* || "${out}" == *"controller_placement_missing:"* || "${out}" == *"controller_placement_reserved:"* ]]; then
       ftctl_state_set "${vm}" \
         "xcolo_startup_disk_backend=invalid" \
         "xcolo_protocol_failure_phase=startup_disk_graph" \
