@@ -4544,3 +4544,78 @@ but a lower-level signature or reached stage changed, set
   - primary QMP `query-migrate` returned an empty object
   - `ablestack_vm_ftctl status --vm i-2-54-VM --json` returned `not_found`
   - the removed standby RBD images now return `No such file or directory`
+
+### X-COLO Startup SCSI PCI Placement Build And Retest Readiness 2026-06-06
+
+- Source commit for deployed code:
+  - `d15f3991fa764c74839a13e79e2843399e707ade`
+  - `fix: place xcolo startup scsi controller`
+- Failure boundary fixed:
+  - Run 89 failed after the Run 88 `Bus 'scsi0.0' not found` issue was
+    corrected.
+  - The new failure was a generated QEMU startup conflict:
+    `PCI: slot 1 function 0 not available for cirrus-vga, in use by
+    virtio-scsi-pci,id=ftctl-xcolo-scsi0`.
+  - Root cause: the FTCTL-generated startup SCSI controller had an id and guest
+    SCSI bus, but it did not have explicit PCI placement. QEMU auto-placed it
+    at root slot `0x1`, which conflicted with the existing VGA device.
+- Code correction:
+  - parse generated XML PCI topology before writing startup disk arguments
+  - prefer an unused existing `pcie-root-port` for
+    `ftctl-xcolo-scsi0`
+  - if no unused root port exists, create an FTCTL-owned root port
+    `ftctl-xcolo-pci0` at a free root slot and attach the startup SCSI
+    controller behind it
+  - validate that the protected disk controller always has explicit `bus=` and
+    `addr=` values
+  - reject accidental placement on `pcie.0` slot `0x1`
+  - keep existing guards for node-name/id conflicts, guest-drive `-bb` suffix,
+    libvirt-owned `scsiN.0` buses, and forbidden `/dev/rbd/` QEMU arguments
+- Preflight:
+  - inspected current `i-2-54-VM` topology on `10.10.32.3`
+  - confirmed existing unused root port `pci.7` can host
+    `ftctl-xcolo-scsi0`
+  - minimal QEMU startup preflight with `cirrus-vga` at root slot `0x1` and
+    FTCTL SCSI attached behind `pci.7` started successfully
+- Build:
+  - GitHub Actions run: `27022522155`
+  - workflow conclusion: `success`
+  - deployed RPM artifact:
+    - `ablestack_vm_ftctl-0.8.0-1.noarch.rpm`
+    - SHA256:
+      `83270bd300d7c64c03337237a04d0b499c14e5f4319abc58e645032e5d244a2a`
+- Deployment:
+  - deployed to `10.10.32.1`, `10.10.32.2`, and `10.10.32.3`
+  - installation used 32.x administrator wrapper:
+    `aspkg --replacepkgs -U`
+  - verified installed package on all three hosts:
+    `ablestack_vm_ftctl-0.8.0-1.noarch`
+  - verified installed script markers on all three hosts:
+    - `controller_placement_missing`
+    - `existing-root-port`
+    - `ftctl-xcolo-pci0`
+  - verified timers active on all three hosts:
+    - `ablestack-vm-ftctl.timer`
+    - `ablestack-vm-hangctl.timer`
+- Cleanup after Run 89:
+  - removed active protection row `89` by marking it disabled/stopped/removed
+    with `last_error=test_cleanup_after_xcolo_controller_placement_fix`
+  - removed `ftctl.*` VM details for primary VM `54` and standby VM `145`
+  - marked standby VM `145` (`i-2-145-VM`) as `Expunging`
+  - marked standby volumes `275` and `276` as `Expunged`
+  - unmapped stale standby RBD mappings `/dev/rbd10` and `/dev/rbd12`
+  - removed standby RBD images:
+    - `rbd/b37f3ad0-647e-4013-8f55-710a2944ed55`
+    - `rbd/1e26c6fc-efcb-41fc-b578-e53e801d16e1`
+  - removed stale FTCTL runtime/profile/debug files for `i-2-54-VM`,
+    `i-2-145-VM`, and `r97-link-01` from the 32.x hosts
+- Final readiness verification:
+  - active protection rows for primary VM `54`: `0`
+  - active `ftctl.*` details for `r97-link-01`: `0`
+  - active standby VM rows: `0`
+  - active standby volumes: `0`
+  - primary VM `i-2-54-VM` is `running` on `10.10.32.3`
+  - primary QMP/HMP shows no active block jobs
+  - primary QMP/HMP shows no active migration
+  - only `i-2-54-VM` is running on the 32.x hosts for this test target
+  - removed standby RBD images now return `No such file or directory`
