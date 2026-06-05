@@ -3412,6 +3412,30 @@ but a lower-level signature or reached stage changed, set
   - `ablestack_vm_ftctl status --vm i-2-54-VM --json` returned `not_found`
   - the removed standby RBD images now return `No such file or directory`
 
+### Cloud Timeout Structural Fix 2026-06-05
+
+- New failure symptom:
+  - UI/API displayed:
+    `Unable to register FTCTL protection for VM d08503ff-ea56-4e35-bdf8-2f0ebf81382c: timeout`
+- Root cause classification:
+  - this timeout was produced by the Cloud KVM wrapper path, not by a qemu-side
+    FTCTL phase classifier
+  - the wrapper used synchronous `FtctlActionCommand(PROTECT)`
+  - Cloud `Script` timeout can forcibly destroy the direct
+    `ablestack_vm_ftctl protect` process
+- Repetition guard:
+  - do not treat this as another COLO protocol failure until the qemu worker
+    has actually accepted and emitted qemu-side phase evidence
+  - if the same UI timeout appears again, first verify that Cloud is calling
+    `PROTECT_START`, not `PROTECT`
+- Corrected design:
+  - `docs/ftctl/359-ft-protect-async-job-start-design-20260605.md`
+- Code direction:
+  - add qemu `protect-start`
+  - keep existing foreground `protect` for direct debugging
+  - make Cloud `registerFtctlProtection` send `PROTECT_START`
+  - expose qemu job metadata through the normal state/status path
+
 ### Run 81 Pre-Migrate Frontend Diagnostic Pivot 2026-06-05
 
 - Run 81 result:

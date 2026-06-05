@@ -29,6 +29,9 @@ EXIT_LOCKED=20
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# Used by sourced orchestrator code when protect-start detaches a worker.
+# shellcheck disable=SC2034
+FTCTL_SELF_BIN="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s\n' "${BASH_SOURCE[0]}")"
 
 CLI_COMMAND=""
 CLI_ACTION=""
@@ -173,6 +176,7 @@ Usage:
 
 Commands:
   protect            Register protection intent for a VM
+  protect-start      Start protection asynchronously and return a job id
   status             Show current protection status
   reconcile          Keep or re-arm replication state
   failover           Start failover workflow
@@ -268,7 +272,7 @@ parse_args() {
         print_version
         exit "${EXIT_OK}"
         ;;
-      protect|status|reconcile|failover|failover-prepare|failback|failback-sync|failback-finalize|failback-reprotect|unprotect|fence-confirm|fence-clear|pause-protection|resume-protection|preflight-remote|dr-key-ensure|dr-key-install|dr-key-remove|check|health|events|snapshot|config)
+      protect|protect-start|status|reconcile|failover|failover-prepare|failback|failback-sync|failback-finalize|failback-reprotect|unprotect|fence-confirm|fence-clear|pause-protection|resume-protection|preflight-remote|dr-key-ensure|dr-key-install|dr-key-remove|check|health|events|snapshot|config)
         [[ -z "${CLI_COMMAND}" ]] || {
           echo "ERROR: multiple commands specified" >&2
           exit "${EXIT_USAGE}"
@@ -648,6 +652,14 @@ dispatch() {
       ftctl_profile_apply_cli "${CLI_VM}" "${CLI_MODE}" "${CLI_PEER}" "${CLI_PROFILE}"
       ftctl_profile_validate "${CLI_VM}"
       ftctl_orchestrator_protect "${CLI_VM}"
+      ;;
+    protect-start)
+      require_vm
+      require_mode
+      ftctl_profile_load_vm "${CLI_VM}"
+      ftctl_profile_apply_cli "${CLI_VM}" "${CLI_MODE}" "${CLI_PEER}" "${CLI_PROFILE}"
+      ftctl_profile_validate "${CLI_VM}"
+      ftctl_orchestrator_protect_start "${CLI_VM}"
       ;;
     status)
       if [[ -n "${CLI_VM}" ]]; then

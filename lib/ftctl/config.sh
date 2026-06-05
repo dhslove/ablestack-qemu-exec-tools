@@ -214,7 +214,9 @@ ftctl_config_finalize_paths() {
 ftctl_ensure_runtime_dirs() {
   ftctl_ensure_dir "${FTCTL_RUN_DIR}" "0755"
   ftctl_ensure_dir "${FTCTL_RUN_DIR}/locks" "0755"
+  ftctl_ensure_dir "${FTCTL_RUN_DIR}/jobs" "0755"
   ftctl_ensure_dir "${FTCTL_LOG_DIR}" "0755"
+  ftctl_ensure_dir "${FTCTL_LOG_DIR}/jobs" "0755"
   ftctl_ensure_dir "${FTCTL_STATE_DIR}" "0755"
   ftctl_ensure_dir "${FTCTL_PROFILE_DIR}" "0755"
   ftctl_ensure_dir "${FTCTL_CLUSTER_DIR}" "0755"

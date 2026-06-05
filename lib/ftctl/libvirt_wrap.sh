@@ -113,7 +113,7 @@ ftctl_command_requires_lock() {
     reconcile)
       return 1
       ;;
-    status|check|health|events|preflight-remote|dr-key-ensure|dr-key-install|dr-key-remove)
+    status|check|health|events|protect-start|preflight-remote|dr-key-ensure|dr-key-install|dr-key-remove)
       return 1
       ;;
     config)

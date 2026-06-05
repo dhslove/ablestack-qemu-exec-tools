@@ -172,14 +172,124 @@ ftctl_orchestrator_handle_transport_issue() {
 
 ftctl_orchestrator_protect() {
   local vm="${1-}"
+  local rc=0 job_id="${FTCTL_PROTECT_JOB_ID:-}" job_log="${FTCTL_PROTECT_JOB_LOG:-}"
   ftctl_state_init_vm "${vm}"
-  if [[ "${FTCTL_PROFILE_MODE}" == "ft" ]]; then
-    ftctl_xcolo_plan_protect "${vm}"
-  else
-    ftctl_blockcopy_plan_protect "${vm}"
+  if [[ -n "${job_id}" ]]; then
+    ftctl_state_set "${vm}" \
+      "protect_job_id=${job_id}" \
+      "protect_job_pid=$$" \
+      "protect_job_state=running" \
+      "protect_job_started_at=$(ftctl_now_iso8601)"
+    [[ -n "${job_log}" ]] && ftctl_state_set "${vm}" "protect_job_log=${job_log}"
+    ftctl_log_event "protect" "protect.job.running" "ok" "${vm}" "" \
+      "job_id=${job_id} pid=$$"
   fi
-  ftctl_verify_vm "${vm}"
+
+  if [[ "${FTCTL_PROFILE_MODE}" == "ft" ]]; then
+    ftctl_xcolo_plan_protect "${vm}" || rc=$?
+  else
+    ftctl_blockcopy_plan_protect "${vm}" || rc=$?
+  fi
+  if (( rc == 0 )); then
+    ftctl_verify_vm "${vm}" || rc=$?
+  fi
+
+  if (( rc == 0 )); then
+    if [[ -n "${job_id}" ]]; then
+      ftctl_state_set "${vm}" \
+        "protect_job_state=done" \
+        "protect_job_finished_at=$(ftctl_now_iso8601)"
+      ftctl_log_event "protect" "protect.job.done" "ok" "${vm}" "0" "job_id=${job_id}"
+    fi
+    ftctl_state_print_one "${vm}" "0"
+    return 0
+  fi
+
+  if [[ -n "${job_id}" ]]; then
+    ftctl_state_set "${vm}" \
+      "protect_job_state=failed" \
+      "protect_job_finished_at=$(ftctl_now_iso8601)"
+    ftctl_log_event "protect" "protect.job.failed" "fail" "${vm}" "${rc}" "job_id=${job_id}"
+  fi
+  if [[ -z "$(ftctl_state_get "${vm}" "last_error" 2>/dev/null || true)" ]]; then
+    ftctl_state_set "${vm}" "last_error=protect_failed"
+  fi
   ftctl_state_print_one "${vm}" "0"
+  return "${rc}"
+}
+
+ftctl_orchestrator_protect_start() {
+  local vm="${1-}"
+  local existing_pid existing_state job_id vm_key job_log self_bin pid
+  local -a args=()
+
+  vm_key="$(ftctl_state_vm_key "${vm}")"
+  existing_pid="$(ftctl_state_get "${vm}" "protect_job_pid" 2>/dev/null || true)"
+  existing_state="$(ftctl_state_get "${vm}" "protect_job_state" 2>/dev/null || true)"
+  if [[ "${existing_pid}" =~ ^[0-9]+$ ]] && kill -0 "${existing_pid}" 2>/dev/null; then
+    case "${existing_state}" in
+      accepted|running)
+        job_id="$(ftctl_state_get "${vm}" "protect_job_id" 2>/dev/null || true)"
+        job_log="$(ftctl_state_get "${vm}" "protect_job_log" 2>/dev/null || true)"
+        ftctl_log_event "protect" "protect.start" "accepted" "${vm}" "" \
+          "reason=already_running job_id=${job_id} pid=${existing_pid}"
+        printf '{"command":"protect-start","result":"accepted","vm":"%s","job_id":"%s","pid":%s,"state":"%s","already_running":true,"log":"%s"}\n' \
+          "$(ftctl__json_escape "${vm}")" \
+          "$(ftctl__json_escape "${job_id}")" \
+          "${existing_pid}" \
+          "$(ftctl__json_escape "${existing_state}")" \
+          "$(ftctl__json_escape "${job_log}")"
+        return 0
+        ;;
+    esac
+  fi
+
+  ftctl_state_init_vm "${vm}"
+  job_id="protect-${vm_key}-$(date +%Y%m%d%H%M%S)-$(ftctl_rand_id)"
+  job_log="${FTCTL_LOG_DIR}/jobs/${job_id}.log"
+  self_bin="${FTCTL_SELF_BIN:-/usr/local/bin/ablestack_vm_ftctl}"
+
+  [[ -x "${self_bin}" || -f "${self_bin}" ]] || {
+    ftctl_state_set "${vm}" \
+      "protect_job_state=failed" \
+      "last_error=protect_start_binary_not_found"
+    printf '{"command":"protect-start","result":"fail","vm":"%s","reason":"binary_not_found","path":"%s"}\n' \
+      "$(ftctl__json_escape "${vm}")" \
+      "$(ftctl__json_escape "${self_bin}")"
+    return 10
+  }
+
+  args=("${self_bin}" "protect" "--vm" "${vm}" "--mode" "${FTCTL_PROFILE_MODE}")
+  [[ -n "${FTCTL_PROFILE_SECONDARY_URI:-}" ]] && args+=("--peer" "${FTCTL_PROFILE_SECONDARY_URI}")
+  [[ -n "${FTCTL_PROFILE_NAME:-}" ]] && args+=("--profile" "${FTCTL_PROFILE_NAME}")
+  [[ -n "${FTCTL_CONFIG_PATH:-}" ]] && args+=("--config" "${FTCTL_CONFIG_PATH}")
+  args+=("--json")
+
+  (
+    export FTCTL_PROTECT_JOB_ID="${job_id}"
+    export FTCTL_PROTECT_JOB_LOG="${job_log}"
+    exec nohup "${args[@]}" > "${job_log}" 2>&1 < /dev/null
+  ) &
+  pid=$!
+  disown "${pid}" 2>/dev/null || true
+
+  ftctl_state_set "${vm}" \
+    "protect_job_id=${job_id}" \
+    "protect_job_pid=${pid}" \
+    "protect_job_state=accepted" \
+    "protect_job_started_at=$(ftctl_now_iso8601)" \
+    "protect_job_log=${job_log}" \
+    "protection_state=pairing" \
+    "transport_state=initializing" \
+    "last_error="
+  ftctl_log_event "protect" "protect.start" "accepted" "${vm}" "" \
+    "job_id=${job_id} pid=${pid} mode=${FTCTL_PROFILE_MODE}"
+
+  printf '{"command":"protect-start","result":"accepted","vm":"%s","job_id":"%s","pid":%s,"state":"accepted","log":"%s"}\n' \
+    "$(ftctl__json_escape "${vm}")" \
+    "$(ftctl__json_escape "${job_id}")" \
+    "${pid}" \
+    "$(ftctl__json_escape "${job_log}")"
 }
 
 ftctl_orchestrator_check_vm() {
