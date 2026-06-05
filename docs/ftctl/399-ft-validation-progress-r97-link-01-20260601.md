@@ -3454,6 +3454,54 @@ but a lower-level signature or reached stage changed, set
     restore or start from `standby_xml_seed` and verify libvirt runtime exists
     so Cloud DB `Running` does not silently diverge from host runtime state
 
+### Frontend Hard Gate Build And Retest Readiness 2026-06-05
+
+- Source commit for deployed code:
+  - `969331f853ed970357e0dbc74e25f603b6da1c91`
+  - `fix: hard gate xcolo frontend before migrate`
+- Build:
+  - GitHub Actions run: `27003067980`
+  - workflow conclusion: `success`
+  - deployed RPM artifact:
+    - `ablestack_vm_ftctl-0.8.0-1.noarch.rpm`
+    - SHA256:
+      `46e08628bbbc9d2ee9d5402757b2bed85136892ad872c51fe849f1bb6c0a1a67`
+- Deployment:
+  - deployed to `10.10.32.1`, `10.10.32.2`, and `10.10.32.3`
+  - installation used the 32.x administrator package wrapper:
+    `aspkg --replacepkgs -U /root/ablestack_vm_ftctl-0.8.0-1.noarch.rpm`
+  - verified installed host script markers on all three hosts:
+    - `xcolo_pre_migrate_frontend_not_open`
+    - `ftctl_standby_deactivate_cloud_managed`
+    - `cloud_runtime_state_mismatch`
+  - verified timers active on all three hosts:
+    - `ablestack-vm-ftctl.timer`
+    - `ablestack-vm-hangctl.timer`
+- Cleanup after Run 82:
+  - active protection rows for primary VM `54`: `0`
+  - active `ftctl.*` details for `r97-link-01`: `0`
+  - active standby VM rows: `0`
+  - active standby volumes: `0`
+  - marked protection row `82` removed with
+    `last_error=test_cleanup_after_frontend_hard_gate_fix`
+  - marked standby VM `138` (`i-2-138-VM`) as `Expunging`
+  - marked standby volumes `261` and `262` as `Expunged`
+  - removed standby RBD images:
+    - `rbd/1812a96a-c5c6-4d67-ac05-87af37ba5dc9`
+    - `rbd/0f803b0e-3df2-4f17-bbd8-302768db8b50`
+  - removed leftover krbd mappings on `10.10.32.1`:
+    - `/dev/rbd15`
+    - `/dev/rbd16`
+  - removed stale FTCTL runtime/profile/debug/job files for `i-2-54-VM`,
+    `i-2-138-VM`, and `r97-link-01` from the 32.x hosts
+- Final readiness verification:
+  - primary VM `i-2-54-VM` is `running` on `10.10.32.3`
+  - primary QMP `query-block-jobs` returned an empty list
+  - primary QMP `query-migrate` returned an empty object
+  - `ablestack_vm_ftctl status --vm i-2-54-VM --json` returned `not_found`
+  - no `i-2-138-VM` standby domain is running on the 32.x hosts
+  - the removed standby RBD images now return absent
+
 ### Cloud Timeout Structural Fix 2026-06-05
 
 - New failure symptom:
