@@ -3270,3 +3270,93 @@ but a lower-level signature or reached stage changed, set
   - `xcolo_qemu_doc_runtime_frontend`
   - `xcolo_qemu_doc_runtime_frontend_reason`
   - whether the closed frontend issue is still `mirror0`, `red1`, or a new edge
+
+### Run79 QEMU Doc Runtime Frontend Monitor 2026-06-05
+
+- Retest evidence directory:
+  - `/home/ablecloud/work/ft-run-monitor-20260605-103340`
+- Protection row:
+  - `79`
+- Primary:
+  - `i-2-54-VM` on `10.10.32.3`
+- Secondary:
+  - `i-2-135-VM` on `10.10.32.1`
+- Result:
+  - final DB state: `protection_state=error`, `transport_state=failed`
+  - `last_error=xcolo_qemu_doc_runtime_frontend_closed`
+  - `xcolo_protocol_failure_phase=pre_guest_traffic_doc_frontend_contract`
+- Progress:
+  - both baseline seed copies completed:
+    - `sda -> fa01b0d2-e6fd-4c22-84e3-e4d023d2285b`
+    - `sdb -> 55fee667-7648-4b91-8bfc-e8890da9d4fd`
+  - storage symmetry stayed `ok`:
+    - `sda:block/raw,sdb:block/raw`
+  - QEMU document topology audit passed:
+    - `xcolo_qemu_doc_topology=ok`
+    - `xcolo_qemu_doc_primary_qom_ready=yes`
+    - `xcolo_qemu_doc_primary_cmdline_ready=yes`
+    - `xcolo_qemu_doc_secondary_cmdline_ready=yes`
+  - TCP/socket layer was established:
+    - primary `9003` and `9004`: `listen`
+    - secondary `9003` and `9004`: `established`
+- Failure evidence:
+  - chardev contract failed:
+    - `xcolo_chardev_contract_ready=no`
+    - `xcolo_chardev_contract_reason=mirror_path_primary_mirror0=present_closed,compare_path_secondary_red1=present_closed`
+    - mirror path:
+      `primary:m0->mirror0(present_closed)->secondary:red0(present_open)->f1`
+    - compare path:
+      `secondary:f2->red1(present_closed)->primary:compare1(present_open)->comp0`
+  - primary QEMU command line contained the expected QEMU COLO document shape:
+    - `mirror0 wait=off`
+    - `compare1 wait=on`
+    - `compare0/compare0-0`
+    - `compare_out/compare_out0`
+    - active `m0`, `redire0`, `redire1`, `comp0`
+  - secondary QEMU command line contained:
+    - `red0 reconnect-ms=1000`
+    - `red1 reconnect-ms=1000`
+    - active `f1`, `f2`
+    - `-incoming tcp:10.10.32.1:9998`
+  - primary QEMU still logged:
+    - `filter mirror send failed(Operation not permitted)`
+  - no new current-run repeated `Received invalid message 0x0000 length 0x0000`
+    was captured before the runtime recovery.
+- Repetition assessment:
+  - this is not the previous generic invalid-message loop
+  - this is a narrowed repeat of the same lower-level chardev frontend closure:
+    QEMU document command-line topology is correct, but runtime frontend state
+    is not ready
+  - the pre-guest gate classified the failure correctly, but it did not prevent
+    the earlier `filter mirror send failed(Operation not permitted)` log
+- Next improvement direction:
+  - keep the QEMU document command-line topology unchanged
+  - do not return to staged `status=off` filter activation
+  - move the runtime frontend readiness control earlier than the current
+    pre-guest gate, or make the primary startup path prevent guest TX from
+    entering `m0 -> mirror0` until both `mirror0` and `red1` are open
+  - the next design must explain exactly how QEMU can start with the documented
+    topology while keeping `mirror0`/`red1` frontends closed, and how ftctl will
+    block guest/filter traffic before that first send attempt
+
+### Premigrate Frontend Open Design 2026-06-05
+
+- Design recorded:
+  - `docs/ftctl/356-ft-xcolo-premigrate-frontend-open-before-migrate-design-20260605.md`
+- Corrected interpretation:
+  - primary `migrate` starts the COLO runtime and is not the right place to
+    begin waiting for `mirror0`/`red1`
+  - frontend readiness must be proven before primary `migrate`
+- Code direction:
+  - generated primary `mirror0` default changes from `wait=off` to `wait=on`
+    for FTCTL's libvirt-orchestrated cloud-managed path
+  - this intentionally differs from the QEMU sample's `mirror0 wait=off`
+  - the reason is Run 79: with startup-active `m0`, `mirror0 wait=off` allowed
+    primary QEMU to pass the mirror listener before secondary `red0` was a
+    usable frontend peer
+  - async primary create avoids the old deadlock risk because FTCTL can observe
+    the mirror listener, start secondary, wait for peer connections, and only
+    then finish primary create
+  - add baseline-based pre-migrate QEMU log guard:
+    - `last_error=xcolo_filter_mirror_send_before_migrate`
+    - `xcolo_protocol_failure_phase=premigrate_filter_mirror_send`

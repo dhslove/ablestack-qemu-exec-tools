@@ -63,6 +63,9 @@ The intentional extensions are:
   it
 - real libvirt netdev ids and site addresses instead of the document's `hn0`
   and example loopback peer addresses
+- after Run 79, FTCTL's cloud-managed/libvirt path uses `mirror0 wait=on` as a
+  peer-before-send orchestration extension; see
+  [356. FT XCOLO Premigrate Frontend Open Before Migrate Design](356-ft-xcolo-premigrate-frontend-open-before-migrate-design-20260605.md)
 
 The real gaps were:
 
@@ -82,8 +85,9 @@ normal path remains startup-active.
 
 Instead, add a QEMU-document hard topology audit:
 
-1. Primary command line must contain the documented socket contract:
-   - `mirror0` port `9003`, `server=on`, `wait=off`
+1. Primary command line must contain the documented socket contract, with the
+   FTCTL mirror wait extension:
+   - `mirror0` port `9003`, `server=on`, `wait=<configured, default on>`
    - `compare1` port `9004`, `server=on`, `wait=on`
    - loopback `compare0` / `compare0-0` on port `9001`
    - loopback `compare_out` / `compare_out0` on port `9005`

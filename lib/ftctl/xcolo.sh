@@ -1815,6 +1815,64 @@ esac
   printf '%s\n' "${out%%$'\n'*}"
 }
 
+ftctl_xcolo_primary_filter_mirror_send_errno_since_baseline() {
+  local vm="${1-}"
+  local baseline out="" err="" rc=0
+
+  [[ -n "${vm}" ]] || return 1
+  baseline="$(ftctl_state_get "${vm}" "xcolo_primary_qemu_log_baseline_lines" 2>/dev/null || true)"
+  [[ "${baseline}" =~ ^[0-9]+$ ]] || baseline="0"
+  # shellcheck disable=SC2016
+  ftctl_cmd_run "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC:-15}" out err rc -- \
+    bash -c '
+domain="$1"
+baseline="$2"
+line="$(awk -v b="${baseline}" "NR>b && /filter mirror send failed\\(/ { last=\\$0 } END { if (last != \"\") print last }" \
+  "/var/log/libvirt/qemu/${domain}.log" 2>/dev/null || true)"
+if [[ -z "${line}" ]]; then
+  exit 1
+fi
+reason="${line##*filter mirror send failed(}"
+reason="${reason%%)*}"
+case "${reason}" in
+  "Operation not permitted") printf "%s\n" "eperm" ;;
+  "Input/output error") printf "%s\n" "eio" ;;
+  "") printf "%s\n" "unknown" ;;
+  *) printf "%s\n" "${reason//[^A-Za-z0-9_.-]/_}" | tr "[:upper:]" "[:lower:]" ;;
+esac
+' _ "${vm}" "${baseline}" || true
+  : "${err}"
+  [[ "${rc}" == "0" && -n "${out}" ]] || return 1
+  printf '%s\n' "${out%%$'\n'*}"
+}
+
+ftctl_xcolo_assert_no_premigrate_filter_mirror_send() {
+  local vm="${1-}"
+  local phase="${2:-pre_migrate}"
+  local errno
+
+  [[ -n "${vm}" ]] || return 1
+  if errno="$(ftctl_xcolo_primary_filter_mirror_send_errno_since_baseline "${vm}")"; then
+    ftctl_xcolo_capture_qemu_log_tails "${vm}" "$(ftctl_profile_secondary_vm_name_resolved "${vm}")" || true
+    ftctl_state_set "${vm}" \
+      "xcolo_premigrate_filter_mirror_send_failed=yes" \
+      "xcolo_premigrate_filter_mirror_send_errno=${errno}" \
+      "xcolo_premigrate_filter_mirror_send_phase=${phase}" \
+      "xcolo_protocol_failure_phase=premigrate_filter_mirror_send" \
+      "last_error=xcolo_filter_mirror_send_before_migrate"
+    ftctl_log_event "colo" "xcolo.premigrate_filter_mirror_send" "fail" "${vm}" "" \
+      "phase=${phase} errno=${errno} baseline=$(ftctl_state_get "${vm}" "xcolo_primary_qemu_log_baseline_lines" 2>/dev/null || true)"
+    return 1
+  fi
+
+  ftctl_state_set "${vm}" \
+    "xcolo_premigrate_filter_mirror_send_failed=no" \
+    "xcolo_premigrate_filter_mirror_send_phase=${phase}"
+  ftctl_log_event "colo" "xcolo.premigrate_filter_mirror_send" "ok" "${vm}" "" \
+    "phase=${phase} baseline=$(ftctl_state_get "${vm}" "xcolo_primary_qemu_log_baseline_lines" 2>/dev/null || true)"
+  return 0
+}
+
 ftctl_xcolo_chardev_label_state() {
   local payload="${1-}"
   local label="${2-}"
@@ -2269,7 +2327,7 @@ ftctl_xcolo_require_primary_netdev_vhost_off() {
 ftctl_xcolo_collect_primary_filter_cmdline_state() {
   local vm="${1-}"
   local out err rc ready reason_text expected_netdev
-  local mirror_port compare_port compare_local_port compare_out_port
+  local mirror_port compare_port compare_local_port compare_out_port mirror_wait
   local -a reasons=()
 
   out=""
@@ -2302,6 +2360,11 @@ done
   compare_port="${FTCTL_XCOLO_COMPARE_PORT:-9004}"
   compare_local_port="${FTCTL_XCOLO_COMPARE_LOCAL_PORT:-9001}"
   compare_out_port="${FTCTL_XCOLO_COMPARE_OUT_PORT:-9005}"
+  mirror_wait="${FTCTL_XCOLO_MIRROR_WAIT:-on}"
+  case "${mirror_wait}" in
+    on|off) ;;
+    *) mirror_wait="on" ;;
+  esac
   ftctl_xcolo_update_vnet_hdr_state "${vm}" || true
   ready="yes"
   _ftctl_xcolo_expect_cmdline_token() {
@@ -2318,7 +2381,7 @@ done
   _ftctl_xcolo_expect_cmdline_token "filter-redirector,id=redire1" "redire1"
   _ftctl_xcolo_expect_cmdline_token "colo-compare,id=comp0" "comp0"
   _ftctl_xcolo_expect_cmdline_token "netdev=${expected_netdev}" "primary_netdev"
-  _ftctl_xcolo_expect_cmdline_token "socket,id=mirror0,host=0.0.0.0,port=${mirror_port},server=on,wait=off" "doc_mirror0_listener"
+  _ftctl_xcolo_expect_cmdline_token "socket,id=mirror0,host=0.0.0.0,port=${mirror_port},server=on,wait=${mirror_wait}" "doc_mirror0_listener"
   _ftctl_xcolo_expect_cmdline_token "socket,id=compare1,host=0.0.0.0,port=${compare_port},server=on,wait=on" "doc_compare1_listener"
   _ftctl_xcolo_expect_cmdline_token "socket,id=compare0,host=127.0.0.1,port=${compare_local_port},server=on,wait=off" "doc_compare0_loopback_server"
   _ftctl_xcolo_expect_cmdline_token "socket,id=compare0-0,host=127.0.0.1,port=${compare_local_port}" "doc_compare0_loopback_client"
@@ -2345,6 +2408,7 @@ done
   ftctl_state_set "${vm}" \
     "xcolo_primary_filter_cmdline_ready=${ready}" \
     "xcolo_primary_filter_cmdline_expected_netdev=${expected_netdev}" \
+    "xcolo_primary_filter_cmdline_mirror_wait=${mirror_wait}" \
     "xcolo_primary_filter_cmdline_reason=${reason_text}" \
     "xcolo_primary_filter_cmdline_vnet_hdr_required=$(ftctl_state_get "${vm}" "xcolo_net_vnet_hdr_support" 2>/dev/null || true)"
   [[ "${ready}" == "yes" ]]
@@ -3750,11 +3814,11 @@ ftctl_xcolo_build_primary_qemu_args() {
   compare_port="${FTCTL_XCOLO_COMPARE_PORT:-9004}"
   compare_local_port="${FTCTL_XCOLO_COMPARE_LOCAL_PORT:-9001}"
   compare_out_port="${FTCTL_XCOLO_COMPARE_OUT_PORT:-9005}"
-  mirror_wait="${FTCTL_XCOLO_MIRROR_WAIT:-off}"
+  mirror_wait="${FTCTL_XCOLO_MIRROR_WAIT:-on}"
   compare_wait="${FTCTL_XCOLO_COMPARE_WAIT:-on}"
   case "${mirror_wait}" in
     on|off) ;;
-    *) mirror_wait="off" ;;
+    *) mirror_wait="on" ;;
   esac
   case "${compare_wait}" in
     on|off) ;;
@@ -3791,7 +3855,9 @@ ftctl_xcolo_doc_alignment_summary() {
   cat <<'EOF'
 COLO startup alignment checklist
 1. Primary startup:
-   - mirror0 server wait=off
+   - mirror0 server wait=on in FTCTL's libvirt orchestration path, so the
+     primary cannot pass the mirror listener before the secondary red0 peer is
+     attached
    - compare1 server wait=on
    - compare0 / compare0-0 / compare_out / compare_out0 loopback sockets
    - filter-mirror, filter-redirector, and colo-compare objects are present
@@ -5677,6 +5743,7 @@ ftctl_xcolo_execute_handshake_with_nodes() {
   ftctl_xcolo_preflight_firewall_contract "${vm}" || return 1
   ftctl_xcolo_require_primary_filter_cmdline_ready "${vm}" "pre_migrate" || return 1
   ftctl_xcolo_require_topology_audit_ready "${vm}" "${secondary_vm}" "pre_migrate" || return 1
+  ftctl_xcolo_assert_no_premigrate_filter_mirror_send "${vm}" "before_migrate" || return 1
   ftctl_xcolo_gate_before_guest_traffic "${vm}" "${secondary_vm}" || return 1
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
     "{\"execute\":\"migrate\",\"arguments\":{\"uri\":\"${FTCTL_PROFILE_XCOLO_MIGRATE_URI}\"}}" \
@@ -5751,6 +5818,7 @@ ftctl_xcolo_execute_handshake_with_disk_plan() {
   ftctl_xcolo_preflight_firewall_contract "${vm}" || return 1
   ftctl_xcolo_require_primary_filter_cmdline_ready "${vm}" "pre_migrate" || return 1
   ftctl_xcolo_require_topology_audit_ready "${vm}" "${secondary_vm}" "pre_migrate" || return 1
+  ftctl_xcolo_assert_no_premigrate_filter_mirror_send "${vm}" "before_migrate" || return 1
   ftctl_xcolo_gate_before_guest_traffic "${vm}" "${secondary_vm}" || return 1
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
     "{\"execute\":\"migrate\",\"arguments\":{\"uri\":\"${FTCTL_PROFILE_XCOLO_MIGRATE_URI}\"}}" \
@@ -6191,7 +6259,7 @@ ftctl_xcolo_start_primary_generated_async() {
   local vm="${1-}"
   local generated_xml="${2-}"
   local out_handle_var="${3-}"
-  local timeout_sec tmp_dir out_file err_file rc_file pid
+  local timeout_sec tmp_dir out_file err_file rc_file pid log_baseline
 
   [[ -n "${generated_xml}" && -f "${generated_xml}" ]] || return 1
   if [[ "${FTCTL_DRY_RUN}" == "1" ]]; then
@@ -6209,6 +6277,9 @@ ftctl_xcolo_start_primary_generated_async() {
   }
 
   timeout_sec="$(ftctl_xcolo_domain_create_timeout_sec)"
+  log_baseline="$(wc -l "/var/log/libvirt/qemu/${vm}.log" 2>/dev/null | awk '{print $1}' || printf '0')"
+  [[ "${log_baseline}" =~ ^[0-9]+$ ]] || log_baseline="0"
+  ftctl_state_set "${vm}" "xcolo_primary_qemu_log_baseline_lines=${log_baseline}"
   tmp_dir="$(mktemp -d "${FTCTL_RUN_DIR:-/run/ablestack-vm-ftctl}/xcolo-primary-create.${vm}.XXXXXX")" || return 1
   out_file="${tmp_dir}/stdout"
   err_file="${tmp_dir}/stderr"
@@ -6229,7 +6300,7 @@ ftctl_xcolo_start_primary_generated_async() {
   pid="$!"
   printf -v "${out_handle_var}" '%s|%s|%s|%s|%s' "${pid}" "${rc_file}" "${out_file}" "${err_file}" "${tmp_dir}"
   ftctl_log_event "colo" "primary.create_generated.async_start" "ok" "${vm}" "" \
-    "path=${generated_xml} timeout=${timeout_sec} pid=${pid}"
+    "path=${generated_xml} timeout=${timeout_sec} pid=${pid} qemu_log_baseline=${log_baseline}"
 }
 
 ftctl_xcolo_wait_primary_generated_listeners() {
@@ -6792,6 +6863,11 @@ ftctl_xcolo_execute_block_cold_conversion() {
     return 1
   }
   ftctl_state_set "${vm}" "conversion_stage=channels_attached"
+  ftctl_xcolo_assert_no_premigrate_filter_mirror_send "${vm}" "after_channel_attach" || {
+    ftctl_xcolo_abort_primary_generated_async "${vm}" "${primary_create_handle}"
+    ftctl_xcolo_rollback_block_primary_create_failure "${vm}" "xcolo_filter_mirror_send_before_migrate" || true
+    return 1
+  }
 
   ftctl_xcolo_finish_primary_generated_async "${vm}" "${primary_generated_xml}" "${primary_create_handle}" || {
     ftctl_log_event "colo" "block_conversion.primary_create" "fail" "${vm}" "" \
@@ -6802,6 +6878,10 @@ ftctl_xcolo_execute_block_cold_conversion() {
   }
   ftctl_state_set "${vm}" "conversion_stage=primary_created"
   ftctl_log_event "colo" "block_conversion.primary_create" "ok" "${vm}" "" ""
+  ftctl_xcolo_assert_no_premigrate_filter_mirror_send "${vm}" "after_primary_create" || {
+    ftctl_xcolo_rollback_block_primary_create_failure "${vm}" "xcolo_filter_mirror_send_before_migrate" || true
+    return 1
+  }
 
   ftctl_xcolo_require_primary_netdev_vhost_off "${vm}" || {
     ftctl_xcolo_abort_primary_generated_async "${vm}" "${primary_create_handle}"

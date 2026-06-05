@@ -1,5 +1,12 @@
 # FT X-COLO Primary-First Listener Wait Design
 
+> Superseded note, 2026-06-05: the default `mirror0 wait=off` assumption in
+> this document is superseded for the active cloud-managed/libvirt path by
+> [356. FT XCOLO Premigrate Frontend Open Before Migrate Design](356-ft-xcolo-premigrate-frontend-open-before-migrate-design-20260605.md).
+> The historical deadlock concern remains valid for synchronous primary create,
+> but the active implementation uses asynchronous primary create and can start
+> the secondary after observing the mirror listener.
+
 ## Background
 
 During FT validation for `r97-link-01`, registration progressed beyond Cloud sync and generated XML creation. The block-backed cold conversion stopped the primary, generated the COLO primary XML, and invoked `virsh create` asynchronously.

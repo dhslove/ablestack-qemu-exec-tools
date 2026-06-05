@@ -1,5 +1,12 @@
 # FT X-COLO Channel Attach Before Migrate Design
 
+> Superseded note, 2026-06-05: the channel attach-before-migrate principle
+> remains active, but the `mirror0 wait=off` default in this document is
+> superseded by
+> [356. FT XCOLO Premigrate Frontend Open Before Migrate Design](356-ft-xcolo-premigrate-frontend-open-before-migrate-design-20260605.md).
+> FTCTL now uses `mirror0 wait=on` in the libvirt-orchestrated path to require
+> the mirror peer before primary can pass startup initialization.
+
 ## Background
 
 During FT validation for `r97-link-01`, cloud-managed cold conversion progressed beyond listener startup and secondary creation, but runtime validation failed:

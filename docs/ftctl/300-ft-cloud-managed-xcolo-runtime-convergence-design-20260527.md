@@ -1,5 +1,11 @@
 # FT Cloud-Managed X-COLO Runtime Convergence Guard Design
 
+> Superseded note, 2026-06-05: sections in this document that describe
+> `mirror0 wait=off` as the active default are superseded by
+> [356. FT XCOLO Premigrate Frontend Open Before Migrate Design](356-ft-xcolo-premigrate-frontend-open-before-migrate-design-20260605.md).
+> The active cloud-managed/libvirt path now uses `mirror0 wait=on` with
+> asynchronous primary create.
+
 ## Background
 
 During FT validation for `r97-link-01`, Cloud-managed registration created the standby VM and qemu FTCTL executed the block-backed cold conversion flow, but runtime convergence failed after QMP handshake.
