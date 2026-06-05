@@ -3651,6 +3651,59 @@ but a lower-level signature or reached stage changed, set
   - fail fast with `xcolo_runtime_guest_disk_hotplug_forbidden` if a stale
     runtime disk replacement path is invoked
 
+### Startup Disk Graph Build And Retest Readiness 2026-06-05
+
+- Source commit for code/design:
+  - `70eb565`
+  - `fix: build xcolo disk graph before startup`
+- Build:
+  - GitHub Actions run: `27015017987`
+  - workflow: `FTCTL Branch Development Release`
+  - conclusion: `success`
+  - deployed RPM artifact:
+    - `ablestack_vm_ftctl-0.8.0-1.noarch.rpm`
+    - SHA256:
+      `d55aaa09a4394def19b59675e46295043e6804c758d427468736ac0628fa2cd8`
+- Local validation before commit:
+  - `bash -n lib/ftctl/xcolo.sh`: pass
+  - `bash -n bin/ablestack_vm_ftctl_selftest.sh`: pass
+  - `git diff --cached --check`: pass
+  - full selftest was not used as a gating result because the existing
+    shellcheck step reports pre-existing warnings outside this change scope
+- Deployment:
+  - deployed to `10.10.32.1`, `10.10.32.2`, and `10.10.32.3`
+  - installation used the 32.x administrator wrapper:
+    `aspkg --replacepkgs -U /root/ablestack_vm_ftctl-0.8.0-1.noarch.rpm`
+  - verified installed markers on all three hosts:
+    - `xcolo_startup_disk_graph`
+    - `xcolo_runtime_guest_disk_hotplug_forbidden`
+  - verified stale runtime hot-plug event markers are absent from installed
+    qemu FTCTL script:
+    - `device_del_existing_root`
+  - verified timers active on all three hosts:
+    - `ablestack-vm-ftctl.timer`
+    - `ablestack-vm-hangctl.timer`
+- Cleanup after Run 85:
+  - destroyed/undefined standby domain `i-2-141-VM` on `10.10.32.1`
+  - marked protection row `85` removed with
+    `last_error=test_cleanup_after_startup_disk_graph_fix`
+  - removed `ftctl.*` VM details for primary VM `54` and standby VM `141`
+  - marked standby VM `141` as `Expunging`
+  - marked standby volumes `267` and `268` as `Expunged`
+  - removed standby RBD images:
+    - `rbd/f977fd7f-bd95-4554-ba99-14ebf3eeb9dc`
+    - `rbd/e7541672-df9d-4ad0-8cb9-19d664ae4876`
+  - removed stale FTCTL runtime/profile/debug files for `i-2-54-VM`,
+    `i-2-141-VM`, and `r97-link-01` from the 32.x hosts
+- Final readiness verification:
+  - active protection rows for primary VM `54`: `0`
+  - active `ftctl.*` details for `r97-link-01`: `0`
+  - active standby VM rows: `0`
+  - active standby volumes: `0`
+  - primary VM `i-2-54-VM` is `Running` on host id `3`
+  - libvirt shows `i-2-54-VM` running on `10.10.32.3`
+  - removed standby RBD images report `RBD_REMOVED`
+
 ### QEMU 9.2.4 Directional Chardev Contract Design 2026-06-05
 
 - Run 83 code-level analysis:
