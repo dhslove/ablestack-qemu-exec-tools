@@ -4106,41 +4106,49 @@ for order, item in enumerate(parse_runtime(runtime_raw)):
         lun = address.get("unit") or lun
     s = suffix(target)
     parent = f"ftctl-parent-{s}" if role == "secondary" else f"ftctl-primary-parent-{s}"
+    parent_bb = f"{parent}-bb"
     active = f"ftctl-active-{s}" if role == "secondary" else f"ftctl-primary-active-{s}"
+    active_bb = f"{active}-bb"
     child = f"ftctl-childs-{s}"
+    child_bb = f"{child}-bb"
     colo = f"ftctl-colo-{s}"
+    colo_bb = f"{colo}-bb"
+    colo_dev = f"{colo}-dev"
     hidden = f"ftctl-hidden-{s}"
     source = item["secondary_dest"] if role == "secondary" else item["source"]
     source_driver = qemu_driver(item["format"])
     source_options = qemu_source_options(source)
     guest = [
         "-device",
-        f"scsi-hd,bus=scsi{controller}.0,channel={bus},scsi-id={scsi_id},lun={lun},drive={colo},id={colo}",
+        f"scsi-hd,bus=scsi{controller}.0,channel={bus},scsi-id={scsi_id},lun={lun},drive={colo_bb},id={colo_dev}",
     ]
     if order == 0:
         guest[1] += ",bootindex=1"
     if role == "secondary":
         args.extend([
             "-drive",
-            f"if=none,id={parent},node-name={parent},{source_options},driver={source_driver}",
+            f"if=none,id={parent_bb},node-name={parent},{source_options},driver={source_driver}",
             "-drive",
-            f"if=none,id={child},node-name={child},driver=replication,mode=secondary,file.driver=qcow2,file.node-name={active},top-id={colo},file.file.filename={item['secondary_active']},file.backing.driver=qcow2,file.backing.node-name={hidden},file.backing.file.filename={item['secondary_hidden']},file.backing.backing={parent}",
+            f"if=none,id={child_bb},node-name={child},driver=replication,mode=secondary,file.driver=qcow2,file.node-name={active},top-id={colo},file.file.filename={item['secondary_active']},file.backing.driver=qcow2,file.backing.node-name={hidden},file.backing.file.filename={item['secondary_hidden']},file.backing.backing={parent}",
             "-drive",
-            f"if=none,id={colo},node-name={colo},driver=quorum,read-pattern=fifo,vote-threshold=1,children.0={child}",
+            f"if=none,id={colo_bb},node-name={colo},driver=quorum,read-pattern=fifo,vote-threshold=1,children.0={child}",
         ])
     else:
         args.extend([
             "-drive",
-            f"if=none,id={parent},node-name={parent},{source_options},driver={source_driver}",
+            f"if=none,id={parent_bb},node-name={parent},{source_options},driver={source_driver}",
             "-drive",
-            f"if=none,id={active},node-name={active},driver=qcow2,file.filename={item['primary_active']},backing={parent}",
+            f"if=none,id={active_bb},node-name={active},driver=qcow2,file.filename={item['primary_active']},backing={parent}",
             "-drive",
-            f"if=none,id={colo},node-name={colo},driver=quorum,read-pattern=fifo,vote-threshold=1,children.0={active}",
+            f"if=none,id={colo_bb},node-name={colo},driver=quorum,read-pattern=fifo,vote-threshold=1,children.0={active}",
         ])
     args.extend(guest)
     state.extend([
         f"{target}.parent={parent}",
+        f"{target}.parent_backend={parent_bb}",
         f"{target}.colo={colo}",
+        f"{target}.colo_backend={colo_bb}",
+        f"{target}.device={colo_dev}",
     ])
 
 print(";".join(args))
@@ -4148,6 +4156,79 @@ PY
 )" || return 1
 
   printf -v "${out_var}" '%s' "${payload}"
+}
+
+ftctl_xcolo_validate_startup_disk_args() {
+  local vm="${1-}"
+  local args="${2-}"
+  local role="${3:-unknown}"
+  local out="" rc=0
+
+  out="$(XCOLO_QEMU_ARGS="${args}" python3 - <<'PY'
+import os
+import re
+import sys
+
+parts = os.environ.get("XCOLO_QEMU_ARGS", "").split(";")
+errors = []
+for idx, part in enumerate(parts):
+    if part != "-drive":
+        continue
+    if idx + 1 >= len(parts):
+        continue
+    opts = parts[idx + 1]
+    item = {}
+    for raw in opts.split(","):
+        if "=" in raw:
+            k, v = raw.split("=", 1)
+            item[k] = v
+    if item.get("id") and item.get("node-name") and item["id"] == item["node-name"]:
+        errors.append(f"backend_node_conflict:{item['id']}")
+
+for idx, part in enumerate(parts):
+    if part != "-device":
+        continue
+    if idx + 1 >= len(parts):
+        continue
+    opts = parts[idx + 1]
+    if not opts.startswith("scsi-hd,") or "drive=ftctl-colo-" not in opts:
+        continue
+    m = re.search(r"(?:^|,)drive=([^,]+)", opts)
+    if not m:
+        errors.append(f"guest_drive_missing:{opts}")
+        continue
+    drive = m.group(1)
+    if not drive.endswith("-bb"):
+        errors.append(f"guest_drive_backend_invalid:{drive}")
+
+if errors:
+    print(",".join(errors))
+    sys.exit(1)
+PY
+)" || rc=$?
+  if [[ "${rc}" != "0" ]]; then
+    if [[ "${out}" == *"backend_node_conflict:"* ]]; then
+      ftctl_state_set "${vm}" \
+        "xcolo_startup_disk_backend=invalid" \
+        "xcolo_protocol_failure_phase=startup_disk_graph" \
+        "last_error=xcolo_startup_block_backend_node_conflict"
+    elif [[ "${out}" == *"guest_drive_backend_invalid:"* || "${out}" == *"guest_drive_missing:"* ]]; then
+      ftctl_state_set "${vm}" \
+        "xcolo_startup_disk_backend=invalid" \
+        "xcolo_protocol_failure_phase=startup_disk_graph" \
+        "last_error=xcolo_startup_guest_drive_backend_invalid"
+    else
+      ftctl_state_set "${vm}" \
+        "xcolo_startup_disk_backend=invalid" \
+        "xcolo_protocol_failure_phase=startup_disk_graph" \
+        "last_error=xcolo_startup_disk_graph_invalid"
+    fi
+    ftctl_log_event "colo" "xcolo.startup_disk_graph.validate" "fail" "${vm}" "" \
+      "role=${role} reason=$(ftctl_xcolo_compact_log_value "${out}")"
+    return 1
+  fi
+  ftctl_log_event "colo" "xcolo.startup_disk_graph.validate" "ok" "${vm}" "" \
+    "role=${role}"
 }
 
 ftctl_xcolo_apply_startup_disk_graphs() {
@@ -4178,6 +4259,8 @@ ftctl_xcolo_apply_startup_disk_graphs() {
       "reason=krbd_path_leaked_into_qemu_commandline"
     return 1
   fi
+  ftctl_xcolo_validate_startup_disk_args "${vm}" "${primary_args}" "primary" || return 1
+  ftctl_xcolo_validate_startup_disk_args "${vm}" "${secondary_args}" "secondary" || return 1
 
   ftctl_xcolo_xml_remove_disk_targets "${primary_xml}" "${disk_runtime}" || return 1
   ftctl_xcolo_xml_remove_disk_targets "${secondary_xml}" "${disk_runtime}" || return 1
@@ -7317,14 +7400,20 @@ ftctl_xcolo_execute_block_cold_conversion() {
     secondary_hidden="${secondary_pair%%|*}"
     secondary_active="${secondary_pair##*|}"
     primary_base_node="ftctl-primary-parent-${suffix}"
-    primary_qdev="ftctl-colo-${suffix}"
+    primary_qdev="ftctl-colo-${suffix}-dev"
     secondary_base_node="ftctl-parent-${suffix}"
-    secondary_qdev="ftctl-colo-${suffix}"
+    secondary_qdev="ftctl-colo-${suffix}-dev"
     ftctl_state_set "${vm}" \
       "xcolo_disk_${suffix}_primary_base_node=${primary_base_node}" \
+      "xcolo_disk_${suffix}_primary_base_backend=${primary_base_node}-bb" \
       "xcolo_disk_${suffix}_primary_base_qdev=${primary_qdev}" \
+      "xcolo_disk_${suffix}_primary_colo_node=ftctl-colo-${suffix}" \
+      "xcolo_disk_${suffix}_primary_colo_backend=ftctl-colo-${suffix}-bb" \
       "xcolo_disk_${suffix}_secondary_base_node=${secondary_base_node}" \
+      "xcolo_disk_${suffix}_secondary_base_backend=${secondary_base_node}-bb" \
       "xcolo_disk_${suffix}_secondary_base_qdev=${secondary_qdev}" \
+      "xcolo_disk_${suffix}_secondary_colo_node=ftctl-colo-${suffix}" \
+      "xcolo_disk_${suffix}_secondary_colo_backend=ftctl-colo-${suffix}-bb" \
       "xcolo_disk_${suffix}_primary_overlay=${primary_overlay}" \
       "xcolo_disk_${suffix}_secondary_hidden=${secondary_hidden}" \
       "xcolo_disk_${suffix}_secondary_active=${secondary_active}"

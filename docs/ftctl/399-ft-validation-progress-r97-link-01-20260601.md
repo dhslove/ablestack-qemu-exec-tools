@@ -3533,6 +3533,85 @@ but a lower-level signature or reached stage changed, set
     - `rbd/d34c57a6-3ea7-48fc-b8fe-58866babb20a`
   - primary VM `i-2-54-VM` remains `running` on `10.10.32.3`
 
+### Run 87 Native RBD Backend Monitor Result 2026-06-05
+
+- Test trigger:
+  - user started FT protection for `r97-link-01`
+  - primary VM: `54` / `i-2-54-VM`
+  - standby VM created by Cloud: `143` / `i-2-143-VM`
+  - standby volumes:
+    - root `271` / `e72c42de-d9cd-46fc-8a31-58a8b2565102`
+    - data `272` / `c82625ca-0020-4165-96d7-c3cebcca3703`
+- Final state:
+  - `ftctl_protection.id=87`
+  - `protection_state=error`
+  - `transport_state=failed`
+  - `last_error=xcolo_block_primary_listener_wait_failed`
+  - primary domain recovered and is running on `10.10.32.3`
+  - standby domain is not running; Cloud DB VM `143` remains `Stopped`
+- Evidence:
+  - monitor evidence directory:
+    `/tmp/ftctl-monitor-run87-20260605-223445`
+  - RBD startup backend improvement was effective:
+    - primary generated qemu args used
+      `file=rbd:rbd/64084f28-b9c7-4e46-8aeb-13a56c452790`
+    - secondary generated qemu args used
+      `file=rbd:rbd/e72c42de-d9cd-46fc-8a31-58a8b2565102`
+    - there was no repeat of the Run 86
+      `Could not open '/dev/rbd/rbd/<image-id>'` startup failure
+  - new QEMU startup failure:
+    - primary:
+      `Device name 'ftctl-primary-parent-sda' conflicts with an existing node name`
+    - secondary:
+      `Device name 'ftctl-parent-sda' conflicts with an existing node name`
+- Minimal reproduction on `10.10.32.3`:
+  - failed:
+    `-drive if=none,id=ftctltest,node-name=ftctltest,...`
+    with `Device name 'ftctltest' conflicts with an existing node name`
+  - did not fail with that error:
+    `-drive if=none,id=ftctltest-backend,node-name=ftctltest-node,...`
+    and QEMU stayed up until the test timeout stopped it
+- Repetition analysis:
+  - this is not the Run 86 KRBD stable path failure
+  - this is not the earlier COLO invalid-message loop
+  - this is not a return to runtime guest disk hotplug
+  - native RBD backend moved the boundary forward to QEMU block graph naming
+    semantics
+- Next required correction:
+  - generated startup disk graph must not use the same string for `id=` and
+    `node-name=`
+  - keep stable node names for graph references, but give the BlockBackend id
+    a distinct suffix, such as `<node>-bb`
+  - update primary, secondary, replication, quorum, and overlay graph args
+    consistently so every `backing=`, `children.0=`, and device `drive=`
+    continues to point at the intended node/backend
+
+### Block Node And Backend Naming Correction 2026-06-05
+
+- Corrected design:
+  - `docs/ftctl/365-ft-xcolo-block-node-backend-naming-design-20260605.md`
+- Code direction implemented:
+  - generated `-drive` options now use distinct BlockBackend ids, for example:
+    - `id=ftctl-primary-parent-sda-bb`
+    - `node-name=ftctl-primary-parent-sda`
+  - guest `scsi-hd` devices now use the BlockBackend id:
+    - `drive=ftctl-colo-sda-bb`
+  - guest disk device ids are distinct from block node names:
+    - `id=ftctl-colo-sda-dev`
+  - QMP graph node references remain unchanged:
+    - `backing=ftctl-primary-parent-sda`
+    - `children.0=ftctl-primary-active-sda`
+    - `x-blockdev-change parent=ftctl-colo-sda`
+  - startup graph validation now fails fast if:
+    - `id=` equals `node-name=`
+    - protected guest disk `drive=` does not point to a `-bb` backend
+    - `/dev/rbd/` leaks into generated qemu args
+- Repetition analysis:
+  - this directly addresses the Run 87 QEMU block namespace conflict
+  - it keeps the native RBD backend fix from Run 86
+  - it does not reintroduce runtime guest disk hotplug
+  - it does not change the COLO network graph or migrate sequence
+
 ### Run 84 Monitoring Result 2026-06-05
 
 - Test trigger:

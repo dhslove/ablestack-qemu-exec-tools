@@ -1315,6 +1315,10 @@ EOF
   selftest_assert_contains "${primary_args}" "file=rbd:rbd/data" "primary data native RBD backend"
   selftest_assert_contains "${secondary_args}" "file=rbd:rbd/secondary-root" "secondary root native RBD backend"
   selftest_assert_contains "${secondary_args}" "file=rbd:rbd/secondary-data" "secondary data native RBD backend"
+  selftest_assert_contains "${primary_args}" "id=ftctl-primary-parent-sda-bb,node-name=ftctl-primary-parent-sda" "primary parent backend/node split"
+  selftest_assert_contains "${primary_args}" "drive=ftctl-colo-sda-bb,id=ftctl-colo-sda-dev" "primary guest drive uses backend id"
+  selftest_assert_contains "${secondary_args}" "id=ftctl-parent-sda-bb,node-name=ftctl-parent-sda" "secondary parent backend/node split"
+  selftest_assert_contains "${secondary_args}" "drive=ftctl-colo-sda-bb,id=ftctl-colo-sda-dev" "secondary guest drive uses backend id"
   selftest_assert_not_contains "${primary_args}" "/dev/rbd/" "primary qemu args must not leak KRBD path"
   selftest_assert_not_contains "${secondary_args}" "/dev/rbd/" "secondary qemu args must not leak KRBD path"
 )

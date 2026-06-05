@@ -51,6 +51,13 @@ file.filename=/dev/rbd/<pool>/<image>
 The same rule applies to both primary and secondary generated qemu commandline
 disk graphs.
 
+The startup graph must also keep QEMU block node names and BlockBackend ids
+separate. Native RBD backend conversion only changes how the base storage is
+opened; it does not permit `id=` and `node-name=` to use the same value. The
+detailed naming contract is defined in:
+
+- `365-ft-xcolo-block-node-backend-naming-design-20260605.md`
+
 ## Validation
 
 Before `virsh create`, FTCTL validates each RBD-backed startup disk through:
