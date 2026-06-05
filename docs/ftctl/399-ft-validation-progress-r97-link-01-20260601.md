@@ -3412,6 +3412,72 @@ but a lower-level signature or reached stage changed, set
   - `ablestack_vm_ftctl status --vm i-2-54-VM --json` returned `not_found`
   - the removed standby RBD images now return `No such file or directory`
 
+### Run 88 Monitoring Result 2026-06-05
+
+- Test start:
+  - protection row: `88`
+  - primary VM: `54` / `i-2-54-VM`
+  - standby VM: `144` / `i-2-144-VM`
+  - standby volumes:
+    - root: `273`, RBD image `fbd6948e-9c74-4644-bce3-0c2ae0df46b9`
+    - data: `274`, RBD image `890f209a-5215-4796-a410-15fe886a362d`
+- Final observed state:
+  - host state file: `protection_state=error`, `transport_state=failed`
+  - host `last_error=xcolo_block_primary_listener_wait_failed`
+  - Cloud DB row still showed `protection_state=pairing`, `transport_state=planned`,
+    with `last_error=xcolo_block_primary_listener_wait_failed`
+  - primary VM was rollback-restored and running again on `10.10.32.3`
+  - standby VM stayed `Stopped`
+- Confirmed improvement from previous runs:
+  - the native RBD backend correction was active:
+    `file=rbd:rbd/<image-id>`
+  - the BlockBackend/node-name split correction was active:
+    `id=...-bb,node-name=...`
+  - guest disk devices referenced the BlockBackend ids:
+    `drive=ftctl-colo-...-bb,id=ftctl-colo-...-dev`
+  - the previous failures `xcolo_startup_krbd_path_leaked` and
+    `Device name ... conflicts with an existing node name` did not recur
+- New failure boundary:
+  - primary QEMU failed while starting generated XML:
+    `Bus 'scsi0.0' not found`
+  - secondary QEMU failed with the same `scsi0.0` bus error
+  - generated XML retained the libvirt SCSI controller alias `scsi0`, but the
+    FT-controlled guest-visible disks were appended through qemu:commandline as
+    `-device scsi-hd,bus=scsi0.0,...`
+- Repetition analysis:
+  - this is not the same repeated COLO protocol `invalid message 0x0000` loop
+  - this is a new startup graph/device topology boundary after the RBD backend
+    and BlockBackend/node-name fixes
+- Next design direction:
+  - stop mixing libvirt-owned SCSI controller topology with qemu:commandline
+    guest disk devices
+  - for FT-controlled disks, create the disk controller and guest-visible disk
+    devices from the same qemu:commandline graph, or otherwise keep both under
+    libvirt XML control if libvirt can express the full COLO backend graph
+  - add a generated-startup validation that rejects a qemu:commandline disk
+    device referencing a controller bus that is not owned by the same startup
+    graph or proven usable by an actual QEMU startup preflight
+
+### Startup Disk Controller Ownership Fix 2026-06-05
+
+- Corrected design:
+  - `docs/ftctl/366-ft-xcolo-startup-disk-controller-ownership-design-20260605.md`
+- Code direction:
+  - prepend the FT startup disk graph with an FTCTL-owned SCSI controller:
+    `-device virtio-scsi-pci,id=ftctl-xcolo-scsi0`
+  - attach all FT-controlled protected disks to:
+    `bus=ftctl-xcolo-scsi0.0`
+  - keep native RBD backend and BlockBackend/node-name split unchanged
+  - reject generated args that attach protected disks to libvirt-owned
+    `scsiN.0`
+  - classify that validation failure as:
+    `xcolo_startup_disk_controller_mismatch`
+- Expected retest improvement:
+  - Run 89 must not repeat `Bus 'scsi0.0' not found`
+  - if it fails, it should move to a later boundary such as channel attach,
+    QMP block graph operations, primary migrate, or post-migrate runtime
+    validation
+
 ### Run 86 Startup Disk Graph Monitor Result 2026-06-05
 
 - Test trigger:

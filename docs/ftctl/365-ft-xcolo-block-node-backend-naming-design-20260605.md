@@ -60,6 +60,8 @@ guest disk device id     = ftctl-colo-sda-dev
 - `backing=...`, `children.0=...`, `file.backing.backing=...`, and
   `x-blockdev-change parent=...` reference block node names.
 - `-device scsi-hd,drive=...` references the BlockBackend id.
+- FT-controlled guest-visible disks must attach to the FTCTL-owned startup
+  controller from document 366, not to a libvirt-owned `scsiN.0` bus.
 - QMP runtime operations continue to use node names. Runtime guest-visible
   disk hotplug remains forbidden.
 
@@ -69,12 +71,14 @@ After generating qemu commandline disk graph arguments, FTCTL validates:
 
 - no `-drive` option has identical `id=` and `node-name=`;
 - every protected `scsi-hd` guest device uses a backend id ending with `-bb`;
+- every protected `scsi-hd` guest device uses the FTCTL-owned controller bus;
 - generated qemu args still do not contain `/dev/rbd/`.
 
 The relevant fail-fast errors are:
 
 - `xcolo_startup_block_backend_node_conflict`
 - `xcolo_startup_guest_drive_backend_invalid`
+- `xcolo_startup_disk_controller_mismatch`
 - `xcolo_startup_krbd_path_leaked`
 
 ## Expected Retest Boundary

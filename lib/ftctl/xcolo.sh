@@ -4087,20 +4087,26 @@ for index, disk in enumerate(devices.findall("disk")):
         continue
     disk_by_target[target.get("dev")] = (disk, index)
 
+entries = parse_runtime(runtime_raw)
 args = []
 state = []
-for order, item in enumerate(parse_runtime(runtime_raw)):
+controller_id = "ftctl-xcolo-scsi0"
+controller_bus = f"{controller_id}.0"
+if entries:
+    args.extend([
+        "-device",
+        f"virtio-scsi-pci,id={controller_id}",
+    ])
+for order, item in enumerate(entries):
     target = item["target"]
     if target not in disk_by_target:
         raise SystemExit(f"disk target not found in xml: {target}")
     disk, disk_index = disk_by_target[target]
     address = disk.find("address")
-    controller = "0"
     bus = "0"
     scsi_id = "0"
     lun = str(disk_index)
     if address is not None and address.get("type") == "drive":
-        controller = address.get("controller") or controller
         bus = address.get("bus") or bus
         scsi_id = address.get("target") or scsi_id
         lun = address.get("unit") or lun
@@ -4120,7 +4126,7 @@ for order, item in enumerate(parse_runtime(runtime_raw)):
     source_options = qemu_source_options(source)
     guest = [
         "-device",
-        f"scsi-hd,bus=scsi{controller}.0,channel={bus},scsi-id={scsi_id},lun={lun},drive={colo_bb},id={colo_dev}",
+        f"scsi-hd,bus={controller_bus},channel={bus},scsi-id={scsi_id},lun={lun},drive={colo_bb},id={colo_dev}",
     ]
     if order == 0:
         guest[1] += ",bootindex=1"
@@ -4149,6 +4155,7 @@ for order, item in enumerate(parse_runtime(runtime_raw)):
         f"{target}.colo={colo}",
         f"{target}.colo_backend={colo_bb}",
         f"{target}.device={colo_dev}",
+        f"{target}.controller={controller_id}",
     ])
 
 print(";".join(args))
@@ -4171,7 +4178,20 @@ import sys
 
 parts = os.environ.get("XCOLO_QEMU_ARGS", "").split(";")
 errors = []
+controller_id = "ftctl-xcolo-scsi0"
+controller_seen = False
+protected_disk_count = 0
 for idx, part in enumerate(parts):
+    if part == "-device" and idx + 1 < len(parts):
+        opts = parts[idx + 1]
+        if opts.startswith("virtio-scsi-pci,"):
+            fields = {}
+            for raw in opts.split(","):
+                if "=" in raw:
+                    k, v = raw.split("=", 1)
+                    fields[k] = v
+            if fields.get("id") == controller_id:
+                controller_seen = True
     if part != "-drive":
         continue
     if idx + 1 >= len(parts):
@@ -4193,6 +4213,7 @@ for idx, part in enumerate(parts):
     opts = parts[idx + 1]
     if not opts.startswith("scsi-hd,") or "drive=ftctl-colo-" not in opts:
         continue
+    protected_disk_count += 1
     m = re.search(r"(?:^|,)drive=([^,]+)", opts)
     if not m:
         errors.append(f"guest_drive_missing:{opts}")
@@ -4200,6 +4221,15 @@ for idx, part in enumerate(parts):
     drive = m.group(1)
     if not drive.endswith("-bb"):
         errors.append(f"guest_drive_backend_invalid:{drive}")
+    bm = re.search(r"(?:^|,)bus=([^,]+)", opts)
+    bus = bm.group(1) if bm else ""
+    if bus != f"{controller_id}.0":
+        errors.append(f"guest_bus_controller_mismatch:{bus or 'missing'}")
+    if re.fullmatch(r"scsi[0-9]+\\.0", bus or ""):
+        errors.append(f"guest_bus_libvirt_owned:{bus}")
+
+if protected_disk_count and not controller_seen:
+    errors.append(f"controller_missing:{controller_id}")
 
 if errors:
     print(",".join(errors))
@@ -4212,6 +4242,11 @@ PY
         "xcolo_startup_disk_backend=invalid" \
         "xcolo_protocol_failure_phase=startup_disk_graph" \
         "last_error=xcolo_startup_block_backend_node_conflict"
+    elif [[ "${out}" == *"guest_bus_controller_mismatch:"* || "${out}" == *"guest_bus_libvirt_owned:"* || "${out}" == *"controller_missing:"* ]]; then
+      ftctl_state_set "${vm}" \
+        "xcolo_startup_disk_backend=invalid" \
+        "xcolo_protocol_failure_phase=startup_disk_graph" \
+        "last_error=xcolo_startup_disk_controller_mismatch"
     elif [[ "${out}" == *"guest_drive_backend_invalid:"* || "${out}" == *"guest_drive_missing:"* ]]; then
       ftctl_state_set "${vm}" \
         "xcolo_startup_disk_backend=invalid" \
