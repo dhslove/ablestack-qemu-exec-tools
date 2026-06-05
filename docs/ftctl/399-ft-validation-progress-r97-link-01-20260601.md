@@ -3511,6 +3511,54 @@ but a lower-level signature or reached stage changed, set
     COLO control message exchange itself or a QEMU-log-proven filter send
     failure
 
+### Return-Path Capability Fix Build And Retest Readiness 2026-06-05
+
+- Source commit for deployed code:
+  - `d5f7fbab0201d1e03f581d38716bbb7e5075486a`
+  - `fix: disable migration return-path for xcolo`
+- Build:
+  - GitHub Actions run: `27010841256`
+  - workflow: `FTCTL Branch Development Release`
+  - conclusion: `success`
+  - deployed RPM artifact:
+    - `ablestack_vm_ftctl-0.8.0-1.noarch.rpm`
+    - SHA256:
+      `2fd5d739b8be1dcb2b3b88b58345abe9a51a38d6a78bbdfaae55a4167d53039a`
+- Deployment:
+  - deployed to `10.10.32.1`, `10.10.32.2`, and `10.10.32.3`
+  - installation used the 32.x administrator wrapper:
+    `aspkg --replacepkgs -U /root/ablestack_vm_ftctl-0.8.0-1.noarch.rpm`
+  - verified installed script markers on all three hosts:
+    - `return-path","state":false`
+    - `xcolo_migration_return_path_conflict`
+    - `xcolo_colo_control_message_invalid`
+  - verified timers active on all three hosts:
+    - `ablestack-vm-ftctl.timer`
+    - `ablestack-vm-hangctl.timer`
+- Cleanup after Run 84:
+  - destroyed standby runtime domain `i-2-140-VM` on `10.10.32.1`
+  - removed standby RBD images:
+    - `rbd/bbb0bcd2-369d-4e57-a97a-a5047fe11275`
+    - `rbd/86085290-1dd7-4d10-a441-914d9aa9d9f2`
+  - marked protection row `84` removed with
+    `last_error=test_cleanup_after_return_path_capability_fix`
+  - deleted `ftctl.*` VM details for primary VM `54` and standby VM `140`
+  - marked standby VM `140` (`i-2-140-VM`) as `Expunging`
+  - marked standby volumes `265` and `266` as `Expunged`
+  - removed stale FTCTL runtime/profile/debug files for `i-2-54-VM` from
+    `10.10.32.3`
+- Final readiness verification:
+  - active protection rows for primary VM `54`: `0`
+  - active `ftctl.*` details for `r97-link-01`: `0`
+  - active standby VM rows: `0`
+  - active standby volumes: `0`
+  - primary VM `i-2-54-VM` is Cloud DB `Running` on host id `3`
+  - primary VM `i-2-54-VM` is libvirt `running` on `10.10.32.3`
+  - primary QMP `query-block-jobs` returned an empty list
+  - primary QMP `query-migrate` returned an empty object
+  - `ablestack_vm_ftctl status --vm i-2-54-VM --json` returned `not_found`
+  - removed standby RBD images now return `No such file or directory`
+
 ### QEMU 9.2.4 Directional Chardev Contract Design 2026-06-05
 
 - Run 83 code-level analysis:
