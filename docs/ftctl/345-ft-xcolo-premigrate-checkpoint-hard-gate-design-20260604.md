@@ -1,5 +1,11 @@
 # FT XCOLO Pre-Migrate Checkpoint Hard Gate Design - 2026-06-04
 
+## Superseded Capability Note - 2026-06-05
+
+The capability line in the sequence below is superseded by
+[362. FT XCOLO QEMU 9.2.4 Return-Path Capability Conflict Design](362-ft-xcolo-qemu-924-return-path-capability-conflict-design-20260605.md).
+The current expected sequence is `return-path=off,x-colo=on`.
+
 ## Background
 
 Run 68 confirmed the Run 67 failure is a repeated QEMU COLO protocol-role
@@ -35,7 +41,7 @@ The corrected primary sequence is:
 primary qmp_capabilities
 primary block graph / NBD client setup
 primary network filter topology and chardev gate
-primary migrate-set-capabilities return-path=on,x-colo=on
+primary migrate-set-capabilities return-path=off,x-colo=on
 primary migrate-set-parameters x-checkpoint-delay=<value>
 primary query-migrate-parameters verifies x-checkpoint-delay=<value>
 primary pre-migrate evidence capture

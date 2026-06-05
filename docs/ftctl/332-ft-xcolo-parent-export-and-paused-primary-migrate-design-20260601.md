@@ -80,9 +80,12 @@ The QEMU COLO startup sequence is:
 primary qmp_capabilities
 primary blockdev-add nbd child
 primary x-blockdev-change
-primary migrate-set-capabilities return-path,x-colo
+primary migrate-set-capabilities return-path=off,x-colo=on
 primary migrate
 ```
+
+The `return-path=off` correction is defined by
+[362. FT XCOLO QEMU 9.2.4 Return-Path Capability Conflict Design](362-ft-xcolo-qemu-924-return-path-capability-conflict-design-20260605.md).
 
 There is no explicit `cont` between capability setup and `migrate`. FTCTL must
 therefore leave the generated primary paused and let the COLO migration command
@@ -146,4 +149,3 @@ This design supersedes the following earlier assumptions:
 - Design 306's secondary NBD export of `ftctl-colo-<target>`.
 - Designs 328, 329, and 330 examples that listed `primary.cont_before_migrate`
   as part of the successful pre-migrate sequence.
-

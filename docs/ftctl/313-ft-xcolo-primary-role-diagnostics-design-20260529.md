@@ -2,6 +2,13 @@
 
 Date: 2026-05-29
 
+## Superseded Capability Note - 2026-06-05
+
+The `primary_return_path_capability_missing` diagnostic in this historical
+design is superseded by
+[362. FT XCOLO QEMU 9.2.4 Return-Path Capability Conflict Design](362-ft-xcolo-qemu-924-return-path-capability-conflict-design-20260605.md).
+For current COLO, `return-path=yes` is an error condition, not a requirement.
+
 ## Context
 
 The `r97-link-01` FT run now proves that the 9000-series X-COLO compare

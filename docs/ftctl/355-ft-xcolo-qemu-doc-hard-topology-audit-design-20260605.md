@@ -43,8 +43,12 @@ The secondary starts with:
 - `-incoming <migration-uri>`
 
 Then the documented sequence prepares secondary QMP/NBD first, prepares the
-primary NBD child, enables `x-colo` and `return-path`, and only then issues
-primary `migrate`.
+primary NBD child, enables `x-colo`, and only then issues primary `migrate`.
+
+The earlier wording that included `return-path` is superseded by
+[362. FT XCOLO QEMU 9.2.4 Return-Path Capability Conflict Design](362-ft-xcolo-qemu-924-return-path-capability-conflict-design-20260605.md).
+Current FTCTL must keep QEMU's generic migration `return-path` disabled in the
+COLO path.
 
 ## Previous Code Difference
 

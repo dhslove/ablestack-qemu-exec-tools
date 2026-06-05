@@ -470,7 +470,7 @@ ftctl_xcolo_set_and_verify_migrate_capabilities() {
   local cap_xcolo="unknown" cap_return_path="unknown"
 
   ftctl_xcolo_qmp_require_ok "${uri}" "${domain}" \
-    '{"execute":"migrate-set-capabilities","arguments":{"capabilities":[{"capability":"return-path","state":true},{"capability":"x-colo","state":true}]}}' \
+    '{"execute":"migrate-set-capabilities","arguments":{"capabilities":[{"capability":"return-path","state":false},{"capability":"x-colo","state":true}]}}' \
     "colo" "${stage_prefix}.migrate_set_capabilities" || return 1
 
   ftctl_xcolo_query_migrate_capability_state "${uri}" "${domain}" "x-colo" cap_xcolo || true
@@ -479,16 +479,16 @@ ftctl_xcolo_set_and_verify_migrate_capabilities() {
     "xcolo_${role}_capability_x_colo=${cap_xcolo}" \
     "xcolo_${role}_capability_return_path=${cap_return_path}"
 
-  if [[ "${cap_xcolo}" != "yes" || "${cap_return_path}" != "yes" ]]; then
+  if [[ "${cap_xcolo}" != "yes" || ( "${cap_return_path}" != "no" && "${cap_return_path}" != "unknown" ) ]]; then
     ftctl_state_set "${vm}" \
       "last_error=${role}_colo_migrate_capability_missing"
     ftctl_log_event "colo" "${stage_prefix}.migrate_capabilities" "fail" "${vm}" "" \
-      "domain=${domain} x_colo=${cap_xcolo} return_path=${cap_return_path}"
+      "domain=${domain} x_colo=${cap_xcolo} return_path=${cap_return_path} expected_return_path=no"
     return 1
   fi
 
   ftctl_log_event "colo" "${stage_prefix}.migrate_capabilities" "ok" "${vm}" "" \
-    "domain=${domain} x_colo=${cap_xcolo} return_path=${cap_return_path}"
+    "domain=${domain} x_colo=${cap_xcolo} return_path=${cap_return_path} expected_return_path=no"
 }
 
 ftctl_xcolo_colo_mode_active() {
@@ -2271,18 +2271,24 @@ ftctl_xcolo_capture_policy_snapshot() {
 ftctl_xcolo_classify_startup_active_stream_failure() {
   local vm="${1-}"
   local secondary_vm="${2:-$vm}"
-  local errno="" reason="qemu_return_path_invalid_zero_header"
-  local last_error="xcolo_startup_active_filter_stream_failed"
+  local errno="" reason="colo_control_message_invalid_zero_header"
+  local last_error="xcolo_colo_control_message_invalid"
+  local failure_scope="post_migrate_colo_control"
+  local failure_phase="post_migrate_colo_control"
+  local cap_return_path
 
   [[ -n "${vm}" && -n "${secondary_vm}" ]] || return 0
   ftctl_xcolo_collect_runtime_failure_diagnostics "${vm}" "${secondary_vm}" || true
   ftctl_xcolo_capture_socket_snapshot "${vm}" "post_migrate_failure" || true
   ftctl_xcolo_capture_failure_chardev_snapshot "${vm}" "${secondary_vm}" "post-migrate-failure" || true
   ftctl_xcolo_capture_policy_snapshot "${vm}" "post-migrate-failure" || true
+  cap_return_path="$(ftctl_xcolo_query_primary_qmp_diag_value "${vm}" "query-migrate-capabilities" "cap:return-path")"
 
   if errno="$(ftctl_xcolo_primary_filter_mirror_send_errno "${vm}")"; then
     reason="filter_mirror_send_failed"
     last_error="xcolo_filter_mirror_send_failed"
+    failure_scope="post_migrate_filter_mirror_send"
+    failure_phase="post_migrate_filter_mirror_send"
     if [[ "${errno}" == "eperm" ]]; then
       reason="filter_mirror_send_eperm"
       last_error="xcolo_filter_mirror_send_eperm"
@@ -2295,20 +2301,24 @@ ftctl_xcolo_classify_startup_active_stream_failure() {
       "xcolo_filter_mirror_send_contract_reason=$(ftctl_state_get "${vm}" "xcolo_chardev_contract_reason" 2>/dev/null || true)" \
       "xcolo_filter_mirror_send_contract_mirror_path=$(ftctl_state_get "${vm}" "xcolo_chardev_contract_mirror_path" 2>/dev/null || true)" \
       "xcolo_filter_mirror_send_contract_compare_path=$(ftctl_state_get "${vm}" "xcolo_chardev_contract_compare_path" 2>/dev/null || true)"
+  elif [[ "${cap_return_path}" == "yes" ]]; then
+    reason="migration_return_path_enabled_for_colo"
+    last_error="xcolo_migration_return_path_conflict"
   fi
 
   ftctl_state_set "${vm}" \
     "xcolo_repeated_protocol_invalid_message=yes" \
     "xcolo_protocol_invalid_message_reason=${reason}" \
-    "xcolo_protocol_invalid_message_scope=post_migrate_startup_active_filter" \
-    "xcolo_protocol_failure_phase=post_migrate_startup_active_filter" \
+    "xcolo_protocol_invalid_message_scope=${failure_scope}" \
+    "xcolo_protocol_failure_phase=${failure_phase}" \
     "xcolo_protocol_steady_state_required=true" \
     "xcolo_protocol_expected_primary_role=primary" \
     "xcolo_protocol_expected_secondary_role=secondary" \
+    "xcolo_primary_capability_return_path_at_failure=${cap_return_path}" \
     "last_error=${last_error}"
 
   ftctl_log_event "colo" "xcolo.startup_active_stream_failure" "fail" "${vm}" "" \
-    "reason=${reason} errno=${errno:-none} path=primary:m0->mirror0->secondary:red0 contract=$(ftctl_state_get "${vm}" "xcolo_chardev_contract_ready" 2>/dev/null || true) contract_reason=$(ftctl_state_get "${vm}" "xcolo_chardev_contract_reason" 2>/dev/null || true)"
+    "reason=${reason} errno=${errno:-none} return_path=${cap_return_path} path=primary:m0->mirror0->secondary:red0 contract=$(ftctl_state_get "${vm}" "xcolo_chardev_contract_ready" 2>/dev/null || true) contract_reason=$(ftctl_state_get "${vm}" "xcolo_chardev_contract_reason" 2>/dev/null || true)"
 }
 
 ftctl_xcolo_collect_primary_netdev_vhost_state() {
@@ -2893,7 +2903,7 @@ ftctl_xcolo_invalid_message_protocol_reason() {
   local secondary_colo="${12-}"
   local firewall_ready storage_symmetry runtime_socket_captured
   local topology_audit startup_primary_9998 failure_primary_9998
-  local pre_chardev pre_filter_qom pre_filter_cmdline
+  local pre_chardev pre_filter_qom pre_filter_cmdline cap_return_path
 
   firewall_ready="$(ftctl_state_get "${vm}" "xcolo_firewall_ready" 2>/dev/null || true)"
   storage_symmetry="$(ftctl_state_get "${vm}" "xcolo_storage_symmetry" 2>/dev/null || true)"
@@ -2904,6 +2914,7 @@ ftctl_xcolo_invalid_message_protocol_reason() {
   pre_chardev="$(ftctl_state_get "${vm}" "xcolo_premigrate_primary_filter_chardev_ready" 2>/dev/null || true)"
   pre_filter_qom="$(ftctl_state_get "${vm}" "xcolo_premigrate_primary_filter_qom_ready" 2>/dev/null || true)"
   pre_filter_cmdline="$(ftctl_state_get "${vm}" "xcolo_premigrate_primary_filter_cmdline_ready" 2>/dev/null || true)"
+  cap_return_path="$(ftctl_state_get "${vm}" "xcolo_primary_capability_return_path" 2>/dev/null || true)"
 
   if [[ "${firewall_ready}" == "no" ]]; then
     printf '%s\n' "firewall_not_ready"
@@ -2925,18 +2936,20 @@ ftctl_xcolo_invalid_message_protocol_reason() {
     printf '%s\n' "runtime_socket_snapshot_missing"
   elif [[ "${topology_audit}" == "failed" ]]; then
     printf '%s\n' "topology_audit_failed"
+  elif [[ "${cap_return_path}" == "yes" ]]; then
+    printf '%s\n' "migration_return_path_enabled_for_colo"
   elif [[ "${primary_migrate}" == "failed" &&
           ( "${secondary_migrate}" == "colo" || "${secondary_colo}" == "secondary" ) &&
           "${startup_primary_9998}" == "established" &&
           "${failure_primary_9998}" == "closed" ]]; then
-    printf '%s\n' "return_path_protocol_closed_after_startup_active"
+    printf '%s\n' "colo_control_channel_closed_after_startup_active"
   elif [[ "${primary_migrate}" == "failed" &&
           "${secondary_migrate}" == "colo" &&
           "${primary_colo}" == "none" &&
           "${secondary_colo}" == "secondary" ]]; then
     printf '%s\n' "primary_role_not_entered_after_migrate"
   else
-    printf '%s\n' "qemu_return_path_invalid_zero_header"
+    printf '%s\n' "colo_control_message_invalid_zero_header"
   fi
 }
 

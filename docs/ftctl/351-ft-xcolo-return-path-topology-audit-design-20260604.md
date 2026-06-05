@@ -1,5 +1,14 @@
 # FT XCOLO Return-Path Topology Audit Design - 2026-06-04
 
+## Superseded Capability Note - 2026-06-05
+
+This document used "return-path" broadly for the COLO control/response stream.
+It must not be read as permission to enable QEMU's generic migration
+`return-path` capability. That capability conflict is resolved by
+[362. FT XCOLO QEMU 9.2.4 Return-Path Capability Conflict Design](362-ft-xcolo-qemu-924-return-path-capability-conflict-design-20260605.md):
+current FTCTL behavior requires `x-colo=true` and generic migration
+`return-path=false`.
+
 ## Background
 
 Run 74 validated the premigrate-active filter change from design 350:
@@ -34,7 +43,8 @@ The investigation must distinguish:
 - TCP reachability: listen/connect/firewall evidence
 - QEMU commandline topology: the objects and chardevs QEMU actually started
 - QOM topology: the properties QEMU exposes at runtime
-- COLO return-path state: migration status, COLO role, and 9998 socket state
+- COLO control-channel state: migration status, COLO role, and 9998 socket
+  state
 - QEMU-side failure text: primary and secondary libvirt/QEMU logs
 
 ## QEMU Topology Contract
@@ -113,12 +123,12 @@ New files:
 When primary migration fails with the invalid-message signature and the previous
 preconditions are ready, classify more narrowly:
 
-- `return_path_protocol_closed_after_startup_active`
+- `colo_control_channel_closed_after_startup_active`
   - primary 9998 moved from established to closed
   - secondary reached `colo` or COLO `secondary`
 - `topology_audit_failed`
   - the new topology audit found a concrete mismatch
-- `qemu_return_path_invalid_zero_header`
+- `colo_control_message_invalid_zero_header`
   - topology audit was ok, sockets were observed, but primary still received
     the zero message header
 
@@ -131,8 +141,8 @@ the subreason must be specific enough to prevent another generic timing loop.
 2. Add primary and secondary QEMU log tail capture.
 3. Add secondary commandline topology validation.
 4. Add combined premigrate topology audit gate before `primary.migrate`.
-5. Enrich invalid-message reason classification with topology and return-path
-   socket state.
+5. Enrich invalid-message reason classification with topology and COLO
+   control-channel socket state.
 6. Record this design and the next run expectation in the progress document.
 
 ## Next Test Expectation
@@ -143,11 +153,11 @@ The next run is progress only if it produces one of these results:
 - The new premigrate topology audit blocks with a concrete missing or miswired
   object.
 - The same invalid-message signature repeats with topology audit `ok`, in which
-  case the next change must target QEMU return-path protocol semantics or QEMU
+  case the next change must target QEMU COLO control-channel semantics or QEMU
   binary/runtime parity, not another filter activation timing change.
 
 ## Supersedes Nothing
 
 This design does not supersede design 350. It extends it. The normal path stays
 premigrate-active; this document only adds topology audit and better
-return-path failure evidence.
+COLO control-channel failure evidence.

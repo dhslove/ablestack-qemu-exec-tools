@@ -7,6 +7,11 @@ Date: 2026-05-30
 The checkpoint-delay portion of this design is superseded by
 [345. FT XCOLO Pre-Migrate Checkpoint Hard Gate Design](345-ft-xcolo-premigrate-checkpoint-hard-gate-design-20260604.md).
 
+The migration capability portion is superseded by
+[362. FT XCOLO QEMU 9.2.4 Return-Path Capability Conflict Design](362-ft-xcolo-qemu-924-return-path-capability-conflict-design-20260605.md).
+Current QEMU 9.2.4-aligned FTCTL behavior enables `x-colo` but explicitly
+keeps generic migration `return-path` disabled for COLO.
+
 The earlier conclusion treated `x-checkpoint-delay` as post-start tuning. Run
 68 later proved that the remaining blocker is primary COLO role transition
 after `primary.migrate`, so ABLESTACK FT validation now requires
@@ -49,7 +54,8 @@ It also shows the primary startup QMP sequence as:
 1. `qmp_capabilities`
 2. `blockdev-add` for the NBD client
 3. `x-blockdev-change`
-4. `migrate-set-capabilities` with `return-path` and `x-colo`
+4. `migrate-set-capabilities` with `x-colo` only; generic migration
+   `return-path` must stay disabled
 5. `migrate`
 
 The same document describes `migrate-set-parameters x-checkpoint-delay` as an

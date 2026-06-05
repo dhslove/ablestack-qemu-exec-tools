@@ -1,5 +1,13 @@
 # FT X-COLO Multi Writable Disk Graph Design
 
+## Superseded Capability Note - 2026-06-05
+
+Any `return-path` capability requirement in this historical design is
+superseded by
+[362. FT XCOLO QEMU 9.2.4 Return-Path Capability Conflict Design](362-ft-xcolo-qemu-924-return-path-capability-conflict-design-20260605.md).
+Current FTCTL behavior must use `x-colo=true` with generic migration
+`return-path=false`.
+
 ## Background
 
 After deferring primary network filter attach, FT registration for `r97-link-01` progressed through:
@@ -57,7 +65,7 @@ The first disk remains backward-compatible with the previous state summary keys,
 The handshake order becomes:
 
 1. Secondary QMP capabilities.
-2. Secondary x-colo/return-path capabilities.
+2. Secondary x-colo capability with generic return-path disabled.
 3. Secondary NBD server start.
 4. For each disk, secondary NBD export add for that disk's base/parent node. Design 332 supersedes the earlier attempt to export the COLO quorum top node (`ftctl-colo-<target>`), because QEMU's COLO procedure exports `parent0` and the primary NBD client attaches that export under the primary quorum.
 5. Primary QMP capabilities.
@@ -67,7 +75,7 @@ The handshake order becomes:
    - primary quorum add with both children already present: `ftctl-primary-active-<target>` and `nbd0-<target>`;
    - primary disk device replacement to the completed quorum.
 7. Primary network filter object attach.
-8. Primary x-colo/return-path capabilities.
+8. Primary x-colo capability with generic return-path disabled.
 9. Primary checkpoint parameter update.
 10. Primary `cont`.
 11. Primary migrate.

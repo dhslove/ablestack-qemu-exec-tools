@@ -62,7 +62,7 @@ primary QEMU log tail immediately. If the latest relevant QEMU log contains
 - `xcolo_filter_mirror_send_errno=eperm`
 - `xcolo_filter_mirror_send_path=primary:m0->mirror0->secondary:red0`
 - `xcolo_protocol_invalid_message_reason=filter_mirror_send_eperm`
-- `xcolo_protocol_failure_phase=post_migrate_startup_active_filter`
+- `xcolo_protocol_failure_phase=post_migrate_filter_mirror_send`
 
 If the mirror send failure is present with another errno, persist the errno as
 `xcolo_filter_mirror_send_errno=<normalized-errno>` and use:

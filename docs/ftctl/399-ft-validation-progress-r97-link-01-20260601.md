@@ -3412,6 +3412,105 @@ but a lower-level signature or reached stage changed, set
   - `ablestack_vm_ftctl status --vm i-2-54-VM --json` returned `not_found`
   - the removed standby RBD images now return `No such file or directory`
 
+### Run 84 Monitoring Result 2026-06-05
+
+- Test trigger:
+  - user started FT protection for `r97-link-01`
+  - primary VM: `54` / `i-2-54-VM`
+  - primary runtime host during final check: `10.10.32.3`
+  - standby VM observed by the monitor: `140` / `i-2-140-VM`
+- Final monitor result:
+  - protection row: `84`
+  - final Cloud protection state observed by the monitor:
+    - `protection_state=error`
+    - `transport_state=failed`
+    - `protect_job_state=failed`
+    - `conversion_stage=handshake_failed`
+    - `last_error=xcolo_startup_active_filter_stream_failed`
+  - current libvirt state after recovery check:
+    - primary `i-2-54-VM` is `running` on `10.10.32.3`
+    - standby `i-2-140-VM` is `paused` on `10.10.32.1`
+- Confirmed improvement:
+  - the QEMU 9.2 directional chardev contract passed before migrate
+  - recorded states:
+    - `xcolo_chardev_contract_ready=yes`
+    - `xcolo_chardev_contract_directional_ready=yes`
+    - `xcolo_chardev_contract_strict_frontend_ready=no`
+    - strict closed reason:
+      `mirror_path_primary_mirror0=present_closed,compare_path_secondary_red1=present_closed`
+    - output frontend policy:
+      `xcolo_chardev_contract_output_frontend_policy=backend_connected`
+    - backend connectivity:
+      `primary_mirror0_backend=connected`,
+      `primary_compare1_backend=connected`,
+      `secondary_red0_backend=connected`,
+      `secondary_red1_backend=connected`
+    - pre guest traffic gate:
+      `xcolo_pre_guest_traffic_gate=ready`
+      with policy `qemu_9_2_directional_chardev_contract`
+  - this proves the previous false failure at the pre-migrate frontend-open
+    gate is no longer blocking the run
+- Remaining failure:
+  - failure moved to the post-`primary.migrate` phase
+  - primary QEMU reported:
+    `Received invalid message 0x0000 length 0x0000`
+  - FTCTL classified the phase as:
+    `xcolo_protocol_failure_phase=post_migrate_startup_active_filter`
+  - repeated symptom flag:
+    `xcolo_repeated_protocol_invalid_message=yes`
+- Repetition analysis:
+  - the visible QEMU symptom is the recurring `invalid message 0x0000`
+    family, but this run is not a loop over the same pre-migrate failure
+  - the system progressed past the directional socket/chardev readiness gate
+    and reached `primary.migrate`
+  - the next correction must focus on the post-migrate COLO control or filter
+    stream transition, not on the already-passing pre-migrate frontend-open
+    gate
+- Required next analysis:
+  - split the broad `xcolo_startup_active_filter_stream_failed` classifier
+    into more precise evidence categories
+  - distinguish actual filter send failure from migration return-path invalid
+    COLO control header
+  - inspect Run 84 QEMU logs/debug snapshots before changing topology again
+
+### Run 84 Source-Level Root Cause Update 2026-06-05
+
+- QEMU 9.2.4 source analysis found the strongest current cause:
+  FTCTL enabled generic migration `return-path=true` together with
+  `x-colo=true`.
+- QEMU source basis:
+  - `migration/migration.c:source_return_path_thread()` emits
+    `Received invalid message 0x0000 length 0x0000`
+  - that thread parses 16-bit `MIG_RP_MSG_*` messages and rejects
+    `MIG_RP_MSG_INVALID=0`
+  - `migration/colo.c:colo_process_checkpoint()` separately reads 32-bit
+    `COLOMessage` values such as `COLO_MESSAGE_CHECKPOINT_READY` from the
+    COLO return path
+  - enabling the generic migration return-path during COLO can create two
+    consumers for the same return-path stream
+- QEMU document basis:
+  - QEMU 9.2.4 `docs/COLO-FT.txt` enables only `x-colo` in the documented COLO
+    QMP sequence
+  - it does not enable generic migration `return-path`
+- Corrected design:
+  - `docs/ftctl/362-ft-xcolo-qemu-924-return-path-capability-conflict-design-20260605.md`
+- Code correction:
+  - FTCTL now sends `migrate-set-capabilities` with
+    `return-path=false,x-colo=true`
+  - success criteria now require `x-colo=yes` and reject `return-path=yes`
+  - `Received invalid message` classification is split:
+    - `xcolo_migration_return_path_conflict` if `return-path=yes`
+    - `xcolo_filter_mirror_send_failed` or
+      `xcolo_filter_mirror_send_eperm` only when QEMU logs prove
+      `filter mirror send failed(...)`
+    - `xcolo_colo_control_message_invalid` otherwise
+- Repetition control:
+  - if the next run still fails with `Received invalid message` while
+    `xcolo_primary_capability_return_path=no`, the generic migration
+    return-path conflict is ruled out and the next analysis must move to the
+    COLO control message exchange itself or a QEMU-log-proven filter send
+    failure
+
 ### QEMU 9.2.4 Directional Chardev Contract Design 2026-06-05
 
 - Run 83 code-level analysis:

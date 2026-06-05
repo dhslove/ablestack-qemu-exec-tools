@@ -36,7 +36,7 @@ Immediately before sending primary QMP `migrate`, qemu FTCTL records stable
 `xcolo_premigrate_*` state keys:
 
 - evidence timestamp;
-- primary `x-colo` and `return-path` migration capability state;
+- primary `x-colo` and disabled `return-path` migration capability state;
 - primary checkpoint delay parameter presence;
 - primary QOM packet filter readiness and selected object properties;
 - primary chardev frontend readiness;

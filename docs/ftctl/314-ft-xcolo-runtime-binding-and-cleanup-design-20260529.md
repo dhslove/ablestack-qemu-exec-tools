@@ -2,6 +2,13 @@
 
 Date: 2026-05-29
 
+## Superseded Capability Note - 2026-06-05
+
+The earlier `return-path` capability expectation is superseded by
+[362. FT XCOLO QEMU 9.2.4 Return-Path Capability Conflict Design](362-ft-xcolo-qemu-924-return-path-capability-conflict-design-20260605.md).
+Current FTCTL must enable `x-colo` while keeping generic migration
+`return-path` disabled.
+
 ## Context
 
 The latest `r97-link-01` FT run reached the runtime convergence stage:

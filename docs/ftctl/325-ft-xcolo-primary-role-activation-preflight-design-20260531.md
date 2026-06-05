@@ -1,5 +1,13 @@
 # FT xCOLO Primary Role Activation Preflight Design - 2026-05-31
 
+## Superseded Capability Note - 2026-06-05
+
+The migration capability contract in this document is superseded by
+[362. FT XCOLO QEMU 9.2.4 Return-Path Capability Conflict Design](362-ft-xcolo-qemu-924-return-path-capability-conflict-design-20260605.md).
+
+Current FTCTL behavior must enable `x-colo` and must not enable the generic
+migration `return-path` capability for COLO.
+
 ## Context
 
 The previous success-gate change correctly stopped FT from being reported as
@@ -55,7 +63,7 @@ not as a generic `activation_stalled`.
 
 Every xCOLO startup path must use a single helper for:
 
-1. `migrate-set-capabilities return-path=true,x-colo=true`
+1. `migrate-set-capabilities return-path=false,x-colo=true`
 2. `query-migrate-capabilities`
 3. state/event recording for `x-colo` and `return-path`
 
@@ -88,8 +96,9 @@ primary role does not become `primary`:
 - if primary filter chardev frontends are closed:
   `primary_filter_chardev_frontend_incomplete`
 - if migration capabilities are missing:
-  `primary_colo_capability_missing` or
-  `primary_return_path_capability_missing`
+  `primary_colo_capability_missing`
+- if generic migration return-path is enabled:
+  `xcolo_migration_return_path_conflict`
 - otherwise:
   `primary_qemu_colo_role_transition_failed`
 
@@ -103,4 +112,3 @@ The next run should either:
   `colo_running/mirroring`, or
 - fail with `xcolo_runtime_validation_failed:primary_filter_chardev_frontend_incomplete`
   if the primary QEMU process still leaves COLO filter chardev frontends closed.
-

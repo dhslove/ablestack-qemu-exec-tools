@@ -1,5 +1,12 @@
 # FT XCOLO Post-Migrate Filter Activation Gate Design - 2026-06-04
 
+## Superseded Capability Note - 2026-06-05
+
+The `return-path=on` capability references in this document are superseded by
+[362. FT XCOLO QEMU 9.2.4 Return-Path Capability Conflict Design](362-ft-xcolo-qemu-924-return-path-capability-conflict-design-20260605.md).
+Current QEMU 9.2.4-aligned FTCTL behavior enables `x-colo` and keeps generic
+migration `return-path` disabled.
+
 ## Background
 
 Run 69 eliminated the checkpoint-delay hypothesis.
@@ -57,7 +64,7 @@ primary qmp_capabilities
 primary block graph / NBD client setup
 primary stop
 primary filter topology present with status=off
-primary migrate-set-capabilities return-path=on,x-colo=on
+primary migrate-set-capabilities return-path=off,x-colo=on
 primary migrate-set-parameters x-checkpoint-delay=<value>
 primary pre-migrate evidence capture with filter status=off
 primary firewall/socket preflight
