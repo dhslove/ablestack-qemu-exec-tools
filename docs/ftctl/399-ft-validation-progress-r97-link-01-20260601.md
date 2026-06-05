@@ -3451,6 +3451,49 @@ but a lower-level signature or reached stage changed, set
     pre-migrate mirror-send guards pass
   - use post-migrate runtime validation to classify the real COLO result
 
+### Pre-Migrate Frontend Diagnostic Build And Retest Readiness 2026-06-05
+
+- Source commit for deployed code:
+  - `5d5a2d9`
+  - `fix: treat pre-migrate frontend-open as diagnostic`
+- Build:
+  - GitHub Actions run: `26997628215`
+  - workflow conclusion: `success`
+  - deployed RPM artifact:
+    - `ablestack_vm_ftctl-0.8.0-1.noarch.rpm`
+    - SHA256:
+      `3c3dd134ff52ebfbea7a43d687b1a9e2abd08e26dcbcd14ca16699ca96df5ecd`
+- Deployment:
+  - deployed to `10.10.32.1`, `10.10.32.2`, and `10.10.32.3`
+  - installation used `aspkg -Uvh --replacepkgs`
+  - verified installed script markers:
+    - `xcolo_pre_guest_traffic_gate_policy=qemu_doc_topology_socket`
+    - `diagnostic_closed`
+  - verified timers active on all three hosts:
+    - `ablestack-vm-ftctl.timer`
+    - `ablestack-vm-hangctl.timer`
+- Cleanup after Run 81:
+  - removed active protection row `81` by marking it disabled/stopped/removed
+    with `last_error=test_cleanup_after_preguest_frontend_diagnostic_fix`
+  - removed `ftctl.*` VM details for primary VM `54` and standby VM `137`
+  - marked standby VM `137` (`i-2-137-VM`) as `Expunging`
+  - marked standby volumes `259` and `260` as `Expunged`
+  - removed standby RBD images:
+    - `rbd/43f0a081-a078-4593-a89b-af1861d84f37`
+    - `rbd/194ac44c-d3c5-4ba3-b073-7564c4ef3e72`
+  - removed stale FTCTL runtime/profile/debug files for `i-2-54-VM`,
+    `i-2-137-VM`, and `r97-link-01` from the 32.x hosts
+- Final readiness verification:
+  - active protection rows for primary VM `54`: `0`
+  - active `ftctl.*` details for `r97-link-01`: `0`
+  - active standby VM rows: `0`
+  - active standby volumes: `0`
+  - primary VM `i-2-54-VM` is `running` on `10.10.32.3`
+  - primary QMP `query-block-jobs` returned an empty list
+  - primary QMP `query-migrate` returned an empty object
+  - `ablestack_vm_ftctl status --vm i-2-54-VM --json` returned `not_found`
+  - the removed standby RBD images now return `No such file or directory`
+
 ### Stable RBD Contract And Listener Bootstrap Design 2026-06-05
 
 - Run 80 failure summary:
