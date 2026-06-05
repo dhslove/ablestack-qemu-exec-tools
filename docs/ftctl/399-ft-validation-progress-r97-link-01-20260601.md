@@ -3412,6 +3412,48 @@ but a lower-level signature or reached stage changed, set
   - `ablestack_vm_ftctl status --vm i-2-54-VM --json` returned `not_found`
   - the removed standby RBD images now return `No such file or directory`
 
+### QEMU 9.2.4 Directional Chardev Contract Design 2026-06-05
+
+- Run 83 code-level analysis:
+  - protection row: `83`
+  - primary VM: `54` / `i-2-54-VM`
+  - standby VM: `139` / `i-2-139-VM`
+  - final state before this fix:
+    - `protection_state=error`
+    - `transport_state=failed`
+    - `last_error=xcolo_pre_migrate_frontend_not_open`
+  - QEMU command-line topology and primary QOM topology were OK.
+  - TCP sockets were connected:
+    - primary `9003=listen`, secondary `9003=established`
+    - primary `9004=listen`, secondary `9004=established`
+  - `query-chardev` showed:
+    - primary `mirror0=present_closed` but filename contained a TCP peer
+    - primary `compare1=present_open`
+    - secondary `red0=present_open`
+    - secondary `red1=present_closed` but filename contained a TCP peer
+- Repetition control:
+  - this is not another storage/RBD path issue
+  - this is not a firewall/connectivity issue because TCP peers were present
+  - this is a false-positive pre-migrate hard gate caused by treating output
+    chardev `frontend-open=false` as failure
+- Corrected design:
+  - `docs/ftctl/361-ft-xcolo-qemu-924-directional-chardev-contract-design-20260605.md`
+  - updated `docs/ftctl/360-ft-xcolo-frontend-hard-gate-and-cloud-managed-runtime-reconcile-design-20260605.md`
+- Code direction:
+  - parse both `frontend-open` and backend filename connectivity from
+    `query-chardev`
+  - require backend connectivity for output chardevs:
+    - primary `mirror0`
+    - secondary `red1`
+  - require `frontend-open=true` for input chardevs:
+    - secondary `red0`
+    - primary `compare1`
+  - keep strict frontend status as diagnostics only
+  - update the pre-guest gate policy to
+    `qemu_9_2_directional_chardev_contract`
+  - restore cloud-managed standby runtime from `standby.generated.xml`, not
+    `standby_xml_seed`, during qemu-side failure recovery
+
 ### Run 82 Async Protect Frontend Contract Failure 2026-06-05
 
 - Source state before the fix:

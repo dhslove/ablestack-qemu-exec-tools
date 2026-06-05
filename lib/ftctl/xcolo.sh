@@ -1939,46 +1939,99 @@ secondary_raw = sys.argv[2] if len(sys.argv) > 2 else ""
 primary_rc = sys.argv[3] if len(sys.argv) > 3 else "1"
 secondary_rc = sys.argv[4] if len(sys.argv) > 4 else "1"
 
-def state(raw, label):
+def entry(raw, label):
     try:
         data = json.loads(raw)
     except Exception:
-        return "unknown"
+        return {"state": "unknown", "backend": "unknown"}
     for item in data.get("return", []):
         if item.get("label") != label:
             continue
         opened = item.get("frontend-open")
+        filename = item.get("filename") or ""
         if opened is True:
-            return "present_open"
-        if opened is False:
-            return "present_closed"
-        return "present_unknown"
-    return "missing"
+            state = "present_open"
+        elif opened is False:
+            state = "present_closed"
+        else:
+            state = "present_unknown"
+        if "<->" in filename and not filename.startswith("disconnected:"):
+            backend = "connected"
+        elif filename.startswith("disconnected:"):
+            backend = "disconnected"
+        elif filename:
+            backend = "present"
+        else:
+            backend = "unknown"
+        return {"state": state, "backend": backend}
+    return {"state": "missing", "backend": "missing"}
+
+def state(raw, label):
+    return entry(raw, label)["state"]
+
+def backend(raw, label):
+    return entry(raw, label)["backend"]
+
+def input_frontend_ok(value):
+    return value == "present_open"
+
+def output_backend_ok(state_value, backend_value):
+    return state_value in ("present_open", "present_closed") and backend_value == "connected"
+
+def output_desc(state_value, backend_value):
+    return f"{state_value}/{backend_value}"
 
 primary_mirror0 = state(primary_raw, "mirror0") if primary_rc == "0" else "query_failed"
+primary_mirror0_backend = backend(primary_raw, "mirror0") if primary_rc == "0" else "query_failed"
 primary_compare1 = state(primary_raw, "compare1") if primary_rc == "0" else "query_failed"
+primary_compare1_backend = backend(primary_raw, "compare1") if primary_rc == "0" else "query_failed"
 secondary_red0 = state(secondary_raw, "red0") if secondary_rc == "0" else "query_failed"
+secondary_red0_backend = backend(secondary_raw, "red0") if secondary_rc == "0" else "query_failed"
 secondary_red1 = state(secondary_raw, "red1") if secondary_rc == "0" else "query_failed"
+secondary_red1_backend = backend(secondary_raw, "red1") if secondary_rc == "0" else "query_failed"
 
-checks = [
+checks = []
+if not output_backend_ok(primary_mirror0, primary_mirror0_backend):
+    checks.append(("mirror_path_primary_mirror0", output_desc(primary_mirror0, primary_mirror0_backend)))
+if not input_frontend_ok(secondary_red0):
+    checks.append(("mirror_path_secondary_red0", secondary_red0))
+if not output_backend_ok(secondary_red1, secondary_red1_backend):
+    checks.append(("compare_path_secondary_red1", output_desc(secondary_red1, secondary_red1_backend)))
+if not input_frontend_ok(primary_compare1):
+    checks.append(("compare_path_primary_compare1", primary_compare1))
+
+reasons = [f"{name}={value}" for name, value in checks]
+ready = "yes" if not reasons else "no"
+if primary_rc != "0" or secondary_rc != "0":
+    ready = "unknown" if not reasons else "no"
+
+strict_checks = [
     ("mirror_path_primary_mirror0", primary_mirror0),
     ("mirror_path_secondary_red0", secondary_red0),
     ("compare_path_primary_compare1", primary_compare1),
     ("compare_path_secondary_red1", secondary_red1),
 ]
-reasons = [f"{name}={value}" for name, value in checks if value != "present_open"]
-ready = "yes" if not reasons else "no"
+strict_reasons = [f"{name}={value}" for name, value in strict_checks if value != "present_open"]
+strict_ready = "yes" if not strict_reasons else "no"
 if primary_rc != "0" or secondary_rc != "0":
-    ready = "unknown" if not reasons else "no"
+    strict_ready = "unknown" if not strict_reasons else "no"
 
 print(f"ready={ready}")
+print(f"directional_ready={ready}")
+print(f"strict_frontend_ready={strict_ready}")
 print("reason=" + ",".join(reasons))
+print("strict_frontend_reason=" + ",".join(strict_reasons))
+print("output_frontend_policy=backend_connected")
 print(f"primary_mirror0={primary_mirror0}")
+print(f"primary_mirror0_backend={primary_mirror0_backend}")
 print(f"primary_compare1={primary_compare1}")
+print(f"primary_compare1_backend={primary_compare1_backend}")
 print(f"secondary_red0={secondary_red0}")
+print(f"secondary_red0_backend={secondary_red0_backend}")
 print(f"secondary_red1={secondary_red1}")
-print(f"mirror_path=primary:m0->mirror0({primary_mirror0})->secondary:red0({secondary_red0})->f1")
-print(f"compare_path=secondary:f2->red1({secondary_red1})->primary:compare1({primary_compare1})->comp0")
+print(f"secondary_red1_backend={secondary_red1_backend}")
+print(f"mirror_path=primary:m0->mirror0({primary_mirror0}/{primary_mirror0_backend})->secondary:red0({secondary_red0}/{secondary_red0_backend})->f1")
+print(f"compare_path=secondary:f2->red1({secondary_red1}/{secondary_red1_backend})->primary:compare1({primary_compare1}/{primary_compare1_backend})->comp0")
 PY
 )" || payload="ready=unknown"$'\n'"reason=query_chardev_contract_parse_failed"
 
@@ -1994,9 +2047,21 @@ PY
         state_args+=("xcolo_chardev_contract_ready=${line#ready=}")
         state_args+=("xcolo_${phase_key}_chardev_contract_ready=${line#ready=}")
         ;;
+      directional_ready=*)
+        state_args+=("xcolo_chardev_contract_directional_ready=${line#directional_ready=}")
+        state_args+=("xcolo_${phase_key}_chardev_contract_directional_ready=${line#directional_ready=}")
+        ;;
+      strict_frontend_ready=*)
+        state_args+=("xcolo_chardev_contract_strict_frontend_ready=${line#strict_frontend_ready=}")
+        state_args+=("xcolo_${phase_key}_chardev_contract_strict_frontend_ready=${line#strict_frontend_ready=}")
+        ;;
       reason=*)
         state_args+=("xcolo_chardev_contract_reason=${line#reason=}")
         state_args+=("xcolo_${phase_key}_chardev_contract_reason=${line#reason=}")
+        ;;
+      strict_frontend_reason=*)
+        state_args+=("xcolo_chardev_contract_strict_frontend_reason=${line#strict_frontend_reason=}")
+        state_args+=("xcolo_${phase_key}_chardev_contract_strict_frontend_reason=${line#strict_frontend_reason=}")
         ;;
       mirror_path=*)
         state_args+=("xcolo_chardev_contract_mirror_path=${line#mirror_path=}")
@@ -2016,12 +2081,12 @@ PY
 
   if [[ "$(ftctl_state_get "${vm}" "xcolo_chardev_contract_ready" 2>/dev/null || true)" == "yes" ]]; then
     ftctl_log_event "colo" "xcolo.chardev_contract" "ok" "${vm}" "" \
-      "phase=${phase} mirror=$(ftctl_state_get "${vm}" "xcolo_chardev_contract_mirror_path" 2>/dev/null || true) compare=$(ftctl_state_get "${vm}" "xcolo_chardev_contract_compare_path" 2>/dev/null || true)"
+      "phase=${phase} policy=directional_backend_connected strict_frontend=$(ftctl_state_get "${vm}" "xcolo_chardev_contract_strict_frontend_ready" 2>/dev/null || true) mirror=$(ftctl_state_get "${vm}" "xcolo_chardev_contract_mirror_path" 2>/dev/null || true) compare=$(ftctl_state_get "${vm}" "xcolo_chardev_contract_compare_path" 2>/dev/null || true)"
     return 0
   fi
 
   ftctl_log_event "colo" "xcolo.chardev_contract" "fail" "${vm}" "" \
-    "phase=${phase} reason=$(ftctl_state_get "${vm}" "xcolo_chardev_contract_reason" 2>/dev/null || true)"
+    "phase=${phase} policy=directional_backend_connected reason=$(ftctl_state_get "${vm}" "xcolo_chardev_contract_reason" 2>/dev/null || true) strict_frontend=$(ftctl_state_get "${vm}" "xcolo_chardev_contract_strict_frontend_ready" 2>/dev/null || true)"
   return 1
 }
 
@@ -2117,12 +2182,12 @@ ftctl_xcolo_gate_before_guest_traffic() {
       "xcolo_pre_guest_traffic_gate=failed" \
       "xcolo_pre_guest_traffic_gate_reason=${contract_reason}" \
       "xcolo_pre_guest_traffic_gate_primary_status=${primary_status}" \
-      "xcolo_pre_guest_traffic_gate_policy=qemu_doc_frontend_hard_contract" \
+      "xcolo_pre_guest_traffic_gate_policy=qemu_9_2_directional_chardev_contract" \
       "xcolo_pre_guest_traffic_chardev_contract=${contract_ready:-unknown}" \
       "xcolo_protocol_failure_phase=pre_guest_traffic_contract" \
       "last_error=xcolo_pre_migrate_frontend_not_open"
     ftctl_log_event "colo" "xcolo.guest_traffic_gate" "fail" "${vm}" "" \
-      "phase=pre_guest_traffic policy=qemu_doc_frontend_hard_contract frontend_contract=${frontend_contract} contract=${contract_ready:-unknown} reason=${contract_reason} primary_status=${primary_status} doc_topology=${doc_topology:-unknown}"
+      "phase=pre_guest_traffic policy=qemu_9_2_directional_chardev_contract frontend_contract=${frontend_contract} contract=${contract_ready:-unknown} reason=${contract_reason} primary_status=${primary_status} doc_topology=${doc_topology:-unknown}"
     return 1
   fi
 
@@ -2130,10 +2195,10 @@ ftctl_xcolo_gate_before_guest_traffic() {
     "xcolo_pre_guest_traffic_gate=ready" \
     "xcolo_pre_guest_traffic_gate_reason=${contract_reason}" \
     "xcolo_pre_guest_traffic_gate_primary_status=${primary_status}" \
-    "xcolo_pre_guest_traffic_gate_policy=qemu_doc_frontend_hard_contract" \
+    "xcolo_pre_guest_traffic_gate_policy=qemu_9_2_directional_chardev_contract" \
     "xcolo_pre_guest_traffic_chardev_contract=${contract_ready:-unknown}"
   ftctl_log_event "colo" "xcolo.guest_traffic_gate" "ok" "${vm}" "" \
-    "phase=pre_guest_traffic policy=qemu_doc_frontend_hard_contract contract=${contract_ready:-unknown} primary_status=${primary_status}"
+    "phase=pre_guest_traffic policy=qemu_9_2_directional_chardev_contract contract=${contract_ready:-unknown} strict_frontend=$(ftctl_state_get "${vm}" "xcolo_chardev_contract_strict_frontend_ready" 2>/dev/null || true) primary_status=${primary_status}"
   return 0
 }
 

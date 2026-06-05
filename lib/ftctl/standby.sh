@@ -1199,10 +1199,13 @@ ftctl_standby_deactivate_cloud_managed() {
   local vm="${1-}"
   shift || true
   local candidates=("$@")
-  local secondary_vm_name seed out err rc state seen candidate
+  local secondary_vm_name generated out err rc state seen candidate detail
 
   secondary_vm_name="$(ftctl_state_get "${vm}" "secondary_vm_name" 2>/dev/null || ftctl_profile_secondary_vm_name_resolved "${vm}")"
-  seed="$(ftctl_state_get "${vm}" "standby_xml_seed" 2>/dev/null || true)"
+  generated="$(ftctl_state_get "${vm}" "standby_xml_generated" 2>/dev/null || true)"
+  if [[ -z "${generated}" || ! -f "${generated}" ]]; then
+    generated="$(ftctl_standby_generated_xml_path "${vm}")"
+  fi
 
   seen=" "
   for candidate in "${candidates[@]}"; do
@@ -1231,14 +1234,14 @@ ftctl_standby_deactivate_cloud_managed() {
     fi
   done
 
-  [[ -n "${seed}" && -f "${seed}" ]] || {
+  [[ -n "${generated}" && -f "${generated}" ]] || {
     ftctl_state_set "${vm}" \
       "standby_state=runtime_restore_failed" \
       "cloud_runtime_state_mismatch=true" \
       "cloud_runtime_restore=failed" \
-      "cloud_runtime_restore_reason=standby_xml_seed_missing"
+      "cloud_runtime_restore_reason=standby_xml_generated_missing"
     ftctl_log_event "standby" "standby.deactivate.cloud_restore" "fail" "${vm}" "" \
-      "reason=standby_xml_seed_missing secondary_uri=${FTCTL_PROFILE_SECONDARY_URI}"
+      "reason=standby_xml_generated_missing secondary_uri=${FTCTL_PROFILE_SECONDARY_URI} path=${generated}"
     return 1
   }
 
@@ -1264,17 +1267,19 @@ ftctl_standby_deactivate_cloud_managed() {
   if [[ "${state}" == "shut off" || "${state}" == "shutoff" ]]; then
     ftctl_virsh "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC}" out err rc -- -c "${FTCTL_PROFILE_SECONDARY_URI}" start "${secondary_vm_name}" || true
   else
-    ftctl_virsh "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC}" out err rc -- -c "${FTCTL_PROFILE_SECONDARY_URI}" create "${seed}" || true
+    ftctl_virsh "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC}" out err rc -- -c "${FTCTL_PROFILE_SECONDARY_URI}" create "${generated}" || true
   fi
   : "${out}${err}"
   if [[ "${rc}" != "0" ]]; then
+    detail="$(printf '%s %s' "${err}" "${out}" | tr '\r\n\t' '   ' | sed 's/[[:space:]][[:space:]]*/ /g;s/^ //;s/ $//' | cut -c1-420)"
     ftctl_state_set "${vm}" \
       "standby_state=runtime_restore_failed" \
       "cloud_runtime_state_mismatch=true" \
       "cloud_runtime_restore=failed" \
-      "cloud_runtime_restore_reason=restore_command_failed"
+      "cloud_runtime_restore_reason=restore_command_failed" \
+      "cloud_runtime_restore_error=${detail}"
     ftctl_log_event "standby" "standby.deactivate.cloud_restore" "fail" "${vm}" "${rc}" \
-      "secondary_uri=${FTCTL_PROFILE_SECONDARY_URI} domain=${secondary_vm_name} path=${seed}"
+      "secondary_uri=${FTCTL_PROFILE_SECONDARY_URI} domain=${secondary_vm_name} path=${generated} error=${detail}"
     return "${rc}"
   fi
 
@@ -1300,7 +1305,7 @@ ftctl_standby_deactivate_cloud_managed() {
     "cloud_runtime_state_mismatch=false" \
     "cloud_runtime_restore=ok"
   ftctl_log_event "standby" "standby.deactivate.cloud_restore" "ok" "${vm}" "" \
-    "secondary_uri=${FTCTL_PROFILE_SECONDARY_URI} domain=${secondary_vm_name} path=${seed}"
+    "secondary_uri=${FTCTL_PROFILE_SECONDARY_URI} domain=${secondary_vm_name} path=${generated}"
 }
 
 ftctl_standby_deactivate() {

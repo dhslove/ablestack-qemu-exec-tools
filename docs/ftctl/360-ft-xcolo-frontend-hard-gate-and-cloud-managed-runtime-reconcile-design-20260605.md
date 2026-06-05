@@ -1,4 +1,10 @@
-# 360. FT XCOLO Frontend Hard Gate And Cloud-Managed Runtime Reconcile Design - 2026-06-05
+# 360. FT XCOLO Directional Chardev Contract And Cloud-Managed Runtime Reconcile Design - 2026-06-05
+
+> Superseded correction: the original version of this document treated every
+> COLO chardev `frontend-open=false` as a pre-migrate hard failure. QEMU 9.2.4
+> code-level review showed that this is too strict for output chardevs used by
+> `filter-mirror` and `filter-redirector`. This document now defines the
+> directional contract used by the implementation.
 
 ## Problem
 
@@ -24,8 +30,21 @@ The previous design in
 `358-ft-xcolo-qemu-doc-preguest-frontend-diagnostic-design-20260605.md`
 allowed this state to proceed as diagnostic evidence when QEMU document topology
 and socket checks passed. That was too permissive. Socket listen/established
-state only proves transport reachability. It does not prove that the COLO
-network frontend path is open for guest traffic.
+state only proves transport reachability.
+
+Run 83 then proved the opposite edge: failing before `primary.migrate` merely
+because `mirror0` and `red1` reported `frontend-open=false` also blocks a QEMU
+9.2.4-valid state. The important detail is direction:
+
+- `mirror0` and `red1` are output chardevs. For these, FTCTL must prove the
+  socket backend is connected.
+- `red0` and `compare1` are input chardevs consumed by QEMU filters/compare.
+  For these, FTCTL must prove `frontend-open=true`.
+
+QEMU 9.2.4 `filter-mirror` writes guest TX data to its `outdev`; QEMU
+`filter-redirector` consumes from `indev` and writes to `outdev` according to
+the configured queue direction. `query-chardev.frontend-open` is therefore not
+a symmetric "network ready" bit for every endpoint.
 
 The same run also exposed a Cloud lifecycle mismatch after failure recovery:
 
@@ -53,7 +72,7 @@ lifecycle state.
 
 ## Design
 
-### Pre-Migrate Frontend Hard Gate
+### Pre-Migrate Directional Chardev Gate
 
 Before issuing primary `migrate`, FTCTL must verify both COLO network paths:
 
@@ -62,27 +81,40 @@ primary:m0 -> mirror0 -> secondary:red0 -> f1
 secondary:f2 -> red1 -> primary:compare1 -> comp0
 ```
 
-The gate passes only when every required chardev endpoint is `present_open`:
+The gate passes when direction-specific conditions are satisfied:
 
-- primary `mirror0`
-- primary `compare1`
-- secondary `red0`
-- secondary `red1`
+- primary `mirror0`: chardev exists and TCP backend is connected; do not
+  require `frontend-open=true`
+- secondary `red0`: chardev exists and `frontend-open=true`
+- secondary `red1`: chardev exists and TCP backend is connected; do not require
+  `frontend-open=true`
+- primary `compare1`: chardev exists and `frontend-open=true`
 
-If any endpoint is `present_closed`, `missing`, `present_unknown`, or
-`query_failed`, FTCTL must not issue `migrate`.
+If any direction-specific condition fails, FTCTL must not issue `migrate`.
+If only the output chardevs are `present_closed` while their TCP backends are
+connected, FTCTL must allow `migrate` to proceed.
 
 Failure state:
 
 ```text
 xcolo_pre_guest_traffic_gate=failed
-xcolo_pre_guest_traffic_gate_policy=qemu_doc_frontend_hard_contract
-xcolo_pre_guest_traffic_frontend_contract=<closed|no|unknown>
+xcolo_pre_guest_traffic_gate_policy=qemu_9_2_directional_chardev_contract
+xcolo_pre_guest_traffic_frontend_contract=<no|unknown>
 xcolo_protocol_failure_phase=pre_guest_traffic_contract
 last_error=xcolo_pre_migrate_frontend_not_open
 ```
 
-This supersedes the diagnostic allowance in document 358.
+Diagnostic state:
+
+```text
+xcolo_chardev_contract_ready=<yes|no|unknown>
+xcolo_chardev_contract_directional_ready=<yes|no|unknown>
+xcolo_chardev_contract_strict_frontend_ready=<yes|no|unknown>
+xcolo_chardev_contract_output_frontend_policy=backend_connected
+```
+
+`strict_frontend_ready=no` is expected when `mirror0` or `red1` are
+`present_closed` but connected. It is no longer a failure by itself.
 
 ### Socket/Frontend Separation
 
@@ -93,11 +125,13 @@ Reports must distinguish:
 
 ```text
 socket_contract=ok
-frontend_contract=failed
+directional_chardev_contract=<ok|failed>
+strict_frontend_contract=<ok|failed>
 ```
 
 This prevents firewall/connectivity analysis from being confused with QEMU
-chardev frontend readiness.
+chardev frontend readiness. It also prevents output chardev `frontend-open`
+semantics from being confused with peer connectivity.
 
 ### Cloud-Managed Standby Runtime Reconcile
 
@@ -109,8 +143,9 @@ The cloud-managed recovery path:
 
 1. Destroy the failed generated standby runtime if it exists.
 2. Do not undefine the Cloud standby VM.
-3. Recreate or start the standby from `standby_xml_seed` so libvirt has a
-   domain corresponding to the Cloud DB `Running` row.
+3. Recreate or start the standby from `standby.generated.xml` so libvirt has a
+   domain corresponding to the Cloud DB `Running` row and the generated
+   secondary name/disk mapping is preserved.
 4. Verify `virsh domstate <secondary_vm_name>` succeeds and is not shut off.
 5. If verification fails, record:
 
@@ -135,20 +170,21 @@ prevents its own runtime cleanup from leaving Cloud-visible state incoherent.
 
 ## Retest Expectations
 
-The next run should not reach `primary.migrate` while
-`mirror0` or `red1` is `present_closed`.
+The next run may reach `primary.migrate` while `mirror0` or `red1` are
+`present_closed`, but only if their TCP backend is connected and the input
+endpoints `red0` and `compare1` are `present_open`.
 
 Possible outcomes:
 
-- If the frontend opens, FTCTL proceeds to `migrate`.
-- If the frontend stays closed, FTCTL fails quickly with
-  `xcolo_pre_migrate_frontend_not_open`.
+- If the directional contract passes, FTCTL proceeds to `migrate`.
+- If the directional contract fails, FTCTL fails quickly with
+  `xcolo_pre_migrate_frontend_not_open` and records which directed edge failed.
 - If a later failure still occurs, the progress log must show whether it is a
-  new phase or a repeat of the same frontend-open failure.
+  migration return-path/COLO control failure or a repeat of a directed chardev
+  contract failure.
 
 ## Supersedes
 
 This document supersedes:
 
 - `358-ft-xcolo-qemu-doc-preguest-frontend-diagnostic-design-20260605.md`
-
