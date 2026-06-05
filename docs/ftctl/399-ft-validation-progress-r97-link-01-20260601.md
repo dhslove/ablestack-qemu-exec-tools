@@ -3454,6 +3454,71 @@ but a lower-level signature or reached stage changed, set
   - restore cloud-managed standby runtime from `standby.generated.xml`, not
     `standby_xml_seed`, during qemu-side failure recovery
 
+### Directional Chardev Contract Build And Retest Readiness 2026-06-05
+
+- Source commit for deployed code:
+  - `71e0bb480a87839e3628d5fef4e3d253c9122239`
+  - `fix: use directional chardev contract for xcolo`
+- Validation before build:
+  - `bash -n` passed for `lib/ftctl/xcolo.sh`
+  - `bash -n` passed for `lib/ftctl/standby.sh`
+  - `git diff --check` passed
+  - local simulation of the Run 83 `query-chardev` shape returned:
+    - `directional_ready=True`
+    - `strict_frontend_ready=False`
+- Build:
+  - GitHub Actions run: `27006586717`
+  - build, RPM repo creation, and artifact upload succeeded
+  - final workflow conclusion was failed only because
+    `Publish FTCTL branch development release` hit a GitHub secondary rate
+    limit
+  - deployed RPM was taken from the uploaded artifact:
+    - `ablestack_vm_ftctl-0.8.0-1.noarch.rpm`
+    - SHA256:
+      `19ba3a465a17102e79a07eadf9354a7d2ffdf2a644294fab8d6d726556ba0d15`
+- Deployment:
+  - deployed to `10.10.32.1`, `10.10.32.2`, and `10.10.32.3`
+  - installation used 32.x administrator wrapper:
+    `aspkg --replacepkgs -U /root/ablestack_vm_ftctl-0.8.0-1.noarch.rpm`
+  - verified installed script markers on all three hosts:
+    - `qemu_9_2_directional_chardev_contract`
+    - `standby_xml_generated_missing`
+  - verified timers active on all three hosts:
+    - `ablestack-vm-ftctl.timer`
+    - `ablestack-vm-hangctl.timer`
+- Cleanup after Run 83:
+  - removed active protection row `83` by marking it disabled/stopped/removed
+    with `last_error=test_cleanup_after_directional_chardev_contract_fix`
+  - removed `ftctl.*` VM details for primary VM `54` and standby VM `139`
+  - marked standby VM `139` (`i-2-139-VM`) as `Expunging`
+  - marked standby volumes `263` and `264` as `Expunged`
+  - destroyed/undefined any stale `i-2-139-VM` libvirt runtime on
+    `10.10.32.1`
+  - unmapped and removed standby RBD images:
+    - `rbd/f7d3590d-05d5-4bad-b783-50914699754a`
+    - `rbd/4111de0f-0ced-4b37-b8c9-f4640b329c1e`
+  - removed stale FTCTL runtime/profile/debug files for `i-2-54-VM`,
+    `i-2-139-VM`, and `r97-link-01` from the 32.x hosts
+- Final readiness verification:
+  - active protection rows for primary VM `54`: `0`
+  - active `ftctl.*` details for `r97-link-01`: `0`
+  - active standby VM rows: `0`
+  - active standby volumes: `0`
+  - primary VM `i-2-54-VM` is `Running` in Cloud DB on host `3`
+  - primary VM `i-2-54-VM` is `running` in libvirt on `10.10.32.3`
+  - primary QMP `query-block-jobs` returned an empty list
+  - primary QMP `query-migrate` returned an empty object
+  - `ablestack_vm_ftctl status --vm i-2-54-VM --json` returned `not_found`
+  - removed standby RBD images now return `No such file or directory`
+- Repetition control:
+  - the next test must report whether the previous false-positive hard gate is
+    cleared by checking `xcolo_chardev_contract_directional_ready` and
+    `xcolo_chardev_contract_strict_frontend_ready`
+  - if `Received invalid message 0x0000 length 0x0000` reappears after
+    `primary.migrate`, it must be treated as a new post-migrate
+    migration-return-path/COLO-control failure, not as the same Run 83
+    pre-migrate gate failure
+
 ### Run 82 Async Protect Frontend Contract Failure 2026-06-05
 
 - Source state before the fix:
