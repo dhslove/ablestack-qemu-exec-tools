@@ -3502,6 +3502,65 @@ but a lower-level signature or reached stage changed, set
   - no `i-2-138-VM` standby domain is running on the 32.x hosts
   - the removed standby RBD images now return absent
 
+### Run 83 Frontend Hard Gate Retest Result 2026-06-05
+
+- Test target:
+  - primary VM: `54` / `i-2-54-VM` / `r97-link-01`
+  - standby VM: `139` / `i-2-139-VM` / `r97-link-01-standby`
+  - protection row: `83`
+- Progress:
+  - async protect job started:
+    `protect-i-2-54-VM-20260605172025-3a7dcba0`
+  - baseline seeding completed for both disks:
+    - `sda` to `rbd/f7d3590d-05d5-4bad-b783-50914699754a`
+    - `sdb` to `rbd/4111de0f-0ced-4b37-b8c9-f4640b329c1e`
+  - stable RBD contract passed through `before_migrate`
+  - primary and secondary runtime were created
+  - primary migrate capabilities and checkpoint delay were set successfully
+- Expected improvement confirmed:
+  - `primary.migrate` was not issued after the frontend contract failed
+  - the repeated post-migrate protocol symptom was avoided in this run
+  - failure stopped at the intended phase:
+    - `xcolo_protocol_failure_phase=pre_guest_traffic_contract`
+    - `last_error=xcolo_pre_migrate_frontend_not_open`
+  - frontend contract evidence:
+    - primary `mirror0=present_closed`
+    - primary `compare1=present_open`
+    - secondary `red0=present_open`
+    - secondary `red1=present_closed`
+  - socket snapshot still showed transport reachability:
+    - primary `9003=listening`
+    - primary `9004=listening`
+    - secondary `9003=established`
+    - secondary `9004=established`
+- Remaining failure:
+  - Cloud DB reports standby VM `i-2-139-VM` as `Running` on host `1`
+  - host `10.10.32.1` libvirt reports:
+    `failed to get domain 'i-2-139-VM'`
+  - standby RBD images still have local watchers/mappings on `10.10.32.1`
+    after failure
+- Root cause of the new recovery bug:
+  - the new cloud-managed restore path was invoked and did not run generic
+    `undefine`
+  - `standby.deactivate.cloud_restore` failed with `rc=1`
+  - the helper attempted to recreate from `standby_xml_seed`
+  - `standby_xml_seed` is the original Cloud XML and still contains:
+    - `<name>i-2-54-VM</name>`
+    - the primary UUID
+    - primary disk source paths
+  - the correct file for restore must be the generated standby runtime XML,
+    `standby.generated.xml`, because it contains the secondary domain name,
+    secondary disk paths, and FT QEMU command line
+- Next code direction:
+  - cloud-managed recovery must restore/start from `standby_xml_generated`
+    first, not `standby_xml_seed`
+  - if generated XML is missing, it must rematerialize standby XML before
+    attempting restore
+  - cloud restore failure logging must include the virsh stderr so the next
+    failure is not reduced to `rc=1`
+  - after restore failure, FTCTL must keep explicit state:
+    `cloud_runtime_state_mismatch=true`
+
 ### Cloud Timeout Structural Fix 2026-06-05
 
 - New failure symptom:
