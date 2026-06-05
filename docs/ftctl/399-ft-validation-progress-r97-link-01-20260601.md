@@ -3360,3 +3360,54 @@ but a lower-level signature or reached stage changed, set
   - add baseline-based pre-migrate QEMU log guard:
     - `last_error=xcolo_filter_mirror_send_before_migrate`
     - `xcolo_protocol_failure_phase=premigrate_filter_mirror_send`
+
+### Premigrate Frontend Open Build And Retest Readiness 2026-06-05
+
+- Source commit:
+  - `bb92082667d1948df5380778f676c5aeed6c033a`
+  - `fix: require xcolo mirror peer before migrate`
+- Build:
+  - GitHub Actions run: `26994945999`
+  - the workflow conclusion was `failure` because the branch development
+    release publish step failed
+  - the FTCTL RPM build, repository creation, and artifact upload steps
+    completed successfully
+  - deployed RPM artifact:
+    - `ablestack_vm_ftctl-0.8.0-1.noarch.rpm`
+    - SHA256:
+      `99a75df48f17d1d17aac06ae8cf78d76e4ff2b4ae7d7c8892d8b79dcaeb2d40c`
+- Deployment:
+  - deployed to `10.10.32.1`, `10.10.32.2`, and `10.10.32.3`
+  - 32.x package installation must use the administrator wrapper directly:
+    `aspkg -Uvh --replacepkgs`
+  - using `exec -a rpm aspkg ...` returned success but left the previous
+    installed script unchanged, so this method is not valid for 32.x
+  - verified installed script markers on all three hosts:
+    - `FTCTL_XCOLO_MIRROR_WAIT:-on`
+    - `xcolo_filter_mirror_send_before_migrate`
+    - `xcolo_primary_qemu_log_baseline_lines`
+    - `premigrate_filter_mirror_send`
+  - verified timers active on all three hosts:
+    - `ablestack-vm-ftctl.timer`
+    - `ablestack-vm-hangctl.timer`
+- Cleanup after Run 79:
+  - removed active protection row `79` by marking it disabled/stopped/removed
+    with `last_error=test_cleanup_after_premigrate_frontend_open_fix`
+  - removed `ftctl.*` VM details for primary VM `54` and standby VM `135`
+  - marked standby VM `135` (`i-2-135-VM`) as `Expunging`
+  - marked standby volumes `255` and `256` as `Expunged`
+  - removed standby RBD images:
+    - `rbd/fa01b0d2-e6fd-4c22-84e3-e4d023d2285b`
+    - `rbd/55fee667-7648-4b91-8bfc-e8890da9d4fd`
+  - removed stale FTCTL runtime/profile/debug files for `i-2-54-VM`,
+    `i-2-135-VM`, and `r97-link-01` from the 32.x hosts
+- Final readiness verification:
+  - active protection rows for primary VM `54`: `0`
+  - active `ftctl.*` details for `r97-link-01`: `0`
+  - active standby VM rows: `0`
+  - active standby volumes: `0`
+  - primary VM `i-2-54-VM` is `running` on `10.10.32.3`
+  - primary QMP `query-block-jobs` returned an empty list
+  - primary QMP `query-migrate` returned an empty object
+  - `ablestack_vm_ftctl status --vm i-2-54-VM --json` returned `not_found`
+  - the removed standby RBD images now return `No such file or directory`
