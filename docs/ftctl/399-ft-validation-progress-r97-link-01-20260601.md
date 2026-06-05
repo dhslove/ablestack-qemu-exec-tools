@@ -3612,6 +3612,40 @@ but a lower-level signature or reached stage changed, set
   - it does not reintroduce runtime guest disk hotplug
   - it does not change the COLO network graph or migrate sequence
 
+### Block Node And Backend Naming Build, Deploy, Cleanup 2026-06-05
+
+- Source commit:
+  - `179463f2e6c07eef46a64683c67094bd06849f99`
+  - `fix: split xcolo block backend and node names`
+- Build:
+  - GitHub Actions run: `27018679778`
+  - result: `success`
+  - artifact: `ablestack_vm_ftctl-0.8.0-1.noarch.rpm`
+  - SHA256:
+    `6e8395679deeef29f2dde5faf751aa04ada9c73c961b65626bde1ac7a23088e2`
+- Deployment:
+  - deployed to `10.10.32.1`, `10.10.32.2`, and `10.10.32.3`
+  - 32.x installer wrapper used:
+    `aspkg --replacepkgs -U /root/ablestack_vm_ftctl-0.8.0-1.noarch.rpm`
+  - verified timers active on all three hosts:
+    - `ablestack-vm-ftctl.timer`
+    - `ablestack-vm-hangctl.timer`
+  - verified installed script markers:
+    - `parent_bb = f`
+    - `xcolo_startup_block_backend_node_conflict`
+    - `drive={colo_bb},id={colo_dev}`
+- Cleanup for retest:
+  - active protection rows for primary VM `54`: `0`
+  - active `ftctl.*` details for primary VM `54`: `0`
+  - active standby VM rows for `r97-link-01-standby`: `0`
+  - active standby volumes for `r97-link-01-standby%`: `0`
+  - standby VM `143` / `i-2-143-VM` marked `Expunging`
+  - standby volumes `271` and `272` marked `Expunged`
+  - removed standby RBD images:
+    - `rbd/e72c42de-d9cd-46fc-8a31-58a8b2565102`
+    - `rbd/c82625ca-0020-4165-96d7-c3cebcca3703`
+  - primary VM `i-2-54-VM` remains `running` on `10.10.32.3`
+
 ### Run 84 Monitoring Result 2026-06-05
 
 - Test trigger:
