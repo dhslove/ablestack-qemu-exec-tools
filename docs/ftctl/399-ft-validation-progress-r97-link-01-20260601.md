@@ -3412,6 +3412,45 @@ but a lower-level signature or reached stage changed, set
   - `ablestack_vm_ftctl status --vm i-2-54-VM --json` returned `not_found`
   - the removed standby RBD images now return `No such file or directory`
 
+### Run 81 Pre-Migrate Frontend Diagnostic Pivot 2026-06-05
+
+- Run 81 result:
+  - protection row: `81`
+  - standby VM: `137` / `i-2-137-VM`
+  - final state: `protection_state=error`, `transport_state=failed`
+  - final stage: `conversion_stage=handshake_failed`
+  - final error: `xcolo_qemu_doc_runtime_frontend_closed`
+- Confirmed improvements from the previous change:
+  - stable RBD contract passed all four phase gates:
+    - `after_primary_stop`
+    - `before_primary_create`
+    - `before_secondary_create`
+    - `before_migrate`
+  - generated XML kept stable `/dev/rbd/rbd/<image-id>` paths
+  - listener bootstrap used `compare_bootstrap`
+  - pre-migrate TCP socket snapshot reached expected connectivity:
+    - primary `9003=listen`
+    - primary `9004=listen`
+    - secondary `9003=established`
+    - secondary `9004=established`
+  - pre-migrate mirror-send guard passed
+  - QEMU document topology and primary filter QOM topology passed
+- Repetition control:
+  - this is the same visible frontend-open gate symptom as Run 80
+  - RBD mapping and listener ordering are no longer the next hypothesis
+  - the repeated condition is specifically that QMP `query-chardev` reports
+    `frontend-open=false` even though TCP sockets are established
+- Corrected design:
+  - `docs/ftctl/358-ft-xcolo-qemu-doc-preguest-frontend-diagnostic-design-20260605.md`
+- Code direction:
+  - keep collecting `query-chardev` at the pre-guest boundary
+  - record closed frontend state as `diagnostic_closed`
+  - do not set `last_error=xcolo_qemu_doc_runtime_frontend_closed` before
+    primary `migrate`
+  - let primary `migrate` run when topology, sockets, RBD contract, and
+    pre-migrate mirror-send guards pass
+  - use post-migrate runtime validation to classify the real COLO result
+
 ### Stable RBD Contract And Listener Bootstrap Design 2026-06-05
 
 - Run 80 failure summary:

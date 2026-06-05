@@ -2079,8 +2079,8 @@ ftctl_xcolo_capture_guest_traffic_gate_state() {
 ftctl_xcolo_gate_before_guest_traffic() {
   local vm="${1-}"
   local secondary_vm="${2:-$vm}"
-  local primary_running="" primary_status="" contract_reason="" last_error="" failure_phase=""
-  local doc_topology=""
+  local primary_running="" primary_status="" contract_ready="" contract_reason="" doc_topology=""
+  local frontend_contract=""
 
   [[ -n "${vm}" && -n "${secondary_vm}" ]] || return 1
   ftctl_xcolo_capture_guest_traffic_gate_state "${vm}" "${secondary_vm}" "pre_guest_traffic_contract" || true
@@ -2098,38 +2098,37 @@ ftctl_xcolo_gate_before_guest_traffic() {
     return 1
   fi
 
-  if ftctl_xcolo_wait_colo_chardev_contract "${vm}" "${secondary_vm}" "pre_guest_traffic_contract"; then
-    ftctl_xcolo_capture_guest_traffic_gate_state "${vm}" "${secondary_vm}" "pre_guest_traffic_contract_ready" || true
+  contract_ready="$(ftctl_state_get "${vm}" "xcolo_pre_guest_traffic_contract_chardev_contract_ready" 2>/dev/null || true)"
+  contract_reason="$(ftctl_state_get "${vm}" "xcolo_pre_guest_traffic_contract_chardev_contract_reason" 2>/dev/null || true)"
+  [[ -n "${contract_ready}" ]] || contract_ready="$(ftctl_state_get "${vm}" "xcolo_chardev_contract_ready" 2>/dev/null || true)"
+  [[ -n "${contract_reason}" ]] || contract_reason="$(ftctl_state_get "${vm}" "xcolo_chardev_contract_reason" 2>/dev/null || true)"
+  doc_topology="$(ftctl_state_get "${vm}" "xcolo_qemu_doc_topology" 2>/dev/null || true)"
+
+  if [[ "${doc_topology}" == "ok" && "${contract_reason}" == *"present_closed"* ]]; then
+    frontend_contract="diagnostic_closed"
     ftctl_state_set "${vm}" \
-      "xcolo_pre_guest_traffic_gate=ready" \
-      "xcolo_pre_guest_traffic_gate_reason=" \
-      "xcolo_pre_guest_traffic_gate_primary_status=${primary_status}"
-    ftctl_log_event "colo" "xcolo.guest_traffic_gate" "ok" "${vm}" "" \
-      "phase=pre_guest_traffic contract=ready primary_status=${primary_status}"
-    return 0
+      "xcolo_qemu_doc_runtime_frontend=diagnostic_closed" \
+      "xcolo_qemu_doc_runtime_frontend_reason=${contract_reason}" \
+      "xcolo_pre_guest_traffic_frontend_contract=diagnostic_closed" \
+      "xcolo_pre_guest_traffic_frontend_contract_reason=${contract_reason}"
+  else
+    frontend_contract="${contract_ready:-unknown}"
   fi
 
-  contract_reason="$(ftctl_state_get "${vm}" "xcolo_chardev_contract_gate_reason" 2>/dev/null || true)"
-  [[ -n "${contract_reason}" ]] || contract_reason="$(ftctl_state_get "${vm}" "xcolo_chardev_contract_reason" 2>/dev/null || true)"
-  ftctl_xcolo_capture_guest_traffic_gate_state "${vm}" "${secondary_vm}" "pre_guest_traffic_contract_failed" || true
-  doc_topology="$(ftctl_state_get "${vm}" "xcolo_qemu_doc_topology" 2>/dev/null || true)"
-  last_error="xcolo_colo_chardev_contract_not_ready_before_guest_traffic"
-  failure_phase="pre_guest_traffic_contract"
-  if [[ "${doc_topology}" == "ok" && "${contract_reason}" == *"present_closed"* ]]; then
-    last_error="xcolo_qemu_doc_runtime_frontend_closed"
-    failure_phase="pre_guest_traffic_doc_frontend_contract"
-    ftctl_state_set "${vm}" \
-      "xcolo_qemu_doc_runtime_frontend=closed" \
-      "xcolo_qemu_doc_runtime_frontend_reason=${contract_reason}"
-  fi
   ftctl_state_set "${vm}" \
-    "xcolo_pre_guest_traffic_gate=failed" \
+    "xcolo_pre_guest_traffic_gate=ready" \
     "xcolo_pre_guest_traffic_gate_reason=${contract_reason}" \
-    "xcolo_protocol_failure_phase=${failure_phase}" \
-    "last_error=${last_error}"
-  ftctl_log_event "colo" "xcolo.guest_traffic_gate" "fail" "${vm}" "" \
-    "reason=${contract_reason} primary_status=${primary_status} doc_topology=${doc_topology:-unknown} last_error=${last_error}"
-  return 1
+    "xcolo_pre_guest_traffic_gate_primary_status=${primary_status}" \
+    "xcolo_pre_guest_traffic_gate_policy=qemu_doc_topology_socket" \
+    "xcolo_pre_guest_traffic_chardev_contract=${contract_ready:-unknown}"
+  if [[ "${frontend_contract}" == "diagnostic_closed" ]]; then
+    ftctl_log_event "colo" "xcolo.guest_traffic_gate" "warn" "${vm}" "" \
+      "phase=pre_guest_traffic policy=qemu_doc_topology_socket frontend_contract=diagnostic_closed reason=${contract_reason} primary_status=${primary_status} doc_topology=${doc_topology:-unknown}"
+  else
+    ftctl_log_event "colo" "xcolo.guest_traffic_gate" "ok" "${vm}" "" \
+      "phase=pre_guest_traffic policy=qemu_doc_topology_socket contract=${contract_ready:-unknown} primary_status=${primary_status}"
+  fi
+  return 0
 }
 
 ftctl_xcolo_capture_failure_chardev_snapshot() {

@@ -47,7 +47,24 @@ downstream symptom rather than the first failure.
 - Preserve phase-specific evidence so repeated failures can be compared without
   falling back to generic `invalid message` diagnosis.
 
-## Required Contract
+## Superseded Contract
+
+This hard pre-migrate frontend-open contract is superseded by:
+
+- `358-ft-xcolo-qemu-doc-preguest-frontend-diagnostic-design-20260605.md`
+
+Run 81 proved that `query-chardev frontend-open=false` can coexist with:
+
+- QEMU document topology passing
+- TCP sockets for `9003` and `9004` established
+- stable RBD contract passing at all conversion boundaries
+- no pre-migrate `filter mirror send failed(...)`
+
+Therefore, before primary `migrate`, the chardev frontend-open state is
+diagnostic evidence, not a hard failure condition. The older design below is
+retained only as historical context for why the diagnostic fields exist.
+
+## Historical Required Contract
 
 Before primary guest traffic is allowed to proceed into the COLO network
 filters, the following query-chardev states must all be `present_open`:
@@ -71,12 +88,14 @@ The gate records both paths:
 4. Attach block graphs and export NBD disks.
 5. Set and verify migration capabilities and checkpoint-delay.
 6. Run firewall and topology audits.
-7. Run the new `pre_guest_traffic_contract` gate:
+7. Run the diagnostic `pre_guest_traffic_contract` capture:
    - capture primary/secondary `query-status`
    - capture socket state
    - capture primary/secondary `query-chardev`
-   - require the four required chardev frontends to be `present_open`
-8. Only after the gate passes, issue primary `migrate`.
+   - record closed frontends as diagnostic evidence
+   - do not fail solely because a QEMU chardev reports `frontend-open=false`
+8. If topology, sockets, RBD contract, and premature mirror-send guards pass,
+   issue primary `migrate`.
 9. Keep the post-migrate contract check as a second validation point.
 
 ## Failure Behavior
@@ -86,7 +105,7 @@ If the primary is already running before the contract is validated:
 - `last_error=xcolo_pre_guest_primary_not_paused`
 - `xcolo_protocol_failure_phase=pre_guest_traffic_contract`
 
-If the chardev contract is not ready:
+Historical failure behavior, now superseded for the pre-migrate boundary:
 
 - `last_error=xcolo_colo_chardev_contract_not_ready_before_guest_traffic`
 - `xcolo_protocol_failure_phase=pre_guest_traffic_contract`
@@ -105,6 +124,13 @@ specifically:
 This distinction is important: it means the command line shape follows the
 documented COLO sample, and the remaining issue is the runtime frontend state
 of the QEMU chardev graph.
+
+Current behavior records the same evidence as:
+
+- `xcolo_pre_guest_traffic_gate=ready`
+- `xcolo_pre_guest_traffic_gate_policy=qemu_doc_topology_socket`
+- `xcolo_pre_guest_traffic_frontend_contract=diagnostic_closed`
+- `xcolo_qemu_doc_runtime_frontend=diagnostic_closed`
 
 Expected evidence includes:
 

@@ -118,9 +118,11 @@ The next run must be interpreted as follows:
 - If `xcolo_filter_mirror_send_before_migrate` occurs, the new mirror wait
   policy still does not prevent early primary filter send, and the next fix must
   suppress primary guest/NIC TX earlier than QEMU filter startup.
-- If `xcolo_qemu_doc_runtime_frontend_closed` occurs without pre-migrate mirror
-  send, the early send has been contained, but QEMU still does not report
-  frontend-open for `mirror0` or `red1`.
+- Superseded by
+  `358-ft-xcolo-qemu-doc-preguest-frontend-diagnostic-design-20260605.md`:
+  if QEMU document topology, socket snapshot, stable RBD contract, and
+  pre-migrate mirror-send guard pass, `frontend-open=false` before migrate is
+  diagnostic evidence and must not block primary `migrate`.
 - If the pre-migrate contract passes and primary `migrate` starts, this change
   moved the boundary forward and the next validation point is COLO steady-state
   convergence.

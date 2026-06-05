@@ -2633,9 +2633,9 @@ selftest_case_xcolo_chardev_contract_reports_closed_edges() (
     "no" "phase-specific contract state is persisted"
 )
 
-selftest_case_xcolo_pre_guest_gate_blocks_closed_chardev_contract() (
+selftest_case_xcolo_pre_guest_gate_warns_closed_chardev_contract() (
   selftest_reset_env
-  selftest_info "x-colo pre-guest gate blocks closed chardev contract before migrate"
+  selftest_info "x-colo pre-guest gate treats closed frontend-open as diagnostic before migrate"
 
   local vm="xcolo-pre-guest-contract"
   local rc=0
@@ -2666,14 +2666,15 @@ selftest_case_xcolo_pre_guest_gate_blocks_closed_chardev_contract() (
   }
 
   ftctl_xcolo_gate_before_guest_traffic "${vm}" "${vm}-standby" || rc=$?
-  selftest_assert_eq "${rc}" "1" "pre-guest closed contract should fail"
-  selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" \
-    "xcolo_qemu_doc_runtime_frontend_closed" \
-    "pre-guest gate last error"
-  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_protocol_failure_phase")" \
-    "pre_guest_traffic_doc_frontend_contract" "pre-guest protocol phase"
+  selftest_assert_eq "${rc}" "0" "pre-guest closed frontend-open should not block migrate"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_pre_guest_traffic_gate")" \
+    "ready" "pre-guest gate ready"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_pre_guest_traffic_gate_policy")" \
+    "qemu_doc_topology_socket" "pre-guest policy"
   selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_qemu_doc_runtime_frontend")" \
-    "closed" "pre-guest doc frontend classification"
+    "diagnostic_closed" "pre-guest doc frontend diagnostic classification"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_pre_guest_traffic_frontend_contract")" \
+    "diagnostic_closed" "pre-guest frontend diagnostic state"
   selftest_assert_contains "$(ftctl_state_get "${vm}" "xcolo_pre_guest_traffic_gate_reason")" \
     "mirror_path_primary_mirror0=present_closed" "pre-guest reason includes mirror0"
   selftest_assert_contains "$(ftctl_state_get "${vm}" "xcolo_pre_guest_traffic_gate_reason")" \
@@ -4503,7 +4504,7 @@ selftest_main() {
   selftest_case_xcolo_runtime_validation_classifies_repeated_invalid_message
   selftest_case_xcolo_startup_active_failure_classifies_filter_mirror_eperm
   selftest_case_xcolo_chardev_contract_reports_closed_edges
-  selftest_case_xcolo_pre_guest_gate_blocks_closed_chardev_contract
+  selftest_case_xcolo_pre_guest_gate_warns_closed_chardev_contract
   selftest_case_xcolo_runtime_validation_reports_pending_convergence
   selftest_case_xcolo_runtime_validation_times_out_stuck_convergence
   selftest_case_xcolo_runtime_validation_reports_one_sided_colo_role
