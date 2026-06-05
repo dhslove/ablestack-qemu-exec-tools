@@ -3478,6 +3478,60 @@ but a lower-level signature or reached stage changed, set
     QMP block graph operations, primary migrate, or post-migrate runtime
     validation
 
+### Startup Disk Controller Ownership Build And Retest Readiness 2026-06-05
+
+- Source commit for deployed code:
+  - `99d905205cd5cd59129d2615e14ae6f114c5bb3f`
+  - `fix: own xcolo startup disk controller`
+- Build:
+  - GitHub Actions run: `27019998472`
+  - workflow conclusion: `success`
+  - deployed RPM artifact:
+    - `ablestack_vm_ftctl-0.8.0-1.noarch.rpm`
+    - SHA256:
+      `0b345d86e540b532042cc2ece6c2d628ce94598b7003d2645f1ece0e4c2ecf07`
+- Pre-deploy QEMU syntax check:
+  - host: `10.10.32.3`
+  - minimal QEMU startup with:
+    - `-device virtio-scsi-pci,id=ftctl-xcolo-scsi0`
+    - `-device scsi-hd,bus=ftctl-xcolo-scsi0.0,...`
+  - result: QEMU started and was stopped by the test timeout, confirming the
+    FTCTL-owned bus name is valid on QEMU 9.2.4
+- Deployment:
+  - deployed to `10.10.32.1`, `10.10.32.2`, and `10.10.32.3`
+  - installation used 32.x administrator wrapper:
+    `aspkg --replacepkgs -U`
+  - verified installed script markers on all three hosts:
+    - `ftctl-xcolo-scsi0`
+    - `xcolo_startup_disk_controller_mismatch`
+  - verified timers active on all three hosts:
+    - `ablestack-vm-ftctl.timer`
+    - `ablestack-vm-hangctl.timer`
+- Cleanup after Run 88:
+  - removed active protection row `88` by marking it `removed/stopped` with
+    `last_error=test_cleanup_after_startup_disk_controller_fix`
+  - removed active `ftctl.*` VM details for primary VM `54` and standby VM
+    `144`
+  - marked standby VM `144` (`i-2-144-VM`) as `Expunging`
+  - marked standby volumes `273` and `274` as `Expunged`
+  - removed stale FTCTL runtime/profile/debug/xml/blockcopy files for
+    `i-2-54-VM`, `i-2-144-VM`, and `r97-link-01` from the 32.x hosts
+  - unmapped leftover standby RBD devices on `10.10.32.1`:
+    - `/dev/rbd10`
+    - `/dev/rbd12`
+  - removed standby RBD images:
+    - `rbd/fbd6948e-9c74-4644-bce3-0c2ae0df46b9`
+    - `rbd/890f209a-5215-4796-a410-15fe886a362d`
+- Final readiness verification:
+  - active protection rows for primary VM `54`: `0`
+  - active `ftctl.*` details for `r97-link-01`: `0`
+  - active standby VM rows: `0`
+  - active standby volumes: `0`
+  - primary VM `i-2-54-VM` is `running` on `10.10.32.3`
+  - primary HMP `info block-jobs` returned `No active jobs`
+  - primary HMP `info migrate` returned no active migration session
+  - removed standby RBD images now return absent
+
 ### Run 86 Startup Disk Graph Monitor Result 2026-06-05
 
 - Test trigger:
