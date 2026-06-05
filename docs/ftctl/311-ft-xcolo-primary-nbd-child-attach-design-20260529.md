@@ -36,8 +36,8 @@ That graph looked similar after inspection, but it skipped the explicit `x-block
 ```text
 blockdev-add local active qcow2
 blockdev-add quorum children=[local-active-qcow2]
-device_del old disk
-device_add quorum disk
+startup transient XML already contains the quorum disk
+runtime device_del/device_add is forbidden
 x-blockdev-change parent=quorum node=remote-nbd
 ```
 
@@ -74,5 +74,6 @@ Selftests must assert:
 
 - primary NBD nodes are created before primary migrate
 - primary quorum is first created with the local active child only
-- primary remote NBD child is attached through `x-blockdev-change`
+- primary remote NBD child is attached through `x-blockdev-change` against a startup-created quorum node
+- runtime guest-visible disk replacement is superseded by [363. FT X-COLO Startup Disk Graph And No Hot Plug Design](363-ft-xcolo-startup-disk-graph-no-hotplug-design-20260605.md)
 - status JSON emits sticky runtime errors when `last_error` is blank in an error state

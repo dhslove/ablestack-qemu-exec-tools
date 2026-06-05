@@ -3559,6 +3559,98 @@ but a lower-level signature or reached stage changed, set
   - `ablestack_vm_ftctl status --vm i-2-54-VM --json` returned `not_found`
   - removed standby RBD images now return `No such file or directory`
 
+### Run 85 Monitoring Result 2026-06-05
+
+- Test trigger:
+  - user started FT protection for `r97-link-01`
+  - primary VM: `54` / `i-2-54-VM`
+  - standby VM: `141` / `i-2-141-VM`
+- Final Cloud state:
+  - protection row: `85`
+  - `protection_state=error`
+  - `transport_state=failed`
+  - `last_error=xcolo_colo_chardev_contract_not_ready`
+  - primary DB/runtime state stayed `Running`
+  - standby DB state was `Running`, libvirt runtime on `10.10.32.1` was
+    `paused`
+- Confirmed improvement from the return-path fix:
+  - `xcolo_primary_capability_x_colo=yes`
+  - `xcolo_primary_capability_return_path=no`
+  - `xcolo_premigrate_primary_capability_return_path=no`
+  - the previous QEMU primary failure
+    `Received invalid message 0x0000 length 0x0000` was not observed in this
+    run
+  - therefore the generic migration return-path conflict hypothesis is
+    currently resolved for this run
+- Progress through the flow:
+  - pre-migrate evidence passed:
+    - checkpoint delay ready: `expected=2000`, `actual=2000`
+    - primary filter QOM/cmdline/chardev ready
+    - mirror/compare/loopback channels established
+    - topology audit reached the pre-migrate gate
+  - pre-guest traffic gate passed:
+    - `xcolo_pre_guest_traffic_gate=ready`
+    - policy `qemu_9_2_directional_chardev_contract`
+  - post-migrate startup-active validation initially passed:
+    - `xcolo_post_migrate_startup_active_validation_chardev_contract_ready=yes`
+    - `xcolo_post_migrate_startup_active_validation_chardev_contract_directional_ready=yes`
+    - primary migrate status: `active`
+    - secondary migrate status: `active`
+    - invalid-message flag: `no`
+- New failure:
+  - post-activation contract failed because secondary chardev query failed:
+    - `xcolo_post_activation_contract_chardev_contract_ready=no`
+    - `xcolo_post_activation_contract_chardev_contract_reason=mirror_path_secondary_red0=query_failed,compare_path_secondary_red1=query_failed/query_failed`
+    - `xcolo_protocol_failure_phase=post_migrate_chardev_contract`
+  - secondary QEMU log showed a crash before the final paused runtime:
+    - `qemu-kvm: ../system/memory.c:2666: memory_region_add_subregion_common: Assertion '!subregion->container' failed.`
+    - libvirt recorded `shutting down, reason=crashed`
+  - libvirt then started a new `i-2-141-VM` runtime with `-S`; its QMP showed:
+    - `red0` disconnected to primary `10.10.32.3:9003`
+    - `red1` connected to primary `10.10.32.3:9004`
+    - migration status `setup`
+- Repetition analysis:
+  - this is not the prior `invalid message 0x0000` loop
+  - this is a new boundary: secondary QEMU crashes during/after the COLO
+    migration activation path, then recovery leaves the standby paused and the
+    secondary chardev query unavailable at the moment FTCTL validates the
+    contract
+- Next investigation target:
+  - inspect QEMU 9.2.4 `memory_region_add_subregion_common` assertion paths
+    and identify which COLO/incoming operation can add an already-parented
+    memory region
+  - compare primary/secondary generated XML and command line for duplicated
+    memory backend, NUMA, pflash, or device objects that might be invalid under
+    incoming COLO
+  - avoid returning to return-path or pre-migrate chardev hypotheses unless
+    their evidence changes
+
+### Run 85 Corrective Design 2026-06-05
+
+- Design document:
+  - `docs/ftctl/363-ft-xcolo-startup-disk-graph-no-hotplug-design-20260605.md`
+- Repetition control:
+  - this is not the old `Received invalid message 0x0000 length 0x0000` loop
+  - the return-path conflict fix held in Run 85
+  - the current boundary is secondary QEMU crash during runtime protected disk
+    device replacement
+- Corrective principle:
+  - primary and secondary protected guest-visible disks must not be changed by
+    runtime `device_del` / `device_add`
+  - COLO disk graph must be present in generated transient XML before the QEMU
+    process starts
+  - QMP after start is limited to capability, NBD export/import,
+    `x-blockdev-change` of the pre-existing quorum child, migration, and COLO
+    control commands
+- Code change target:
+  - add startup disk graph commandline generation from the generated XML disk
+    address model
+  - remove protected disk XML entries only from generated transient XML to avoid
+    duplicate guest disks
+  - preserve stable `/dev/rbd/rbd/<image-id>` paths
+  - fail fast with `xcolo_runtime_guest_disk_hotplug_forbidden` if a stale
+    runtime disk replacement path is invoked
+
 ### QEMU 9.2.4 Directional Chardev Contract Design 2026-06-05
 
 - Run 83 code-level analysis:

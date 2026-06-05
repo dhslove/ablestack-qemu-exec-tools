@@ -152,7 +152,7 @@ Before QMP migration, qemu FTCTL attaches the primary network filter objects wit
 
 Before attaching primary network filters, qemu FTCTL must attach the block graph for all mapped writable disks, not only the first/root disk.
 
-For cloud-managed cold conversion, the primary disk graph must be created as a complete local+remote quorum before disk device replacement. qemu FTCTL must not switch a disk to a local-only quorum and rely on later `x-blockdev-change` to add the remote child.
+Superseded by [363. FT X-COLO Startup Disk Graph And No Hot Plug Design](363-ft-xcolo-startup-disk-graph-no-hotplug-design-20260605.md): cloud-managed cold conversion must not perform guest-visible disk device replacement at runtime. The COLO disk graph must be present in the generated transient XML before primary/secondary QEMU startup; the only runtime graph mutation allowed in the normal protect path is attaching the remote NBD child to the pre-existing primary quorum through `x-blockdev-change`.
 
 For cloud-managed block-backed FT, baseline disk materialization is a required step between primary shutdown and generated-domain startup. Cloud creates target volumes; qemu FTCTL seeds their contents.
 

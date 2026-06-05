@@ -1245,9 +1245,9 @@ EOF
   selftest_assert_file_contains "${FTCTL_EVENTS_LOG}" "primary.create_generated"
 )
 
-selftest_case_xcolo_scsi_root_replace_avoids_lun_collision() (
+selftest_case_xcolo_runtime_disk_device_replace_is_forbidden() (
   selftest_reset_env
-  selftest_info "x-colo SCSI root replacement removes existing qdev before reusing LUN"
+  selftest_info "x-colo forbids runtime protected disk device replacement"
 
   local call_log="${SELFTEST_ROOT}/xcolo-scsi-replace-calls.log"
   FTCTL_DRY_RUN="1"
@@ -1265,23 +1265,19 @@ selftest_case_xcolo_scsi_root_replace_avoids_lun_collision() (
     return 0
   }
 
-  ftctl_xcolo_attach_secondary_block_graph \
-    "standby-vm" "libvirt-3-format" "/tmp/hidden.qcow2" "/tmp/active.qcow2" "scsi0-0-0-0"
-  ftctl_xcolo_attach_primary_block_graph \
-    "primary-vm" "libvirt-3-storage" "/tmp/primary-active.qcow2" "scsi0-0-0-0"
-  ftctl_xcolo_attach_primary_block_graph \
-    "primary-vm" "libvirt-2-storage" "/tmp/primary-active-data.qcow2" "scsi0-0-0-1" "sdb"
-
-  selftest_assert_file_contains "${call_log}" "secondary.device_del_existing_root"
-  selftest_assert_file_contains "${call_log}" '"execute":"device_del","arguments":{"id":"scsi0-0-0-0"}'
-  selftest_assert_file_contains "${call_log}" "secondary.device_add_colo_root"
-  selftest_assert_file_contains "${call_log}" '"bus":"scsi0.0","channel":0,"scsi-id":0,"lun":0,"drive":"ftctl-colo-root","id":"ftctl-colo-root","bootindex":1'
-  selftest_assert_file_contains "${call_log}" '"bus":"scsi0.0","channel":0,"scsi-id":0,"lun":1,"drive":"ftctl-colo-sdb","id":"ftctl-colo-sdb"'
-  if grep -F '"lun":1' "${call_log}" | grep -q '"bootindex"'; then
-    selftest_fail "non-root x-colo disk replacement must not set bootindex"
+  if ftctl_xcolo_attach_secondary_block_graph \
+      "standby-vm" "libvirt-3-format" "/tmp/hidden.qcow2" "/tmp/active.qcow2" "scsi0-0-0-0"; then
+    selftest_fail "secondary runtime disk replacement must be rejected by default"
   fi
-  selftest_assert_file_contains "${call_log}" "primary.device_del_existing_root"
-  selftest_assert_file_contains "${call_log}" "primary.device_add_colo_root"
+  if ftctl_xcolo_attach_primary_block_graph \
+      "primary-vm" "libvirt-3-storage" "/tmp/primary-active.qcow2" "scsi0-0-0-0"; then
+    selftest_fail "primary runtime disk replacement must be rejected by default"
+  fi
+
+  selftest_assert_file_contains "${call_log}" "secondary.device_replace_forbidden"
+  selftest_assert_file_contains "${call_log}" "primary.device_replace_forbidden"
+  selftest_assert_file_not_contains "${call_log}" '"execute":"device_del"'
+  selftest_assert_file_not_contains "${call_log}" '"execute":"device_add"'
 )
 
 selftest_case_xcolo_block_handshake_sets_checkpoint_before_migrate() (
@@ -1452,16 +1448,10 @@ selftest_case_xcolo_multi_disk_handshake_exports_all_disks() (
   selftest_assert_file_contains "${call_log}" "secondary.nbd_server_add.sdb"
   selftest_assert_file_contains "${call_log}" "primary.blockdev_add.sda"
   selftest_assert_file_contains "${call_log}" "primary.blockdev_add.sdb"
-  selftest_assert_file_contains "${call_log}" "primary.blockdev_add_active.sda"
-  selftest_assert_file_contains "${call_log}" "primary.blockdev_add_active.sdb"
-  selftest_assert_file_contains "${call_log}" "primary.blockdev_add_quorum.sda"
-  selftest_assert_file_contains "${call_log}" "primary.blockdev_add_quorum.sdb"
   selftest_assert_file_contains "${call_log}" "primary.x_blockdev_change.sda"
   selftest_assert_file_contains "${call_log}" "primary.x_blockdev_change.sdb"
   selftest_assert_file_contains "${call_log}" '"node-name":"nbd0-sda"'
   selftest_assert_file_contains "${call_log}" '"node-name":"nbd0-sdb"'
-  selftest_assert_file_contains "${call_log}" '"children":\["ftctl-primary-active-sda"\]'
-  selftest_assert_file_contains "${call_log}" '"children":\["ftctl-primary-active-sdb"\]'
   selftest_assert_file_contains "${call_log}" '"parent":"ftctl-colo-sda","node":"nbd0-sda"'
   selftest_assert_file_contains "${call_log}" '"parent":"ftctl-colo-sdb","node":"nbd0-sdb"'
   selftest_assert_file_contains "${call_log}" '"device":"libvirt-root-format"'
@@ -4481,7 +4471,7 @@ selftest_main() {
   selftest_case_xcolo_block_xml_preserves_disk_targets
   selftest_case_xcolo_cloud_managed_rbd_metadata_inference
   selftest_case_xcolo_primary_create_maps_rbd_sources
-  selftest_case_xcolo_scsi_root_replace_avoids_lun_collision
+  selftest_case_xcolo_runtime_disk_device_replace_is_forbidden
   selftest_case_xcolo_block_handshake_sets_checkpoint_before_migrate
   selftest_case_xcolo_multi_disk_handshake_exports_all_disks
   selftest_case_xcolo_staged_filter_activation_classifies_failed_step
