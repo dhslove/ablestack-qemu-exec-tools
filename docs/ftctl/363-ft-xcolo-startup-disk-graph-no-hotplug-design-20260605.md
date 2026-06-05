@@ -59,7 +59,8 @@ The corrected ABLESTACK flow follows that model:
 
 ## RBD Path Rule
 
-The generated XML and qemu commandline must use the stable Cloud RBD path:
+Cloud-created XML and FTCTL state must keep the stable Cloud RBD path as the
+long-lived disk identity:
 
 ```text
 /dev/rbd/rbd/<image-id>
@@ -67,6 +68,20 @@ The generated XML and qemu commandline must use the stable Cloud RBD path:
 
 `/dev/rbdN` may be recorded only as diagnostic evidence. It must not become the
 long-lived generated XML source path.
+
+However, once FTCTL removes the protected `<disk>` entries from the generated
+transient XML and moves the COLO disk graph into `qemu:commandline`, the QEMU
+startup graph must not depend on libvirt's XML disk handling for those KRBD
+paths. The qemu commandline disk graph must convert stable
+`/dev/rbd/<pool>/<image>` identities into QEMU's native RBD backend, for
+example:
+
+```text
+file=rbd:<pool>/<image>
+```
+
+This keeps the Cloud identity stable without depending on `/dev/rbdN` or on a
+KRBD symlink being present inside the QEMU startup context.
 
 ## Runtime Guard
 
@@ -88,6 +103,8 @@ The next retest must confirm:
 - generated XML no longer contains duplicate protected `<disk>` entries;
 - no event contains `device_del_existing_root`;
 - no event contains `device_add_colo_root`;
+- startup qemu commandline for RBD-backed protected disks contains native RBD
+  backend entries and does not contain `/dev/rbd/`;
 - secondary `query-named-block-nodes` shows `ftctl-parent-*`,
   `ftctl-childs-*`, `ftctl-hidden-*`, `ftctl-active-*`, and `ftctl-colo-*`
   nodes before primary migrate;

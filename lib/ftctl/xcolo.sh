@@ -4040,6 +4040,19 @@ def qemu_driver(fmt):
     fmt = (fmt or "raw").strip()
     return fmt if fmt in {"raw", "qcow2"} else "raw"
 
+def qemu_source_options(path):
+    if path.startswith("/dev/rbd/"):
+        spec = path[len("/dev/rbd/"):]
+        if "/" not in spec:
+            raise SystemExit(f"invalid krbd path: {path}")
+        pool, image = spec.split("/", 1)
+        if not pool or not image:
+            raise SystemExit(f"invalid krbd path: {path}")
+        if any(ch in pool + image for ch in ",;"):
+            raise SystemExit(f"unsupported krbd pool/image characters: {path}")
+        return f"file=rbd:{pool}/{image}"
+    return f"file.filename={path}"
+
 def parse_runtime(raw):
     entries = []
     for entry in raw.split(";"):
@@ -4099,6 +4112,7 @@ for order, item in enumerate(parse_runtime(runtime_raw)):
     hidden = f"ftctl-hidden-{s}"
     source = item["secondary_dest"] if role == "secondary" else item["source"]
     source_driver = qemu_driver(item["format"])
+    source_options = qemu_source_options(source)
     guest = [
         "-device",
         f"scsi-hd,bus=scsi{controller}.0,channel={bus},scsi-id={scsi_id},lun={lun},drive={colo},id={colo}",
@@ -4108,7 +4122,7 @@ for order, item in enumerate(parse_runtime(runtime_raw)):
     if role == "secondary":
         args.extend([
             "-drive",
-            f"if=none,id={parent},node-name={parent},file.filename={source},driver={source_driver}",
+            f"if=none,id={parent},node-name={parent},{source_options},driver={source_driver}",
             "-drive",
             f"if=none,id={child},node-name={child},driver=replication,mode=secondary,file.driver=qcow2,file.node-name={active},top-id={colo},file.file.filename={item['secondary_active']},file.backing.driver=qcow2,file.backing.node-name={hidden},file.backing.file.filename={item['secondary_hidden']},file.backing.backing={parent}",
             "-drive",
@@ -4117,7 +4131,7 @@ for order, item in enumerate(parse_runtime(runtime_raw)):
     else:
         args.extend([
             "-drive",
-            f"if=none,id={parent},node-name={parent},file.filename={source},driver={source_driver}",
+            f"if=none,id={parent},node-name={parent},{source_options},driver={source_driver}",
             "-drive",
             f"if=none,id={active},node-name={active},driver=qcow2,file.filename={item['primary_active']},backing={parent}",
             "-drive",
@@ -4155,6 +4169,15 @@ ftctl_xcolo_apply_startup_disk_graphs() {
   ftctl_xcolo_build_startup_disk_args "${secondary_xml}" "secondary" "${disk_runtime}" secondary_disk_args || return 1
   primary_args="$(ftctl_xcolo_qemu_args_append "${primary_net_args}" "${primary_disk_args}")"
   secondary_args="$(ftctl_xcolo_secondary_args_with_disk_graph "${secondary_net_args}" "${secondary_disk_args}")"
+  if [[ "${primary_args};${secondary_args}" == *"/dev/rbd/"* ]]; then
+    ftctl_state_set "${vm}" \
+      "xcolo_startup_disk_backend=invalid" \
+      "xcolo_protocol_failure_phase=startup_disk_graph" \
+      "last_error=xcolo_startup_krbd_path_leaked"
+    ftctl_log_event "colo" "xcolo.startup_disk_graph" "fail" "${vm}" "" \
+      "reason=krbd_path_leaked_into_qemu_commandline"
+    return 1
+  fi
 
   ftctl_xcolo_xml_remove_disk_targets "${primary_xml}" "${disk_runtime}" || return 1
   ftctl_xcolo_xml_remove_disk_targets "${secondary_xml}" "${disk_runtime}" || return 1
@@ -4163,6 +4186,7 @@ ftctl_xcolo_apply_startup_disk_graphs() {
 
   ftctl_state_set "${vm}" \
     "xcolo_startup_disk_graph=enabled" \
+    "xcolo_startup_disk_backend=native-rbd-or-file" \
     "xcolo_startup_disk_graph_runtime=${disk_runtime}" \
     "primary_qemu_args=${primary_args}" \
     "secondary_qemu_args=${secondary_args}"
@@ -6907,12 +6931,80 @@ ftctl_xcolo_prepare_secondary_runtime_rbd() {
   done
 }
 
+ftctl_xcolo_qemu_rbd_uri_from_path() {
+  local path="${1-}"
+  local out_var="${2}"
+  local spec
+
+  ftctl_blockcopy_krbd_spec_from_path "${path}" spec || return 1
+  [[ "${spec}" == */* ]] || return 1
+  case "${spec}" in
+    *","*|*";"*)
+      return 2
+      ;;
+  esac
+  printf -v "${out_var}" 'rbd:%s' "${spec}"
+}
+
+ftctl_xcolo_verify_qemu_rbd_backend_local() {
+  local path="${1-}"
+  local uri="" spec="" out="" err="" rc=0
+
+  ftctl_blockcopy_krbd_spec_from_path "${path}" spec || return 1
+  ftctl_xcolo_qemu_rbd_uri_from_path "${path}" uri || return 1
+  command -v rbd >/dev/null 2>&1 || {
+    echo "ERROR: rbd CLI not found for native RBD startup backend ${path}" >&2
+    return 2
+  }
+  command -v qemu-img >/dev/null 2>&1 || {
+    echo "ERROR: qemu-img not found for native RBD startup backend ${path}" >&2
+    return 2
+  }
+  rbd info "${spec}" >/dev/null || {
+    echo "ERROR: rbd info failed for native RBD startup backend ${spec}" >&2
+    return 2
+  }
+  ftctl_cmd_run "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC}" out err rc -- \
+    qemu-img info --force-share --output=json "${uri}" || true
+  : "${out}"
+  if [[ "${rc}" != "0" ]]; then
+    echo "ERROR: qemu-img cannot open native RBD startup backend ${uri}: ${err}" >&2
+    return "${rc}"
+  fi
+}
+
+ftctl_xcolo_verify_qemu_rbd_backend_remote() {
+  local host="${1-}"
+  local user="${2-}"
+  local path="${3-}"
+  local spec="" uri="" q_spec="" q_uri="" remote_cmd="" out="" err="" rc=0
+
+  ftctl_blockcopy_krbd_spec_from_path "${path}" spec || return 1
+  ftctl_xcolo_qemu_rbd_uri_from_path "${path}" uri || return 1
+  printf -v q_spec '%q' "${spec}"
+  printf -v q_uri '%q' "${uri}"
+  remote_cmd="$(cat <<EOF
+set -euo pipefail
+command -v rbd >/dev/null 2>&1
+command -v qemu-img >/dev/null 2>&1
+rbd info ${q_spec} >/dev/null
+qemu-img info --force-share --output=json ${q_uri} >/dev/null
+EOF
+)"
+  ftctl_blockcopy_remote_exec "${host}" "${user}" out err rc "${remote_cmd}" || true
+  : "${out}"
+  if [[ "${rc}" != "0" ]]; then
+    echo "ERROR: remote qemu-img cannot open native RBD startup backend ${path}: ${err}" >&2
+    return "${rc}"
+  fi
+}
+
 ftctl_xcolo_verify_stable_rbd_contract() {
   local vm="${1-}"
   local disk_plan="${2-}"
   local phase="${3:-runtime}"
   local phase_key entry rest target primary_source primary_format primary_dtype secondary_dest
-  local host="" user="" map_msg="" ready="yes" reason="" suffix
+  local host="" user="" map_msg="" backend_msg="" ready="yes" reason="" suffix uri=""
   local -a entries=() state_args=()
 
   [[ -n "${vm}" && -n "${disk_plan}" ]] || return 0
@@ -6943,6 +7035,16 @@ ftctl_xcolo_verify_stable_rbd_contract() {
         continue
       }
       state_args+=("xcolo_${phase_key}_rbd_primary_${suffix}=ok:${primary_source}")
+      ftctl_xcolo_qemu_rbd_uri_from_path "${primary_source}" uri || uri=""
+      backend_msg="$(ftctl_xcolo_verify_qemu_rbd_backend_local "${primary_source}" 2>&1)" || {
+        ready="no"
+        reason="${reason:+${reason},}primary_${target}_native_rbd_backend_unavailable"
+        state_args+=("xcolo_${phase_key}_rbd_primary_backend_${suffix}=fail:${uri:-${primary_source}}")
+        ftctl_log_event "colo" "xcolo.rbd_backend.primary" "fail" "${vm}" "" \
+          "phase=${phase} target=${target} path=${primary_source} error=$(ftctl_xcolo_compact_log_value "${backend_msg}")"
+        continue
+      }
+      state_args+=("xcolo_${phase_key}_rbd_primary_backend_${suffix}=ok:${uri:-${primary_source}}")
     fi
 
     if ftctl_blockcopy_is_krbd_path "${secondary_dest}"; then
@@ -6963,6 +7065,16 @@ ftctl_xcolo_verify_stable_rbd_contract() {
         continue
       }
       state_args+=("xcolo_${phase_key}_rbd_secondary_${suffix}=ok:${secondary_dest}")
+      ftctl_xcolo_qemu_rbd_uri_from_path "${secondary_dest}" uri || uri=""
+      backend_msg="$(ftctl_xcolo_verify_qemu_rbd_backend_remote "${host}" "${user}" "${secondary_dest}" 2>&1)" || {
+        ready="no"
+        reason="${reason:+${reason},}secondary_${target}_native_rbd_backend_unavailable"
+        state_args+=("xcolo_${phase_key}_rbd_secondary_backend_${suffix}=fail:${uri:-${secondary_dest}}")
+        ftctl_log_event "colo" "xcolo.rbd_backend.secondary" "fail" "${vm}" "" \
+          "phase=${phase} target=${target} path=${secondary_dest} error=$(ftctl_xcolo_compact_log_value "${backend_msg}")"
+        continue
+      }
+      state_args+=("xcolo_${phase_key}_rbd_secondary_backend_${suffix}=ok:${uri:-${secondary_dest}}")
     fi
   done
 
@@ -6976,8 +7088,8 @@ ftctl_xcolo_verify_stable_rbd_contract() {
   )
   if [[ "${ready}" != "yes" ]]; then
     state_args+=(
-      "xcolo_protocol_failure_phase=rbd_stable_path_contract"
-      "last_error=xcolo_rbd_stable_path_unmapped"
+      "xcolo_protocol_failure_phase=rbd_startup_backend_contract"
+      "last_error=xcolo_rbd_startup_backend_unavailable"
     )
   fi
   ftctl_state_set "${vm}" "${state_args[@]}"
@@ -7091,12 +7203,16 @@ ftctl_xcolo_execute_block_cold_conversion() {
   ftctl_log_event "colo" "block_conversion.primary_stop" "ok" "${vm}" "" ""
 
   ftctl_xcolo_verify_stable_rbd_contract "${vm}" "${disk_plan}" "after_primary_stop" || {
-    ftctl_xcolo_rollback_block_primary_create_failure "${vm}" "xcolo_rbd_stable_path_unmapped" || true
+    local rbd_error
+    rbd_error="$(ftctl_state_get "${vm}" "last_error" 2>/dev/null || true)"
+    [[ -n "${rbd_error}" ]] || rbd_error="xcolo_rbd_startup_backend_unavailable"
+    ftctl_xcolo_rollback_block_primary_create_failure "${vm}" "${rbd_error}" || true
     ftctl_state_set "${vm}" \
       "conversion_state=error" \
       "protection_state=error" \
       "transport_state=failed" \
-      "xcolo_last_runtime_error=xcolo_rbd_stable_path_unmapped"
+      "xcolo_last_runtime_error=${rbd_error}" \
+      "last_error=${rbd_error}"
     return 1
   }
 
@@ -7232,12 +7348,16 @@ ftctl_xcolo_execute_block_cold_conversion() {
   ftctl_state_set "${vm}" "conversion_stage=startup_disk_graph_ready"
 
   ftctl_xcolo_verify_stable_rbd_contract "${vm}" "${disk_plan}" "before_primary_create" || {
-    ftctl_xcolo_rollback_block_primary_create_failure "${vm}" "xcolo_rbd_stable_path_unmapped" || true
+    local rbd_error
+    rbd_error="$(ftctl_state_get "${vm}" "last_error" 2>/dev/null || true)"
+    [[ -n "${rbd_error}" ]] || rbd_error="xcolo_rbd_startup_backend_unavailable"
+    ftctl_xcolo_rollback_block_primary_create_failure "${vm}" "${rbd_error}" || true
     ftctl_state_set "${vm}" \
       "conversion_state=error" \
       "protection_state=error" \
       "transport_state=failed" \
-      "xcolo_last_runtime_error=xcolo_rbd_stable_path_unmapped"
+      "xcolo_last_runtime_error=${rbd_error}" \
+      "last_error=${rbd_error}"
     return 1
   }
 
@@ -7263,13 +7383,17 @@ ftctl_xcolo_execute_block_cold_conversion() {
   ftctl_state_set "${vm}" "conversion_stage=primary_listening"
 
   ftctl_xcolo_verify_stable_rbd_contract "${vm}" "${disk_plan}" "before_secondary_create" || {
+    local rbd_error
+    rbd_error="$(ftctl_state_get "${vm}" "last_error" 2>/dev/null || true)"
+    [[ -n "${rbd_error}" ]] || rbd_error="xcolo_rbd_startup_backend_unavailable"
     ftctl_xcolo_abort_primary_generated_async "${vm}" "${primary_create_handle}"
-    ftctl_xcolo_rollback_block_primary_create_failure "${vm}" "xcolo_rbd_stable_path_unmapped" || true
+    ftctl_xcolo_rollback_block_primary_create_failure "${vm}" "${rbd_error}" || true
     ftctl_state_set "${vm}" \
       "conversion_state=error" \
       "protection_state=error" \
       "transport_state=failed" \
-      "xcolo_last_runtime_error=xcolo_rbd_stable_path_unmapped"
+      "xcolo_last_runtime_error=${rbd_error}" \
+      "last_error=${rbd_error}"
     return 1
   }
 
@@ -7339,12 +7463,16 @@ ftctl_xcolo_execute_block_cold_conversion() {
   }
 
   ftctl_xcolo_verify_stable_rbd_contract "${vm}" "${disk_plan}" "before_migrate" || {
-    ftctl_xcolo_rollback_block_primary_create_failure "${vm}" "xcolo_rbd_stable_path_unmapped" || true
+    local rbd_error
+    rbd_error="$(ftctl_state_get "${vm}" "last_error" 2>/dev/null || true)"
+    [[ -n "${rbd_error}" ]] || rbd_error="xcolo_rbd_startup_backend_unavailable"
+    ftctl_xcolo_rollback_block_primary_create_failure "${vm}" "${rbd_error}" || true
     ftctl_state_set "${vm}" \
       "conversion_state=error" \
       "protection_state=error" \
       "transport_state=failed" \
-      "xcolo_last_runtime_error=xcolo_rbd_stable_path_unmapped"
+      "xcolo_last_runtime_error=${rbd_error}" \
+      "last_error=${rbd_error}"
     return 1
   }
 

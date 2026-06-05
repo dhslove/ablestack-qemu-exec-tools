@@ -3412,6 +3412,84 @@ but a lower-level signature or reached stage changed, set
   - `ablestack_vm_ftctl status --vm i-2-54-VM --json` returned `not_found`
   - the removed standby RBD images now return `No such file or directory`
 
+### Run 86 Startup Disk Graph Monitor Result 2026-06-05
+
+- Test trigger:
+  - user started FT protection for `r97-link-01`
+  - primary VM: `54` / `i-2-54-VM`
+  - standby VM created by Cloud: `142` / `i-2-142-VM`
+- Final state:
+  - `ftctl_protection.id=86`
+  - `protection_state=error`
+  - `transport_state=failed`
+  - `last_error=xcolo_block_primary_listener_wait_failed`
+  - primary domain recovered and is running on `10.10.32.3`
+  - standby domain is not running; Cloud DB VM `142` remains `Stopped`
+- Evidence:
+  - monitor evidence directory:
+    `/tmp/ftctl-monitor-run-20260605-214520`
+  - primary state file recorded startup disk graph activation:
+    `xcolo_startup_disk_graph=enabled`
+  - generated primary QEMU args used stable RBD paths:
+    `/dev/rbd/rbd/64084f28-b9c7-4e46-8aeb-13a56c452790`
+    and `/dev/rbd/rbd/4b86a392-aeb4-47fd-b8cc-16295f5eee82`
+  - generated secondary QEMU args used stable RBD paths:
+    `/dev/rbd/rbd/bcc61c91-9e63-4db3-b96e-fdd442a93eed`
+    and `/dev/rbd/rbd/d34c57a6-3ea7-48fc-b8fe-58866babb20a`
+  - primary libvirt/QEMU log failed while opening the generated startup graph
+    root path:
+    `Could not open '/dev/rbd/rbd/64084f28-b9c7-4e46-8aeb-13a56c452790': No such file or directory`
+  - secondary libvirt/QEMU log failed while opening the generated startup
+    graph standby path:
+    `Could not open '/dev/rbd/rbd/bcc61c91-9e63-4db3-b96e-fdd442a93eed': No such file or directory`
+- Repetition analysis:
+  - this is not the previous COLO protocol invalid-message loop
+  - this is not the secondary memory-region assertion caused by runtime
+    guest disk hotplug
+  - the startup disk graph code did run and advanced the failure boundary to
+    the pre-QEMU-start RBD mapping contract
+  - the new issue is that the generated XML no longer contains protected
+    libvirt `<disk>` entries, so existing XML/hook-based RBD mapping can no
+    longer be relied on to make qemu:commandline `-drive file.filename=...`
+    paths exist at QEMU startup
+- Next required correction:
+  - make FTCTL explicitly map and verify every stable `/dev/rbd/rbd/<image-id>`
+    path referenced by startup-generated qemu commandline arguments before
+    each `virsh create`
+  - perform this mapping independently of libvirt XML `<disk>` entries
+  - keep the stable path rule; do not switch generated XML or qemu arguments
+    to `/dev/rbdN`
+  - add fail-fast errors for missing startup RBD paths instead of allowing the
+    failure to surface later as `xcolo_block_primary_listener_wait_failed`
+
+### Native RBD Startup Backend Correction 2026-06-05
+
+- Corrected conclusion after Run 86:
+  - Cloud and FTCTL state must keep `/dev/rbd/rbd/<image-id>` as the stable
+    disk identity
+  - generated transient qemu commandline must not directly open that KRBD path
+    after protected `<disk>` XML entries are removed
+  - generated startup disk graph must use QEMU's native RBD backend:
+    `file=rbd:<pool>/<image>`
+- Code direction implemented:
+  - `ftctl_xcolo_build_startup_disk_args` converts `/dev/rbd/<pool>/<image>`
+    to `file=rbd:<pool>/<image>` for primary and secondary startup graph base
+    nodes
+  - startup graph application fails fast with
+    `xcolo_startup_krbd_path_leaked` if `/dev/rbd/` remains in generated qemu
+    args
+  - stable RBD contract validation now also checks native RBD backend
+    accessibility through `qemu-img info --force-share --output=json
+    rbd:<pool>/<image>`
+  - call sites preserve the specific startup backend error instead of
+    overwriting it with the older stable-path error
+- Repetition analysis:
+  - this is a direct fix for the Run 86 QEMU startup failure
+  - it does not change the earlier no-hotplug decision
+  - it does not reintroduce `/dev/rbdN`
+  - if the next run again fails with COLO invalid-message errors, that will be
+    a later protocol boundary, not the same RBD startup path issue
+
 ### Run 84 Monitoring Result 2026-06-05
 
 - Test trigger:

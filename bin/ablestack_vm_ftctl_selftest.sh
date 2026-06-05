@@ -1280,6 +1280,45 @@ selftest_case_xcolo_runtime_disk_device_replace_is_forbidden() (
   selftest_assert_file_not_contains "${call_log}" '"execute":"device_add"'
 )
 
+selftest_case_xcolo_startup_disk_graph_uses_native_rbd_backend() (
+  selftest_reset_env
+  selftest_info "x-colo startup disk graph uses native RBD backend"
+
+  local xml_path="${SELFTEST_ROOT}/xcolo-startup-rbd.xml"
+  local primary_args="" secondary_args=""
+  cat > "${xml_path}" <<'EOF'
+<domain type='kvm'>
+  <devices>
+    <controller type='scsi' index='0'/>
+    <disk type='block' device='disk'>
+      <source dev='/dev/rbd/rbd/root'/>
+      <target dev='sda' bus='scsi'/>
+      <address type='drive' controller='0' bus='0' target='0' unit='0'/>
+    </disk>
+    <disk type='block' device='disk'>
+      <source dev='/dev/rbd/rbd/data'/>
+      <target dev='sdb' bus='scsi'/>
+      <address type='drive' controller='0' bus='0' target='0' unit='1'/>
+    </disk>
+  </devices>
+</domain>
+EOF
+
+  ftctl_xcolo_build_startup_disk_args "${xml_path}" "primary" \
+    "sda|/dev/rbd/rbd/root|raw|/tmp/primary-active-root.qcow2|/dev/rbd/rbd/secondary-root|/tmp/secondary-hidden-root.qcow2|/tmp/secondary-active-root.qcow2;sdb|/dev/rbd/rbd/data|raw|/tmp/primary-active-data.qcow2|/dev/rbd/rbd/secondary-data|/tmp/secondary-hidden-data.qcow2|/tmp/secondary-active-data.qcow2" \
+    primary_args
+  ftctl_xcolo_build_startup_disk_args "${xml_path}" "secondary" \
+    "sda|/dev/rbd/rbd/root|raw|/tmp/primary-active-root.qcow2|/dev/rbd/rbd/secondary-root|/tmp/secondary-hidden-root.qcow2|/tmp/secondary-active-root.qcow2;sdb|/dev/rbd/rbd/data|raw|/tmp/primary-active-data.qcow2|/dev/rbd/rbd/secondary-data|/tmp/secondary-hidden-data.qcow2|/tmp/secondary-active-data.qcow2" \
+    secondary_args
+
+  selftest_assert_contains "${primary_args}" "file=rbd:rbd/root" "primary root native RBD backend"
+  selftest_assert_contains "${primary_args}" "file=rbd:rbd/data" "primary data native RBD backend"
+  selftest_assert_contains "${secondary_args}" "file=rbd:rbd/secondary-root" "secondary root native RBD backend"
+  selftest_assert_contains "${secondary_args}" "file=rbd:rbd/secondary-data" "secondary data native RBD backend"
+  selftest_assert_not_contains "${primary_args}" "/dev/rbd/" "primary qemu args must not leak KRBD path"
+  selftest_assert_not_contains "${secondary_args}" "/dev/rbd/" "secondary qemu args must not leak KRBD path"
+)
+
 selftest_case_xcolo_block_handshake_sets_checkpoint_before_migrate() (
   selftest_reset_env
   selftest_info "x-colo block handshake sets checkpoint delay before primary migrate"
@@ -2236,6 +2275,14 @@ selftest_case_xcolo_stable_rbd_contract_remaps_cloud_paths() (
   ftctl_blockcopy_map_remote_krbd_path() {
     printf 'REMOTE:%s:%s:%s\n' "$1" "$2" "$3" >> "${call_log}"
   }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_verify_qemu_rbd_backend_local() {
+    printf 'LOCAL_BACKEND:%s\n' "$1" >> "${call_log}"
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_verify_qemu_rbd_backend_remote() {
+    printf 'REMOTE_BACKEND:%s:%s:%s\n' "$1" "$2" "$3" >> "${call_log}"
+  }
 
   ftctl_xcolo_verify_stable_rbd_contract "primary-vm" \
     "sda|/dev/rbd/rbd/root|raw|block|/dev/rbd/rbd/secondary-root;sdb|/dev/rbd/rbd/data|raw|block|/dev/rbd/rbd/secondary-data" \
@@ -2247,8 +2294,14 @@ selftest_case_xcolo_stable_rbd_contract_remaps_cloud_paths() (
     "ok:/dev/rbd/rbd/root" "primary stable RBD state"
   selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_before_migrate_rbd_secondary_sdb")" \
     "ok:/dev/rbd/rbd/secondary-data" "secondary stable RBD state"
+  selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_before_migrate_rbd_primary_backend_sda")" \
+    "ok:rbd:rbd/root" "primary native RBD backend state"
+  selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_before_migrate_rbd_secondary_backend_sdb")" \
+    "ok:rbd:rbd/secondary-data" "secondary native RBD backend state"
   selftest_assert_file_contains "${call_log}" "LOCAL:/dev/rbd/rbd/root"
   selftest_assert_file_contains "${call_log}" "REMOTE:10.0.0.2:root:/dev/rbd/rbd/secondary-root"
+  selftest_assert_file_contains "${call_log}" "LOCAL_BACKEND:/dev/rbd/rbd/root"
+  selftest_assert_file_contains "${call_log}" "REMOTE_BACKEND:10.0.0.2:root:/dev/rbd/rbd/secondary-root"
 )
 
 selftest_case_xcolo_baseline_seed_retries_ssh_transport_failure() (
@@ -4484,6 +4537,7 @@ selftest_main() {
   selftest_case_xcolo_filter_qom_hard_gate
   selftest_case_xcolo_primary_filter_qmp_order_matches_qemu_doc
   selftest_case_xcolo_primary_netdev_vhost_guard
+  selftest_case_xcolo_startup_disk_graph_uses_native_rbd_backend
   selftest_case_xcolo_baseline_seed_uses_primary_nbd_before_runtime_graph
   selftest_case_xcolo_baseline_seed_maps_cloud_managed_rbd
   selftest_case_xcolo_secondary_runtime_maps_cloud_managed_rbd
