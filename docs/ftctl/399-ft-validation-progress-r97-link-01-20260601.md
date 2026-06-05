@@ -3490,6 +3490,49 @@ but a lower-level signature or reached stage changed, set
   - if the next run again fails with COLO invalid-message errors, that will be
     a later protocol boundary, not the same RBD startup path issue
 
+### Native RBD Startup Backend Build, Deploy, Cleanup 2026-06-05
+
+- Source commit:
+  - `402bed3fe8298511aad86611020ce17b2b22b183`
+  - `fix: use native rbd backend for xcolo startup`
+- Build:
+  - GitHub Actions run: `27017056209`
+  - result: `success`
+  - artifact: `ablestack_vm_ftctl-0.8.0-1.noarch.rpm`
+  - SHA256:
+    `5bb93a58f27a0c4b30bc53dee2575836b510b1446e04dfd486502beb97b0a360`
+- Deployment:
+  - deployed to `10.10.32.1`, `10.10.32.2`, and `10.10.32.3`
+  - 32.x installer wrapper used:
+    `aspkg --replacepkgs -U /root/ablestack_vm_ftctl-0.8.0-1.noarch.rpm`
+  - verified timers active on all three hosts:
+    - `ablestack-vm-ftctl.timer`
+    - `ablestack-vm-hangctl.timer`
+  - verified installed script markers:
+    - `xcolo_startup_krbd_path_leaked`
+    - `file=rbd:`
+    - `xcolo_rbd_startup_backend_unavailable`
+  - verified installed script no longer has a generated startup path pattern
+    like `file.filename=.*dev/rbd`
+- Native RBD backend host preflight:
+  - primary-side `qemu-img info --force-share --output=json
+    rbd:rbd/64084f28-b9c7-4e46-8aeb-13a56c452790` succeeded on
+    `10.10.32.3`
+  - secondary-side `qemu-img info --force-share --output=json
+    rbd:rbd/bcc61c91-9e63-4db3-b96e-fdd442a93eed` succeeded on
+    `10.10.32.1` before cleanup
+- Cleanup for retest:
+  - active protection rows for primary VM `54`: `0`
+  - active `ftctl.*` details for primary VM `54`: `0`
+  - active standby VM rows for `r97-link-01-standby`: `0`
+  - active standby volumes for `r97-link-01-standby%`: `0`
+  - standby VM `142` / `i-2-142-VM` marked `Expunging`
+  - standby volumes `269` and `270` marked `Expunged`
+  - removed standby RBD images:
+    - `rbd/bcc61c91-9e63-4db3-b96e-fdd442a93eed`
+    - `rbd/d34c57a6-3ea7-48fc-b8fe-58866babb20a`
+  - primary VM `i-2-54-VM` remains `running` on `10.10.32.3`
+
 ### Run 84 Monitoring Result 2026-06-05
 
 - Test trigger:
