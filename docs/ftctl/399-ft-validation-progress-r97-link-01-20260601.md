@@ -4619,3 +4619,49 @@ but a lower-level signature or reached stage changed, set
   - primary QMP/HMP shows no active migration
   - only `i-2-54-VM` is running on the 32.x hosts for this test target
   - removed standby RBD images now return `No such file or directory`
+
+### Run 90 Monitoring - Existing Root-Port Reference Fails At QEMU Parse Time 2026-06-06
+
+- Test trigger:
+  - user started FT protection for `r97-link-01`
+  - primary VM: `54` / `i-2-54-VM`
+  - standby VM: `146` / `i-2-146-VM`
+- Final DB state:
+  - `ftctl_protection.id=90`
+  - `protection_state=error`
+  - `transport_state=failed`
+  - `last_error=xcolo_block_primary_listener_wait_failed`
+  - primary VM `54` remained `Running` on host id `3`
+  - standby VM `146` remained `Stopped`
+- Evidence:
+  - primary create stderr:
+    - `Failed to create domain from .../primary.generated.xml`
+    - `qemu-kvm: -device virtio-scsi-pci,id=ftctl-xcolo-scsi0,bus=pci.7,addr=0x0: Bus 'pci.7' not found`
+  - `primary.generated.xml` still contained controller index `7`,
+    model `pcie-root-port`, alias `pci.7`
+  - generated QEMU args correctly avoided the previous root slot `0x1`
+    collision:
+    - `-device virtio-scsi-pci,id=ftctl-xcolo-scsi0,bus=pci.7,addr=0x0`
+  - RBD contract and storage symmetry checks were still healthy:
+    - `xcolo_storage_symmetry=ok`
+    - `xcolo_rbd_contract_ready=yes`
+- Repetition analysis:
+  - this is not the same failure as Run 89.
+  - Run 89 failed because FTCTL SCSI was auto-placed on root slot `0x1` and
+    collided with `cirrus-vga`.
+  - Run 90 shows that referencing a libvirt-defined existing root-port alias
+    from `qemu:commandline` is not a valid startup contract for this path.
+  - The generic `xcolo_block_primary_listener_wait_failed` state is misleading
+    here; the primary never reached listener readiness because QEMU failed at
+    command-line parse/device construction.
+- Corrected direction:
+  - do not attach FTCTL-generated command-line devices to libvirt-owned
+    existing `pcie-root-port` aliases such as `pci.7`
+  - always create the FTCTL-owned root-port inside the same
+    `qemu:commandline` argument sequence before creating
+    `ftctl-xcolo-scsi0`
+  - choose a free root slot from the XML topology for that FTCTL-owned
+    root-port
+  - keep the `cirrus-vga` root slot `0x1` guard
+  - classify this parse-time failure as a dedicated startup PCI topology
+    failure instead of folding it into primary listener wait failure

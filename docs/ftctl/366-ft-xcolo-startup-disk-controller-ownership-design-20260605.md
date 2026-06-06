@@ -36,16 +36,15 @@ For the X-COLO cold conversion startup graph:
 
 ## Startup Graph Contract
 
-FTCTL now prepends the disk graph with an explicitly placed controller. If the
-generated libvirt XML already has an unused `pcie-root-port`, FTCTL attaches to
-that bus:
+FTCTL now prepends the disk graph with an explicitly placed root-port and SCSI
+controller that are both created by the same `qemu:commandline` graph. FTCTL
+must not attach command-line devices to existing libvirt-owned root-port aliases
+such as `pci.N`; Run 90 showed that those aliases can be present in
+`primary.generated.xml` but still unavailable when QEMU parses the command-line
+device argument.
 
-```text
--device virtio-scsi-pci,id=ftctl-xcolo-scsi0,bus=pci.N,addr=0x0
-```
-
-If no unused libvirt root port exists, FTCTL creates its own root-port and then
-attaches the SCSI controller behind it:
+FTCTL therefore always creates its own root-port and then attaches the SCSI
+controller behind it:
 
 ```text
 -device pcie-root-port,id=ftctl-xcolo-pci0,bus=pcie.0,addr=<free-root-slot>,...
@@ -73,6 +72,9 @@ The startup argument validator must reject:
 - protected disk devices whose `drive=` does not reference a `-bb` backend;
 - protected disk devices attached to a libvirt-owned `scsiN.0` bus;
 - protected disk devices when the FTCTL-owned SCSI controller is missing;
+- protected disk devices when the FTCTL-owned root-port is missing or appears
+  after the SCSI controller argument;
+- FTCTL-owned SCSI controller args attached to a libvirt-owned `pci.N` parent;
 - FTCTL-owned SCSI controller args without explicit `bus=` and `addr=`;
 - FTCTL-owned SCSI controller args that fall back to the root slot used by
   `cirrus-vga` in the observed q35 layout;
@@ -108,3 +110,28 @@ in use by virtio-scsi-pci,id=ftctl-xcolo-scsi0
 
 The correction is to make the FTCTL-owned controller placement deterministic,
 not to revisit the RBD backend or BlockBackend/node-name fixes.
+
+## Run 90 Follow-Up
+
+Run 90 confirmed that simply reusing an unused libvirt root-port alias is not a
+valid command-line startup contract:
+
+```text
+qemu-kvm: -device virtio-scsi-pci,id=ftctl-xcolo-scsi0,bus=pci.7,addr=0x0:
+Bus 'pci.7' not found
+```
+
+The generated XML still contained controller alias `pci.7`, so the issue was
+not XML removal. The boundary is the command-line device construction order and
+ownership model. From this run forward, FTCTL must always create
+`ftctl-xcolo-pci0` in the command-line argument sequence before
+`ftctl-xcolo-scsi0`, then attach all protected disks to
+`ftctl-xcolo-scsi0.0`.
+
+Parse-time PCI topology failures must be classified as:
+
+```text
+xcolo_startup_pci_topology_failed
+```
+
+rather than being folded into the more generic primary listener wait failure.

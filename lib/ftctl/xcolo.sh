@@ -4086,8 +4086,6 @@ def find_ft_scsi_attachment(root):
         raise SystemExit("missing <devices> in xml")
 
     root_slots = set()
-    used_controller_indices = set()
-    root_port_indices = []
     max_chassis = 0
     max_port = 0x0f
 
@@ -4099,30 +4097,17 @@ def find_ft_scsi_attachment(root):
         slot = pci_int(addr.get("slot"), -1)
         if bus == 0 and slot >= 0:
             root_slots.add(slot)
-        elif bus > 0:
-            used_controller_indices.add(bus)
 
     for ctl in devices.findall("controller"):
         if ctl.get("type") != "pci":
             continue
-        index = pci_int(ctl.get("index"), None)
         model = ctl.get("model") or ""
-        if model != "pcie-root-port" or index is None:
+        if model != "pcie-root-port":
             continue
-        root_port_indices.append(index)
         target = ctl.find("target")
         if target is not None:
             max_chassis = max(max_chassis, pci_int(target.get("chassis"), max_chassis))
             max_port = max(max_port, pci_int(target.get("port"), max_port))
-
-    for index in sorted(root_port_indices):
-        if index not in used_controller_indices:
-            return {
-                "prefix": [],
-                "controller_bus": f"pci.{index}",
-                "controller_addr": "0x0",
-                "mode": "existing-root-port",
-            }
 
     for slot in range(3, 31):
         if slot in root_slots:
@@ -4312,6 +4297,27 @@ if protected_disk_count and controller_seen:
         errors.append(f"controller_placement_missing:{controller_id}")
     if controller_fields.get("bus") == "pcie.0" and controller_fields.get("addr") == "0x1":
         errors.append(f"controller_placement_reserved:{controller_id}:pcie.0/0x1")
+    if controller_fields.get("bus") != "ftctl-xcolo-pci0":
+        errors.append(f"controller_parent_not_ftctl_owned:{controller_id}:{controller_fields.get('bus') or 'missing'}")
+
+root_port_seen = False
+root_port_pos = -1
+controller_pos = -1
+for idx, part in enumerate(parts):
+    if part != "-device" or idx + 1 >= len(parts):
+        continue
+    opts = parts[idx + 1]
+    if opts.startswith("pcie-root-port,") and "id=ftctl-xcolo-pci0" in opts:
+        root_port_seen = True
+        root_port_pos = idx
+    if opts.startswith("virtio-scsi-pci,") and f"id={controller_id}" in opts:
+        controller_pos = idx
+
+if protected_disk_count:
+    if not root_port_seen:
+        errors.append("ftctl_root_port_missing:ftctl-xcolo-pci0")
+    elif controller_pos >= 0 and root_port_pos > controller_pos:
+        errors.append("ftctl_root_port_order_invalid:ftctl-xcolo-pci0")
 
 if errors:
     print(",".join(errors))
@@ -4324,7 +4330,7 @@ PY
         "xcolo_startup_disk_backend=invalid" \
         "xcolo_protocol_failure_phase=startup_disk_graph" \
         "last_error=xcolo_startup_block_backend_node_conflict"
-    elif [[ "${out}" == *"guest_bus_controller_mismatch:"* || "${out}" == *"guest_bus_libvirt_owned:"* || "${out}" == *"controller_missing:"* || "${out}" == *"controller_placement_missing:"* || "${out}" == *"controller_placement_reserved:"* ]]; then
+    elif [[ "${out}" == *"guest_bus_controller_mismatch:"* || "${out}" == *"guest_bus_libvirt_owned:"* || "${out}" == *"controller_missing:"* || "${out}" == *"controller_placement_missing:"* || "${out}" == *"controller_placement_reserved:"* || "${out}" == *"controller_parent_not_ftctl_owned:"* || "${out}" == *"ftctl_root_port_missing:"* || "${out}" == *"ftctl_root_port_order_invalid:"* ]]; then
       ftctl_state_set "${vm}" \
         "xcolo_startup_disk_backend=invalid" \
         "xcolo_protocol_failure_phase=startup_disk_graph" \
@@ -6806,7 +6812,7 @@ ftctl_xcolo_wait_primary_generated_listeners() {
   local handle="${2-}"
   local timeout_sec mirror_port compare_port compare_local_port compare_out_port mirror_wait compare_wait i
   local pid="" rc_file="" out_file="" err_file="" tmp_dir=""
-  local create_rc ready_reason
+  local create_rc ready_reason err_summary create_error
 
   IFS='|' read -r pid rc_file out_file err_file tmp_dir <<< "${handle}"
   : "${pid}${out_file}${err_file}${tmp_dir}"
@@ -6855,8 +6861,21 @@ ftctl_xcolo_wait_primary_generated_listeners() {
     if ftctl_xcolo_primary_create_async_done "${handle}"; then
       create_rc="$(cat "${rc_file}" 2>/dev/null || printf '1')"
       if [[ "${create_rc}" != "0" ]]; then
+        err_summary="$(tr '\n' ' ' < "${err_file}" 2>/dev/null | cut -c1-220 || true)"
+        create_error="xcolo_primary_create_failed_before_listener"
+        if [[ "${err_summary}" == *"Bus '"*" not found"* ||
+              "${err_summary}" == *"PCI:"*" not available"* ||
+              "${err_summary}" == *"slot "*" not available"* ]]; then
+          create_error="xcolo_startup_pci_topology_failed"
+        elif [[ "${err_summary}" == *"qemu-kvm:"* ]]; then
+          create_error="xcolo_primary_create_qemu_parse_failed"
+        fi
+        ftctl_state_set "${vm}" \
+          "xcolo_protocol_failure_phase=primary_create" \
+          "xcolo_primary_create_error_summary=$(ftctl_xcolo_compact_log_value "${err_summary}")" \
+          "last_error=${create_error}"
         ftctl_log_event "colo" "primary.create_generated.listeners" "fail" "${vm}" "${create_rc}" \
-          "reason=create_exited_before_listen mirror_port=${mirror_port} compare_port=${compare_port} log_dir=${tmp_dir}"
+          "reason=create_exited_before_listen classified=${create_error} mirror_port=${mirror_port} compare_port=${compare_port} log_dir=${tmp_dir} error=$(ftctl_xcolo_compact_log_value "${err_summary}")"
         return 1
       fi
     fi
@@ -7579,11 +7598,14 @@ ftctl_xcolo_execute_block_cold_conversion() {
   }
   ftctl_state_set "${vm}" "conversion_stage=primary_create_started"
   ftctl_xcolo_wait_primary_generated_listeners "${vm}" "${primary_create_handle}" || {
+    local listener_error
+    listener_error="$(ftctl_state_get "${vm}" "last_error" 2>/dev/null || true)"
+    [[ -n "${listener_error}" ]] || listener_error="xcolo_block_primary_listener_wait_failed"
     ftctl_xcolo_abort_primary_generated_async "${vm}" "${primary_create_handle}"
     ftctl_log_event "colo" "block_conversion.primary_create" "fail" "${vm}" "" \
-      "path=${primary_generated_xml} reason=listener_wait_failed"
-    ftctl_state_set "${vm}" "last_error=xcolo_block_primary_listener_wait_failed"
-    ftctl_xcolo_rollback_block_primary_create_failure "${vm}" "xcolo_block_primary_listener_wait_failed" || true
+      "path=${primary_generated_xml} reason=${listener_error}"
+    ftctl_state_set "${vm}" "last_error=${listener_error}"
+    ftctl_xcolo_rollback_block_primary_create_failure "${vm}" "${listener_error}" || true
     return 1
   }
   ftctl_state_set "${vm}" "conversion_stage=primary_listening"
