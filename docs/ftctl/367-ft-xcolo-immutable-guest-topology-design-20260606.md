@@ -66,6 +66,37 @@ The guest-visible topology must remain the Cloud/libvirt topology:
 
 Only the backend block graph is replaced with the COLO graph.
 
+## Commandline Controller Reproduction
+
+Run 94 proved that leaving the libvirt `<controller type="scsi">` in generated
+XML and adding protected `scsi-hd` devices through `qemu:commandline` is not
+reliable. QEMU failed secondary startup with:
+
+```text
+Bus 'scsi0.0' not found
+```
+
+The generated XML contained the libvirt SCSI controller alias, but raw
+`qemu:commandline` devices could not attach to that libvirt-created bus.
+
+The corrected model is still immutable topology, but the controller ownership
+within the generated transient XML must be consistent:
+
+- read the original libvirt SCSI controller alias and PCI address;
+- remove the libvirt SCSI controller from generated XML after protected disks
+  are removed, provided no remaining SCSI disk uses it;
+- add an equivalent commandline controller before protected disk devices, for
+  example:
+
+```text
+-device virtio-scsi-pci,id=scsi0,bus=pcie.0,addr=0x9,num_queues=2
+-device scsi-hd,bus=scsi0.0,channel=0,scsi-id=0,lun=0,...
+```
+
+This is not an FTCTL-owned new topology. It is the original Cloud/libvirt
+controller reproduced at the same guest-visible PCI location so that QEMU raw
+commandline disk devices can attach to it deterministically.
+
 ## Implementation Direction
 
 When building generated transient XML:
@@ -105,6 +136,10 @@ Before `virsh create`, FTCTL must validate:
   - `<address type="drive" controller="X" bus="Y" target="Z" unit="N">`
 - no generated commandline contains `ftctl-xcolo-pci0`;
 - no generated commandline contains `ftctl-xcolo-scsi0`;
+- generated XML no longer contains the libvirt SCSI controller used only by
+  protected disks;
+- generated commandline contains the original SCSI controller reproduced as
+  `virtio-scsi-pci,id=scsiX,bus=<original-pci-bus>,addr=<original-pci-slot>`;
 - every protected disk `scsi-hd` uses an original libvirt SCSI bus such as
   `scsi0.0`;
 - every protected disk qdev id follows the original topology such as

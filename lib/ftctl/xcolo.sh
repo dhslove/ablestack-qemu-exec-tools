@@ -3995,17 +3995,40 @@ devices = root.find("devices")
 if devices is None:
     raise SystemExit("missing <devices> in xml")
 
+protected_controllers = set()
 removed = 0
 for disk in list(devices.findall("disk")):
     if disk.get("device") != "disk":
         continue
     target = disk.find("target")
     if target is not None and target.get("dev") in targets:
+        address = disk.find("address")
+        if target.get("bus") == "scsi" and address is not None and address.get("type") == "drive":
+            protected_controllers.add(address.get("controller") or "0")
         devices.remove(disk)
         removed += 1
 
 if removed != len(targets):
     raise SystemExit(f"removed {removed} disk devices, expected {len(targets)}")
+
+remaining_scsi_controllers = set()
+for disk in devices.findall("disk"):
+    if disk.get("device") != "disk":
+        continue
+    target = disk.find("target")
+    address = disk.find("address")
+    if target is None or target.get("bus") != "scsi":
+        continue
+    if address is None or address.get("type") != "drive":
+        continue
+    remaining_scsi_controllers.add(address.get("controller") or "0")
+
+for controller in list(devices.findall("controller")):
+    if controller.get("type") != "scsi":
+        continue
+    index = controller.get("index") or "0"
+    if index in protected_controllers and index not in remaining_scsi_controllers:
+        devices.remove(controller)
 
 tree.write(xml_path, encoding="unicode")
 PY
@@ -4201,6 +4224,14 @@ def parse_runtime(raw):
         })
     return entries
 
+def pci_int(value, default=0):
+    if value is None or value == "":
+        return default
+    try:
+        return int(str(value), 0)
+    except ValueError:
+        return default
+
 def text_of(elem, default=""):
     if elem is None or elem.text is None:
         return default
@@ -4232,6 +4263,7 @@ def disk_topology(target, disk, disk_index):
 
     return {
         "bus": f"{controller_id}.0",
+        "controller_index": controller,
         "controller": controller_id,
         "channel": channel,
         "scsi_id": scsi_id,
@@ -4240,6 +4272,66 @@ def disk_topology(target, disk, disk_index):
         "serial": serial,
         "boot_order": boot_order,
     }
+
+def pci_bus_aliases(devices):
+    aliases = {0: "pcie.0"}
+    for controller in devices.findall("controller"):
+        if controller.get("type") != "pci":
+            continue
+        index = pci_int(controller.get("index"), None)
+        if index is None:
+            continue
+        alias = controller.find("alias")
+        alias_name = alias.get("name") if alias is not None else ""
+        if alias_name:
+            aliases[index] = alias_name
+        elif index == 0:
+            aliases[index] = "pcie.0"
+        else:
+            aliases[index] = f"pci.{index}"
+    return aliases
+
+def scsi_controller_command(devices, controller_index):
+    controller = None
+    for candidate in devices.findall("controller"):
+        if candidate.get("type") != "scsi":
+            continue
+        if (candidate.get("index") or "0") == str(controller_index):
+            controller = candidate
+            break
+    if controller is None:
+        raise SystemExit(f"missing scsi controller index {controller_index}")
+
+    model = controller.get("model") or "virtio-scsi"
+    if model != "virtio-scsi":
+        raise SystemExit(f"unsupported scsi controller model for x-colo: {model}")
+
+    alias = controller.find("alias")
+    controller_id = alias.get("name") if alias is not None and alias.get("name") else f"scsi{controller_index}"
+    if controller_id != f"scsi{controller_index}":
+        raise SystemExit(f"unexpected scsi controller alias for x-colo: {controller_id}")
+
+    address = controller.find("address")
+    if address is None or address.get("type") != "pci":
+        raise SystemExit(f"missing pci address for scsi controller {controller_id}")
+
+    pci_aliases = pci_bus_aliases(devices)
+    pci_bus_index = pci_int(address.get("bus"), 0)
+    bus = pci_aliases.get(pci_bus_index)
+    if not bus:
+        raise SystemExit(f"missing pci bus alias for scsi controller {controller_id}: {address.get('bus')}")
+
+    slot = pci_int(address.get("slot"), None)
+    function = pci_int(address.get("function"), 0)
+    if slot is None:
+        raise SystemExit(f"missing pci slot for scsi controller {controller_id}")
+    addr = f"0x{slot:x}" if function == 0 else f"0x{slot:x}.0x{function:x}"
+
+    opts = f"virtio-scsi-pci,id={controller_id},bus={bus},addr={addr}"
+    driver = controller.find("driver")
+    if driver is not None and driver.get("queues"):
+        opts += f",num_queues={driver.get('queues')}"
+    return ["-device", opts]
 
 tree = ET.parse(xml_path)
 root = tree.getroot()
@@ -4259,12 +4351,17 @@ for index, disk in enumerate(devices.findall("disk")):
 entries = parse_runtime(runtime_raw)
 args = []
 state = []
+controller_args = []
+controller_seen = set()
 for order, item in enumerate(entries):
     target = item["target"]
     if target not in disk_by_target:
         raise SystemExit(f"disk target not found in xml: {target}")
     disk, disk_index = disk_by_target[target]
     topo = disk_topology(target, disk, disk_index)
+    if topo["controller_index"] not in controller_seen:
+        controller_args.extend(scsi_controller_command(devices, topo["controller_index"]))
+        controller_seen.add(topo["controller_index"])
     s = suffix(target)
     parent = f"ftctl-parent-{s}" if role == "secondary" else f"ftctl-primary-parent-{s}"
     parent_bb = f"{parent}-bb"
@@ -4318,10 +4415,10 @@ for order, item in enumerate(entries):
         f"{target}.device={topo['qdev_id']}",
         f"{target}.controller={topo['controller']}",
         f"{target}.controller_bus={topo['bus']}",
-        f"{target}.controller_mode=libvirt-original",
+        f"{target}.controller_mode=commandline-original",
     ])
 
-print(";".join(args))
+print(";".join(controller_args + args))
 PY
 )" || return 1
 
@@ -4342,11 +4439,14 @@ import sys
 parts = os.environ.get("XCOLO_QEMU_ARGS", "").split(";")
 errors = []
 protected_disk_count = 0
+controller_count = 0
 for idx, part in enumerate(parts):
     if part == "-device" and idx + 1 < len(parts):
         opts = parts[idx + 1]
         if "id=ftctl-xcolo-pci0" in opts or "id=ftctl-xcolo-scsi0" in opts:
             errors.append(f"ftctl_guest_visible_controller_forbidden:{opts}")
+        if opts.startswith("virtio-scsi-pci,") and "id=scsi" in opts:
+            controller_count += 1
     if part != "-drive":
         continue
     if idx + 1 >= len(parts):
@@ -4388,6 +4488,10 @@ for idx, part in enumerate(parts):
 if errors:
     print(",".join(errors))
     sys.exit(1)
+
+if protected_disk_count and controller_count == 0:
+    print("original_scsi_controller_missing")
+    sys.exit(1)
 PY
 )" || rc=$?
   if [[ "${rc}" != "0" ]]; then
@@ -4396,7 +4500,7 @@ PY
         "xcolo_startup_disk_backend=invalid" \
         "xcolo_protocol_failure_phase=startup_disk_graph" \
         "last_error=xcolo_startup_block_backend_node_conflict"
-    elif [[ "${out}" == *"ftctl_guest_visible_controller_forbidden:"* || "${out}" == *"guest_bus_not_original_scsi:"* || "${out}" == *"guest_qdev_not_original_scsi:"* ]]; then
+    elif [[ "${out}" == *"ftctl_guest_visible_controller_forbidden:"* || "${out}" == *"guest_bus_not_original_scsi:"* || "${out}" == *"guest_qdev_not_original_scsi:"* || "${out}" == *"original_scsi_controller_missing"* ]]; then
       ftctl_state_set "${vm}" \
         "xcolo_startup_disk_backend=invalid" \
         "xcolo_protocol_failure_phase=startup_disk_graph" \
@@ -4458,11 +4562,20 @@ def require(token):
 if "ftctl-xcolo-pci0" in text or "ftctl-xcolo-scsi0" in text:
     errors.append("ftctl_guest_visible_controller_forbidden")
 
+devices = root.find("devices")
+if devices is not None:
+    for controller in devices.findall("controller"):
+        if controller.get("type") == "scsi":
+            errors.append("libvirt_scsi_controller_not_removed")
+
 has_original_scsi_disk = False
+has_original_scsi_controller = False
 for idx, arg in enumerate(args):
     if arg != "-device" or idx + 1 >= len(args):
         continue
     opts = args[idx + 1]
+    if opts.startswith("virtio-scsi-pci,") and "id=scsi" in opts and "addr=" in opts:
+        has_original_scsi_controller = True
     if not opts.startswith("scsi-hd,") or "drive=ftctl-colo-" not in opts:
         continue
     if "bus=scsi" in opts and ".0" in opts and "id=scsi" in opts:
@@ -4470,6 +4583,8 @@ for idx, arg in enumerate(args):
 
 if not has_original_scsi_disk:
     errors.append("original_scsi_guest_disk_missing")
+if not has_original_scsi_controller:
+    errors.append("original_scsi_controller_missing")
 
 if role == "primary":
     for token in [
@@ -4478,6 +4593,7 @@ if role == "primary":
         "filter-mirror",
         "filter-redirector",
         "colo-compare",
+        "virtio-scsi-pci,id=scsi",
         "scsi-hd,bus=scsi",
         "drive=ftctl-colo-",
     ]:
@@ -4490,6 +4606,7 @@ elif role == "secondary":
         "filter-rewriter",
         "-incoming",
         "driver=replication",
+        "virtio-scsi-pci,id=scsi",
         "scsi-hd,bus=scsi",
         "drive=ftctl-colo-",
     ]:
@@ -4511,7 +4628,7 @@ print("ok")
 PY
 )" || rc=$?
   if [[ "${rc}" != "0" ]]; then
-    if [[ "${out}" == *"ftctl_guest_visible_controller_forbidden"* || "${out}" == *"original_scsi_guest_disk_missing"* ]]; then
+    if [[ "${out}" == *"ftctl_guest_visible_controller_forbidden"* || "${out}" == *"original_scsi_guest_disk_missing"* || "${out}" == *"original_scsi_controller_missing"* || "${out}" == *"libvirt_scsi_controller_not_removed"* ]]; then
       ftctl_state_set "${vm}" \
         "xcolo_protocol_failure_phase=startup_commandline_contract" \
         "last_error=xcolo_guest_topology_mismatch"

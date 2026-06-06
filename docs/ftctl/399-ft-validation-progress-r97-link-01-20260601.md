@@ -4749,6 +4749,58 @@ but a lower-level signature or reached stage changed, set
   - continue to reject any generated commandline containing
     `ftctl-xcolo-pci0` or `ftctl-xcolo-scsi0`.
 
+### Run 94 Monitoring Result 2026-06-06
+
+- Test input:
+  - target VM: `r97-link-01`
+  - primary VM id: `54`
+  - generated standby VM id: `150`
+  - generated standby instance: `i-2-150-VM`
+  - primary host: `10.10.32.3`
+  - secondary host: `10.10.32.1`
+- Final Cloud DB state:
+  - `ftctl_protection.id=94`
+  - `protection_state=error`
+  - `transport_state=failed`
+  - `last_error=xcolo_block_secondary_create_failed`
+  - primary VM `54` remained `Running`
+  - standby VM `150` was `Stopped`
+- Progress confirmed:
+  - Run 93's missing topology metadata issue did not recur.
+  - generated XML removed ordinary protected libvirt `<disk>` entries.
+  - generated `qemu:commandline` included COLO disk graph arguments for both
+    `sda` and `sdb`.
+  - generated disk devices used original qdev identities:
+    - `scsi0-0-0-0`
+    - `scsi0-0-0-1`
+  - no `ftctl-xcolo-pci0` or `ftctl-xcolo-scsi0` was generated.
+- First cause:
+  - secondary QEMU failed during create:
+
+```text
+Bus 'scsi0.0' not found
+```
+
+  - the generated XML kept the libvirt SCSI controller while protected disks
+    were added through raw `qemu:commandline`.
+  - QEMU did not expose the libvirt-created `scsi0.0` bus to the later raw
+    commandline `scsi-hd` devices in this mixed ownership model.
+- Repetition analysis:
+  - this is a new boundary after Run 93.
+  - the test advanced from topology metadata extraction to actual secondary
+    QEMU startup with the COLO disk graph present.
+  - it is related to the older `Bus 'scsi0.0' not found` symptom, but the
+    context is different: the old fix introduced an FTCTL-owned controller,
+    while the current fix must preserve original PCI identity.
+- Corrected direction:
+  - do not create `ftctl-xcolo-pci0` or `ftctl-xcolo-scsi0`.
+  - extract the original SCSI controller alias and PCI address.
+  - remove the libvirt SCSI controller from generated XML when protected disks
+    are the only users.
+  - recreate the same controller through `qemu:commandline`, for example
+    `virtio-scsi-pci,id=scsi0,bus=pcie.0,addr=0x9`.
+  - attach protected `scsi-hd` disks to `bus=scsi0.0`.
+
 ### Run 90 Monitoring - Existing Root-Port Reference Fails At QEMU Parse Time 2026-06-06
 
 - Test trigger:
