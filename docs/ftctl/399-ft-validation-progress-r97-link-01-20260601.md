@@ -5426,3 +5426,53 @@ xcolo_guest_abi_manifest_reason=
   - this fix targets the newly introduced manifest scope error.
   - if the same VNC listen mismatch appears again, it is a regression in
     normalization/manifest exclusion rather than a new COLO protocol issue.
+
+### Run 97 Fix Deployment And Cleanup 2026-06-06
+
+- Implemented qemu-side fix:
+  - commit: `7ff7bbbd2aab749d05aaee40876dc86a215f001a`
+  - normalized FT generated XML VNC listen endpoints to `0.0.0.0` for both
+    primary and secondary.
+  - excluded host-local presentation/management endpoint subtrees from the
+    guest ABI manifest: `graphics`, nested `listen`, `console`, and `channel`.
+  - added startup-gate rollback cleanup that destroys the secondary transient
+    runtime and unmaps secondary runtime RBD state without recreating the
+    cloud-managed standby before protection is stable.
+- Build:
+  - GitHub Actions run: `27058065358`
+  - result: success
+  - RPM:
+    `/home/ablecloud/work/ftctl-artifacts/run-27058065358/ftctl-branch-rpm-27058065358/ftctl-rpm-rocky9.6/ablestack_vm_ftctl-0.8.0-1.noarch.rpm`
+  - RPM SHA256:
+    `c3192d31948b9701dd3a56f125df797231173aed1310ed1b62ddd04d6234698d`
+- Deployment:
+  - deployed to `10.10.32.1`, `10.10.32.2`, and `10.10.32.3` using `aspkg`.
+  - verified installed script markers on all three hosts:
+    - `normalize_ft_host_local_endpoints`
+    - `rollback_startup_gate`
+    - `xcolo_guest_abi_manifest`
+  - `ablestack-vm-ftctl.timer` and `ablestack-vm-hangctl.timer` are active on
+    all three hosts.
+- Cleanup:
+  - destroyed stale secondary runtime `i-2-153-VM` on `10.10.32.1`.
+  - unmapped and removed stale standby RBD images:
+    - `rbd/57388f27-8b51-451a-9d29-3d7a80f0d7ba`
+    - `rbd/60ad27c8-e912-4419-a420-faac9ec67dab`
+  - marked protection row `97` as removed/stopped/stopped with
+    `last_error=test_cleanup_after_host_local_endpoint_manifest_fix`.
+  - removed active `ftctl.*` VM details for primary VM `54` and standby VM
+    `153`.
+  - marked standby VM `153` as `Expunging`.
+  - marked standby volumes for VM `153` as `Expunged`.
+  - removed stale FTCTL runtime/profile/debug files for `i-2-54-VM`,
+    `i-2-153-VM`, and `r97-link-01` from the 32.x hosts.
+- Final readiness verification:
+  - active protection rows for primary VM `54`: `0`
+  - active `ftctl.*` details for `r97-link-01`: `0`
+  - active standby VM rows: `0`
+  - active standby volumes: `0`
+  - primary VM `54` remains DB `Running` on host id `3`
+  - primary `virsh domstate i-2-54-VM`: `running`
+  - primary QMP `query-block-jobs`: empty list
+  - no `i-2-153-VM` / `r97-link-01-standby` runtime domain remains in libvirt
+  - installed marker verification passed on all three hosts.
