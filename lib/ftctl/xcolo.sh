@@ -1711,28 +1711,211 @@ done
   printf -v "${rc_var}" '%s' "${rc}"
 }
 
+ftctl_xcolo_qemu_argv_device_count() {
+  local argv="${1-}"
+  printf '%s\n' "${argv}" | awk '$0 == "-device" { count++ } END { print count + 0 }'
+}
+
 ftctl_xcolo_capture_qemu_proc_args_local() {
   local domain="${1-}"
   local out_var="${2}"
-  local rc_var="${3}"
-  local out="" err="" rc=0
+  local meta_var="${3}"
+  local rc_var="${4}"
+  local out="" err="" rc=0 payload args meta
 
-  # shellcheck disable=SC2016
   ftctl_cmd_run "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC:-15}" out err rc -- \
-    bash -c '
-domain="$1"
-for proc_cmd in /proc/[0-9]*/cmdline; do
-  [[ -r "${proc_cmd}" ]] || continue
-  flat="$(tr "\0" " " < "${proc_cmd}" 2>/dev/null || true)"
-  [[ "${flat}" == *"${domain}"* ]] || continue
-  [[ "${flat}" == *"/qemu-kvm"* || "${flat}" == *" qemu-kvm"* || "${flat}" == *"qemu-system"* ]] || continue
-  tr "\0" "\n" < "${proc_cmd}" 2>/dev/null
-  exit 0
-done
-exit 1
-' _ "${domain}" || true
-  : "${err}"
-  printf -v "${out_var}" '%s' "${out}"
+    python3 - "${domain}" <<'PY' || true
+import json
+import os
+import sys
+
+domain = sys.argv[1]
+records = []
+
+def read_cmdline(pid):
+    try:
+        raw = open(f"/proc/{pid}/cmdline", "rb").read()
+    except Exception:
+        return []
+    return [part.decode("utf-8", "replace") for part in raw.split(b"\0") if part]
+
+def is_qemu_exe(pid, args):
+    exe = ""
+    try:
+        exe = os.readlink(f"/proc/{pid}/exe")
+    except Exception:
+        exe = args[0] if args else ""
+    base = os.path.basename(exe)
+    return base == "qemu-kvm" or base.startswith("qemu-system")
+
+def score_args(args):
+    score = 0
+    guest = ""
+    for idx, arg in enumerate(args):
+        if arg == "-name" and idx + 1 < len(args):
+            guest = args[idx + 1]
+        elif arg.startswith("guest="):
+            guest = arg
+    if guest.startswith(f"guest={domain},") or guest == f"guest={domain}":
+        score += 100
+    if any(f"/domain-" in arg and domain in arg for arg in args):
+        score += 50
+    if any(arg == domain or domain in arg for arg in args):
+        score += 10
+    return score, guest
+
+for name in os.listdir("/proc"):
+    if not name.isdigit():
+        continue
+    args = read_cmdline(name)
+    if not args or not is_qemu_exe(name, args):
+        continue
+    score, guest = score_args(args)
+    if score <= 0:
+        continue
+    records.append({
+        "pid": int(name),
+        "score": score,
+        "guest": guest,
+        "exe": args[0],
+        "device_count": sum(1 for arg in args if arg == "-device"),
+        "domain_path_match": any(f"/domain-" in arg and domain in arg for arg in args),
+        "arg_count": len(args),
+        "args": args,
+    })
+
+records.sort(key=lambda item: (item["score"], item["device_count"], item["pid"]), reverse=True)
+selected = records[0] if records else None
+payload = {
+    "domain": domain,
+    "selected_pid": selected["pid"] if selected else None,
+    "selected_score": selected["score"] if selected else 0,
+    "selected_guest": selected["guest"] if selected else "",
+    "selected_device_count": selected["device_count"] if selected else 0,
+    "candidates": [
+        {k: v for k, v in item.items() if k != "args"}
+        for item in records
+    ],
+    "args": selected["args"] if selected else [],
+}
+print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+raise SystemExit(0 if selected else 1)
+PY
+  payload="${out}"
+  args="$(python3 - <<'PY' "${payload}"
+import json
+import sys
+try:
+    data = json.loads(sys.argv[1])
+except Exception:
+    data = {}
+print("\n".join(data.get("args") or []))
+PY
+)"
+  meta="$(python3 - <<'PY' "${payload}" "${err}"
+import json
+import sys
+try:
+    data = json.loads(sys.argv[1])
+except Exception:
+    data = {"parse_error": True, "raw": sys.argv[1]}
+if sys.argv[2]:
+    data["stderr"] = sys.argv[2]
+data.pop("args", None)
+print(json.dumps(data, indent=2, sort_keys=True))
+PY
+)"
+  printf -v "${out_var}" '%s' "${args}"
+  printf -v "${meta_var}" '%s' "${meta}"
+  printf -v "${rc_var}" '%s' "${rc}"
+}
+
+ftctl_xcolo_capture_qemu_log_args_local() {
+  local domain="${1-}"
+  local out_var="${2}"
+  local meta_var="${3}"
+  local rc_var="${4}"
+  local out="" err="" rc=0 payload args meta
+
+  ftctl_cmd_run "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC:-15}" out err rc -- \
+    python3 - "${domain}" "/var/log/libvirt/qemu/${domain}.log" <<'PY' || true
+import json
+import os
+import shlex
+import sys
+
+domain = sys.argv[1]
+path = sys.argv[2]
+try:
+    lines = open(path, "r", encoding="utf-8", errors="replace").read().splitlines()
+except Exception as exc:
+    print(json.dumps({"domain": domain, "path": path, "error": str(exc), "args": []}, sort_keys=True))
+    raise SystemExit(1)
+
+starts = [idx for idx, line in enumerate(lines) if line.startswith("/usr/libexec/qemu-kvm") or line.startswith("/usr/bin/qemu-system")]
+if not starts:
+    print(json.dumps({"domain": domain, "path": path, "error": "qemu_command_not_found", "args": []}, sort_keys=True))
+    raise SystemExit(1)
+
+start = starts[-1]
+block = []
+for line in lines[start:]:
+    stripped = line.rstrip()
+    if not stripped:
+        break
+    if block and not (stripped.startswith("-") or stripped.startswith("/") or stripped.startswith("{") or stripped.startswith("'") or stripped.startswith('"')):
+        break
+    cont = stripped.endswith("\\")
+    if cont:
+        stripped = stripped[:-1].rstrip()
+    block.append(stripped)
+    if not cont and len(block) > 1:
+        break
+
+args = []
+for line in block:
+    try:
+        args.extend(shlex.split(line))
+    except Exception:
+        args.append(line)
+
+payload = {
+    "domain": domain,
+    "path": path,
+    "start_line": start + 1,
+    "line_count": len(block),
+    "device_count": sum(1 for arg in args if arg == "-device"),
+    "args": args,
+}
+print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+raise SystemExit(0 if args else 1)
+PY
+  payload="${out}"
+  args="$(python3 - <<'PY' "${payload}"
+import json
+import sys
+try:
+    data = json.loads(sys.argv[1])
+except Exception:
+    data = {}
+print("\n".join(data.get("args") or []))
+PY
+)"
+  meta="$(python3 - <<'PY' "${payload}" "${err}"
+import json
+import sys
+try:
+    data = json.loads(sys.argv[1])
+except Exception:
+    data = {"parse_error": True, "raw": sys.argv[1]}
+if sys.argv[2]:
+    data["stderr"] = sys.argv[2]
+data.pop("args", None)
+print(json.dumps(data, indent=2, sort_keys=True))
+PY
+)"
+  printf -v "${out_var}" '%s' "${args}"
+  printf -v "${meta_var}" '%s' "${meta}"
   printf -v "${rc_var}" '%s' "${rc}"
 }
 
@@ -1740,41 +1923,254 @@ ftctl_xcolo_capture_qemu_proc_args_pair() {
   local vm="${1-}"
   local secondary_vm="${2-}"
   local phase="${3:-before_migrate}"
-  local host="" user="" out="" rc=0 err="" remote_cmd="" q_secondary=""
+  local host="" user="" out="" rc=0 err="" remote_cmd="" q_secondary="" meta="" source=""
+  local primary_count secondary_count fallback_out fallback_meta fallback_rc primary_source secondary_source
   local primary_var="${4}"
   local secondary_var="${5}"
 
-  ftctl_xcolo_capture_qemu_proc_args_local "${vm}" out rc || true
+  ftctl_xcolo_capture_qemu_proc_args_local "${vm}" out meta rc || true
+  ftctl_xcolo_write_debug_file "${vm}" "primary-qemu-pid-candidates-${phase}.txt" "${meta}" || true
+  source="proc"
+  primary_count="$(ftctl_xcolo_qemu_argv_device_count "${out}")"
+  if [[ "${primary_count}" == "0" ]]; then
+    fallback_out=""
+    fallback_meta=""
+    fallback_rc=0
+    ftctl_xcolo_capture_qemu_log_args_local "${vm}" fallback_out fallback_meta fallback_rc || true
+    ftctl_xcolo_write_debug_file "${vm}" "primary-qemu-log-argv-fallback-${phase}.txt" "${fallback_meta}" || true
+    if [[ "$(ftctl_xcolo_qemu_argv_device_count "${fallback_out}")" != "0" ]]; then
+      out="${fallback_out}"
+      rc="${fallback_rc}"
+      source="qemu_log_fallback"
+      primary_count="$(ftctl_xcolo_qemu_argv_device_count "${out}")"
+    fi
+  fi
   ftctl_xcolo_write_debug_file "${vm}" "primary-live-qemu-argv-${phase}.txt" "${out}" || true
+  ftctl_xcolo_write_debug_file "${vm}" "primary-live-qemu-argv-source-${phase}.txt" "${source}" || true
+  primary_source="${source}"
   printf -v "${primary_var}" '%s' "${out}"
 
   out=""
   rc=0
+  meta=""
+  source="proc"
   if ftctl_blockcopy_secondary_uri_is_local_system; then
-    ftctl_xcolo_capture_qemu_proc_args_local "${secondary_vm}" out rc || true
+    ftctl_xcolo_capture_qemu_proc_args_local "${secondary_vm}" out meta rc || true
   elif ftctl_blockcopy_remote_target_host_user host user; then
     printf -v q_secondary '%q' "${secondary_vm}"
     remote_cmd="domain=${q_secondary}
-for proc_cmd in /proc/[0-9]*/cmdline; do
-  [[ -r \"\${proc_cmd}\" ]] || continue
-  flat=\"\$(tr '\0' ' ' < \"\${proc_cmd}\" 2>/dev/null || true)\"
-  [[ \"\${flat}\" == *\"\${domain}\"* ]] || continue
-  [[ \"\${flat}\" == *\"/qemu-kvm\"* || \"\${flat}\" == *\" qemu-kvm\"* || \"\${flat}\" == *\"qemu-system\"* ]] || continue
-  tr '\0' '\n' < \"\${proc_cmd}\" 2>/dev/null
-  exit 0
-done
-exit 1"
+python3 - \"\${domain}\" <<'PY'
+import json
+import os
+import sys
+
+domain = sys.argv[1]
+records = []
+
+def read_cmdline(pid):
+    try:
+        raw = open(f\"/proc/{pid}/cmdline\", \"rb\").read()
+    except Exception:
+        return []
+    return [part.decode(\"utf-8\", \"replace\") for part in raw.split(b\"\\0\") if part]
+
+def is_qemu_exe(pid, args):
+    exe = \"\"
+    try:
+        exe = os.readlink(f\"/proc/{pid}/exe\")
+    except Exception:
+        exe = args[0] if args else \"\"
+    base = os.path.basename(exe)
+    return base == \"qemu-kvm\" or base.startswith(\"qemu-system\")
+
+def score_args(args):
+    score = 0
+    guest = \"\"
+    for idx, arg in enumerate(args):
+        if arg == \"-name\" and idx + 1 < len(args):
+            guest = args[idx + 1]
+        elif arg.startswith(\"guest=\"):
+            guest = arg
+    if guest.startswith(f\"guest={domain},\") or guest == f\"guest={domain}\":
+        score += 100
+    if any(f\"/domain-\" in arg and domain in arg for arg in args):
+        score += 50
+    if any(arg == domain or domain in arg for arg in args):
+        score += 10
+    return score, guest
+
+for name in os.listdir(\"/proc\"):
+    if not name.isdigit():
+        continue
+    args = read_cmdline(name)
+    if not args or not is_qemu_exe(name, args):
+        continue
+    score, guest = score_args(args)
+    if score <= 0:
+        continue
+    records.append({
+        \"pid\": int(name),
+        \"score\": score,
+        \"guest\": guest,
+        \"exe\": args[0],
+        \"device_count\": sum(1 for arg in args if arg == \"-device\"),
+        \"domain_path_match\": any(f\"/domain-\" in arg and domain in arg for arg in args),
+        \"arg_count\": len(args),
+        \"args\": args,
+    })
+
+records.sort(key=lambda item: (item[\"score\"], item[\"device_count\"], item[\"pid\"]), reverse=True)
+selected = records[0] if records else None
+payload = {
+    \"domain\": domain,
+    \"selected_pid\": selected[\"pid\"] if selected else None,
+    \"selected_score\": selected[\"score\"] if selected else 0,
+    \"selected_guest\": selected[\"guest\"] if selected else \"\",
+    \"selected_device_count\": selected[\"device_count\"] if selected else 0,
+    \"candidates\": [
+        {k: v for k, v in item.items() if k != \"args\"}
+        for item in records
+    ],
+    \"args\": selected[\"args\"] if selected else [],
+}
+print(json.dumps(payload, sort_keys=True, separators=(\",\", \":\")))
+raise SystemExit(0 if selected else 1)
+PY"
     ftctl_blockcopy_remote_exec "${host}" "${user}" out err rc "${remote_cmd}" || true
+    meta="$(python3 - <<'PY' "${out}" "${err}"
+import json
+import sys
+try:
+    data = json.loads(sys.argv[1])
+except Exception:
+    data = {"parse_error": True, "raw": sys.argv[1]}
+if sys.argv[2]:
+    data["stderr"] = sys.argv[2]
+data.pop("args", None)
+print(json.dumps(data, indent=2, sort_keys=True))
+PY
+)"
+    out="$(python3 - <<'PY' "${out}"
+import json
+import sys
+try:
+    data = json.loads(sys.argv[1])
+except Exception:
+    data = {}
+print("\n".join(data.get("args") or []))
+PY
+)"
   else
     rc=2
+    meta='{"error":"target_unresolved"}'
   fi
   : "${err}"
+  ftctl_xcolo_write_debug_file "${vm}" "secondary-qemu-pid-candidates-${phase}.txt" "${meta}" || true
+  secondary_count="$(ftctl_xcolo_qemu_argv_device_count "${out}")"
+  if [[ "${secondary_count}" == "0" ]]; then
+    fallback_out=""
+    fallback_meta=""
+    fallback_rc=0
+    if ftctl_blockcopy_secondary_uri_is_local_system; then
+      ftctl_xcolo_capture_qemu_log_args_local "${secondary_vm}" fallback_out fallback_meta fallback_rc || true
+    elif [[ -n "${host}" && -n "${user}" ]]; then
+      remote_cmd="domain=${q_secondary}
+python3 - \"\${domain}\" \"/var/log/libvirt/qemu/\${domain}.log\" <<'PY'
+import json
+import shlex
+import sys
+
+domain = sys.argv[1]
+path = sys.argv[2]
+try:
+    lines = open(path, \"r\", encoding=\"utf-8\", errors=\"replace\").read().splitlines()
+except Exception as exc:
+    print(json.dumps({\"domain\": domain, \"path\": path, \"error\": str(exc), \"args\": []}, sort_keys=True))
+    raise SystemExit(1)
+
+starts = [idx for idx, line in enumerate(lines) if line.startswith(\"/usr/libexec/qemu-kvm\") or line.startswith(\"/usr/bin/qemu-system\")]
+if not starts:
+    print(json.dumps({\"domain\": domain, \"path\": path, \"error\": \"qemu_command_not_found\", \"args\": []}, sort_keys=True))
+    raise SystemExit(1)
+
+start = starts[-1]
+block = []
+for line in lines[start:]:
+    stripped = line.rstrip()
+    if not stripped:
+        break
+    if block and not (stripped.startswith(\"-\") or stripped.startswith(\"/\") or stripped.startswith(\"{\") or stripped.startswith(\"'\") or stripped.startswith('\"')):
+        break
+    cont = stripped.endswith(\"\\\\\")
+    if cont:
+        stripped = stripped[:-1].rstrip()
+    block.append(stripped)
+    if not cont and len(block) > 1:
+        break
+
+args = []
+for line in block:
+    try:
+        args.extend(shlex.split(line))
+    except Exception:
+        args.append(line)
+
+payload = {
+    \"domain\": domain,
+    \"path\": path,
+    \"start_line\": start + 1,
+    \"line_count\": len(block),
+    \"device_count\": sum(1 for arg in args if arg == \"-device\"),
+    \"args\": args,
+}
+print(json.dumps(payload, sort_keys=True, separators=(\",\", \":\")))
+raise SystemExit(0 if args else 1)
+PY"
+      ftctl_blockcopy_remote_exec "${host}" "${user}" fallback_out err fallback_rc "${remote_cmd}" || true
+      fallback_meta="$(python3 - <<'PY' "${fallback_out}" "${err}"
+import json
+import sys
+try:
+    data = json.loads(sys.argv[1])
+except Exception:
+    data = {"parse_error": True, "raw": sys.argv[1]}
+if sys.argv[2]:
+    data["stderr"] = sys.argv[2]
+data.pop("args", None)
+print(json.dumps(data, indent=2, sort_keys=True))
+PY
+)"
+      fallback_out="$(python3 - <<'PY' "${fallback_out}"
+import json
+import sys
+try:
+    data = json.loads(sys.argv[1])
+except Exception:
+    data = {}
+print("\n".join(data.get("args") or []))
+PY
+)"
+    fi
+    ftctl_xcolo_write_debug_file "${vm}" "secondary-qemu-log-argv-fallback-${phase}.txt" "${fallback_meta}" || true
+    if [[ "$(ftctl_xcolo_qemu_argv_device_count "${fallback_out}")" != "0" ]]; then
+      out="${fallback_out}"
+      rc="${fallback_rc}"
+      source="qemu_log_fallback"
+      secondary_count="$(ftctl_xcolo_qemu_argv_device_count "${out}")"
+    fi
+  fi
   ftctl_xcolo_write_debug_file "${vm}" "secondary-live-qemu-argv-${phase}.txt" "${out}" || true
+  ftctl_xcolo_write_debug_file "${vm}" "secondary-live-qemu-argv-source-${phase}.txt" "${source}" || true
+  secondary_source="${source}"
   printf -v "${secondary_var}" '%s' "${out}"
 
   ftctl_state_set "${vm}" \
     "xcolo_live_runtime_${phase}_primary_proc_argv_captured=$([[ -n "${!primary_var}" ]] && printf yes || printf no)" \
+    "xcolo_live_runtime_${phase}_primary_argv_source=${primary_source}" \
+    "xcolo_live_runtime_${phase}_primary_device_count=${primary_count}" \
     "xcolo_live_runtime_${phase}_secondary_proc_argv_captured=$([[ -n "${out}" ]] && printf yes || printf no)" \
+    "xcolo_live_runtime_${phase}_secondary_argv_source=${secondary_source}" \
+    "xcolo_live_runtime_${phase}_secondary_device_count=${secondary_count}" \
     "xcolo_live_runtime_${phase}_secondary_proc_argv_rc=${rc}"
 }
 
@@ -1936,14 +2332,41 @@ def digest(obj):
     encoded = json.dumps(obj, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
+p_args = argv_list(primary_argv)
+s_args = argv_list(secondary_argv)
 p_devices = guest_devices(primary_argv)
 s_devices = guest_devices(secondary_argv)
 p_pci = normalize_pci(primary_pci)
 s_pci = normalize_pci(secondary_pci)
 
-if not p_devices or not s_devices:
-    print("error=xcolo_live_runtime_snapshot_failed")
-    print(f"reason=missing_proc_argv primary_devices={len(p_devices)} secondary_devices={len(s_devices)}")
+if not p_args and not s_args:
+    print("error=xcolo_live_runtime_argv_empty")
+    print("reason=both_qemu_argv_empty primary_args=0 secondary_args=0")
+    raise SystemExit(1)
+
+if not p_args:
+    print("error=xcolo_live_primary_argv_empty")
+    print(f"reason=primary_qemu_argv_empty secondary_args={len(s_args)} secondary_devices={len(s_devices)}")
+    raise SystemExit(1)
+
+if not s_args:
+    print("error=xcolo_live_secondary_argv_empty")
+    print(f"reason=secondary_qemu_argv_empty primary_args={len(p_args)} primary_devices={len(p_devices)}")
+    raise SystemExit(1)
+
+if not p_devices and not s_devices:
+    print("error=xcolo_live_runtime_argv_no_devices")
+    print(f"reason=both_qemu_argv_have_no_devices primary_args={len(p_args)} secondary_args={len(s_args)}")
+    raise SystemExit(1)
+
+if not p_devices:
+    print("error=xcolo_live_primary_argv_no_devices")
+    print(f"reason=primary_qemu_argv_has_no_devices primary_args={len(p_args)} secondary_devices={len(s_devices)}")
+    raise SystemExit(1)
+
+if not s_devices:
+    print("error=xcolo_live_secondary_argv_no_devices")
+    print(f"reason=secondary_qemu_argv_has_no_devices secondary_args={len(s_args)} primary_devices={len(p_devices)}")
     raise SystemExit(1)
 
 if p_devices != s_devices:

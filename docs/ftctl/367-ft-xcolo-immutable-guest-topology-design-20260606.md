@@ -310,6 +310,12 @@ Failure classifications:
 
 ```text
 last_error=xcolo_live_runtime_snapshot_failed
+last_error=xcolo_live_runtime_argv_empty
+last_error=xcolo_live_primary_argv_empty
+last_error=xcolo_live_secondary_argv_empty
+last_error=xcolo_live_runtime_argv_no_devices
+last_error=xcolo_live_primary_argv_no_devices
+last_error=xcolo_live_secondary_argv_no_devices
 last_error=xcolo_live_qemu_argv_mismatch
 last_error=xcolo_live_pci_topology_mismatch
 xcolo_protocol_failure_phase=pre_migrate_live_topology
@@ -318,8 +324,14 @@ xcolo_protocol_failure_phase=pre_migrate_live_topology
 Required debug artifacts:
 
 ```text
+primary-qemu-pid-candidates-before_migrate.txt
+secondary-qemu-pid-candidates-before_migrate.txt
 primary-live-qemu-argv-before_migrate.txt
 secondary-live-qemu-argv-before_migrate.txt
+primary-live-qemu-argv-source-before_migrate.txt
+secondary-live-qemu-argv-source-before_migrate.txt
+primary-qemu-log-argv-fallback-before_migrate.txt
+secondary-qemu-log-argv-fallback-before_migrate.txt
 primary-live-dumpxml-before_migrate.xml
 secondary-live-dumpxml-before_migrate.xml
 primary-info-pci-before_migrate.txt
@@ -335,6 +347,31 @@ If this gate fails, FTCTL must not execute `primary.migrate`.  It must restore
 the primary from backup and destroy the secondary transient runtime without
 recreating the cloud-managed standby runtime because FT protection has not
 reached a stable state.
+
+## Deterministic Live QEMU Argv Capture
+
+Run 99 proved that the live topology gate can fail before any real topology
+comparison if `/proc` scanning misses the generated-domain QEMU process.  This
+is an instrumentation failure, not proof of a primary/secondary topology
+mismatch.
+
+The capture rule is therefore:
+
+- enumerate QEMU processes by executable identity, not only by substring;
+- score candidates by exact `-name guest=<domain>` and libvirt
+  `/domain-<id>-<domain>/` paths;
+- persist candidate metadata and selected PID before comparison;
+- if `/proc/<pid>/cmdline` is empty or contains no `-device` entries, parse the
+  latest `/var/log/libvirt/qemu/<domain>.log` command line as a fallback;
+- record the source as `proc` or `qemu_log_fallback` in both debug artifacts and
+  FTCTL state;
+- classify empty argv separately from argv-without-device so the next run can
+  distinguish capture failure from actual topology mismatch.
+
+The fallback is evidence-only for the live topology gate.  It must not be used
+to start, stop, or mutate a running protected VM.  If the fallback also contains
+no guest-visible devices, FTCTL must fail before `primary.migrate` and preserve
+the candidate/fallback evidence for diagnosis.
 
 ## Failure Classification
 

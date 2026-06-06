@@ -5697,3 +5697,36 @@ reason=missing_proc_argv primary_devices=0 secondary_devices=20
   - this is a new instrumentation failure introduced by the live topology gate.
   - do not proceed to migrate-related topology conclusions until primary live
     argv collection is reliable.
+
+### Run 99 Fix Plan 2026-06-06
+
+- Correction target:
+  - the previous failure was not a COLO protocol error and not a proven
+    primary/secondary topology mismatch.
+  - the gate stopped earlier because the primary live QEMU argv collection
+    returned zero `-device` entries while the primary QEMU process still existed.
+- Design update:
+  - resolve live QEMU argv by QEMU executable identity and exact libvirt domain
+    evidence instead of broad substring scanning.
+  - score candidates by exact `-name guest=<domain>` and
+    `/domain-<id>-<domain>/` paths.
+  - write candidate metadata to:
+    - `primary-qemu-pid-candidates-before_migrate.txt`
+    - `secondary-qemu-pid-candidates-before_migrate.txt`
+  - when `/proc` argv has no guest-visible devices, parse the latest
+    `/var/log/libvirt/qemu/<domain>.log` command line as a fallback and record
+    the source as `qemu_log_fallback`.
+  - split the old generic `missing_proc_argv` result into concrete
+    classifications:
+    - `xcolo_live_runtime_argv_empty`
+    - `xcolo_live_primary_argv_empty`
+    - `xcolo_live_secondary_argv_empty`
+    - `xcolo_live_runtime_argv_no_devices`
+    - `xcolo_live_primary_argv_no_devices`
+    - `xcolo_live_secondary_argv_no_devices`
+- Repetition guard:
+  - if the next run still fails before migrate, the report must identify
+    whether argv capture, argv device extraction, PCI snapshot, or actual live
+    topology comparison failed.
+  - do not describe it as the old `memory_region_add_subregion_common`
+    repetition unless QEMU actually reaches that assertion again.
