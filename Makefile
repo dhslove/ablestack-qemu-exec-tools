@@ -204,6 +204,7 @@ ftctl-rpm:
 	@test -f "$(FTCTL_SPEC)" || (echo "[ERR] Missing spec: $(FTCTL_SPEC)" >&2; exit 2)
 	@test -f "completions/$(FTCTL_NAME)" || (echo "[ERR] Missing completion file: completions/$(FTCTL_NAME)" >&2; exit 2)
 
+	@rm -rf rpmbuild_ftctl
 	@mkdir -p rpmbuild_ftctl/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
 	@TMP_TGZ="$$(mktemp /tmp/$(FTCTL_NAME)-$(VERSION).tar.gz.XXXXXX)"; \
 	tar czf "$$TMP_TGZ" \

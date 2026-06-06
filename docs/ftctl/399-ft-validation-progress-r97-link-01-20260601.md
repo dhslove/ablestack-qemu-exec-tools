@@ -6108,3 +6108,26 @@ xcolo_secondary_block_replication_contract_incomplete
     `xcolo_secondary_qemu_assert_memory_region_container` repeats, report it
     as a deeper QEMU migration-load compatibility problem rather than changing
     the already-fixed crash classification path.
+
+### Build Artifact Correction 2026-06-07
+
+- During deployment preparation for the Run 104 fix, GitHub Actions run
+  `27067140063` succeeded at commit `84a014d`, but the downloaded RPM did not
+  contain `ftctl_xcolo_validate_pre_migrate_contract`.
+- Cause:
+  - `make ftctl-rpm` reused the `rpmbuild_ftctl` working tree.
+  - because the package version/release stayed constant, stale build contents
+    could be packaged even though the checked-out source had the new code.
+- Correction:
+  - clean `rpmbuild_ftctl` at the start of the `ftctl-rpm` target before
+    creating `BUILD`, `SOURCES`, `SPECS`, and output directories.
+- Verification rule:
+  - before deployment, extract the produced RPM and require the installed
+    `xcolo.sh` to contain:
+
+```text
+ftctl_xcolo_validate_pre_migrate_contract
+xcolo_pre_migrate_contract
+migration-abi-contract
+xcolo_primary_block_replication_contract_incomplete
+```
