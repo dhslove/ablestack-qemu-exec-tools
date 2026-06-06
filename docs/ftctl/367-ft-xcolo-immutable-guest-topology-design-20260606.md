@@ -281,6 +281,61 @@ Before `primary.migrate`, FTCTL should also collect a QMP topology fingerprint
 from both sides and fail before migration if guest-visible PCI/SCSI topology is
 not compatible.
 
+## Live Runtime Topology Gate
+
+The generated XML manifest is only a static preflight.  A second mandatory gate
+must run after the primary and secondary generated domains are started, after
+COLO red0/red1 channel attachment, after secondary block graph validation, and
+immediately before `primary.migrate`.
+
+This gate must collect evidence from the actual running QEMU processes:
+
+- `/proc/<qemu-pid>/cmdline` argument list for primary and secondary;
+- live `virsh dumpxml` for primary and secondary;
+- QMP `query-status`, `query-chardev`, `query-block`, and
+  `query-named-block-nodes`;
+- HMP `info pci`, `info qtree`, and `info mtree`.
+
+The gate must strictly compare guest-visible live topology before migration:
+
+- every live QEMU `-device` argument after normalization;
+- HMP `info pci` bus/slot/function topology.
+
+The gate must collect but not initially fail on complete `info qtree` and
+`info mtree` text because those trees include role-specific COLO block and
+chardev internals.  They are retained as evidence for the next correction if
+the assertion still occurs after live `-device` and PCI parity are proven.
+
+Failure classifications:
+
+```text
+last_error=xcolo_live_runtime_snapshot_failed
+last_error=xcolo_live_qemu_argv_mismatch
+last_error=xcolo_live_pci_topology_mismatch
+xcolo_protocol_failure_phase=pre_migrate_live_topology
+```
+
+Required debug artifacts:
+
+```text
+primary-live-qemu-argv-before_migrate.txt
+secondary-live-qemu-argv-before_migrate.txt
+primary-live-dumpxml-before_migrate.xml
+secondary-live-dumpxml-before_migrate.xml
+primary-info-pci-before_migrate.txt
+secondary-info-pci-before_migrate.txt
+primary-info-qtree-before_migrate.txt
+secondary-info-qtree-before_migrate.txt
+primary-info-mtree-before_migrate.txt
+secondary-info-mtree-before_migrate.txt
+live-topology-diff-before_migrate.txt
+```
+
+If this gate fails, FTCTL must not execute `primary.migrate`.  It must restore
+the primary from backup and destroy the secondary transient runtime without
+recreating the cloud-managed standby runtime because FT protection has not
+reached a stable state.
+
 ## Failure Classification
 
 If QEMU logs:

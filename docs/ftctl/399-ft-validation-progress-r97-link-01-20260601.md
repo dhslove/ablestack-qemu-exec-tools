@@ -5550,3 +5550,32 @@ secondary:
   - The next diagnosis must compare primary/secondary generated QEMU command
     lines and live QEMU topology at the point immediately before migration, not
     only the static manifest hash.
+
+### Run 98 Fix Plan 2026-06-06
+
+- Confirmed next focus:
+  - static generated XML manifest is not enough.
+  - Run 98 passed `xcolo_guest_abi_manifest=ok` and still reached the repeated
+    QEMU `memory_region_add_subregion_common` assertion.
+  - the next gate must inspect the actual running QEMU process state
+    immediately before `primary.migrate`.
+- Code direction:
+  - add `ftctl_xcolo_verify_live_runtime_topology_pair` before the handshake
+    path.
+  - collect live primary/secondary QEMU argv from `/proc/<pid>/cmdline`.
+  - collect live dumpxml, QMP block/chardev/status snapshots, and HMP
+    `info pci`, `info qtree`, and `info mtree`.
+  - compare normalized guest-visible live QEMU `-device` arguments.
+  - compare HMP `info pci` output.
+  - collect qtree/mtree as evidence, but do not fail on full qtree parity in
+    the first gate because qtree includes role-specific COLO internals.
+  - on mismatch, fail before `primary.migrate` with
+    `xcolo_protocol_failure_phase=pre_migrate_live_topology`.
+- New expected failure classifications:
+  - `xcolo_live_runtime_snapshot_failed`
+  - `xcolo_live_qemu_argv_mismatch`
+  - `xcolo_live_pci_topology_mismatch`
+- Repetition guard:
+  - if the repeated QEMU assertion appears again after this gate passes, the
+    next investigation must treat guest-visible `-device` and PCI topology as
+    proven equal and move to qtree/mtree or QEMU internal migration state.

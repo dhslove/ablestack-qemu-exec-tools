@@ -1711,6 +1711,307 @@ done
   printf -v "${rc_var}" '%s' "${rc}"
 }
 
+ftctl_xcolo_capture_qemu_proc_args_local() {
+  local domain="${1-}"
+  local out_var="${2}"
+  local rc_var="${3}"
+  local out="" err="" rc=0
+
+  # shellcheck disable=SC2016
+  ftctl_cmd_run "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC:-15}" out err rc -- \
+    bash -c '
+domain="$1"
+for proc_cmd in /proc/[0-9]*/cmdline; do
+  [[ -r "${proc_cmd}" ]] || continue
+  flat="$(tr "\0" " " < "${proc_cmd}" 2>/dev/null || true)"
+  [[ "${flat}" == *"${domain}"* ]] || continue
+  [[ "${flat}" == *"/qemu-kvm"* || "${flat}" == *" qemu-kvm"* || "${flat}" == *"qemu-system"* ]] || continue
+  tr "\0" "\n" < "${proc_cmd}" 2>/dev/null
+  exit 0
+done
+exit 1
+' _ "${domain}" || true
+  : "${err}"
+  printf -v "${out_var}" '%s' "${out}"
+  printf -v "${rc_var}" '%s' "${rc}"
+}
+
+ftctl_xcolo_capture_qemu_proc_args_pair() {
+  local vm="${1-}"
+  local secondary_vm="${2-}"
+  local phase="${3:-before_migrate}"
+  local host="" user="" out="" rc=0 err="" remote_cmd="" q_secondary=""
+  local primary_var="${4}"
+  local secondary_var="${5}"
+
+  ftctl_xcolo_capture_qemu_proc_args_local "${vm}" out rc || true
+  ftctl_xcolo_write_debug_file "${vm}" "primary-live-qemu-argv-${phase}.txt" "${out}" || true
+  printf -v "${primary_var}" '%s' "${out}"
+
+  out=""
+  rc=0
+  if ftctl_blockcopy_secondary_uri_is_local_system; then
+    ftctl_xcolo_capture_qemu_proc_args_local "${secondary_vm}" out rc || true
+  elif ftctl_blockcopy_remote_target_host_user host user; then
+    printf -v q_secondary '%q' "${secondary_vm}"
+    remote_cmd="domain=${q_secondary}
+for proc_cmd in /proc/[0-9]*/cmdline; do
+  [[ -r \"\${proc_cmd}\" ]] || continue
+  flat=\"\$(tr '\0' ' ' < \"\${proc_cmd}\" 2>/dev/null || true)\"
+  [[ \"\${flat}\" == *\"\${domain}\"* ]] || continue
+  [[ \"\${flat}\" == *\"/qemu-kvm\"* || \"\${flat}\" == *\" qemu-kvm\"* || \"\${flat}\" == *\"qemu-system\"* ]] || continue
+  tr '\0' '\n' < \"\${proc_cmd}\" 2>/dev/null
+  exit 0
+done
+exit 1"
+    ftctl_blockcopy_remote_exec "${host}" "${user}" out err rc "${remote_cmd}" || true
+  else
+    rc=2
+  fi
+  : "${err}"
+  ftctl_xcolo_write_debug_file "${vm}" "secondary-live-qemu-argv-${phase}.txt" "${out}" || true
+  printf -v "${secondary_var}" '%s' "${out}"
+
+  ftctl_state_set "${vm}" \
+    "xcolo_live_runtime_${phase}_primary_proc_argv_captured=$([[ -n "${!primary_var}" ]] && printf yes || printf no)" \
+    "xcolo_live_runtime_${phase}_secondary_proc_argv_captured=$([[ -n "${out}" ]] && printf yes || printf no)" \
+    "xcolo_live_runtime_${phase}_secondary_proc_argv_rc=${rc}"
+}
+
+ftctl_xcolo_hmp() {
+  local uri="${1-}"
+  local vm="${2-}"
+  local command_line="${3-}"
+  local out_var="${4}"
+  local rc_var="${5}"
+  local payload
+
+  payload="$(python3 - <<'PY' "${command_line}"
+import json
+import sys
+print(json.dumps({
+    "execute": "human-monitor-command",
+    "arguments": {"command-line": sys.argv[1]},
+}, separators=(",", ":")))
+PY
+)"
+  ftctl_xcolo_qmp "${uri}" "${vm}" "${payload}" "${out_var}" "${rc_var}"
+}
+
+ftctl_xcolo_extract_hmp_return() {
+  local raw="${1-}"
+  python3 - <<'PY' "${raw}"
+import json
+import sys
+raw = sys.argv[1]
+try:
+    data = json.loads(raw) if raw.strip() else {}
+except Exception:
+    print(raw)
+    raise SystemExit(0)
+ret = data.get("return") if isinstance(data, dict) else ""
+if isinstance(ret, str):
+    print(ret.rstrip())
+else:
+    print(json.dumps(ret, sort_keys=True, ensure_ascii=False))
+PY
+}
+
+ftctl_xcolo_capture_live_runtime_topology_one() {
+  local vm="${1-}"
+  local uri="${2-}"
+  local domain="${3-}"
+  local prefix="${4-}"
+  local phase="${5:-before_migrate}"
+  local out="" rc=0 text=""
+  local err=""
+
+  ftctl_virsh "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC:-15}" out err rc -- -c "${uri}" dumpxml "${domain}" || true
+  : "${err}"
+  ftctl_xcolo_write_debug_file "${vm}" "${prefix}-live-dumpxml-${phase}.xml" "${out}" || true
+
+  ftctl_xcolo_qmp "${uri}" "${domain}" '{"execute":"query-status"}' out rc
+  ftctl_xcolo_write_debug_file "${vm}" "${prefix}-live-query-status-${phase}.json" "${out}" || true
+  ftctl_xcolo_qmp "${uri}" "${domain}" '{"execute":"query-chardev"}' out rc
+  ftctl_xcolo_write_debug_file "${vm}" "${prefix}-live-query-chardev-${phase}.json" "${out}" || true
+  ftctl_xcolo_qmp "${uri}" "${domain}" '{"execute":"query-block"}' out rc
+  ftctl_xcolo_write_debug_file "${vm}" "${prefix}-live-query-block-${phase}.json" "${out}" || true
+  ftctl_xcolo_qmp "${uri}" "${domain}" '{"execute":"query-named-block-nodes"}' out rc
+  ftctl_xcolo_write_debug_file "${vm}" "${prefix}-live-query-named-block-nodes-${phase}.json" "${out}" || true
+
+  ftctl_xcolo_hmp "${uri}" "${domain}" "info pci" out rc
+  text="$(ftctl_xcolo_extract_hmp_return "${out}")"
+  ftctl_xcolo_write_debug_file "${vm}" "${prefix}-info-pci-${phase}.txt" "${text}" || true
+  ftctl_xcolo_hmp "${uri}" "${domain}" "info qtree" out rc
+  text="$(ftctl_xcolo_extract_hmp_return "${out}")"
+  ftctl_xcolo_write_debug_file "${vm}" "${prefix}-info-qtree-${phase}.txt" "${text}" || true
+  ftctl_xcolo_hmp "${uri}" "${domain}" "info mtree" out rc
+  text="$(ftctl_xcolo_extract_hmp_return "${out}")"
+  ftctl_xcolo_write_debug_file "${vm}" "${prefix}-info-mtree-${phase}.txt" "${text}" || true
+}
+
+ftctl_xcolo_verify_live_runtime_topology_pair() {
+  local vm="${1-}"
+  local secondary_vm="${2-}"
+  local phase="${3:-before_migrate}"
+  local primary_argv="" secondary_argv=""
+  local primary_pci="" secondary_pci="" out="" rc=0 payload="" reason="" error_name=""
+  local primary_pci_file secondary_pci_file
+
+  [[ -n "${vm}" && -n "${secondary_vm}" ]] || return 1
+  if [[ "${FTCTL_DRY_RUN}" == "1" ]]; then
+    ftctl_log_event "colo" "xcolo.live_runtime_topology" "skip" "${vm}" "" "reason=dry_run phase=${phase}"
+    return 0
+  fi
+
+  ftctl_xcolo_capture_live_runtime_topology_one "${vm}" "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" "primary" "${phase}" || true
+  ftctl_xcolo_capture_live_runtime_topology_one "${vm}" "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" "secondary" "${phase}" || true
+  ftctl_xcolo_capture_qemu_proc_args_pair "${vm}" "${secondary_vm}" "${phase}" primary_argv secondary_argv || true
+
+  primary_pci_file="$(ftctl_xcolo_debug_dir "${vm}")/primary-info-pci-${phase}.txt"
+  secondary_pci_file="$(ftctl_xcolo_debug_dir "${vm}")/secondary-info-pci-${phase}.txt"
+  primary_pci="$(cat "${primary_pci_file}" 2>/dev/null || true)"
+  secondary_pci="$(cat "${secondary_pci_file}" 2>/dev/null || true)"
+
+  payload="$(PRIMARY_ARGV="${primary_argv}" SECONDARY_ARGV="${secondary_argv}" PRIMARY_PCI="${primary_pci}" SECONDARY_PCI="${secondary_pci}" python3 - <<'PY'
+import hashlib
+import json
+import os
+import re
+
+primary_argv = os.environ.get("PRIMARY_ARGV", "")
+secondary_argv = os.environ.get("SECONDARY_ARGV", "")
+primary_pci = os.environ.get("PRIMARY_PCI", "")
+secondary_pci = os.environ.get("SECONDARY_PCI", "")
+
+def argv_list(raw):
+    return [line for line in raw.splitlines() if line]
+
+def normalize_device_arg(value):
+    value = value.strip()
+    if not value:
+        return ""
+    if value.startswith("{"):
+        try:
+            data = json.loads(value)
+            return json.dumps(data, sort_keys=True, separators=(",", ":"))
+        except Exception:
+            return value
+    parts = value.split(",")
+    driver = parts[0]
+    opts = []
+    for item in parts[1:]:
+        if not item:
+            continue
+        if "=" not in item:
+            opts.append([item, ""])
+            continue
+        key, val = item.split("=", 1)
+        opts.append([key, val])
+    return json.dumps([driver, sorted(opts)], sort_keys=True, separators=(",", ":"))
+
+def guest_devices(raw):
+    args = argv_list(raw)
+    devices = []
+    for idx, arg in enumerate(args):
+        if arg != "-device" or idx + 1 >= len(args):
+            continue
+        value = args[idx + 1]
+        # COLO uses -object for filters.  Every -device here is guest-visible
+        # enough to matter for migration topology, including libvirt JSON args.
+        devices.append(normalize_device_arg(value))
+    return devices
+
+def normalize_pci(raw):
+    lines = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        line = re.sub(r"\s+", " ", line)
+        lines.append(line)
+    return lines
+
+def digest(obj):
+    encoded = json.dumps(obj, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+p_devices = guest_devices(primary_argv)
+s_devices = guest_devices(secondary_argv)
+p_pci = normalize_pci(primary_pci)
+s_pci = normalize_pci(secondary_pci)
+
+if not p_devices or not s_devices:
+    print("error=xcolo_live_runtime_snapshot_failed")
+    print(f"reason=missing_proc_argv primary_devices={len(p_devices)} secondary_devices={len(s_devices)}")
+    raise SystemExit(1)
+
+if p_devices != s_devices:
+    print("error=xcolo_live_qemu_argv_mismatch")
+    print(f"reason=device_args_diff primary_hash={digest(p_devices)} secondary_hash={digest(s_devices)}")
+    max_len = max(len(p_devices), len(s_devices))
+    for idx in range(max_len):
+        left = p_devices[idx] if idx < len(p_devices) else "<missing>"
+        right = s_devices[idx] if idx < len(s_devices) else "<missing>"
+        if left != right:
+            print(f"first_diff_index={idx}")
+            print(f"primary={left}")
+            print(f"secondary={right}")
+            break
+    raise SystemExit(1)
+
+if not p_pci or not s_pci:
+    print("error=xcolo_live_runtime_snapshot_failed")
+    print(f"reason=missing_info_pci primary_lines={len(p_pci)} secondary_lines={len(s_pci)}")
+    raise SystemExit(1)
+
+if p_pci != s_pci:
+    print("error=xcolo_live_pci_topology_mismatch")
+    print(f"reason=info_pci_diff primary_hash={digest(p_pci)} secondary_hash={digest(s_pci)}")
+    max_len = max(len(p_pci), len(s_pci))
+    for idx in range(max_len):
+        left = p_pci[idx] if idx < len(p_pci) else "<missing>"
+        right = s_pci[idx] if idx < len(s_pci) else "<missing>"
+        if left != right:
+            print(f"first_diff_index={idx}")
+            print(f"primary={left}")
+            print(f"secondary={right}")
+            break
+    raise SystemExit(1)
+
+print("error=")
+print(f"reason=ok device_hash={digest(p_devices)} pci_hash={digest(p_pci)} devices={len(p_devices)} pci_lines={len(p_pci)}")
+PY
+)" || rc=$?
+
+  ftctl_xcolo_write_debug_file "${vm}" "live-topology-diff-${phase}.txt" "${payload}" || true
+  if [[ "${rc}" != "0" ]]; then
+    error_name="$(printf '%s\n' "${payload}" | sed -n 's/^error=//p' | head -n1)"
+    reason="$(printf '%s\n' "${payload}" | sed -n 's/^reason=//p' | head -n1)"
+    [[ -n "${error_name}" ]] || error_name="xcolo_live_runtime_snapshot_failed"
+    [[ -n "${reason}" ]] || reason="unknown"
+    ftctl_state_set "${vm}" \
+      "xcolo_live_runtime_topology=failed" \
+      "xcolo_live_runtime_topology_phase=${phase}" \
+      "xcolo_live_runtime_topology_reason=$(ftctl_xcolo_compact_log_value "${reason}")" \
+      "xcolo_protocol_failure_phase=pre_migrate_live_topology" \
+      "last_error=${error_name}"
+    ftctl_log_event "colo" "xcolo.live_runtime_topology" "fail" "${vm}" "" \
+      "phase=${phase} error=${error_name} reason=$(ftctl_xcolo_compact_log_value "${reason}")"
+    return 1
+  fi
+
+  reason="$(printf '%s\n' "${payload}" | sed -n 's/^reason=//p' | head -n1)"
+  ftctl_state_set "${vm}" \
+    "xcolo_live_runtime_topology=ok" \
+    "xcolo_live_runtime_topology_phase=${phase}" \
+    "xcolo_live_runtime_topology_reason=$(ftctl_xcolo_compact_log_value "${reason}")" \
+    "xcolo_live_qtree_evidence=collected" \
+    "xcolo_live_mtree_evidence=collected"
+  ftctl_log_event "colo" "xcolo.live_runtime_topology" "ok" "${vm}" "" \
+    "phase=${phase} $(ftctl_xcolo_compact_log_value "${reason}")"
+}
+
 ftctl_xcolo_capture_primary_qemu_cmdline() {
   local vm="${1-}"
   local out="" err="" rc=0
@@ -8393,6 +8694,22 @@ ftctl_xcolo_execute_block_cold_conversion() {
       "last_error=${rbd_error}"
     return 1
   }
+
+  ftctl_xcolo_verify_live_runtime_topology_pair "${vm}" "${secondary_vm}" "before_migrate" || {
+    local topology_error
+    topology_error="$(ftctl_state_get "${vm}" "last_error" 2>/dev/null || true)"
+    [[ -n "${topology_error}" ]] || topology_error="xcolo_live_runtime_topology_mismatch"
+    ftctl_state_set "${vm}" \
+      "conversion_stage=pre_migrate_live_topology_failed" \
+      "conversion_state=error" \
+      "protection_state=error" \
+      "transport_state=failed" \
+      "xcolo_last_runtime_error=${topology_error}" \
+      "last_error=${topology_error}"
+    ftctl_xcolo_rollback_startup_gate_failure "${vm}" "${topology_error}" || true
+    return 1
+  }
+  ftctl_state_set "${vm}" "conversion_stage=pre_migrate_live_topology_ready"
 
   ftctl_xcolo_execute_handshake_with_disk_plan "${vm}" "${secondary_vm}" "${disk_plan}" || {
     local handshake_error
