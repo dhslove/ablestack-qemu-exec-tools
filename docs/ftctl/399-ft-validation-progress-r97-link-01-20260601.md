@@ -5633,3 +5633,67 @@ secondary:
   - primary QMP `query-block-jobs`: empty list
   - no `i-2-154-VM` / `r97-link-01-standby` runtime domain remains in libvirt
   - installed marker verification passed on all three hosts.
+
+### Run 99 Monitoring Result 2026-06-06
+
+- Test action:
+  - user started FT protection for primary VM `54` / `i-2-54-VM`.
+  - Cloud created standby VM `155` / `i-2-155-VM` and standby volumes:
+    - root: `b5d6aa18-bf17-4311-913f-cfdb2835c9ed`
+    - data: `652dbe33-910c-4775-9937-088ab63bb260`
+- Final Cloud DB result:
+  - `ftctl_protection.id=99`
+  - `protection_state=error`
+  - `transport_state=failed`
+  - `provisioning_state=Ready`
+  - `active_side=secondary`
+  - `last_error=xcolo_live_runtime_snapshot_failed`
+  - standby VM `155` is DB `Stopped` with no host id.
+- Confirmed improvement:
+  - `xcolo_guest_abi_manifest=ok`.
+  - the new live runtime topology gate ran before `primary.migrate`.
+  - the flow stopped at `xcolo_protocol_failure_phase=pre_migrate_live_topology`.
+  - the repeated QEMU `memory_region_add_subregion_common` assertion was not
+    reached in this run.
+  - live evidence files were collected:
+    - `primary-live-dumpxml-before_migrate.xml`
+    - `secondary-live-dumpxml-before_migrate.xml`
+    - `primary-info-pci-before_migrate.txt`
+    - `secondary-info-pci-before_migrate.txt`
+    - `primary-info-qtree-before_migrate.txt`
+    - `secondary-info-qtree-before_migrate.txt`
+    - `primary-info-mtree-before_migrate.txt`
+    - `secondary-info-mtree-before_migrate.txt`
+    - `live-topology-diff-before_migrate.txt`
+- Failure evidence:
+
+```text
+error=xcolo_live_runtime_snapshot_failed
+reason=missing_proc_argv primary_devices=0 secondary_devices=20
+```
+
+- Additional evidence:
+  - `primary-live-qemu-argv-before_migrate.txt` was empty.
+  - `secondary-live-qemu-argv-before_migrate.txt` contained 131 lines and 20
+    guest-visible `-device` entries.
+  - manual post-failure inspection on `10.10.32.3` found the primary generated
+    QEMU process in `/proc/3508672/cmdline` with:
+    - `guest=i-2-54-VM`
+    - COLO `mirror0`, `compare1`, `redire0`, `redire1`, and `comp0` args
+    - protected `scsi-hd` device args for both disks.
+- Interpretation:
+  - the live topology gate itself is in the right phase and prevented migration
+    from reaching the previous QEMU assertion.
+  - the new failure is not yet a topology mismatch.
+  - the primary `/proc/<pid>/cmdline` capture path missed the actual generated
+    QEMU process even though the process existed.
+  - next fix must make live argv collection deterministic:
+    - resolve the qemu PID from `virsh dominfo` / libvirt domain id / monitor
+      process metadata instead of scanning all `/proc` entries by substring;
+    - or fall back to parsing the latest `/var/log/libvirt/qemu/<domain>.log`
+      commandline when `/proc` capture returns no `-device` entries.
+- Repetition guard:
+  - this run did not repeat the QEMU assertion.
+  - this is a new instrumentation failure introduced by the live topology gate.
+  - do not proceed to migrate-related topology conclusions until primary live
+    argv collection is reliable.
