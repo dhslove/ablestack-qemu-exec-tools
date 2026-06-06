@@ -2484,6 +2484,238 @@ PY
     "phase=${phase} $(ftctl_xcolo_compact_log_value "${reason}")"
 }
 
+ftctl_xcolo_validate_pre_migrate_contract() {
+  local vm="${1-}"
+  local secondary_vm="${2-}"
+  local disk_plan="${3-}"
+  local phase="${4:-pre_migrate_contract}"
+  local primary_argv="" secondary_argv="" payload="" rc=0
+  local contract_state="" contract_reason="" contract_error=""
+  local primary_block="" primary_block_reason="" secondary_block="" secondary_block_reason=""
+
+  [[ -n "${vm}" && -n "${secondary_vm}" ]] || return 1
+  if [[ "${FTCTL_DRY_RUN}" == "1" ]]; then
+    ftctl_log_event "colo" "xcolo.pre_migrate_contract" "skip" "${vm}" "" "reason=dry_run"
+    return 0
+  fi
+
+  ftctl_xcolo_capture_qemu_proc_args_pair "${vm}" "${secondary_vm}" "${phase}" primary_argv secondary_argv || true
+  ftctl_xcolo_collect_primary_block_graph_state "${vm}" "${disk_plan}" || true
+  ftctl_xcolo_collect_secondary_block_graph_state "${vm}" "${secondary_vm}" "${disk_plan}" || true
+
+  primary_block="$(ftctl_state_get "${vm}" "xcolo_primary_block_graph_ready" 2>/dev/null || true)"
+  primary_block_reason="$(ftctl_state_get "${vm}" "xcolo_primary_block_graph_reason" 2>/dev/null || true)"
+  secondary_block="$(ftctl_state_get "${vm}" "xcolo_secondary_block_graph_ready" 2>/dev/null || true)"
+  secondary_block_reason="$(ftctl_state_get "${vm}" "xcolo_secondary_block_graph_reason" 2>/dev/null || true)"
+
+  payload="$(PRIMARY_ARGV="${primary_argv}" SECONDARY_ARGV="${secondary_argv}" PRIMARY_BLOCK="${primary_block}" SECONDARY_BLOCK="${secondary_block}" PRIMARY_BLOCK_REASON="${primary_block_reason}" SECONDARY_BLOCK_REASON="${secondary_block_reason}" python3 - <<'PY'
+import hashlib
+import json
+import os
+import re
+
+primary_argv = os.environ.get("PRIMARY_ARGV", "")
+secondary_argv = os.environ.get("SECONDARY_ARGV", "")
+primary_block = os.environ.get("PRIMARY_BLOCK", "")
+secondary_block = os.environ.get("SECONDARY_BLOCK", "")
+primary_block_reason = os.environ.get("PRIMARY_BLOCK_REASON", "")
+secondary_block_reason = os.environ.get("SECONDARY_BLOCK_REASON", "")
+
+def argv_list(raw):
+    return [line for line in raw.splitlines() if line]
+
+def digest(obj):
+    encoded = json.dumps(obj, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+def normalize_value(value):
+    value = value.strip()
+    if value.startswith("{"):
+        try:
+            return json.loads(value)
+        except Exception:
+            return value
+    parts = value.split(",")
+    if len(parts) == 1:
+        return value
+    opts = {}
+    flags = []
+    for item in parts[1:]:
+        if not item:
+            continue
+        if "=" in item:
+            key, val = item.split("=", 1)
+            opts[key] = val
+        else:
+            flags.append(item)
+    return {"driver": parts[0], "opts": opts, "flags": sorted(flags)}
+
+def option_values(args, opt):
+    values = []
+    idx = 0
+    while idx < len(args):
+        if args[idx] == opt and idx + 1 < len(args):
+            values.append(args[idx + 1])
+            idx += 2
+        else:
+            idx += 1
+    return values
+
+def option_present(args, opt):
+    return opt in args
+
+def qemu_devices(args):
+    return [normalize_value(v) for v in option_values(args, "-device")]
+
+def object_ids(args):
+    ids = {}
+    for value in option_values(args, "-object"):
+        data = normalize_value(value)
+        if isinstance(data, dict) and "qom-type" in data:
+            qtype = data.get("qom-type")
+            oid = data.get("id", "")
+        elif isinstance(data, dict):
+            qtype = data.get("driver", "")
+            oid = data.get("opts", {}).get("id", "")
+        else:
+            qtype = str(data).split(",", 1)[0]
+            match = re.search(r"(?:^|,)id=([^,]+)", str(data))
+            oid = match.group(1) if match else ""
+        if oid:
+            ids[oid] = qtype
+    return ids
+
+def chardev_ids(args):
+    ids = {}
+    for value in option_values(args, "-chardev"):
+        data = normalize_value(value)
+        if isinstance(data, dict):
+            cid = data.get("id", "") or data.get("opts", {}).get("id", "")
+            driver = data.get("backend", "") or data.get("driver", "")
+        else:
+            cid = ""
+            driver = str(data).split(",", 1)[0]
+            match = re.search(r"(?:^|,)id=([^,]+)", str(data))
+            if match:
+                cid = match.group(1)
+        if cid:
+            ids[cid] = driver
+    return ids
+
+p_args = argv_list(primary_argv)
+s_args = argv_list(secondary_argv)
+p_devices = qemu_devices(p_args)
+s_devices = qemu_devices(s_args)
+p_objects = object_ids(p_args)
+s_objects = object_ids(s_args)
+p_chardevs = chardev_ids(p_args)
+s_chardevs = chardev_ids(s_args)
+
+reasons = []
+error = ""
+
+if not p_args or not s_args:
+    error = "xcolo_guest_abi_contract_mismatch"
+    reasons.append(f"argv_missing primary={len(p_args)} secondary={len(s_args)}")
+elif p_devices != s_devices:
+    error = "xcolo_guest_abi_contract_mismatch"
+    reasons.append(f"guest_devices_diff primary_hash={digest(p_devices)} secondary_hash={digest(s_devices)}")
+    for idx in range(max(len(p_devices), len(s_devices))):
+        left = p_devices[idx] if idx < len(p_devices) else "<missing>"
+        right = s_devices[idx] if idx < len(s_devices) else "<missing>"
+        if left != right:
+            reasons.append(f"first_device_diff_index={idx}")
+            reasons.append("primary_device=" + json.dumps(left, sort_keys=True, separators=(",", ":")))
+            reasons.append("secondary_device=" + json.dumps(right, sort_keys=True, separators=(",", ":")))
+            break
+
+primary_required_chardevs = {"mirror0", "compare0", "compare0-0", "compare1", "compare_out", "compare_out0"}
+primary_required_objects = {"m0": "filter-mirror", "redire0": "filter-redirector", "redire1": "filter-redirector", "comp0": "colo-compare"}
+secondary_required_chardevs = {"red0", "red1"}
+secondary_required_objects = {"f1": "filter-redirector", "f2": "filter-redirector", "rew0": "filter-rewriter"}
+primary_forbidden_objects = {"f1", "f2", "rew0"}
+secondary_forbidden_objects = {"m0", "redire0", "redire1", "comp0"}
+
+role_reasons = []
+for item in sorted(primary_required_chardevs - set(p_chardevs)):
+    role_reasons.append(f"primary_chardev_{item}:missing")
+for oid, qtype in primary_required_objects.items():
+    if p_objects.get(oid) != qtype:
+        role_reasons.append(f"primary_object_{oid}:{p_objects.get(oid, 'missing')}")
+for item in sorted(primary_forbidden_objects & set(p_objects)):
+    role_reasons.append(f"primary_forbidden_object_{item}:present")
+for item in sorted(secondary_required_chardevs - set(s_chardevs)):
+    role_reasons.append(f"secondary_chardev_{item}:missing")
+for oid, qtype in secondary_required_objects.items():
+    if s_objects.get(oid) != qtype:
+        role_reasons.append(f"secondary_object_{oid}:{s_objects.get(oid, 'missing')}")
+for item in sorted(secondary_forbidden_objects & set(s_objects)):
+    role_reasons.append(f"secondary_forbidden_object_{item}:present")
+if not option_present(s_args, "-incoming"):
+    role_reasons.append("secondary_incoming:missing")
+
+if not error and role_reasons:
+    error = "xcolo_colo_role_contract_mismatch"
+    reasons.extend(role_reasons)
+
+if not error and primary_block != "yes":
+    error = "xcolo_primary_block_replication_contract_incomplete"
+    reasons.append(primary_block_reason or "primary_block_graph_not_ready")
+if not error and secondary_block not in ("yes", "not_applicable"):
+    error = "xcolo_secondary_block_replication_contract_incomplete"
+    reasons.append(secondary_block_reason or "secondary_block_graph_not_ready")
+
+print(f"state={'ok' if not error else 'failed'}")
+print(f"error={error}")
+print("reason=" + ",".join(reasons))
+print(f"primary_argv_lines={len(p_args)}")
+print(f"secondary_argv_lines={len(s_args)}")
+print(f"guest_device_count={len(p_devices)}")
+print(f"primary_guest_device_hash={digest(p_devices)}")
+print(f"secondary_guest_device_hash={digest(s_devices)}")
+print(f"primary_role_chardevs={','.join(sorted(p_chardevs))}")
+print(f"secondary_role_chardevs={','.join(sorted(s_chardevs))}")
+print(f"primary_role_objects={','.join(f'{k}:{v}' for k,v in sorted(p_objects.items()))}")
+print(f"secondary_role_objects={','.join(f'{k}:{v}' for k,v in sorted(s_objects.items()))}")
+print(f"primary_block_graph={primary_block}")
+print(f"primary_block_graph_reason={primary_block_reason}")
+print(f"secondary_block_graph={secondary_block}")
+print(f"secondary_block_graph_reason={secondary_block_reason}")
+PY
+)" || rc=$?
+
+  ftctl_xcolo_write_debug_file "${vm}" "migration-abi-contract-${phase}.txt" "${payload}" || true
+  contract_state="$(printf '%s\n' "${payload}" | sed -n 's/^state=//p' | head -n1)"
+  contract_error="$(printf '%s\n' "${payload}" | sed -n 's/^error=//p' | head -n1)"
+  contract_reason="$(printf '%s\n' "${payload}" | sed -n 's/^reason=//p' | head -n1)"
+  [[ -n "${contract_state}" ]] || contract_state="failed"
+
+  if [[ "${contract_state}" == "ok" && "${rc}" == "0" ]]; then
+    ftctl_state_set "${vm}" \
+      "xcolo_pre_migrate_contract=ok" \
+      "xcolo_pre_migrate_contract_phase=${phase}" \
+      "xcolo_pre_migrate_contract_reason=$(ftctl_xcolo_compact_log_value "${contract_reason}")" \
+      "xcolo_primary_block_graph_ready=${primary_block}" \
+      "xcolo_secondary_block_graph_ready=${secondary_block}"
+    ftctl_log_event "colo" "xcolo.pre_migrate_contract" "ok" "${vm}" "" \
+      "phase=${phase} primary_block=${primary_block} secondary_block=${secondary_block}"
+    return 0
+  fi
+
+  [[ -n "${contract_error}" ]] || contract_error="xcolo_pre_migrate_contract_failed"
+  [[ -n "${contract_reason}" ]] || contract_reason="unknown"
+  ftctl_state_set "${vm}" \
+    "xcolo_pre_migrate_contract=failed" \
+    "xcolo_pre_migrate_contract_phase=${phase}" \
+    "xcolo_pre_migrate_contract_error=${contract_error}" \
+    "xcolo_pre_migrate_contract_reason=$(ftctl_xcolo_compact_log_value "${contract_reason}")" \
+    "xcolo_protocol_failure_phase=pre_migrate_contract" \
+    "last_error=${contract_error}"
+  ftctl_log_event "colo" "xcolo.pre_migrate_contract" "fail" "${vm}" "" \
+    "phase=${phase} error=${contract_error} reason=$(ftctl_xcolo_compact_log_value "${contract_reason}") primary_block=${primary_block} secondary_block=${secondary_block}"
+  return 1
+}
+
 ftctl_xcolo_capture_primary_qemu_cmdline() {
   local vm="${1-}"
   local out="" err="" rc=0
@@ -7817,6 +8049,7 @@ ftctl_xcolo_execute_handshake_with_disk_plan() {
     ftctl_xcolo_attach_primary_nbd_child "${vm}" "${target}" "${nbd_node}" || return 1
   done
 
+  ftctl_xcolo_validate_pre_migrate_contract "${vm}" "${secondary_vm}" "${disk_plan}" "pre_migrate_contract" || return 1
   ftctl_xcolo_attach_primary_net_filters "${vm}" || return 1
   ftctl_xcolo_set_and_verify_migrate_capabilities "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" "${vm}" "primary" "primary" || return 1
   ftctl_xcolo_require_checkpoint_delay_before_migrate "${vm}" || return 1

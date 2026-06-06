@@ -6017,3 +6017,94 @@ xcolo_secondary_runtime_missing_after_migrate
 
   - evidence is stored under `debug/xcolo/<vm>/`, including
     `migration-abi-failure-summary-post_migrate_secondary_crash.txt`.
+
+### Run 104 Monitoring Result 2026-06-07
+
+- Test action:
+  - user started FT protection after the Run 103 classification fix and
+    cleanup.
+  - Cloud created protection row `104` and standby VM `160` /
+    `i-2-160-VM`.
+- Confirmed improvement:
+  - Run 103 `pairing/planned` stuck state did not recur.
+  - `primary.migrate` reached the post-migrate path again.
+  - FTCTL classified the secondary QEMU assertion as:
+
+```text
+xcolo_secondary_qemu_assert_memory_region_container
+```
+
+  - runtime recovery ran and restored the primary VM to `Running`.
+  - protection state became `error` / `failed` with `active_side=primary`.
+- Final state:
+
+```text
+ftctl_protection.id=104
+protection_state=error
+transport_state=failed
+active_side=primary
+last_error=xcolo_secondary_qemu_assert_memory_region_container
+primary=i-2-54-VM on 10.10.32.3 running
+secondary=i-2-160-VM on 10.10.32.1 DB Running
+```
+
+- Evidence summary:
+
+```text
+phase=post_migrate_secondary_crash
+primary_argv_devices=20
+secondary_argv_devices=20
+primary_argv=sha256:c81dfae45e64d6166a2c315467ff251fc63044af535c1903dd6f36d06c126d42
+secondary_argv=sha256:03280b27b061984a1f53933747a5f7d24b6301fb433b8ef5f7bc462339b5dd47
+secondary_log_assertion=qemu-kvm: ../system/memory.c:2666:
+memory_region_add_subregion_common: Assertion `!subregion->container' failed.
+```
+
+- Interpretation:
+  - this is a repeated post-migrate secondary QEMU assertion.
+  - the new classification/recovery code worked, so the next work must not
+    revisit the stuck-state fix.
+  - the next diagnosis must compare the persisted primary/secondary runtime
+    ABI evidence, especially the one-byte-different QEMU argv and the
+    unavailable post-crash secondary qtree/mtree snapshots.
+- Repetition guard:
+  - if the next run again ends with
+    `xcolo_secondary_qemu_assert_memory_region_container`, report it as the
+    same repeated post-migrate migration ABI issue.
+  - do not rework baseline seed, pre-migrate PCI warning behavior, or the
+    crash classification path unless new evidence points there.
+  - next design should target deterministic primary/secondary QEMU commandline
+    equivalence and migration ABI compatibility before `primary.migrate`.
+
+### Run 104 Fix Plan 2026-06-07
+
+- Design document:
+  - `368-ft-xcolo-pre-migrate-contract-gate-design-20260607.md`
+- Correction target:
+  - stop treating primary/secondary QEMU argv as one identical blob because
+    COLO primary and secondary roles intentionally differ.
+  - split the pre-migrate contract into:
+    - identical guest-visible `-device` ABI;
+    - role-specific COLO chardev/object topology;
+    - ready primary/secondary block replication graph.
+  - run this contract gate after secondary NBD export and primary NBD child
+    attachment, but before `primary.migrate`.
+- Expected evidence:
+  - `migration-abi-contract-pre_migrate_contract.txt`
+  - `xcolo_pre_migrate_contract=ok|failed`
+  - specific failure names:
+
+```text
+xcolo_guest_abi_contract_mismatch
+xcolo_colo_role_contract_mismatch
+xcolo_primary_block_replication_contract_incomplete
+xcolo_secondary_block_replication_contract_incomplete
+```
+
+- Repetition guard:
+  - if the contract fails, do not proceed to `primary.migrate`; report the
+    exact contract failure.
+  - if the contract passes and
+    `xcolo_secondary_qemu_assert_memory_region_container` repeats, report it
+    as a deeper QEMU migration-load compatibility problem rather than changing
+    the already-fixed crash classification path.
