@@ -5146,3 +5146,53 @@ Can't receive COLO message: Input/output error
   - for `r97-link-01`, root disk bootindex should come from the normal log
     (`bootindex=3`) instead of the transient rewrite boot order (`9`), and both
     protected disks should carry `write-cache=on`.
+
+### Libvirt QEMU Log Property Parity Build, Deploy, Cleanup 2026-06-06
+
+- Source commit built and deployed:
+  - `18e1bc4ed3452742d8627ce5e1bdc06aeeaf4cc8`
+  - `fix: mirror libvirt scsi disk properties for xcolo`
+- Build:
+  - GitHub Actions workflow: `branch-ftctl-release.yml`
+  - run id: `27056832259`
+  - conclusion: `success`
+  - artifact: `ablestack_vm_ftctl-0.8.0-1.noarch.rpm`
+  - SHA256:
+    `ab18566d3eaa43dccb64598796f2c5beae473bf5e555d24300fe05764ad2ff6b`
+- Deployment:
+  - deployed to `10.10.32.1`, `10.10.32.2`, and `10.10.32.3`
+  - installation used the 32.x administrator wrapper:
+    `aspkg --replacepkgs -U`
+  - verified installed script markers on all three hosts:
+    - `REFERENCE_QEMU_LOG`
+    - `parse_qemu_log_device_references`
+    - `guest_write_cache_missing`
+    - `write-cache=on`
+  - verified timers active on all three hosts:
+    - `ablestack-vm-ftctl.timer`
+    - `ablestack-vm-hangctl.timer`
+- Cleanup after Run 95:
+  - primary VM `54` / `i-2-54-VM` was already restored to normal
+    Cloud/libvirt `running` state on `10.10.32.3`.
+  - destroyed stale secondary runtime domain `i-2-151-VM` on `10.10.32.1`.
+  - removed standby RBD images:
+    - `rbd/a616038e-8d49-43df-ad2d-cca03be50ab6`
+    - `rbd/e333b82d-6f73-4ed1-a598-203cd086d7a0`
+  - marked protection row `95` as `removed/stopped/stopped` with
+    `last_error=test_cleanup_after_libvirt_qemu_log_property_fix`.
+  - removed active `ftctl.*` VM details for primary VM `54` and standby VM
+    `151`.
+  - marked standby VM `151` as `Expunging`.
+  - marked standby volumes `287` and `288` as `Expunged`.
+  - removed stale FTCTL runtime/profile/debug files for `i-2-54-VM`,
+    `i-2-151-VM`, and `r97-link-01` from the 32.x hosts.
+- Final readiness verification:
+  - active protection rows for primary VM `54`: `0`
+  - active `ftctl.*` details for `r97-link-01`: `0`
+  - active standby VM rows: `0`
+  - active standby volumes: `0`
+  - primary VM `54` remains DB `Running` on host id `3`
+  - primary `virsh domstate i-2-54-VM`: `running`
+  - primary QMP `query-migrate`: empty return
+  - primary QMP `query-block-jobs`: empty list
+  - no standby domain remains in libvirt
