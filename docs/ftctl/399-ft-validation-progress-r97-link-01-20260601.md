@@ -5840,3 +5840,35 @@ secondary=BAR0: 32 bit prefetchable memory (not mapped)
     before the pre-migrate topology comparison, or on comparing a migration-safe
     topology identity that excludes runtime BAR allocation while still checking
     bus/slot/function/device identity.
+
+### Run 101 Fix Plan 2026-06-06
+
+- Correction target:
+  - Run 101 proved that static guest ABI manifest generation and live argv
+    capture are now working.
+  - The remaining pre-migrate stop was caused by comparing complete HMP
+    `info pci` text, including runtime BAR/IRQ/resource allocation state.
+  - The first difference was `BAR0 ...` versus `BAR0 ... (not mapped)`, which
+    is not by itself a migration ABI identity mismatch.
+- Design update:
+  - keep strict live QEMU `-device` argument comparison;
+  - replace full `info pci` text comparison with PCI identity comparison:
+    - bus/device/function address;
+    - class/vendor/device id line;
+    - PCI subsystem line;
+    - QEMU device `id` line;
+  - ignore and preserve as evidence only:
+    - BAR lines;
+    - IRQ lines;
+    - bridge bus/resource windows;
+    - `not mapped` runtime resource text.
+  - classify a real identity difference as
+    `xcolo_live_pci_identity_mismatch`.
+  - record resource-only differences as
+    `xcolo_live_pci_resource_diff_ignored`.
+- Repetition guard:
+  - if the next run passes this gate and fails later, do not rework argv capture
+    or static manifest generation again.
+  - if `xcolo_live_pci_identity_mismatch` appears, compare the stored identity
+    records first; if only BAR/IRQ/resource differences appear, that is a bug
+    in the gate and must be fixed before retrying.

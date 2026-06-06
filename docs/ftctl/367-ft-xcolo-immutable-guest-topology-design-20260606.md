@@ -296,10 +296,21 @@ This gate must collect evidence from the actual running QEMU processes:
   `query-named-block-nodes`;
 - HMP `info pci`, `info qtree`, and `info mtree`.
 
-The gate must strictly compare guest-visible live topology before migration:
+The gate must strictly compare migration-visible live topology before migration:
 
 - every live QEMU `-device` argument after normalization;
-- HMP `info pci` bus/slot/function topology.
+- HMP `info pci` device identity:
+  - bus/device/function address;
+  - device class and vendor/device id;
+  - PCI subsystem;
+  - QEMU device `id`.
+
+The gate must not fail on HMP `info pci` runtime resource allocation fields
+such as BAR address ranges, bridge resource windows, IRQ values, or `not
+mapped` BAR text.  Run 101 proved that the secondary can be in a pre-realized
+resource allocation state while still having the same migration-visible device
+identity.  Those resource differences are retained as evidence under
+`xcolo_live_pci_resource_diff_ignored`, but they do not block `primary.migrate`.
 
 The gate must collect but not initially fail on complete `info qtree` and
 `info mtree` text because those trees include role-specific COLO block and
@@ -317,7 +328,7 @@ last_error=xcolo_live_runtime_argv_no_devices
 last_error=xcolo_live_primary_argv_no_devices
 last_error=xcolo_live_secondary_argv_no_devices
 last_error=xcolo_live_qemu_argv_mismatch
-last_error=xcolo_live_pci_topology_mismatch
+last_error=xcolo_live_pci_identity_mismatch
 xcolo_protocol_failure_phase=pre_migrate_live_topology
 ```
 
@@ -372,6 +383,35 @@ The fallback is evidence-only for the live topology gate.  It must not be used
 to start, stop, or mutate a running protected VM.  If the fallback also contains
 no guest-visible devices, FTCTL must fail before `primary.migrate` and preserve
 the candidate/fallback evidence for diagnosis.
+
+## Run 101 Live PCI Gate Correction
+
+Run 101 reached the live topology gate with:
+
+- `xcolo_guest_abi_manifest=ok`;
+- primary live argv captured from `qemu_log_fallback`;
+- secondary live argv captured from `/proc`;
+- both sides reporting 20 guest-visible `-device` entries.
+
+The gate then failed with:
+
+```text
+xcolo_live_pci_topology_mismatch
+first_diff_index=7
+primary=BAR0: 32 bit prefetchable memory at 0x80000000 [0x81ffffff]
+secondary=BAR0: 32 bit prefetchable memory (not mapped)
+```
+
+This is not a proven migration ABI mismatch.  It is a resource allocation
+snapshot difference between a fully realized primary and a secondary that has
+not yet received incoming migration state.  The corrected rule is:
+
+- fail before migration only when live QEMU `-device` identity differs;
+- fail before migration only when `info pci` device identity differs;
+- record BAR/IRQ/window differences as
+  `xcolo_live_pci_resource_diff_ignored`;
+- continue to preserve full raw `info pci`, `info qtree`, and `info mtree`
+  evidence so the next failure can be traced at the QEMU/device-state layer.
 
 ## Failure Classification
 

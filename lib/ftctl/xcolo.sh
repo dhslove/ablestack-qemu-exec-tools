@@ -2251,7 +2251,7 @@ ftctl_xcolo_verify_live_runtime_topology_pair() {
   local secondary_vm="${2-}"
   local phase="${3:-before_migrate}"
   local primary_argv="" secondary_argv=""
-  local primary_pci="" secondary_pci="" out="" rc=0 payload="" reason="" error_name=""
+  local primary_pci="" secondary_pci="" out="" rc=0 payload="" reason="" error_name="" pci_resource_warning=""
   local primary_pci_file secondary_pci_file
 
   [[ -n "${vm}" && -n "${secondary_vm}" ]] || return 1
@@ -2328,6 +2328,47 @@ def normalize_pci(raw):
         lines.append(line)
     return lines
 
+PCI_HEADER_RE = re.compile(r"^Bus\s+([0-9a-fA-F]+),\s*device\s+([0-9a-fA-F]+),\s*function\s+([0-9a-fA-F]+):$")
+
+def pci_identity(raw):
+    records = []
+    current = None
+    for line in raw.splitlines():
+        text = re.sub(r"\s+", " ", line.strip())
+        if not text:
+            continue
+        match = PCI_HEADER_RE.match(text)
+        if match:
+            if current is not None:
+                records.append(current)
+            current = {
+                "addr": f"bus={int(match.group(1), 10)} device={int(match.group(2), 10)} function={int(match.group(3), 10)}",
+                "class": "",
+                "subsystem": "",
+                "id": "",
+            }
+            continue
+        if current is None:
+            continue
+        if text.startswith("BAR") or text.startswith("IRQ"):
+            continue
+        if text.startswith("BUS ") or text.startswith("secondary bus ") or text.startswith("subordinate bus "):
+            continue
+        if text.startswith("IO range ") or text.startswith("memory range ") or text.startswith("prefetchable memory range "):
+            continue
+        if ": PCI device " in text and not current["class"]:
+            current["class"] = text
+            continue
+        if text.startswith("PCI subsystem "):
+            current["subsystem"] = text
+            continue
+        if text.startswith("id "):
+            current["id"] = text
+            continue
+    if current is not None:
+        records.append(current)
+    return records
+
 def digest(obj):
     encoded = json.dumps(obj, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -2338,6 +2379,8 @@ p_devices = guest_devices(primary_argv)
 s_devices = guest_devices(secondary_argv)
 p_pci = normalize_pci(primary_pci)
 s_pci = normalize_pci(secondary_pci)
+p_pci_identity = pci_identity(primary_pci)
+s_pci_identity = pci_identity(secondary_pci)
 
 if not p_args and not s_args:
     print("error=xcolo_live_runtime_argv_empty")
@@ -2388,22 +2431,30 @@ if not p_pci or not s_pci:
     print(f"reason=missing_info_pci primary_lines={len(p_pci)} secondary_lines={len(s_pci)}")
     raise SystemExit(1)
 
-if p_pci != s_pci:
-    print("error=xcolo_live_pci_topology_mismatch")
-    print(f"reason=info_pci_diff primary_hash={digest(p_pci)} secondary_hash={digest(s_pci)}")
-    max_len = max(len(p_pci), len(s_pci))
+if not p_pci_identity or not s_pci_identity:
+    print("error=xcolo_live_runtime_snapshot_failed")
+    print(f"reason=missing_info_pci_identity primary_identity={len(p_pci_identity)} secondary_identity={len(s_pci_identity)} primary_lines={len(p_pci)} secondary_lines={len(s_pci)}")
+    raise SystemExit(1)
+
+if p_pci_identity != s_pci_identity:
+    print("error=xcolo_live_pci_identity_mismatch")
+    print(f"reason=info_pci_identity_diff primary_hash={digest(p_pci_identity)} secondary_hash={digest(s_pci_identity)}")
+    max_len = max(len(p_pci_identity), len(s_pci_identity))
     for idx in range(max_len):
-        left = p_pci[idx] if idx < len(p_pci) else "<missing>"
-        right = s_pci[idx] if idx < len(s_pci) else "<missing>"
+        left = p_pci_identity[idx] if idx < len(p_pci_identity) else "<missing>"
+        right = s_pci_identity[idx] if idx < len(s_pci_identity) else "<missing>"
         if left != right:
             print(f"first_diff_index={idx}")
-            print(f"primary={left}")
-            print(f"secondary={right}")
+            print("primary=" + json.dumps(left, sort_keys=True, separators=(",", ":")))
+            print("secondary=" + json.dumps(right, sort_keys=True, separators=(",", ":")))
             break
     raise SystemExit(1)
 
 print("error=")
-print(f"reason=ok device_hash={digest(p_devices)} pci_hash={digest(p_pci)} devices={len(p_devices)} pci_lines={len(p_pci)}")
+if p_pci != s_pci:
+    print("warning=xcolo_live_pci_resource_diff_ignored")
+    print(f"resource_reason=info_pci_resource_diff primary_hash={digest(p_pci)} secondary_hash={digest(s_pci)}")
+print(f"reason=ok device_hash={digest(p_devices)} pci_identity_hash={digest(p_pci_identity)} devices={len(p_devices)} pci_devices={len(p_pci_identity)} pci_lines_primary={len(p_pci)} pci_lines_secondary={len(s_pci)}")
 PY
 )" || rc=$?
 
@@ -2425,10 +2476,12 @@ PY
   fi
 
   reason="$(printf '%s\n' "${payload}" | sed -n 's/^reason=//p' | head -n1)"
+  pci_resource_warning="$(printf '%s\n' "${payload}" | sed -n 's/^warning=//p' | head -n1)"
   ftctl_state_set "${vm}" \
     "xcolo_live_runtime_topology=ok" \
     "xcolo_live_runtime_topology_phase=${phase}" \
     "xcolo_live_runtime_topology_reason=$(ftctl_xcolo_compact_log_value "${reason}")" \
+    "xcolo_live_pci_resource_diff=${pci_resource_warning:-none}" \
     "xcolo_live_qtree_evidence=collected" \
     "xcolo_live_mtree_evidence=collected"
   ftctl_log_event "colo" "xcolo.live_runtime_topology" "ok" "${vm}" "" \
