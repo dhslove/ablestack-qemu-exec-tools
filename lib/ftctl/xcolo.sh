@@ -4701,7 +4701,10 @@ def canon_elem(elem, path=""):
         return None
     if name in {"name", "id", "resource", "seclabel"}:
         return None
-    if path == "/domain/devices" and name in {"graphics", "console", "channel"}:
+    # Host-local presentation and management endpoints are not guest-visible
+    # migration ABI.  They may legitimately differ by host even when the COLO
+    # guest topology is identical.
+    if name in {"graphics", "listen", "console", "channel"}:
         return None
     attrs = {
         k: v for k, v in sorted(elem.attrib.items())
@@ -5139,6 +5142,10 @@ ftctl_xcolo_prepare_block_generated_xmls() {
     ftctl_xcolo_prepare_block_generated_xmls_fail "xcolo_primary_network_xml_failed" "path=${primary_generated_xml}" || return 1
   ftctl_xml_apply_xcolo_network_runtime "${standby_generated_xml}" ||
     ftctl_xcolo_prepare_block_generated_xmls_fail "xcolo_standby_network_xml_failed" "path=${standby_generated_xml}" || return 1
+  ftctl_xml_normalize_ft_host_local_endpoints "${primary_generated_xml}" ||
+    ftctl_xcolo_prepare_block_generated_xmls_fail "xcolo_primary_host_local_endpoint_xml_failed" "path=${primary_generated_xml}" || return 1
+  ftctl_xml_normalize_ft_host_local_endpoints "${standby_generated_xml}" ||
+    ftctl_xcolo_prepare_block_generated_xmls_fail "xcolo_standby_host_local_endpoint_xml_failed" "path=${standby_generated_xml}" || return 1
   ftctl_xml_apply_standby_host_runtime "${standby_generated_xml}" ||
     ftctl_xcolo_prepare_block_generated_xmls_fail "xcolo_standby_host_xml_failed" "path=${standby_generated_xml}" || return 1
   ftctl_xml_ensure_iothread_id "${primary_generated_xml}" "1" ||
@@ -7616,6 +7623,59 @@ ftctl_xcolo_rollback_block_primary_create_failure() {
   ftctl_log_event "colo" "block_conversion.rollback" "ok" "${vm}" "" "cause=${reason}"
 }
 
+ftctl_xcolo_rollback_startup_gate_failure() {
+  local vm="${1-}"
+  local reason="${2-xcolo_startup_gate_failed}"
+  local secondary_vm_name out err rc
+
+  if [[ "${FTCTL_DRY_RUN}" == "1" ]]; then
+    ftctl_log_event "colo" "block_conversion.rollback_startup_gate" "skip" "${vm}" "" \
+      "reason=dry_run cause=${reason}"
+    return 0
+  fi
+
+  secondary_vm_name="$(ftctl_state_get "${vm}" "secondary_vm_name" 2>/dev/null || ftctl_profile_secondary_vm_name_resolved "${vm}")"
+  if [[ -n "${secondary_vm_name}" ]]; then
+    out=""
+    err=""
+    rc=0
+    ftctl_virsh "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC}" out err rc -- -c "${FTCTL_PROFILE_SECONDARY_URI}" destroy "${secondary_vm_name}" || true
+    : "${out}${err}"
+    case "${err}" in
+      *"failed to get domain"*|*"domain is not running"*|*"Domain not found"*) rc=0 ;;
+    esac
+    if [[ "${rc}" == "0" ]]; then
+      ftctl_log_event "colo" "block_conversion.rollback_startup_gate.secondary_destroy" "ok" "${vm}" "" \
+        "domain=${secondary_vm_name} cause=${reason}"
+    else
+      ftctl_log_event "colo" "block_conversion.rollback_startup_gate.secondary_destroy" "warn" "${vm}" "${rc}" \
+        "domain=${secondary_vm_name} cause=${reason}"
+    fi
+  fi
+
+  ftctl_xcolo_unmap_secondary_runtime_rbd "${vm}" || {
+    ftctl_log_event "colo" "block_conversion.rollback_startup_gate.secondary_rbd_unmap" "warn" "${vm}" "" \
+      "cause=${reason}"
+  }
+  ftctl_primary_activate_from_backup "${vm}" || {
+    ftctl_log_event "colo" "block_conversion.rollback_startup_gate.primary_restore" "warn" "${vm}" "" \
+      "cause=${reason}"
+    return 1
+  }
+  ftctl_state_set "${vm}" \
+    "conversion_stage=rollback_after_startup_gate_failed" \
+    "conversion_state=error" \
+    "protection_state=error" \
+    "transport_state=failed" \
+    "active_side=primary" \
+    "standby_state=stopped" \
+    "peer_domain_expected=false" \
+    "cloud_runtime_restore=skipped_before_protection_ready" \
+    "xcolo_last_runtime_error=${reason}" \
+    "last_error=${reason}"
+  ftctl_log_event "colo" "block_conversion.rollback_startup_gate" "ok" "${vm}" "" "cause=${reason}"
+}
+
 ftctl_xcolo_prepare_secondary_runtime_rbd_disk() {
   local vm="${1-}"
   local xml_path="${2-}"
@@ -8197,7 +8257,7 @@ ftctl_xcolo_execute_block_cold_conversion() {
       "protection_state=error" \
       "transport_state=failed" \
       "last_error=${startup_error}"
-    ftctl_xcolo_rollback_block_primary_create_failure "${vm}" "${startup_error}" || true
+    ftctl_xcolo_rollback_startup_gate_failure "${vm}" "${startup_error}" || true
     return 1
   }
   ftctl_state_set "${vm}" "conversion_stage=startup_disk_graph_ready"

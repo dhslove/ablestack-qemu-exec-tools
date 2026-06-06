@@ -604,6 +604,38 @@ tree.write(xml_path, encoding="unicode")
 PY
 }
 
+ftctl_xml_normalize_ft_host_local_endpoints() {
+  local xml_path="${1-}"
+
+  command -v python3 >/dev/null 2>&1 || {
+    echo "ERROR: python3 is required for FT host-local XML normalization" >&2
+    return 2
+  }
+
+  XML_PATH="${xml_path}" python3 - <<'PY'
+import os
+import xml.etree.ElementTree as ET
+
+xml_path = os.environ["XML_PATH"]
+
+tree = ET.parse(xml_path)
+root = tree.getroot()
+devices = root.find("devices")
+if devices is None:
+    raise SystemExit("missing <devices> in xml")
+
+for graphics in devices.findall("graphics"):
+    if graphics.get("type") != "vnc":
+        continue
+    graphics.set("listen", "0.0.0.0")
+    for listen in graphics.findall("listen"):
+        if listen.get("type") == "address":
+            listen.set("address", "0.0.0.0")
+
+tree.write(xml_path, encoding="unicode")
+PY
+}
+
 ftctl_xml_rewrite_first_disk_block_runtime() {
   local xml_path="${1-}"
   local dest_path="${2-}"

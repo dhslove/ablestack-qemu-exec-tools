@@ -5344,3 +5344,85 @@ Failed to connect to '10.10.32.3:9003': Connection refused
   - primary QMP `query-block-jobs`: empty list
   - no `i-2-152-VM` / `r97-link-01-standby` runtime domain remains in libvirt
   - installed marker verification passed on all three hosts.
+
+### Run 97 Monitoring Result 2026-06-06
+
+- Test action:
+  - user started FT protection for primary VM `54` / `i-2-54-VM`.
+  - Cloud created standby VM `153` / `i-2-153-VM` and standby volumes:
+    - root: `57388f27-8b51-451a-9d29-3d7a80f0d7ba`
+    - data: `60ad27c8-e912-4419-a420-faac9ec67dab`
+- Current Cloud DB result:
+  - `ftctl_protection.id=97`
+  - `protection_state=error`
+  - `transport_state=failed`
+  - `provisioning_state=Ready`
+  - `last_error=xcolo_guest_abi_manifest_mismatch`
+  - standby VM `153` is still DB `Running` on host id `1`.
+- Confirmed improvement:
+  - the new primary-canonical secondary runtime path was used.
+  - secondary QEMU process `i-2-153-VM` was started with the primary guest UUID,
+    MAC, CPU/memory shape, native `iothread1`, PCI topology, and disk qdev
+    identity.
+  - the previous QEMU migration crash did not recur in this run.
+  - `memory_region_add_subregion_common` did not appear for Run 97.
+  - the system failed at the explicit guest ABI manifest gate instead of
+    letting QEMU reach a low-level assertion.
+- Failure evidence:
+
+```text
+last_error=xcolo_guest_abi_manifest_mismatch
+xcolo_protocol_failure_phase=guest_abi_manifest
+xcolo_guest_abi_manifest_phase=startup_disk_graph
+xcolo_guest_abi_manifest_reason=
+  mismatch ... reason=/xml[3][18][3][20][3][0][1]/address:
+  '10.10.32.3'!='0.0.0.0'
+```
+
+- Interpretation:
+  - the first mismatch is the VNC/graphics listen address.
+  - primary generated XML retained the primary host-specific graphics listen
+    address `10.10.32.3`.
+  - secondary generated XML was rewritten by standby host runtime handling to
+    listen on `0.0.0.0`.
+  - this is not guest-visible migration ABI; it is a host presentation endpoint.
+  - the ABI manifest gate is therefore too broad for nested graphics/listen
+    data.
+- Runtime residue:
+  - primary VM `i-2-54-VM` was restored to normal libvirt `running` state on
+    host `10.10.32.3`.
+  - secondary transient domain `i-2-153-VM` remains `paused` / `inmigrate` on
+    host `10.10.32.1`.
+  - secondary `query-migrate` remains in `setup` and listening on
+    `10.10.32.1:9998`.
+  - secondary logged red0/red1 connection refused because primary COLO listeners
+    were not kept up after the manifest gate failure.
+- Repetition guard:
+  - this is not a repeat of the previous QEMU assertion failure.
+  - the new gate changed the failure mode from QEMU crash to pre-migrate
+    mismatch classification.
+  - next correction must narrow the ABI manifest to exclude role-local
+    presentation endpoints such as graphics/VNC/listen, while still keeping
+    true guest-visible devices in the manifest.
+
+### Run 97 Fix Plan 2026-06-06
+
+- Confirmed cause:
+  - the manifest gate incorrectly compared host-local VNC graphics listen data.
+  - the primary generated XML retained the source host console bind address,
+    while the standby host runtime path normalized it to `0.0.0.0`.
+  - this mismatch is not a migration-visible guest ABI difference.
+- Code direction:
+  - normalize FT generated XML VNC listen endpoints to `0.0.0.0` on both
+    primary and secondary before startup validation.
+  - exclude `graphics`, nested `listen`, `console`, and `channel` subtrees from
+    the guest ABI manifest.
+  - keep strict comparison for CPU, memory, machine, disk, controller, PCI,
+    NIC model, NIC MAC, and guest-visible qemu `-device` arguments.
+  - add a startup-gate rollback path that destroys any secondary transient
+    runtime and unmaps secondary runtime RBD state without recreating the
+    cloud-managed standby domain before FT protection becomes stable.
+- Repetition guard:
+  - this fix targets the newly introduced manifest scope error.
+  - if the same VNC listen mismatch appears again, it is a regression in
+    normalization/manifest exclusion rather than a new COLO protocol issue.

@@ -226,7 +226,16 @@ The manifest intentionally excludes role-local runtime data:
 - domain name and transient libvirt id;
 - `qemu:commandline` chardev/filter/incoming objects;
 - block backend `-drive` graph internals;
-- monitor, VNC, socket, pid, and file descriptor paths.
+- monitor, VNC/graphics/listen, socket, pid, and file descriptor paths.
+
+FT generated XML must also normalize host-local graphics endpoints before the
+manifest gate:
+
+- Primary and secondary VNC `listen` values must be rewritten to `0.0.0.0`.
+- A host-specific Cloud console bind address such as `10.10.32.3` is not COLO
+  guest ABI and must not cause `xcolo_guest_abi_manifest_mismatch`.
+- The normalization does not apply to guest NIC identity; NIC model, MAC, PCI
+  address, and guest-visible network device topology remain strict ABI inputs.
 
 If the primary and secondary manifest hashes differ, FTCTL must fail before
 starting migration:
@@ -264,6 +273,9 @@ Before `virsh create`, FTCTL must validate:
 - primary and secondary generated disk qdev fingerprints match.
 - primary and secondary generated guest ABI manifests match after the final
   startup disk graph has been applied.
+- startup gate failures must destroy any secondary transient runtime domain and
+  restore the primary from backup without recreating the cloud-managed standby
+  runtime, because protection has not yet reached a stable FT state.
 
 Before `primary.migrate`, FTCTL should also collect a QMP topology fingerprint
 from both sides and fail before migration if guest-visible PCI/SCSI topology is
