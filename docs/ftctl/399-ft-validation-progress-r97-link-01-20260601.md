@@ -5579,3 +5579,57 @@ secondary:
   - if the repeated QEMU assertion appears again after this gate passes, the
     next investigation must treat guest-visible `-device` and PCI topology as
     proven equal and move to qtree/mtree or QEMU internal migration state.
+
+### Run 98 Fix Deployment And Cleanup 2026-06-06
+
+- Implemented qemu-side live runtime topology gate:
+  - commit: `c2bfd8dbd386299b6b2fbaa6427427400617767e`
+  - added `ftctl_xcolo_verify_live_runtime_topology_pair`.
+  - inserted the gate immediately before `primary.migrate`.
+  - collected live QEMU argv from `/proc/<qemu-pid>/cmdline`.
+  - collected live dumpxml, QMP status/chardev/block/named-block-node
+    snapshots, and HMP `info pci`, `info qtree`, and `info mtree`.
+  - compared normalized guest-visible live QEMU `-device` args.
+  - compared HMP `info pci` topology.
+  - wrote `live-topology-diff-before_migrate.txt` on both success and failure.
+- Build:
+  - GitHub Actions run: `27062512580`
+  - RPM build and artifact upload completed.
+  - final workflow conclusion was failed because the release publish step hit a
+    GitHub secondary rate limit.
+  - deployed RPM artifact was downloaded from the uploaded run artifact.
+  - RPM:
+    `/home/ablecloud/work/ftctl-artifacts/run-27062512580/ftctl-branch-rpm-27062512580/ftctl-rpm-rocky9.6/ablestack_vm_ftctl-0.8.0-1.noarch.rpm`
+  - RPM SHA256:
+    `124e901c199edecfd50e148e8badaef9fed0280d7e4cbfd341bc345ddda1322f`
+- Deployment:
+  - deployed to `10.10.32.1`, `10.10.32.2`, and `10.10.32.3` using `aspkg`.
+  - verified installed script markers on all three hosts:
+    - `verify_live_runtime_topology_pair`
+    - `primary-live-qemu-argv`
+    - `pre_migrate_live_topology`
+  - `ablestack-vm-ftctl.timer` and `ablestack-vm-hangctl.timer` are active on
+    all three hosts.
+- Cleanup:
+  - destroyed stale secondary runtime `i-2-154-VM` on `10.10.32.1`.
+  - unmapped and removed stale standby RBD images:
+    - `rbd/b526594e-364c-48da-be8e-a401fdf430ad`
+    - `rbd/857925c6-908a-4c4a-974e-96fb3f27d97f`
+  - marked protection row `98` as removed/stopped/stopped with
+    `last_error=test_cleanup_after_live_runtime_topology_gate`.
+  - removed active `ftctl.*` VM details for primary VM `54` and standby VM
+    `154`.
+  - marked standby VM `154` as `Expunging`.
+  - marked standby volumes for VM `154` as `Expunged`.
+  - removed stale FTCTL runtime/profile/debug files for `i-2-54-VM`,
+    `i-2-154-VM`, and `r97-link-01` from the 32.x hosts.
+- Final readiness verification:
+  - active protection rows for primary VM `54`: `0`
+  - active `ftctl.*` details for `r97-link-01`: `0`
+  - active standby VM rows: `0`
+  - active standby volumes: `0`
+  - primary VM `54` remains DB `Running` on host id `3`
+  - primary `virsh domstate i-2-54-VM`: `running`
+  - primary QMP `query-block-jobs`: empty list
+  - no `i-2-154-VM` / `r97-link-01-standby` runtime domain remains in libvirt
+  - installed marker verification passed on all three hosts.
