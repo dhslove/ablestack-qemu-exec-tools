@@ -296,21 +296,19 @@ This gate must collect evidence from the actual running QEMU processes:
   `query-named-block-nodes`;
 - HMP `info pci`, `info qtree`, and `info mtree`.
 
-The gate must strictly compare migration-visible live topology before migration:
+The gate must strictly compare migration-visible live startup arguments before
+migration:
 
-- every live QEMU `-device` argument after normalization;
-- HMP `info pci` device identity:
-  - bus/device/function address;
-  - device class and vendor/device id;
-  - PCI subsystem;
-  - QEMU device `id`.
+- every live QEMU `-device` argument after normalization.
 
-The gate must not fail on HMP `info pci` runtime resource allocation fields
-such as BAR address ranges, bridge resource windows, IRQ values, or `not
-mapped` BAR text.  Run 101 proved that the secondary can be in a pre-realized
-resource allocation state while still having the same migration-visible device
-identity.  Those resource differences are retained as evidence under
-`xcolo_live_pci_resource_diff_ignored`, but they do not block `primary.migrate`.
+The gate must collect HMP `info pci` device identity, but it must not use it as
+a pre-migrate fatal gate while the secondary is in incoming/paused state. Run
+101 proved that BAR/resource allocation fields can differ before incoming
+migration state is applied. Run 102 then proved that downstream PCI bridge
+identity can also appear different from HMP `info pci` because secondary bridge
+bus numbers are not yet realized. These `info pci` differences are retained as
+evidence under `xcolo_live_pci_evidence`, but they do not block
+`primary.migrate`.
 
 The gate must collect but not initially fail on complete `info qtree` and
 `info mtree` text because those trees include role-specific COLO block and
@@ -328,7 +326,6 @@ last_error=xcolo_live_runtime_argv_no_devices
 last_error=xcolo_live_primary_argv_no_devices
 last_error=xcolo_live_secondary_argv_no_devices
 last_error=xcolo_live_qemu_argv_mismatch
-last_error=xcolo_live_pci_identity_mismatch
 xcolo_protocol_failure_phase=pre_migrate_live_topology
 ```
 
@@ -412,6 +409,35 @@ not yet received incoming migration state.  The corrected rule is:
   `xcolo_live_pci_resource_diff_ignored`;
 - continue to preserve full raw `info pci`, `info qtree`, and `info mtree`
   evidence so the next failure can be traced at the QEMU/device-state layer.
+
+## Run 102 Incoming Secondary PCI Evidence Correction
+
+Run 102 used the Run 101 correction and no longer failed on resource-only BAR
+differences. It failed at:
+
+```text
+xcolo_live_pci_identity_mismatch
+first_diff_index=3
+primary={"addr":"bus=1 device=0 function=0","class":"PCI bridge: PCI device 1b36:000e","id":"id \"pci.6\""}
+secondary={"addr":"bus=0 device=2 function=1","class":"PCI bridge: PCI device 1b36:000c","id":"id \"pci.2\""}
+```
+
+The static guest ABI manifest was still `ok`, and the live QEMU `-device`
+argument lists were already equal. The mismatch came from sampling HMP
+`info pci` before the incoming secondary had realized downstream bridge bus
+numbers and child devices. Therefore `info pci` is not reliable as a fatal
+pre-migrate identity gate for a secondary waiting for incoming COLO migration.
+
+Corrected rule:
+
+- retain strict live QEMU `-device` argv equality;
+- retain static generated primary/secondary ABI manifest equality;
+- collect full `info pci`, normalized PCI identity, `info qtree`, and
+  `info mtree` as evidence;
+- never fail pre-migrate solely because incoming-secondary `info pci` identity
+  differs;
+- if QEMU fails after `primary.migrate`, correlate the failure with the stored
+  PCI/qtree/mtree evidence instead of adding another pre-migrate PCI stop.
 
 ## Failure Classification
 

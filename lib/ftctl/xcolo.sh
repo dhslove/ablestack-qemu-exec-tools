@@ -2251,7 +2251,7 @@ ftctl_xcolo_verify_live_runtime_topology_pair() {
   local secondary_vm="${2-}"
   local phase="${3:-before_migrate}"
   local primary_argv="" secondary_argv=""
-  local primary_pci="" secondary_pci="" out="" rc=0 payload="" reason="" error_name="" pci_resource_warning=""
+  local primary_pci="" secondary_pci="" out="" rc=0 payload="" reason="" error_name="" pci_warning=""
   local primary_pci_file secondary_pci_file
 
   [[ -n "${vm}" && -n "${secondary_vm}" ]] || return 1
@@ -2426,34 +2426,30 @@ if p_devices != s_devices:
             break
     raise SystemExit(1)
 
+print("error=")
 if not p_pci or not s_pci:
-    print("error=xcolo_live_runtime_snapshot_failed")
-    print(f"reason=missing_info_pci primary_lines={len(p_pci)} secondary_lines={len(s_pci)}")
-    raise SystemExit(1)
-
-if not p_pci_identity or not s_pci_identity:
-    print("error=xcolo_live_runtime_snapshot_failed")
-    print(f"reason=missing_info_pci_identity primary_identity={len(p_pci_identity)} secondary_identity={len(s_pci_identity)} primary_lines={len(p_pci)} secondary_lines={len(s_pci)}")
-    raise SystemExit(1)
-
-if p_pci_identity != s_pci_identity:
-    print("error=xcolo_live_pci_identity_mismatch")
-    print(f"reason=info_pci_identity_diff primary_hash={digest(p_pci_identity)} secondary_hash={digest(s_pci_identity)}")
+    print("warning=xcolo_live_pci_snapshot_missing")
+    print(f"pci_reason=missing_info_pci primary_lines={len(p_pci)} secondary_lines={len(s_pci)}")
+elif not p_pci_identity or not s_pci_identity:
+    print("warning=xcolo_live_pci_identity_missing")
+    print(f"pci_reason=missing_info_pci_identity primary_identity={len(p_pci_identity)} secondary_identity={len(s_pci_identity)} primary_lines={len(p_pci)} secondary_lines={len(s_pci)}")
+elif p_pci_identity != s_pci_identity:
+    print("warning=xcolo_live_pci_identity_diff_observed")
+    print(f"pci_reason=info_pci_identity_diff primary_hash={digest(p_pci_identity)} secondary_hash={digest(s_pci_identity)}")
     max_len = max(len(p_pci_identity), len(s_pci_identity))
     for idx in range(max_len):
         left = p_pci_identity[idx] if idx < len(p_pci_identity) else "<missing>"
         right = s_pci_identity[idx] if idx < len(s_pci_identity) else "<missing>"
         if left != right:
-            print(f"first_diff_index={idx}")
-            print("primary=" + json.dumps(left, sort_keys=True, separators=(",", ":")))
-            print("secondary=" + json.dumps(right, sort_keys=True, separators=(",", ":")))
+            print(f"pci_first_diff_index={idx}")
+            print("pci_primary=" + json.dumps(left, sort_keys=True, separators=(",", ":")))
+            print("pci_secondary=" + json.dumps(right, sort_keys=True, separators=(",", ":")))
             break
-    raise SystemExit(1)
-
-print("error=")
-if p_pci != s_pci:
+elif p_pci != s_pci:
     print("warning=xcolo_live_pci_resource_diff_ignored")
-    print(f"resource_reason=info_pci_resource_diff primary_hash={digest(p_pci)} secondary_hash={digest(s_pci)}")
+    print(f"pci_reason=info_pci_resource_diff primary_hash={digest(p_pci)} secondary_hash={digest(s_pci)}")
+if p_pci != s_pci:
+    print(f"pci_raw_hash=primary:{digest(p_pci)} secondary:{digest(s_pci)}")
 print(f"reason=ok device_hash={digest(p_devices)} pci_identity_hash={digest(p_pci_identity)} devices={len(p_devices)} pci_devices={len(p_pci_identity)} pci_lines_primary={len(p_pci)} pci_lines_secondary={len(s_pci)}")
 PY
 )" || rc=$?
@@ -2476,12 +2472,12 @@ PY
   fi
 
   reason="$(printf '%s\n' "${payload}" | sed -n 's/^reason=//p' | head -n1)"
-  pci_resource_warning="$(printf '%s\n' "${payload}" | sed -n 's/^warning=//p' | head -n1)"
+  pci_warning="$(printf '%s\n' "${payload}" | sed -n 's/^warning=//p' | head -n1)"
   ftctl_state_set "${vm}" \
     "xcolo_live_runtime_topology=ok" \
     "xcolo_live_runtime_topology_phase=${phase}" \
     "xcolo_live_runtime_topology_reason=$(ftctl_xcolo_compact_log_value "${reason}")" \
-    "xcolo_live_pci_resource_diff=${pci_resource_warning:-none}" \
+    "xcolo_live_pci_evidence=${pci_warning:-none}" \
     "xcolo_live_qtree_evidence=collected" \
     "xcolo_live_mtree_evidence=collected"
   ftctl_log_event "colo" "xcolo.live_runtime_topology" "ok" "${vm}" "" \

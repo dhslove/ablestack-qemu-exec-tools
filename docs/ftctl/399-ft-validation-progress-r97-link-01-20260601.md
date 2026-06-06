@@ -5872,3 +5872,75 @@ secondary=BAR0: 32 bit prefetchable memory (not mapped)
   - if `xcolo_live_pci_identity_mismatch` appears, compare the stored identity
     records first; if only BAR/IRQ/resource differences appear, that is a bug
     in the gate and must be fixed before retrying.
+
+### Run 102 Monitoring Result 2026-06-06
+
+- Test action:
+  - user started FT protection after Run 101 cleanup and deployment.
+  - Cloud created protection row `102` and standby VM `158` /
+    `i-2-158-VM`.
+- Confirmed improvement:
+  - the Run 101 resource-only BAR/`not mapped` comparison did not recur as the
+    failure classification.
+  - static generated guest ABI manifest stayed `ok`.
+  - primary and secondary generated runtimes both started.
+  - failure was still pre-migrate, before `primary.migrate`, so QEMU did not
+    reach the old assertion or the COLO invalid-message phase.
+- Final result:
+
+```text
+ftctl_protection.id=102
+protection_state=error
+transport_state=failed
+active_side=secondary
+last_error=xcolo_live_pci_identity_mismatch
+xcolo_protocol_failure_phase=pre_migrate_live_topology
+```
+
+- Failure evidence:
+
+```text
+first_diff_index=3
+primary={"addr":"bus=1 device=0 function=0","class":"PCI bridge: PCI device 1b36:000e","id":"id \"pci.6\""}
+secondary={"addr":"bus=0 device=2 function=1","class":"PCI bridge: PCI device 1b36:000c","id":"id \"pci.2\""}
+```
+
+- Interpretation:
+  - this is progress, not a repeat of Run 101.
+  - live `info pci` is still too early as a fatal pre-migrate check for an
+    incoming/paused secondary.
+  - the secondary had not realized downstream PCI bridge bus numbers and child
+    devices yet, so HMP `info pci` identity did not line up even though the
+    generated manifest and live `-device` argv were already aligned.
+  - primary QEMU logs also showed repeated `filter mirror send
+    failed(Operation not permitted)`, but the run did not reach the phase where
+    that can be treated as the primary failure cause.
+- Repetition guard:
+  - do not strengthen pre-migrate HMP `info pci` fatal comparison again.
+  - next design must demote pre-migrate PCI identity/resource differences to
+    evidence and let the run proceed to `primary.migrate`.
+  - if the next run fails after migrate, classify it from QEMU migrate status,
+    COLO invalid-message logs, and filter mirror errors with the stored
+    PCI/qtree/mtree evidence as context.
+
+### Run 102 Fix Plan 2026-06-06
+
+- Correction target:
+  - remove HMP `info pci` identity from the pre-migrate fatal gate.
+  - keep `info pci`, normalized PCI identity, `info qtree`, and `info mtree`
+    as persisted evidence.
+  - keep strict fatal comparison for live QEMU `-device` argv because that is
+    the startup commandline shape FTCTL actually controls.
+- Design update:
+  - `xcolo_live_qemu_argv_mismatch` remains fatal.
+  - missing or mismatched `info pci` becomes warning/evidence:
+    - `xcolo_live_pci_snapshot_missing`
+    - `xcolo_live_pci_identity_missing`
+    - `xcolo_live_pci_identity_diff_observed`
+    - `xcolo_live_pci_resource_diff_ignored`
+  - record the warning in state as `xcolo_live_pci_evidence`.
+  - pre-migrate gate result remains `ok` when live `-device` argv matches.
+- Repetition guard:
+  - if a later run fails with `Operation not permitted` or invalid COLO
+    messages, do not return to pre-migrate PCI gating unless the live
+    `-device` argv or static ABI manifest actually differs.
