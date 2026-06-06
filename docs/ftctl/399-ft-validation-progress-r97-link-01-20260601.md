@@ -5730,3 +5730,54 @@ reason=missing_proc_argv primary_devices=0 secondary_devices=20
     topology comparison failed.
   - do not describe it as the old `memory_region_add_subregion_common`
     repetition unless QEMU actually reaches that assertion again.
+
+### Run 99 Fix Deployment And Cleanup 2026-06-06
+
+- Implemented deterministic live QEMU argv capture:
+  - commit: `00e2f6e23f328fa5374924fc326fc1a5b702fc83`
+  - `/proc` capture now filters by QEMU executable identity.
+  - candidate scoring prefers exact `-name guest=<domain>` and libvirt
+    `/domain-<id>-<domain>/` path evidence.
+  - candidate metadata is written before topology comparison.
+  - when `/proc` argv has no `-device` entries, FTCTL falls back to the latest
+    `/var/log/libvirt/qemu/<domain>.log` command line.
+  - primary and secondary argv source is recorded as `proc` or
+    `qemu_log_fallback`.
+  - old generic `missing_proc_argv` classification was split into empty-argv
+    and argv-without-device variants.
+- Build:
+  - GitHub Actions run: `27063215593`
+  - workflow conclusion: success
+  - RPM artifact:
+    `/home/ablecloud/work/ftctl-artifacts/run-27063215593/ftctl-branch-rpm-27063215593/ftctl-rpm-rocky9.6/ablestack_vm_ftctl-0.8.0-1.noarch.rpm`
+  - RPM SHA256:
+    `de68fc4f1efdceb010055f465e20d0a3b21e7304298b19af9867946af5472b17`
+- Deployment:
+  - deployed to `10.10.32.1`, `10.10.32.2`, and `10.10.32.3` using `aspkg`.
+  - verified installed script markers on all three hosts:
+    - `primary-qemu-pid-candidates`
+    - `qemu_log_fallback`
+    - `xcolo_live_primary_argv_no_devices`
+  - `ablestack-vm-ftctl.timer` and `ablestack-vm-hangctl.timer` are active on
+    all three hosts.
+- Cleanup:
+  - marked protection row `99` as removed/stopped/stopped with
+    `last_error=test_cleanup_after_deterministic_live_argv_capture_fix`.
+  - removed active `ftctl.*` VM details for primary VM `54` and standby VM
+    `155`.
+  - marked standby VM `155` as `Expunging`.
+  - marked standby volumes for VM `155` as `Expunged`.
+  - unmapped and removed stale standby RBD images:
+    - `rbd/b5d6aa18-bf17-4311-913f-cfdb2835c9ed`
+    - `rbd/652dbe33-910c-4775-9937-088ab63bb260`
+  - removed stale FTCTL runtime/profile/debug files for `i-2-54-VM`,
+    `i-2-155-VM`, and `r97-link-01` from the 32.x hosts.
+- Final readiness verification:
+  - active protection rows for primary VM `54`: `0`
+  - active `ftctl.*` details for `r97-link-01`: `0`
+  - active standby VM rows: `0`
+  - active standby volumes: `0`
+  - primary VM `54` remains DB `Running` on host id `3`
+  - primary `virsh domstate i-2-54-VM`: `running`
+  - primary QMP `query-block-jobs`: empty list
+  - no Run 99 standby RBD image remains mapped or present.
