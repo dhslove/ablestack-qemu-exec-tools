@@ -5781,3 +5781,62 @@ reason=missing_proc_argv primary_devices=0 secondary_devices=20
   - primary `virsh domstate i-2-54-VM`: `running`
   - primary QMP `query-block-jobs`: empty list
   - no Run 99 standby RBD image remains mapped or present.
+
+### Run 101 Monitoring Result 2026-06-06
+
+- Test action:
+  - user restarted the primary VM through Cloud, then started FT protection
+    again.
+  - Cloud created protection row `101` and standby VM `157` /
+    `i-2-157-VM`.
+- Confirmed improvement:
+  - the previous Run 100 disk inventory failure did not repeat.
+  - primary started from clean inactive libvirt XML first:
+    - active disk count was `2` at the beginning of protection.
+    - active `ftctl-` commandline marker count was `0` at the beginning of
+      protection.
+  - FTCTL reached `baseline_seeding`, then started the generated COLO primary.
+  - `xcolo_guest_abi_manifest=ok`.
+  - live argv capture succeeded on both sides:
+    - primary source: `qemu_log_fallback`
+    - primary device count: `20`
+    - secondary source: `proc`
+    - secondary device count: `20`
+  - the previous `memory_region_add_subregion_common` assertion was not reached.
+  - migration was stopped by the pre-migrate live topology gate.
+- Final result:
+
+```text
+ftctl_protection.id=101
+protection_state=error
+transport_state=failed
+active_side=secondary
+last_error=xcolo_live_pci_topology_mismatch
+xcolo_protocol_failure_phase=pre_migrate_live_topology
+```
+
+- Failure evidence:
+
+```text
+error=xcolo_live_pci_topology_mismatch
+reason=info_pci_diff primary_hash=0540dde0a659e65de7918d65222abdcbb7a6de20a0af3fb3b9af86b92321c7d2 secondary_hash=790297d437b8cc07491919d16a60e8d376f01b9cdbd6ed4b47302ce449735c54
+first_diff_index=7
+primary=BAR0: 32 bit prefetchable memory at 0x80000000 [0x81ffffff]
+secondary=BAR0: 32 bit prefetchable memory (not mapped)
+```
+
+- Interpretation:
+  - this is progress, not a repeat of Run 100.
+  - the next problem is not argv capture and not static manifest generation.
+  - the secondary runtime is still in a pre-realized PCI state when the live
+    topology gate samples it: many PCI bridge/device BARs are `not mapped`,
+    bridge secondary bus values are `0`, and IRQ values are `0`.
+  - the primary has fully realized PCI resources after start, while the
+    secondary has not realized the same bus/resource assignment before
+    migration.
+- Repetition guard:
+  - if the same error recurs, do not rework argv capture again.
+  - next design must focus on making the secondary realize/settle PCI topology
+    before the pre-migrate topology comparison, or on comparing a migration-safe
+    topology identity that excludes runtime BAR allocation while still checking
+    bus/slot/function/device identity.
