@@ -5295,3 +5295,52 @@ Failed to connect to '10.10.32.3:9003': Connection refused
   - if the manifest gate passes but QEMU still asserts, the remaining mismatch
     is in runtime argv/QMP topology that is not yet represented by the manifest,
     and the manifest must be expanded instead of changing isolated disk options.
+
+### Primary Canonical Guest ABI Build, Deploy, Cleanup 2026-06-06
+
+- Source commit built and deployed:
+  - `da61245352ebbd553fd6916f9c0d561a22f469a8`
+  - `fix: clone primary guest abi for xcolo secondary`
+- Build:
+  - GitHub Actions workflow: `branch-ftctl-release.yml`
+  - run id: `27057571647`
+  - conclusion: `success`
+  - artifact: `ablestack_vm_ftctl-0.8.0-1.noarch.rpm`
+  - SHA256:
+    `64028d0ac1c2589718d1483bdd1d0e5b154c1bed1157d15bae9e34c03682be69`
+- Deployment:
+  - deployed to `10.10.32.1`, `10.10.32.2`, and `10.10.32.3`
+  - installation used the 32.x administrator wrapper:
+    `aspkg --replacepkgs -U`
+  - verified installed script markers on all three hosts:
+    - `clone_primary_xml_for_secondary`
+    - `xcolo_guest_abi_manifest`
+    - `verify_generated_guest_abi_pair`
+  - verified timers active on all three hosts:
+    - `ablestack-vm-ftctl.timer`
+    - `ablestack-vm-hangctl.timer`
+- Cleanup after Run 96:
+  - destroyed stale secondary runtime domain `i-2-152-VM` on `10.10.32.1`.
+  - stale standby RBD images initially had watchers because they remained
+    mapped as `/dev/rbd10` and `/dev/rbd12` on `10.10.32.1`.
+  - unmapped and removed standby RBD images:
+    - `rbd/c7c3a5e5-d007-421b-a380-6cd18ed6e59b`
+    - `rbd/f37cc9ca-4702-4a7d-b2aa-3c88720c4c54`
+  - marked protection row `96` as `removed/stopped/stopped` with
+    `last_error=test_cleanup_after_primary_canonical_guest_abi_fix`.
+  - removed active `ftctl.*` VM details for primary VM `54` and standby VM
+    `152`.
+  - marked standby VM `152` as `Expunging`.
+  - marked standby volumes `289` and `290` as `Expunged`.
+  - removed stale FTCTL runtime/profile/debug files for `i-2-54-VM`,
+    `i-2-152-VM`, and `r97-link-01` from the 32.x hosts.
+- Final readiness verification:
+  - active protection rows for primary VM `54`: `0`
+  - active `ftctl.*` details for `r97-link-01`: `0`
+  - active standby VM rows: `0`
+  - active standby volumes: `0`
+  - primary VM `54` remains DB `Running` on host id `3`
+  - primary `virsh domstate i-2-54-VM`: `running`
+  - primary QMP `query-block-jobs`: empty list
+  - no `i-2-152-VM` / `r97-link-01-standby` runtime domain remains in libvirt
+  - installed marker verification passed on all three hosts.
