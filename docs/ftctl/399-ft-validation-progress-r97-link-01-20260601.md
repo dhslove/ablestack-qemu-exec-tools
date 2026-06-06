@@ -4788,3 +4788,76 @@ but a lower-level signature or reached stage changed, set
       protected disk `-drive` and `scsi-hd` args
   - if either contract is missing, fail before primary shutdown/create with a
     dedicated classifier such as `xcolo_startup_network_args_missing`.
+
+### Startup Commandline Merge Build And Retest Readiness 2026-06-06
+
+- Source commit for deployed code:
+  - `ceed822ee876438a0b4b9b6a16f0882263cbf77e`
+  - `fix: preserve xcolo network startup args`
+- Code correction:
+  - `ftctl_xcolo_apply_startup_disk_graphs` no longer recovers network args
+    from diagnostic state
+  - caller-built primary and secondary network args are passed explicitly into
+    disk graph application
+  - final commandline is assembled as:
+    - primary network args plus primary disk graph args
+    - secondary network args plus secondary disk graph args plus `-incoming`
+  - generated XML commandline contract validation now checks network and disk
+    markers before primary create:
+    - primary: `compare1`, `mirror0`, `filter-mirror`,
+      `filter-redirector`, `colo-compare`, `ftctl-xcolo-pci0`,
+      `ftctl-xcolo-scsi0`
+    - secondary: `red0`, `red1`, `filter-redirector`, `filter-rewriter`,
+      `-incoming`, `ftctl-xcolo-pci0`, `ftctl-xcolo-scsi0`
+  - if network args are absent, the failure is classified as
+    `xcolo_startup_network_args_missing` instead of timing out at listener wait
+- Build:
+  - GitHub Actions run: `27054088954`
+  - workflow conclusion: `success`
+  - deployed RPM artifact:
+    - `ablestack_vm_ftctl-0.8.0-1.noarch.rpm`
+    - SHA256:
+      `52dd51dc788d011cde1556472639052cafa25f624dae582096d6434a7830cfa3`
+- Deployment:
+  - deployed to `10.10.32.1`, `10.10.32.2`, and `10.10.32.3`
+  - installation used 32.x administrator wrapper:
+    `aspkg --replacepkgs -U`
+  - verified installed package on all three hosts:
+    `ablestack_vm_ftctl-0.8.0-1.noarch`
+  - verified installed script markers on all three hosts:
+    - `xcolo_startup_network_args_missing`
+    - `startup_commandline_contract`
+    - `network_args_not_passed`
+    - `validate_generated_commandline_contract`
+    - `ftctl-xcolo-pci0`
+  - verified timers active on all three hosts:
+    - `ablestack-vm-ftctl.timer`
+    - `ablestack-vm-hangctl.timer`
+- Cleanup after Run 91:
+  - marked protection row `91` disabled/stopped/removed with
+    `last_error=test_cleanup_after_startup_commandline_merge_fix`
+  - removed `ftctl.*` VM details for primary VM `54` and standby VM `147`
+  - destroyed stale standby runtime domain `i-2-147-VM` on `10.10.32.1`
+  - marked standby VM `147` (`i-2-147-VM`) as `Expunging`
+  - marked standby volumes for VM `147` as `Expunged`
+  - stopped FTCTL and hangctl timers during host runtime cleanup to prevent
+    state recreation
+  - removed stale FTCTL runtime/profile/debug files for `i-2-54-VM`,
+    `i-2-147-VM`, and `r97-link-01` from the 32.x hosts
+  - unmapped stale standby RBD mappings:
+    - `/dev/rbd10`
+    - `/dev/rbd12`
+  - removed standby RBD images:
+    - `rbd/4a11f01c-0453-4b05-9d2f-af230f22f5c2`
+    - `rbd/510aa330-dd8c-434f-b423-2f21626115aa`
+- Final readiness verification:
+  - active protection rows for primary VM `54`: `0`
+  - active `ftctl.*` details for `r97-link-01`: `0`
+  - active standby VM rows: `0`
+  - active standby volumes: `0`
+  - primary VM `i-2-54-VM` is `running` on `10.10.32.3`
+  - no stale FTCTL files for `i-2-54-VM`, `i-2-147-VM`, or `r97-link-01`
+    remained under `/run/ablestack-vm-ftctl` or `/etc/ablestack/ftctl.d`
+  - removed standby RBD images now return `No such file or directory`
+  - primary QMP/HMP shows no active block jobs
+  - primary QMP/HMP shows no active migration
