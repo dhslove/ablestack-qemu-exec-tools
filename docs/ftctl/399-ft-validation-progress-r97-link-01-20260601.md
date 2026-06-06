@@ -4665,3 +4665,71 @@ but a lower-level signature or reached stage changed, set
   - keep the `cirrus-vga` root slot `0x1` guard
   - classify this parse-time failure as a dedicated startup PCI topology
     failure instead of folding it into primary listener wait failure
+
+### Owned Root-Port Build And Retest Readiness 2026-06-06
+
+- Source commit for deployed code:
+  - `2b35b1a38e5ddef0a0a3e58c2a5962c5b8f03054`
+  - `fix: use owned xcolo pci root port`
+- Code correction:
+  - removed the existing libvirt root-port reuse path from startup SCSI
+    attachment selection
+  - always create `ftctl-xcolo-pci0` in `qemu:commandline`
+  - attach `ftctl-xcolo-scsi0` to `bus=ftctl-xcolo-pci0,addr=0x0`
+  - validate that protected disks have the FTCTL root-port before the SCSI
+    controller argument
+  - reject SCSI controller parents that are not FTCTL-owned
+  - classify QEMU parse-time PCI failures as
+    `xcolo_startup_pci_topology_failed`
+  - preserve the classified startup error instead of overwriting it with the
+    generic listener wait error
+- Build:
+  - GitHub Actions run: `27053719762`
+  - workflow conclusion: `success`
+  - deployed RPM artifact:
+    - `ablestack_vm_ftctl-0.8.0-1.noarch.rpm`
+    - SHA256:
+      `6a0eb52c56cae481065d6dc1c1bd1b3c413f99dc4c0550f24ca0e3f163d7b76c`
+- Deployment:
+  - deployed to `10.10.32.1`, `10.10.32.2`, and `10.10.32.3`
+  - installation used 32.x administrator wrapper:
+    `aspkg --replacepkgs -U`
+  - verified installed package on all three hosts:
+    `ablestack_vm_ftctl-0.8.0-1.noarch`
+  - verified installed script markers on all three hosts:
+    - `controller_parent_not_ftctl_owned`
+    - `ftctl_root_port_missing`
+    - `xcolo_startup_pci_topology_failed`
+    - `ftctl-xcolo-pci0`
+  - verified stale marker `existing-root-port` is absent from installed
+    `xcolo.sh`
+  - verified timers active on all three hosts:
+    - `ablestack-vm-ftctl.timer`
+    - `ablestack-vm-hangctl.timer`
+- Cleanup after Run 90:
+  - marked protection row `90` disabled/stopped/removed with
+    `last_error=test_cleanup_after_owned_root_port_fix`
+  - removed `ftctl.*` VM details for primary VM `54` and standby VM `146`
+  - marked standby VM `146` (`i-2-146-VM`) as `Expunging`
+  - marked standby volumes for VM `146` as `Expunged`
+  - stopped FTCTL and hangctl timers during host runtime cleanup to prevent
+    state recreation
+  - removed stale FTCTL runtime/profile/debug files for `i-2-54-VM`,
+    `i-2-146-VM`, and `r97-link-01` from the 32.x hosts
+  - unmapped stale standby RBD mappings:
+    - `/dev/rbd10`
+    - `/dev/rbd12`
+  - removed standby RBD images:
+    - `rbd/578747fc-624e-44e4-bd51-e3baa5b5079c`
+    - `rbd/c4394ab3-1f5c-4c77-9c33-c2110f1f5b4a`
+- Final readiness verification:
+  - active protection rows for primary VM `54`: `0`
+  - active `ftctl.*` details for `r97-link-01`: `0`
+  - active standby VM rows: `0`
+  - active standby volumes: `0`
+  - primary VM `i-2-54-VM` is `running` on `10.10.32.3`
+  - no stale FTCTL files for `i-2-54-VM`, `i-2-146-VM`, or `r97-link-01`
+    remained under `/run/ablestack-vm-ftctl` or `/etc/ablestack/ftctl.d`
+  - removed standby RBD images now return `No such file or directory`
+  - primary QMP/HMP shows no active block jobs
+  - primary QMP/HMP shows no active migration
