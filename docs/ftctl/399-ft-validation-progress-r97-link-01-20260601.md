@@ -4705,6 +4705,50 @@ but a lower-level signature or reached stage changed, set
   - only `i-2-54-VM` is running on the 32.x hosts for this test target
   - removed standby RBD images now return `No such file or directory`
 
+### Run 93 Monitoring Result 2026-06-06
+
+- Test input:
+  - target VM: `r97-link-01`
+  - primary VM id: `54`
+  - generated standby VM id: `149`
+  - generated standby instance: `i-2-149-VM`
+  - primary host: `10.10.32.3`
+  - secondary host: `10.10.32.1`
+- Final Cloud DB state:
+  - `ftctl_protection.id=93`
+  - `protection_state=error`
+  - `transport_state=failed`
+  - `last_error=xcolo_guest_topology_mismatch`
+  - primary VM `54` remained `Running`
+  - standby VM `149` remained `Running` in Cloud DB and paused/incoming on
+    the secondary host
+- Progress and repetition analysis:
+  - this is not a repeat of Run 92's QEMU assertion crash.
+  - Run 92 reached `primary.migrate` and then secondary QEMU crashed with
+    `memory_region_add_subregion_common: Assertion '!subregion->container'
+    failed`.
+  - Run 93 failed earlier, before the startup disk graph was applied and before
+    migration.
+  - the new guard prevented proceeding into migration with an incomplete
+    generated commandline.
+- First cause:
+  - `primary.generated.xml` and `standby.generated.xml` still contained normal
+    libvirt protected `<disk>` entries.
+  - their `qemu:commandline` contained only network COLO arguments.
+  - the COLO disk graph arguments were absent because the block-runtime XML
+    rewrite had removed the original protected disk `<alias>` and
+    `<address type="drive">` elements.
+  - without those elements, FTCTL could not rebuild protected `scsi-hd` devices
+    on the original guest-visible SCSI qdev topology.
+- Corrected direction:
+  - preserve protected disk `<alias>` and `<address>` during block-runtime XML
+    rewrite.
+  - validate generated XML topology before removing protected disks.
+  - classify missing alias/address as
+    `xcolo_startup_disk_topology_missing`, not as a generic topology mismatch.
+  - continue to reject any generated commandline containing
+    `ftctl-xcolo-pci0` or `ftctl-xcolo-scsi0`.
+
 ### Run 90 Monitoring - Existing Root-Port Reference Fails At QEMU Parse Time 2026-06-06
 
 - Test trigger:

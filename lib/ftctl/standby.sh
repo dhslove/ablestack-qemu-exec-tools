@@ -672,7 +672,7 @@ target.set("dev", target_dev)
 target.set("bus", target_bus)
 
 for child in list(disk):
-    if child.tag in {"readonly", "shareable", "boot", "alias", "address"}:
+    if child.tag in {"readonly", "shareable", "boot"}:
         disk.remove(child)
 
 if disk_mode in {"ro", "ro-shareable"}:
@@ -821,7 +821,7 @@ for disk in devices.findall("disk"):
         target.set("bus", "scsi")
 
     for child in list(disk):
-        if child.tag in {"readonly", "shareable", "boot", "alias", "address"}:
+        if child.tag in {"readonly", "shareable", "boot"}:
             disk.remove(child)
 
     if disk_mode in {"ro", "ro-shareable"}:

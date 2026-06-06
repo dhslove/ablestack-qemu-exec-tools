@@ -98,6 +98,11 @@ not.
 
 Before `virsh create`, FTCTL must validate:
 
+- generated XML rewrite has preserved the protected disk topology fields needed
+  to rebuild the commandline disk device:
+  - `<target bus="scsi">`
+  - `<alias name="scsiX-Y-Z-N">`
+  - `<address type="drive" controller="X" bus="Y" target="Z" unit="N">`
 - no generated commandline contains `ftctl-xcolo-pci0`;
 - no generated commandline contains `ftctl-xcolo-scsi0`;
 - every protected disk `scsi-hd` uses an original libvirt SCSI bus such as
@@ -141,3 +146,29 @@ It preserves the valid parts of:
 
 The preserved rule is: no runtime protected disk hotplug. The corrected rule is:
 no new guest-visible protected disk topology at startup either.
+
+## Run 93 Correction
+
+Run 93 failed earlier than Run 92 with:
+
+```text
+xcolo_guest_topology_mismatch
+```
+
+The failure was not a QEMU migration crash. The generated XML still contained
+ordinary libvirt `<disk>` entries and the `qemu:commandline` contained only the
+network COLO arguments. The startup disk graph was not applied because the
+earlier block-runtime XML rewrite removed `<alias>` and `<address>` from the
+protected disks. FTCTL then could not extract the original qdev identity before
+removing the disks and rebuilding them as commandline `scsi-hd` devices.
+
+The corrected implementation must preserve `<alias>` and `<address>` during the
+block-runtime rewrite. If either field is missing before startup disk graph
+application, FTCTL must fail with:
+
+```text
+xcolo_startup_disk_topology_missing
+```
+
+This is distinct from `xcolo_guest_topology_mismatch`, which means primary and
+secondary topology fingerprints exist but do not match.

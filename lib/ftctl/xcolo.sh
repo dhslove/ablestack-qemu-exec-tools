@@ -4061,6 +4061,85 @@ PY
   printf -v "${out_var}" '%s' "${payload}"
 }
 
+ftctl_xcolo_validate_startup_disk_topology_xml() {
+  local vm="${1-}"
+  local xml_path="${2-}"
+  local disk_runtime="${3-}"
+  local role="${4:-unknown}"
+  local out="" rc=0
+
+  [[ -n "${vm}" && -f "${xml_path}" && -n "${disk_runtime}" ]] || return 1
+
+  out="$(XML_PATH="${xml_path}" DISK_RUNTIME="${disk_runtime}" python3 - <<'PY'
+import os
+import re
+import xml.etree.ElementTree as ET
+
+xml_path = os.environ["XML_PATH"]
+runtime = os.environ.get("DISK_RUNTIME", "")
+targets = [entry.split("|", 1)[0] for entry in runtime.split(";") if entry]
+
+root = ET.parse(xml_path).getroot()
+devices = root.find("devices")
+if devices is None:
+    print("missing_devices")
+    raise SystemExit(1)
+
+errors = []
+for target_name in targets:
+    disk = None
+    for candidate in devices.findall("disk"):
+        if candidate.get("device") != "disk":
+            continue
+        target = candidate.find("target")
+        if target is not None and target.get("dev") == target_name:
+            disk = candidate
+            break
+    if disk is None:
+        errors.append(f"{target_name}:disk_missing")
+        continue
+    target = disk.find("target")
+    if target is None or target.get("bus") != "scsi":
+        errors.append(f"{target_name}:target_not_scsi")
+    alias = disk.find("alias")
+    qdev_id = alias.get("name") if alias is not None else ""
+    address = disk.find("address")
+    if address is None or address.get("type") != "drive":
+        errors.append(f"{target_name}:drive_address_missing")
+    else:
+        controller = address.get("controller") or "0"
+        bus = address.get("bus") or "0"
+        scsi_id = address.get("target") or "0"
+        lun = address.get("unit") or "0"
+        expected = f"scsi{controller}-{bus}-{scsi_id}-{lun}"
+        if qdev_id and qdev_id != expected and not re.fullmatch(r"scsi[0-9]+-[0-9]+-[0-9]+-[0-9]+", qdev_id):
+            errors.append(f"{target_name}:alias_not_scsi_topology:{qdev_id}")
+        elif not qdev_id:
+            qdev_id = expected
+    if qdev_id and not re.fullmatch(r"scsi[0-9]+-[0-9]+-[0-9]+-[0-9]+", qdev_id):
+        errors.append(f"{target_name}:qdev_not_scsi_topology:{qdev_id}")
+
+if errors:
+    print(",".join(errors))
+    raise SystemExit(1)
+
+print("ok")
+PY
+)" || rc=$?
+
+  if [[ "${rc}" != "0" ]]; then
+    ftctl_state_set "${vm}" \
+      "xcolo_protocol_failure_phase=startup_disk_graph" \
+      "last_error=xcolo_startup_disk_topology_missing"
+    ftctl_log_event "colo" "xcolo.startup_disk_topology" "fail" "${vm}" "" \
+      "role=${role} path=${xml_path} reason=${out}"
+    return 1
+  fi
+
+  ftctl_log_event "colo" "xcolo.startup_disk_topology" "ok" "${vm}" "" \
+    "role=${role} path=${xml_path}"
+}
+
 ftctl_xcolo_build_startup_disk_args() {
   local xml_path="${1-}"
   local role="${2-}"
@@ -4299,7 +4378,7 @@ for idx, part in enumerate(parts):
         errors.append(f"guest_drive_backend_invalid:{drive}")
     bm = re.search(r"(?:^|,)bus=([^,]+)", opts)
     bus = bm.group(1) if bm else ""
-    if not re.fullmatch(r"scsi[0-9]+\\.0", bus or ""):
+    if not re.fullmatch(r"scsi[0-9]+\.0", bus or ""):
         errors.append(f"guest_bus_not_original_scsi:{bus or 'missing'}")
     im = re.search(r"(?:^|,)id=([^,]+)", opts)
     qdev_id = im.group(1) if im else ""
@@ -4494,6 +4573,8 @@ ftctl_xcolo_apply_startup_disk_graphs() {
       "reason=krbd_path_leaked_into_qemu_commandline"
     return 1
   fi
+  ftctl_xcolo_validate_startup_disk_topology_xml "${vm}" "${primary_xml}" "${disk_runtime}" "primary" || return 1
+  ftctl_xcolo_validate_startup_disk_topology_xml "${vm}" "${secondary_xml}" "${disk_runtime}" "secondary" || return 1
   ftctl_xcolo_validate_startup_disk_args "${vm}" "${primary_args}" "primary" || return 1
   ftctl_xcolo_validate_startup_disk_args "${vm}" "${secondary_args}" "secondary" || return 1
 
@@ -7659,8 +7740,8 @@ ftctl_xcolo_execute_block_cold_conversion() {
         "conversion_state=error" \
         "protection_state=error" \
         "transport_state=failed" \
-        "last_error=xcolo_guest_topology_mismatch"
-      ftctl_xcolo_rollback_block_primary_create_failure "${vm}" "xcolo_guest_topology_mismatch" || true
+        "last_error=xcolo_startup_disk_topology_missing"
+      ftctl_xcolo_rollback_block_primary_create_failure "${vm}" "xcolo_startup_disk_topology_missing" || true
       return 1
     }
     ftctl_xcolo_disk_qdev_from_xml "${standby_generated_xml}" "${target}" secondary_qdev || {
@@ -7671,8 +7752,8 @@ ftctl_xcolo_execute_block_cold_conversion() {
         "conversion_state=error" \
         "protection_state=error" \
         "transport_state=failed" \
-        "last_error=xcolo_guest_topology_mismatch"
-      ftctl_xcolo_rollback_block_primary_create_failure "${vm}" "xcolo_guest_topology_mismatch" || true
+        "last_error=xcolo_startup_disk_topology_missing"
+      ftctl_xcolo_rollback_block_primary_create_failure "${vm}" "xcolo_startup_disk_topology_missing" || true
       return 1
     }
     if [[ "${primary_qdev}" != "${secondary_qdev}" ]]; then
