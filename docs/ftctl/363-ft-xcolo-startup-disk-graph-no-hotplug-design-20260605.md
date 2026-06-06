@@ -2,6 +2,12 @@
 
 Date: 2026-06-05
 
+> 2026-06-06 update: Run 92 proved that removing runtime hotplug is necessary
+> but not sufficient. FTCTL must also avoid adding any new guest-visible
+> PCI/SCSI topology at startup. The startup disk graph must reuse the original
+> Cloud/libvirt SCSI qdev topology and replace only the backend block graph.
+> See `367-ft-xcolo-immutable-guest-topology-design-20260606.md`.
+
 ## Trigger
 
 Run 85 advanced beyond the previous migration return-path conflict, but the
@@ -50,6 +56,8 @@ The corrected ABLESTACK flow follows that model:
    - preserve Cloud-created controllers, NICs, serial/console, metadata, and
      non-protected devices;
    - add qemu commandline disk graph arguments for the protected disks;
+   - recreate protected `scsi-hd` devices on their original Cloud/libvirt SCSI
+     bus/qdev topology, not on an FTCTL-owned PCI/SCSI controller;
    - add qemu commandline COLO network filter arguments.
 5. Start primary and secondary from the generated transient XML.
 6. Verify the secondary startup block graph exists.
@@ -101,6 +109,9 @@ The next retest must confirm:
 - generated primary/secondary XML contains startup COLO disk graph commandline
   arguments;
 - generated XML no longer contains duplicate protected `<disk>` entries;
+- generated commandline does not contain `ftctl-xcolo-pci0` or
+  `ftctl-xcolo-scsi0`;
+- protected disk `scsi-hd` devices use the original SCSI bus/qdev identity;
 - no event contains `device_del_existing_root`;
 - no event contains `device_add_colo_root`;
 - startup qemu commandline for RBD-backed protected disks contains native RBD

@@ -2,6 +2,15 @@
 
 Date: 2026-06-05
 
+> Superseded by `367-ft-xcolo-immutable-guest-topology-design-20260606.md`.
+> This document is retained as historical evidence for Runs 88 through 91.
+> Run 92 proved that an FTCTL-owned guest-visible PCI/SCSI controller can still
+> break COLO incoming migration device-state load with
+> `memory_region_add_subregion_common: Assertion '!subregion->container'
+> failed`. New code must not create `ftctl-xcolo-pci0` or
+> `ftctl-xcolo-scsi0`; it must reuse the original Cloud/libvirt disk topology
+> and replace only the backend block graph.
+
 ## Trigger
 
 Run 88 passed the previous native RBD backend and BlockBackend/node-name

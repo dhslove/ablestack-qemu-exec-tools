@@ -4011,6 +4011,56 @@ tree.write(xml_path, encoding="unicode")
 PY
 }
 
+ftctl_xcolo_disk_qdev_from_xml() {
+  local xml_path="${1-}"
+  local target="${2-}"
+  local out_var="${3}"
+  local payload
+
+  [[ -f "${xml_path}" && -n "${target}" ]] || return 1
+  command -v python3 >/dev/null 2>&1 || return 2
+
+  payload="$(XML_PATH="${xml_path}" TARGET="${target}" python3 - <<'PY'
+import os
+import xml.etree.ElementTree as ET
+
+xml_path = os.environ["XML_PATH"]
+target_name = os.environ["TARGET"]
+
+root = ET.parse(xml_path).getroot()
+devices = root.find("devices")
+if devices is None:
+    raise SystemExit("missing_devices")
+
+for disk in devices.findall("disk"):
+    if disk.get("device") != "disk":
+        continue
+    target = disk.find("target")
+    if target is None or target.get("dev") != target_name:
+        continue
+    alias = disk.find("alias")
+    if alias is not None and alias.get("name"):
+        print(alias.get("name"))
+        raise SystemExit(0)
+    if (target.get("bus") or "") != "scsi":
+        raise SystemExit(f"unsupported_bus:{target.get('bus') or 'missing'}")
+    address = disk.find("address")
+    if address is None or address.get("type") != "drive":
+        raise SystemExit("missing_drive_address")
+    controller = address.get("controller") or "0"
+    bus = address.get("bus") or "0"
+    scsi_id = address.get("target") or "0"
+    lun = address.get("unit") or "0"
+    print(f"scsi{controller}-{bus}-{scsi_id}-{lun}")
+    raise SystemExit(0)
+
+raise SystemExit("disk_target_not_found")
+PY
+)" || return 1
+
+  printf -v "${out_var}" '%s' "${payload}"
+}
+
 ftctl_xcolo_build_startup_disk_args() {
   local xml_path="${1-}"
   local role="${2-}"
@@ -4072,58 +4122,45 @@ def parse_runtime(raw):
         })
     return entries
 
-def pci_int(value, default=None):
-    if value is None or value == "":
+def text_of(elem, default=""):
+    if elem is None or elem.text is None:
         return default
-    try:
-        return int(str(value), 0)
-    except ValueError:
-        return default
+    return elem.text.strip()
 
-def find_ft_scsi_attachment(root):
-    devices = root.find("devices")
-    if devices is None:
-        raise SystemExit("missing <devices> in xml")
+def disk_topology(target, disk, disk_index):
+    target_elem = disk.find("target")
+    bus_type = target_elem.get("bus") if target_elem is not None else ""
+    if bus_type != "scsi":
+        raise SystemExit(f"unsupported protected disk bus for x-colo: {target}:{bus_type or 'missing'}")
 
-    root_slots = set()
-    max_chassis = 0
-    max_port = 0x0f
+    address = disk.find("address")
+    if address is None or address.get("type") != "drive":
+        raise SystemExit(f"missing drive address for protected disk: {target}")
 
-    for elem in devices.iter():
-        addr = elem.find("address")
-        if addr is None or addr.get("type") != "pci":
-            continue
-        bus = pci_int(addr.get("bus"), -1)
-        slot = pci_int(addr.get("slot"), -1)
-        if bus == 0 and slot >= 0:
-            root_slots.add(slot)
+    controller = address.get("controller") or "0"
+    channel = address.get("bus") or "0"
+    scsi_id = address.get("target") or "0"
+    lun = address.get("unit") or str(disk_index)
+    controller_id = f"scsi{controller}"
+    qdev_id = f"{controller_id}-{channel}-{scsi_id}-{lun}"
+    alias = disk.find("alias")
+    if alias is not None and alias.get("name"):
+        qdev_id = alias.get("name")
 
-    for ctl in devices.findall("controller"):
-        if ctl.get("type") != "pci":
-            continue
-        model = ctl.get("model") or ""
-        if model != "pcie-root-port":
-            continue
-        target = ctl.find("target")
-        if target is not None:
-            max_chassis = max(max_chassis, pci_int(target.get("chassis"), max_chassis))
-            max_port = max(max_port, pci_int(target.get("port"), max_port))
+    serial = text_of(disk.find("serial"))
+    boot = disk.find("boot")
+    boot_order = boot.get("order") if boot is not None else ""
 
-    for slot in range(3, 31):
-        if slot in root_slots:
-            continue
-        port_id = "ftctl-xcolo-pci0"
-        return {
-            "prefix": [
-                "-device",
-                f"pcie-root-port,id={port_id},bus=pcie.0,addr=0x{slot:x},chassis={max_chassis + 1},port=0x{max_port + 1:x}",
-            ],
-            "controller_bus": port_id,
-            "controller_addr": "0x0",
-            "mode": "ftctl-root-port",
-        }
-
-    raise SystemExit("no free PCI attachment point for FTCTL X-COLO SCSI controller")
+    return {
+        "bus": f"{controller_id}.0",
+        "controller": controller_id,
+        "channel": channel,
+        "scsi_id": scsi_id,
+        "lun": lun,
+        "qdev_id": qdev_id,
+        "serial": serial,
+        "boot_order": boot_order,
+    }
 
 tree = ET.parse(xml_path)
 root = tree.getroot()
@@ -4143,30 +4180,12 @@ for index, disk in enumerate(devices.findall("disk")):
 entries = parse_runtime(runtime_raw)
 args = []
 state = []
-controller_id = "ftctl-xcolo-scsi0"
-attachment = find_ft_scsi_attachment(root)
-controller_parent_bus = attachment["controller_bus"]
-controller_addr = attachment["controller_addr"]
-controller_bus = f"{controller_id}.0"
-if entries:
-    args.extend(attachment["prefix"])
-    args.extend([
-        "-device",
-        f"virtio-scsi-pci,id={controller_id},bus={controller_parent_bus},addr={controller_addr}",
-    ])
 for order, item in enumerate(entries):
     target = item["target"]
     if target not in disk_by_target:
         raise SystemExit(f"disk target not found in xml: {target}")
     disk, disk_index = disk_by_target[target]
-    address = disk.find("address")
-    bus = "0"
-    scsi_id = "0"
-    lun = str(disk_index)
-    if address is not None and address.get("type") == "drive":
-        bus = address.get("bus") or bus
-        scsi_id = address.get("target") or scsi_id
-        lun = address.get("unit") or lun
+    topo = disk_topology(target, disk, disk_index)
     s = suffix(target)
     parent = f"ftctl-parent-{s}" if role == "secondary" else f"ftctl-primary-parent-{s}"
     parent_bb = f"{parent}-bb"
@@ -4181,12 +4200,18 @@ for order, item in enumerate(entries):
     source = item["secondary_dest"] if role == "secondary" else item["source"]
     source_driver = qemu_driver(item["format"])
     source_options = qemu_source_options(source)
-    guest = [
-        "-device",
-        f"scsi-hd,bus={controller_bus},channel={bus},scsi-id={scsi_id},lun={lun},drive={colo_bb},id={colo_dev}",
-    ]
-    if order == 0:
-        guest[1] += ",bootindex=1"
+    guest_opts = (
+        f"scsi-hd,bus={topo['bus']},channel={topo['channel']},"
+        f"scsi-id={topo['scsi_id']},lun={topo['lun']},"
+        f"drive={colo_bb},id={topo['qdev_id']}"
+    )
+    if topo["serial"]:
+        guest_opts += f",serial={topo['serial']},device_id={topo['serial']}"
+    if topo["boot_order"]:
+        guest_opts += f",bootindex={topo['boot_order']}"
+    elif order == 0:
+        guest_opts += ",bootindex=1"
+    guest = ["-device", guest_opts]
     if role == "secondary":
         args.extend([
             "-drive",
@@ -4211,11 +4236,10 @@ for order, item in enumerate(entries):
         f"{target}.parent_backend={parent_bb}",
         f"{target}.colo={colo}",
         f"{target}.colo_backend={colo_bb}",
-        f"{target}.device={colo_dev}",
-        f"{target}.controller={controller_id}",
-        f"{target}.controller_bus={controller_parent_bus}",
-        f"{target}.controller_addr={controller_addr}",
-        f"{target}.controller_mode={attachment['mode']}",
+        f"{target}.device={topo['qdev_id']}",
+        f"{target}.controller={topo['controller']}",
+        f"{target}.controller_bus={topo['bus']}",
+        f"{target}.controller_mode=libvirt-original",
     ])
 
 print(";".join(args))
@@ -4238,22 +4262,12 @@ import sys
 
 parts = os.environ.get("XCOLO_QEMU_ARGS", "").split(";")
 errors = []
-controller_id = "ftctl-xcolo-scsi0"
-controller_seen = False
-controller_fields = {}
 protected_disk_count = 0
 for idx, part in enumerate(parts):
     if part == "-device" and idx + 1 < len(parts):
         opts = parts[idx + 1]
-        if opts.startswith("virtio-scsi-pci,"):
-            fields = {}
-            for raw in opts.split(","):
-                if "=" in raw:
-                    k, v = raw.split("=", 1)
-                    fields[k] = v
-            if fields.get("id") == controller_id:
-                controller_seen = True
-                controller_fields = fields
+        if "id=ftctl-xcolo-pci0" in opts or "id=ftctl-xcolo-scsi0" in opts:
+            errors.append(f"ftctl_guest_visible_controller_forbidden:{opts}")
     if part != "-drive":
         continue
     if idx + 1 >= len(parts):
@@ -4285,39 +4299,12 @@ for idx, part in enumerate(parts):
         errors.append(f"guest_drive_backend_invalid:{drive}")
     bm = re.search(r"(?:^|,)bus=([^,]+)", opts)
     bus = bm.group(1) if bm else ""
-    if bus != f"{controller_id}.0":
-        errors.append(f"guest_bus_controller_mismatch:{bus or 'missing'}")
-    if re.fullmatch(r"scsi[0-9]+\\.0", bus or ""):
-        errors.append(f"guest_bus_libvirt_owned:{bus}")
-
-if protected_disk_count and not controller_seen:
-    errors.append(f"controller_missing:{controller_id}")
-if protected_disk_count and controller_seen:
-    if not controller_fields.get("bus") or not controller_fields.get("addr"):
-        errors.append(f"controller_placement_missing:{controller_id}")
-    if controller_fields.get("bus") == "pcie.0" and controller_fields.get("addr") == "0x1":
-        errors.append(f"controller_placement_reserved:{controller_id}:pcie.0/0x1")
-    if controller_fields.get("bus") != "ftctl-xcolo-pci0":
-        errors.append(f"controller_parent_not_ftctl_owned:{controller_id}:{controller_fields.get('bus') or 'missing'}")
-
-root_port_seen = False
-root_port_pos = -1
-controller_pos = -1
-for idx, part in enumerate(parts):
-    if part != "-device" or idx + 1 >= len(parts):
-        continue
-    opts = parts[idx + 1]
-    if opts.startswith("pcie-root-port,") and "id=ftctl-xcolo-pci0" in opts:
-        root_port_seen = True
-        root_port_pos = idx
-    if opts.startswith("virtio-scsi-pci,") and f"id={controller_id}" in opts:
-        controller_pos = idx
-
-if protected_disk_count:
-    if not root_port_seen:
-        errors.append("ftctl_root_port_missing:ftctl-xcolo-pci0")
-    elif controller_pos >= 0 and root_port_pos > controller_pos:
-        errors.append("ftctl_root_port_order_invalid:ftctl-xcolo-pci0")
+    if not re.fullmatch(r"scsi[0-9]+\\.0", bus or ""):
+        errors.append(f"guest_bus_not_original_scsi:{bus or 'missing'}")
+    im = re.search(r"(?:^|,)id=([^,]+)", opts)
+    qdev_id = im.group(1) if im else ""
+    if not re.fullmatch(r"scsi[0-9]+-[0-9]+-[0-9]+-[0-9]+", qdev_id or ""):
+        errors.append(f"guest_qdev_not_original_scsi:{qdev_id or 'missing'}")
 
 if errors:
     print(",".join(errors))
@@ -4330,11 +4317,11 @@ PY
         "xcolo_startup_disk_backend=invalid" \
         "xcolo_protocol_failure_phase=startup_disk_graph" \
         "last_error=xcolo_startup_block_backend_node_conflict"
-    elif [[ "${out}" == *"guest_bus_controller_mismatch:"* || "${out}" == *"guest_bus_libvirt_owned:"* || "${out}" == *"controller_missing:"* || "${out}" == *"controller_placement_missing:"* || "${out}" == *"controller_placement_reserved:"* || "${out}" == *"controller_parent_not_ftctl_owned:"* || "${out}" == *"ftctl_root_port_missing:"* || "${out}" == *"ftctl_root_port_order_invalid:"* ]]; then
+    elif [[ "${out}" == *"ftctl_guest_visible_controller_forbidden:"* || "${out}" == *"guest_bus_not_original_scsi:"* || "${out}" == *"guest_qdev_not_original_scsi:"* ]]; then
       ftctl_state_set "${vm}" \
         "xcolo_startup_disk_backend=invalid" \
         "xcolo_protocol_failure_phase=startup_disk_graph" \
-        "last_error=xcolo_startup_disk_controller_mismatch"
+        "last_error=xcolo_guest_topology_mismatch"
     elif [[ "${out}" == *"guest_drive_backend_invalid:"* || "${out}" == *"guest_drive_missing:"* ]]; then
       ftctl_state_set "${vm}" \
         "xcolo_startup_disk_backend=invalid" \
@@ -4383,10 +4370,27 @@ for elem in root.iter():
 text = ";".join(args)
 
 missing = []
+errors = []
 
 def require(token):
     if token not in text:
         missing.append(token)
+
+if "ftctl-xcolo-pci0" in text or "ftctl-xcolo-scsi0" in text:
+    errors.append("ftctl_guest_visible_controller_forbidden")
+
+has_original_scsi_disk = False
+for idx, arg in enumerate(args):
+    if arg != "-device" or idx + 1 >= len(args):
+        continue
+    opts = args[idx + 1]
+    if not opts.startswith("scsi-hd,") or "drive=ftctl-colo-" not in opts:
+        continue
+    if "bus=scsi" in opts and ".0" in opts and "id=scsi" in opts:
+        has_original_scsi_disk = True
+
+if not has_original_scsi_disk:
+    errors.append("original_scsi_guest_disk_missing")
 
 if role == "primary":
     for token in [
@@ -4395,9 +4399,7 @@ if role == "primary":
         "filter-mirror",
         "filter-redirector",
         "colo-compare",
-        "ftctl-xcolo-pci0",
-        "ftctl-xcolo-scsi0",
-        "scsi-hd,bus=ftctl-xcolo-scsi0.0",
+        "scsi-hd,bus=scsi",
         "drive=ftctl-colo-",
     ]:
         require(token)
@@ -4408,10 +4410,8 @@ elif role == "secondary":
         "filter-redirector",
         "filter-rewriter",
         "-incoming",
-        "ftctl-xcolo-pci0",
-        "ftctl-xcolo-scsi0",
         "driver=replication",
-        "scsi-hd,bus=ftctl-xcolo-scsi0.0",
+        "scsi-hd,bus=scsi",
         "drive=ftctl-colo-",
     ]:
         require(token)
@@ -4419,15 +4419,24 @@ else:
     print(f"unknown_role:{role}")
     sys.exit(1)
 
-if missing:
-    print("missing:" + ",".join(missing))
+if errors or missing:
+    parts = []
+    if missing:
+        parts.append("missing:" + ",".join(missing))
+    if errors:
+        parts.append("errors:" + ",".join(errors))
+    print(";".join(parts))
     sys.exit(1)
 
 print("ok")
 PY
 )" || rc=$?
   if [[ "${rc}" != "0" ]]; then
-    if [[ "${out}" == *"missing:"* ]]; then
+    if [[ "${out}" == *"ftctl_guest_visible_controller_forbidden"* || "${out}" == *"original_scsi_guest_disk_missing"* ]]; then
+      ftctl_state_set "${vm}" \
+        "xcolo_protocol_failure_phase=startup_commandline_contract" \
+        "last_error=xcolo_guest_topology_mismatch"
+    elif [[ "${out}" == *"missing:"* ]]; then
       if [[ "${out}" == *"compare1"* || "${out}" == *"mirror0"* || "${out}" == *"filter-mirror"* || "${out}" == *"filter-redirector"* || "${out}" == *"colo-compare"* || "${out}" == *"red0"* || "${out}" == *"red1"* || "${out}" == *"-incoming"* || "${out}" == *"filter-rewriter"* ]]; then
         ftctl_state_set "${vm}" \
           "xcolo_protocol_failure_phase=startup_commandline_contract" \
@@ -7641,9 +7650,43 @@ ftctl_xcolo_execute_block_cold_conversion() {
     secondary_hidden="${secondary_pair%%|*}"
     secondary_active="${secondary_pair##*|}"
     primary_base_node="ftctl-primary-parent-${suffix}"
-    primary_qdev="ftctl-colo-${suffix}-dev"
     secondary_base_node="ftctl-parent-${suffix}"
-    secondary_qdev="ftctl-colo-${suffix}-dev"
+    ftctl_xcolo_disk_qdev_from_xml "${primary_generated_xml}" "${target}" primary_qdev || {
+      ftctl_log_event "colo" "xcolo.guest_topology" "fail" "${vm}" "" \
+        "target=${target} role=primary reason=qdev_extract_failed"
+      ftctl_state_set "${vm}" \
+        "conversion_stage=startup_disk_graph_failed" \
+        "conversion_state=error" \
+        "protection_state=error" \
+        "transport_state=failed" \
+        "last_error=xcolo_guest_topology_mismatch"
+      ftctl_xcolo_rollback_block_primary_create_failure "${vm}" "xcolo_guest_topology_mismatch" || true
+      return 1
+    }
+    ftctl_xcolo_disk_qdev_from_xml "${standby_generated_xml}" "${target}" secondary_qdev || {
+      ftctl_log_event "colo" "xcolo.guest_topology" "fail" "${vm}" "" \
+        "target=${target} role=secondary reason=qdev_extract_failed"
+      ftctl_state_set "${vm}" \
+        "conversion_stage=startup_disk_graph_failed" \
+        "conversion_state=error" \
+        "protection_state=error" \
+        "transport_state=failed" \
+        "last_error=xcolo_guest_topology_mismatch"
+      ftctl_xcolo_rollback_block_primary_create_failure "${vm}" "xcolo_guest_topology_mismatch" || true
+      return 1
+    }
+    if [[ "${primary_qdev}" != "${secondary_qdev}" ]]; then
+      ftctl_log_event "colo" "xcolo.guest_topology" "fail" "${vm}" "" \
+        "target=${target} primary_qdev=${primary_qdev} secondary_qdev=${secondary_qdev}"
+      ftctl_state_set "${vm}" \
+        "conversion_stage=startup_disk_graph_failed" \
+        "conversion_state=error" \
+        "protection_state=error" \
+        "transport_state=failed" \
+        "last_error=xcolo_guest_topology_mismatch"
+      ftctl_xcolo_rollback_block_primary_create_failure "${vm}" "xcolo_guest_topology_mismatch" || true
+      return 1
+    fi
     ftctl_state_set "${vm}" \
       "xcolo_disk_${suffix}_primary_base_node=${primary_base_node}" \
       "xcolo_disk_${suffix}_primary_base_backend=${primary_base_node}-bb" \

@@ -4617,6 +4617,91 @@ but a lower-level signature or reached stage changed, set
   - primary VM `i-2-54-VM` is `running` on `10.10.32.3`
   - primary QMP/HMP shows no active block jobs
   - primary QMP/HMP shows no active migration
+
+### Run 92 Monitoring Result 2026-06-06
+
+- Test input:
+  - target VM: `r97-link-01`
+  - primary VM id: `54`
+  - primary instance: `i-2-54-VM`
+  - generated standby VM id: `148`
+  - generated standby instance: `i-2-148-VM`
+  - primary host: `10.10.32.3`
+  - secondary host: `10.10.32.1`
+- Final Cloud DB state:
+  - `ftctl_protection.id=92`
+  - `protection_state=error`
+  - `transport_state=failed`
+  - `last_error=xcolo_runtime_validation_failed:primary_not_running`
+  - primary VM `54` is `Running` on host id `3`
+  - standby VM `148` is DB `Running` on host id `1`
+- Final host runtime state:
+  - primary host `10.10.32.3` has `i-2-54-VM` running again after FTCTL
+    runtime recovery
+  - secondary host `10.10.32.1` has `i-2-148-VM` paused with incoming
+    migration listener `10.10.32.1:9998`
+  - this remaining secondary runtime is failure evidence and must be cleaned
+    before the next retest
+- Progress confirmed:
+  - generated commandline contract passed for both roles:
+    - primary generated XML contained network COLO args and disk graph args
+    - secondary generated XML contained redirection/filter args, incoming
+      migration, and disk graph args
+  - both baseline seeds completed:
+    - `xcolo_disk_sda_baseline_seeded=true`
+    - `xcolo_disk_sdb_baseline_seeded=true`
+  - startup disk graph was enabled:
+    - `xcolo_startup_disk_graph=enabled`
+  - primary and secondary generated domains were created
+  - before migration, channel checks passed:
+    - `xcolo.socket_snapshot phase=pre_migrate` showed primary `9003/9004`
+      listening and secondary `9003/9004` established
+    - `xcolo.chardev_contract phase=pre_guest_traffic_contract` passed
+  - migration command was accepted:
+    - `primary.migrate result=ok`
+    - `xcolo.post_migrate_transition phase=startup_active_validation`
+      reported primary/secondary migration `active`
+  - post-migrate channel checks initially still passed:
+    - `xcolo.socket_snapshot phase=post_migrate_startup_active_validation`
+      showed secondary `9003/9004` established
+    - `xcolo.chardev_contract phase=post_migrate_startup_active_validation`
+      passed
+- Failure evidence:
+  - secondary QEMU on `10.10.32.1` crashed after migration activation:
+    - `qemu-kvm: ../system/memory.c:2666: memory_region_add_subregion_common:
+      Assertion '!subregion->container' failed.`
+    - libvirt recorded shutdown reason `crashed`
+  - primary QEMU then logged:
+    - `Can't receive COLO message: Input/output error`
+  - after the secondary crash, FTCTL post-activation validation detected the
+    broken paths:
+    - `xcolo.socket_snapshot phase=post_migrate_post_activation_validation`
+      showed secondary `9003/9004` closed
+    - `xcolo.chardev_contract` failed with
+      `mirror_path_secondary_red0=query_failed,compare_path_secondary_red1=query_failed/query_failed`
+  - FTCTL later failed the job as:
+    - `xcolo_runtime_validation_failed:primary_not_running`
+    - this is a downstream validation result, not the first cause
+- Repetition analysis:
+  - this is not Run 91 repeating.
+  - Run 91 failed before opening primary COLO listeners because network
+    commandline args were dropped.
+  - Run 92 includes both network and disk startup args, reached successful
+    pre-migrate channel validation, accepted migration, and entered the
+    post-migrate validation boundary.
+  - the repeated primary-side `Can't receive COLO message: Input/output error`
+    is currently a symptom of secondary QEMU termination, not the primary root
+    cause in this run.
+- Corrected direction:
+  - preserve the current commandline merge and startup graph corrections; they
+    moved the test past the previous boundary.
+  - next investigation must focus on the secondary QEMU assertion crash, using
+    QEMU 9.2.4 code-level analysis and the exact secondary command line.
+  - FTCTL should also fail faster when the secondary QMP/domain disappears
+    during steady-state wait, instead of waiting until a later primary runtime
+    validation reports `primary_not_running`.
+  - the failure classifier should report the first cause as a secondary QEMU
+    crash or secondary domain loss when that is observed.
   - only `i-2-54-VM` is running on the 32.x hosts for this test target
   - removed standby RBD images now return `No such file or directory`
 
