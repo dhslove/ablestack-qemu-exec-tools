@@ -2568,6 +2568,98 @@ tail -n 360 \"/var/log/libvirt/qemu/\${domain}.log\" 2>/dev/null || true"
     "xcolo_secondary_qemu_log_tail_rc=${rc}"
 }
 
+ftctl_xcolo_secondary_qemu_assert_memory_region_container_observed() {
+  local vm="${1-}"
+  local secondary_vm="${2:-$vm}"
+  local log_file
+
+  [[ -n "${vm}" && -n "${secondary_vm}" ]] || return 1
+  ftctl_xcolo_capture_qemu_log_tails "${vm}" "${secondary_vm}" || true
+  log_file="$(ftctl_xcolo_debug_dir "${vm}")/secondary-qemu-log-tail.txt"
+  if grep -Eq "memory_region_add_subregion_common|Assertion .*subregion->container|Assertion .*!subregion->container" "${log_file}" 2>/dev/null; then
+    ftctl_state_set "${vm}" \
+      "xcolo_secondary_qemu_assert=memory_region_add_subregion_common" \
+      "xcolo_secondary_crash_detected=yes" \
+      "xcolo_secondary_crash_assertion=memory_region_add_subregion_common"
+    return 0
+  fi
+  return 1
+}
+
+ftctl_xcolo_capture_post_migrate_secondary_failure_evidence() {
+  local vm="${1-}"
+  local secondary_vm="${2:-$vm}"
+  local phase="${3:-post_migrate_secondary_crash}"
+  local primary_argv="" secondary_argv="" summary="" debug_dir=""
+
+  [[ -n "${vm}" && -n "${secondary_vm}" ]] || return 0
+  [[ "${FTCTL_DRY_RUN}" != "1" ]] || return 0
+
+  debug_dir="$(ftctl_xcolo_debug_dir "${vm}")"
+  ftctl_state_set "${vm}" \
+    "xcolo_post_migrate_failure_evidence_phase=${phase}" \
+    "xcolo_debug_dir=${debug_dir}"
+
+  ftctl_xcolo_collect_runtime_failure_diagnostics "${vm}" "${secondary_vm}" || true
+  ftctl_xcolo_capture_socket_snapshot "${vm}" "${phase}" || true
+  ftctl_xcolo_capture_failure_chardev_snapshot "${vm}" "${secondary_vm}" "${phase}" || true
+  ftctl_xcolo_capture_policy_snapshot "${vm}" "${phase}" || true
+  ftctl_xcolo_capture_live_runtime_topology_one "${vm}" "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" "primary" "${phase}" || true
+  ftctl_xcolo_capture_live_runtime_topology_one "${vm}" "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" "secondary" "${phase}" || true
+  ftctl_xcolo_capture_qemu_proc_args_pair "${vm}" "${secondary_vm}" "${phase}" primary_argv secondary_argv || true
+
+  summary="$(DEBUG_DIR="${debug_dir}" PHASE="${phase}" PRIMARY_ARGV="${primary_argv}" SECONDARY_ARGV="${secondary_argv}" python3 - <<'PY'
+import hashlib
+import os
+
+debug_dir = os.environ.get("DEBUG_DIR", "")
+phase = os.environ.get("PHASE", "")
+primary_argv = os.environ.get("PRIMARY_ARGV", "")
+secondary_argv = os.environ.get("SECONDARY_ARGV", "")
+
+def file_digest(name):
+    path = os.path.join(debug_dir, name)
+    if not os.path.exists(path):
+        return "missing"
+    data = open(path, "rb").read()
+    return f"size={len(data)} sha256={hashlib.sha256(data).hexdigest()}"
+
+def first_matching_line(name, needles):
+    path = os.path.join(debug_dir, name)
+    if not os.path.exists(path):
+        return ""
+    with open(path, "r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            if any(needle in line for needle in needles):
+                return line.strip()
+    return ""
+
+primary_devices = sum(1 for line in primary_argv.splitlines() if line == "-device")
+secondary_devices = sum(1 for line in secondary_argv.splitlines() if line == "-device")
+assertion = first_matching_line("secondary-qemu-log-tail.txt", [
+    "memory_region_add_subregion_common",
+    "subregion->container",
+    "reason=crashed",
+])
+
+print(f"phase={phase}")
+print(f"primary_argv_devices={primary_devices}")
+print(f"secondary_argv_devices={secondary_devices}")
+print(f"primary_argv={file_digest('primary-live-qemu-argv-' + phase + '.txt')}")
+print(f"secondary_argv={file_digest('secondary-live-qemu-argv-' + phase + '.txt')}")
+print(f"primary_pci={file_digest('primary-info-pci-' + phase + '.txt')}")
+print(f"secondary_pci={file_digest('secondary-info-pci-' + phase + '.txt')}")
+print(f"primary_qtree={file_digest('primary-info-qtree-' + phase + '.txt')}")
+print(f"secondary_qtree={file_digest('secondary-info-qtree-' + phase + '.txt')}")
+print(f"primary_mtree={file_digest('primary-info-mtree-' + phase + '.txt')}")
+print(f"secondary_mtree={file_digest('secondary-info-mtree-' + phase + '.txt')}")
+print(f"secondary_log_assertion={assertion or 'not_observed'}")
+PY
+)" || summary="phase=${phase}"$'\n'"summary=failed"
+  ftctl_xcolo_write_debug_file "${vm}" "migration-abi-failure-summary-${phase}.txt" "${summary}" || true
+  ftctl_state_set "${vm}" "xcolo_post_migrate_failure_evidence_captured=yes"
+}
+
 ftctl_xcolo_primary_filter_mirror_send_errno() {
   local vm="${1-}"
   local out="" err="" rc=0
@@ -3830,6 +3922,27 @@ ftctl_xcolo_validate_pair_runtime() {
     secondary_block_graph="$(ftctl_state_get "${vm}" "xcolo_secondary_block_graph_ready" 2>/dev/null || true)"
     secondary_block_graph_reason="$(ftctl_state_get "${vm}" "xcolo_secondary_block_graph_reason" 2>/dev/null || true)"
 
+    if [[ ( "${primary_migrate}" == "active" || "${primary_migrate}" == "colo" ||
+            "${primary_colo}" == "primary" || "${primary_status}" == "finish-migrate" ) &&
+          ( "${secondary_running}" != "true" || "${secondary_xml}" != "ok" ||
+            -z "${secondary_migrate}" || -z "${secondary_status}" ) ]]; then
+      ftctl_xcolo_capture_post_migrate_secondary_failure_evidence "${vm}" "${secondary_vm}" "post_migrate_secondary_crash" || true
+      if ftctl_xcolo_secondary_qemu_assert_memory_region_container_observed "${vm}" "${secondary_vm}"; then
+        reason="secondary_qemu_assert_memory_region_container"
+      else
+        reason="secondary_runtime_missing_after_migrate"
+      fi
+      ftctl_state_set "${vm}" \
+        "xcolo_protocol_failure_phase=post_migrate_secondary_crash" \
+        "xcolo_secondary_runtime_missing_after_migrate=yes" \
+        "xcolo_secondary_runtime_missing_after_migrate_primary_migrate=${primary_migrate}" \
+        "xcolo_secondary_runtime_missing_after_migrate_primary_colo=${primary_colo}" \
+        "xcolo_secondary_runtime_missing_after_migrate_primary_status=${primary_status}" \
+        "xcolo_secondary_runtime_missing_after_migrate_secondary_status=${secondary_status}" \
+        "xcolo_secondary_runtime_missing_after_migrate_secondary_migrate=${secondary_migrate}"
+      break
+    fi
+
     if [[ "${socket_runtime_captured}" != "yes" &&
           ( "${primary_migrate}" == "active" || "${primary_migrate}" == "failed" || "${secondary_migrate}" == "colo" ) ]]; then
       ftctl_xcolo_capture_socket_snapshot "${vm}" "runtime" || true
@@ -4099,6 +4212,19 @@ ftctl_xcolo_validate_pair_runtime() {
       last_error_value="xcolo_repeated_protocol_invalid_message"
       protocol_reason="$(ftctl_state_get "${vm}" "xcolo_protocol_invalid_message_reason" 2>/dev/null || true)"
       [[ -n "${protocol_reason}" ]] || protocol_reason="qemu_colo_protocol_invalid_message"
+    elif [[ "${reason}" == "secondary_qemu_assert_memory_region_container" ]]; then
+      last_error_value="xcolo_secondary_qemu_assert_memory_region_container"
+      protocol_reason="secondary_qemu_crashed_while_applying_migration_state"
+      ftctl_state_set "${vm}" \
+        "xcolo_protocol_failure_phase=post_migrate_secondary_crash" \
+        "xcolo_secondary_qemu_assert=memory_region_add_subregion_common" \
+        "xcolo_secondary_crash_detected=yes"
+    elif [[ "${reason}" == "secondary_runtime_missing_after_migrate" ]]; then
+      last_error_value="xcolo_secondary_runtime_missing_after_migrate"
+      protocol_reason="secondary_runtime_disappeared_after_primary_migrate"
+      ftctl_state_set "${vm}" \
+        "xcolo_protocol_failure_phase=post_migrate_secondary_crash" \
+        "xcolo_secondary_crash_detected=unknown"
     fi
     ftctl_state_set "${vm}" \
       "xcolo_primary_running=${primary_running}" \

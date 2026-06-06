@@ -496,3 +496,56 @@ xcolo_startup_disk_topology_missing
 
 This is distinct from `xcolo_guest_topology_mismatch`, which means primary and
 secondary topology fingerprints exist but do not match.
+
+## Run 103 Post-Migrate Crash Classification
+
+Run 103 passed the corrected pre-migrate guest ABI checks:
+
+- static generated guest ABI manifest: `ok`;
+- live QEMU `-device` argv equality: `ok`;
+- pre-migrate HMP `info pci` difference: retained as evidence only.
+
+The run then executed `primary.migrate` and failed later when the secondary
+QEMU process crashed while applying migration state:
+
+```text
+qemu-kvm: ../system/memory.c:2666: memory_region_add_subregion_common:
+Assertion `!subregion->container' failed.
+```
+
+This phase must not be represented as a generic pending state. Once the primary
+has entered `active`/`colo` migration or the primary COLO role and the secondary
+domain disappears or stops answering QMP, FTCTL must:
+
+1. capture post-migrate failure evidence:
+   - primary and secondary QEMU log tails;
+   - QMP status/chardev/block snapshots;
+   - socket and policy snapshots;
+   - live `info pci`, `info qtree`, and `info mtree`;
+   - primary/secondary QEMU argv;
+2. classify a secondary `memory_region_add_subregion_common` assertion as:
+
+```text
+xcolo_secondary_qemu_assert_memory_region_container
+```
+
+3. classify secondary disappearance without that assertion as:
+
+```text
+xcolo_secondary_runtime_missing_after_migrate
+```
+
+4. set `xcolo_protocol_failure_phase=post_migrate_secondary_crash`;
+5. enter runtime convergence recovery so the protect job releases its lock and
+   Cloud state becomes `error`/`failed`, not `pairing`/`planned`.
+
+The evidence summary file is:
+
+```text
+debug/xcolo/<vm>/migration-abi-failure-summary-post_migrate_secondary_crash.txt
+```
+
+The next engineering task after this classification is not another pre-migrate
+gate. It is to compare the captured QEMU argv, qtree, mtree, and PCI evidence
+to find the remaining migration ABI mismatch that makes secondary QEMU assert
+when loading the incoming state.

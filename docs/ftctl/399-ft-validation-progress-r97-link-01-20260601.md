@@ -5944,3 +5944,76 @@ secondary={"addr":"bus=0 device=2 function=1","class":"PCI bridge: PCI device 1b
   - if a later run fails with `Operation not permitted` or invalid COLO
     messages, do not return to pre-migrate PCI gating unless the live
     `-device` argv or static ABI manifest actually differs.
+
+### Run 103 Monitoring Result 2026-06-07
+
+- Test action:
+  - user started FT protection after Run 102 cleanup and deployment.
+  - Cloud created protection row `103` and standby VM `159` /
+    `i-2-159-VM`.
+- Confirmed improvement:
+  - Run 102 pre-migrate PCI identity failure did not recur.
+  - generated primary/secondary runtime started.
+  - `primary.migrate` was executed and accepted.
+  - primary entered COLO/migrate state instead of failing before migrate.
+- Final observed stuck state before this fix:
+
+```text
+ftctl_protection.id=103
+protection_state=pairing
+transport_state=planned
+active_side=secondary
+primary=i-2-54-VM on 10.10.32.3 status=colo/paused
+secondary=i-2-159-VM on 10.10.32.1 missing from libvirt
+```
+
+- Secondary QEMU evidence:
+
+```text
+qemu-kvm: ../system/memory.c:2666: memory_region_add_subregion_common:
+Assertion `!subregion->container' failed.
+shutting down, reason=crashed
+```
+
+- Interpretation:
+  - this is progress, not a repeat of Run 102.
+  - the remaining issue is now post-migrate migration ABI/runtime topology
+    compatibility.
+  - Cloud DB said standby `Running` because the transient secondary QEMU domain
+    crashed after libvirt start; FTCTL did not yet classify that crash and left
+    the protect job/lock in a pending state.
+- Repetition guard:
+  - do not return to pre-migrate `info pci` fatal gating.
+  - do not rework live argv/static manifest unless the new evidence shows a
+    real commandline mismatch.
+  - if `memory_region_add_subregion_common` appears again, it must be reported
+    as a repeated post-migrate secondary QEMU assertion and investigated from
+    the captured argv/qtree/mtree/PCI evidence.
+
+### Run 103 Fix Plan 2026-06-07
+
+- Correction target:
+  - classify secondary disappearance after `primary.migrate` as an immediate
+    post-migrate failure instead of runtime pending.
+  - preserve evidence needed for the next ABI diff pass.
+  - guarantee the protect job enters runtime recovery, releases its lock, and
+    returns Cloud state to `error`/`failed`.
+- Design update:
+  - after primary migrate status becomes `active`/`colo`, or primary COLO mode
+    becomes `primary`, missing secondary QMP/libvirt state is treated as
+    `post_migrate_secondary_crash`.
+  - if the secondary QEMU log contains `memory_region_add_subregion_common` or
+    `subregion->container`, the exact error is:
+
+```text
+xcolo_secondary_qemu_assert_memory_region_container
+```
+
+  - otherwise the exact error is:
+
+```text
+xcolo_secondary_runtime_missing_after_migrate
+```
+
+  - evidence is stored under `debug/xcolo/<vm>/`, including
+    `migration-abi-failure-summary-post_migrate_secondary_crash.txt`.
