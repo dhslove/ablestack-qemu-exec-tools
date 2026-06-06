@@ -4354,20 +4354,123 @@ PY
     "role=${role}"
 }
 
+ftctl_xcolo_validate_generated_commandline_contract() {
+  local vm="${1-}"
+  local xml_path="${2-}"
+  local role="${3-}"
+  local out="" rc=0
+
+  out="$(XML_PATH="${xml_path}" ROLE="${role}" python3 - <<'PY'
+import os
+import sys
+import xml.etree.ElementTree as ET
+
+xml_path = os.environ["XML_PATH"]
+role = os.environ["ROLE"]
+
+try:
+    root = ET.parse(xml_path).getroot()
+except Exception as exc:
+    print(f"xml_parse_failed:{exc}")
+    sys.exit(1)
+
+args = []
+for elem in root.iter():
+    if elem.tag.endswith("arg"):
+        value = elem.get("value")
+        if value:
+            args.append(value)
+text = ";".join(args)
+
+missing = []
+
+def require(token):
+    if token not in text:
+        missing.append(token)
+
+if role == "primary":
+    for token in [
+        "id=compare1",
+        "id=mirror0",
+        "filter-mirror",
+        "filter-redirector",
+        "colo-compare",
+        "ftctl-xcolo-pci0",
+        "ftctl-xcolo-scsi0",
+        "scsi-hd,bus=ftctl-xcolo-scsi0.0",
+        "drive=ftctl-colo-",
+    ]:
+        require(token)
+elif role == "secondary":
+    for token in [
+        "id=red0",
+        "id=red1",
+        "filter-redirector",
+        "filter-rewriter",
+        "-incoming",
+        "ftctl-xcolo-pci0",
+        "ftctl-xcolo-scsi0",
+        "driver=replication",
+        "scsi-hd,bus=ftctl-xcolo-scsi0.0",
+        "drive=ftctl-colo-",
+    ]:
+        require(token)
+else:
+    print(f"unknown_role:{role}")
+    sys.exit(1)
+
+if missing:
+    print("missing:" + ",".join(missing))
+    sys.exit(1)
+
+print("ok")
+PY
+)" || rc=$?
+  if [[ "${rc}" != "0" ]]; then
+    if [[ "${out}" == *"missing:"* ]]; then
+      if [[ "${out}" == *"compare1"* || "${out}" == *"mirror0"* || "${out}" == *"filter-mirror"* || "${out}" == *"filter-redirector"* || "${out}" == *"colo-compare"* || "${out}" == *"red0"* || "${out}" == *"red1"* || "${out}" == *"-incoming"* || "${out}" == *"filter-rewriter"* ]]; then
+        ftctl_state_set "${vm}" \
+          "xcolo_protocol_failure_phase=startup_commandline_contract" \
+          "last_error=xcolo_startup_network_args_missing"
+      else
+        ftctl_state_set "${vm}" \
+          "xcolo_protocol_failure_phase=startup_commandline_contract" \
+          "last_error=xcolo_startup_disk_args_missing"
+      fi
+    else
+      ftctl_state_set "${vm}" \
+        "xcolo_protocol_failure_phase=startup_commandline_contract" \
+        "last_error=xcolo_startup_commandline_contract_invalid"
+    fi
+    ftctl_log_event "colo" "xcolo.startup_commandline_contract" "fail" "${vm}" "" \
+      "role=${role} path=${xml_path} reason=$(ftctl_xcolo_compact_log_value "${out}")"
+    return 1
+  fi
+
+  ftctl_log_event "colo" "xcolo.startup_commandline_contract" "ok" "${vm}" "" \
+    "role=${role} path=${xml_path}"
+}
+
 ftctl_xcolo_apply_startup_disk_graphs() {
   local vm="${1-}"
   local primary_xml="${2-}"
   local secondary_xml="${3-}"
   local disk_runtime="${4-}"
-  local primary_net_args secondary_net_args primary_disk_args secondary_disk_args
+  local primary_net_args="${5-}"
+  local secondary_net_args="${6-}"
+  local primary_disk_args secondary_disk_args
   local primary_args secondary_args
 
   [[ -n "${vm}" && -f "${primary_xml}" && -f "${secondary_xml}" && -n "${disk_runtime}" ]] || return 1
 
-  primary_net_args="$(ftctl_state_get "${vm}" "xcolo_primary_qemu_args_network" 2>/dev/null || true)"
-  secondary_net_args="$(ftctl_state_get "${vm}" "xcolo_secondary_qemu_args_network" 2>/dev/null || true)"
-  [[ -n "${primary_net_args}" ]] || primary_net_args="$(ftctl_state_get "${vm}" "primary_qemu_args" 2>/dev/null || true)"
-  [[ -n "${secondary_net_args}" ]] || secondary_net_args="$(ftctl_state_get "${vm}" "secondary_qemu_args" 2>/dev/null || true)"
+  if [[ -z "${primary_net_args}" || -z "${secondary_net_args}" ]]; then
+    ftctl_state_set "${vm}" \
+      "xcolo_protocol_failure_phase=startup_commandline_contract" \
+      "last_error=xcolo_startup_network_args_missing"
+    ftctl_log_event "colo" "xcolo.startup_commandline_contract" "fail" "${vm}" "" \
+      "role=both reason=network_args_not_passed"
+    return 1
+  fi
 
   ftctl_xcolo_build_startup_disk_args "${primary_xml}" "primary" "${disk_runtime}" primary_disk_args || return 1
   ftctl_xcolo_build_startup_disk_args "${secondary_xml}" "secondary" "${disk_runtime}" secondary_disk_args || return 1
@@ -4389,6 +4492,8 @@ ftctl_xcolo_apply_startup_disk_graphs() {
   ftctl_xcolo_xml_remove_disk_targets "${secondary_xml}" "${disk_runtime}" || return 1
   ftctl_xml_apply_qemu_commandline "${primary_xml}" "${primary_args}" || return 1
   ftctl_xml_apply_qemu_commandline "${secondary_xml}" "${secondary_args}" || return 1
+  ftctl_xcolo_validate_generated_commandline_contract "${vm}" "${primary_xml}" "primary" || return 1
+  ftctl_xcolo_validate_generated_commandline_contract "${vm}" "${secondary_xml}" "secondary" || return 1
 
   ftctl_state_set "${vm}" \
     "xcolo_startup_disk_graph=enabled" \
@@ -7558,7 +7663,7 @@ ftctl_xcolo_execute_block_cold_conversion() {
       "target=${target} primary_overlay=${primary_overlay} secondary_hidden=${secondary_hidden} secondary_active=${secondary_active}"
   done
 
-  ftctl_xcolo_apply_startup_disk_graphs "${vm}" "${primary_generated_xml}" "${standby_generated_xml}" "${disk_runtime}" || {
+  ftctl_xcolo_apply_startup_disk_graphs "${vm}" "${primary_generated_xml}" "${standby_generated_xml}" "${disk_runtime}" "${primary_qemu_args}" "${secondary_qemu_args}" || {
     startup_error="$(ftctl_state_get "${vm}" "last_error" 2>/dev/null || true)"
     [[ -n "${startup_error}" ]] || startup_error="xcolo_startup_disk_graph_prepare_failed"
     ftctl_state_set "${vm}" \

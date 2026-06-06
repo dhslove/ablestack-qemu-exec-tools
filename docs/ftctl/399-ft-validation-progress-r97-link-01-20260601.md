@@ -4733,3 +4733,58 @@ but a lower-level signature or reached stage changed, set
   - removed standby RBD images now return `No such file or directory`
   - primary QMP/HMP shows no active block jobs
   - primary QMP/HMP shows no active migration
+
+### Run 91 Monitoring - Network COLO Args Dropped From Generated XML 2026-06-06
+
+- Test trigger:
+  - user started FT protection for `r97-link-01`
+  - primary VM: `54` / `i-2-54-VM`
+  - standby VM: `147` / `i-2-147-VM`
+- Final DB state:
+  - `ftctl_protection.id=91`
+  - `protection_state=error`
+  - `transport_state=failed`
+  - `last_error=xcolo_block_primary_listener_wait_failed`
+  - primary VM `54` remained `Running` on host id `3`
+  - standby VM `147` was left DB `Running` on host id `1`
+- Progress confirmed:
+  - baseline seed completed for both protected disks:
+    - `xcolo_disk_sda_baseline_seeded=true`
+    - `xcolo_disk_sdb_baseline_seeded=true`
+  - startup disk graph validation passed for both roles
+  - the owned root-port correction worked:
+    - `primary_qemu_args` contained
+      `pcie-root-port,id=ftctl-xcolo-pci0,bus=pcie.0,addr=0x3,...`
+    - `virtio-scsi-pci,id=ftctl-xcolo-scsi0,bus=ftctl-xcolo-pci0,addr=0x0`
+  - primary generated domain creation succeeded:
+    - `Domain 'i-2-54-VM' created from .../primary.generated.xml`
+  - secondary generated domain creation also reached incoming migration setup:
+    - standby QMP `query-migrate` returned `status=setup`
+    - standby was listening on `10.10.32.1:9998`
+- Failure evidence:
+  - primary generated XML had no network COLO command-line args:
+    - `compare1` count: `0`
+    - `mirror0` count: `0`
+    - `filter-mirror` count: `0`
+  - primary generated XML contained only the FTCTL-owned PCI root-port, SCSI
+    controller, and disk graph command-line args.
+  - primary QEMU log for the generated domain showed no `-chardev compare1`,
+    no `-chardev mirror0`, and no filter objects.
+  - no primary listener was opened on ports `9003` or `9004`, so listener wait
+    timed out.
+- Repetition analysis:
+  - this is not Run 90 repeating.
+  - Run 90 failed before generated primary startup because `bus=pci.7` was not
+    found.
+  - Run 91 passed generated startup with the owned root-port but failed because
+    the command-line XML merge path dropped the COLO network args.
+- Corrected direction:
+  - `ftctl_xcolo_apply_startup_disk_graphs` must append disk graph args to the
+    existing network COLO args instead of replacing them.
+  - generated XML must be validated for both contracts before `virsh create`:
+    - network COLO contract: `compare1`, `mirror0`, `filter-mirror`,
+      `filter-redirector`, and `colo-compare`
+    - disk graph contract: `ftctl-xcolo-pci0`, `ftctl-xcolo-scsi0`,
+      protected disk `-drive` and `scsi-hd` args
+  - if either contract is missing, fail before primary shutdown/create with a
+    dedicated classifier such as `xcolo_startup_network_args_missing`.
