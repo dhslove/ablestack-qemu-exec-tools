@@ -5042,3 +5042,107 @@ Bus 'scsi0.0' not found
   - removed standby RBD images now return `No such file or directory`
   - primary QMP/HMP shows no active block jobs
   - primary QMP/HMP shows no active migration
+
+### Run 95 Monitoring Result 2026-06-06
+
+- Test trigger:
+  - user started FT protection for `r97-link-01`
+  - primary VM: `54` / `i-2-54-VM`
+  - generated standby VM: `151` / `i-2-151-VM`
+  - primary host: `10.10.32.3`
+  - secondary host: `10.10.32.1`
+- Deployed source at test start:
+  - `27ae986efbe4121e23bf763ed830e61270c8e84f`
+  - `fix: reproduce xcolo scsi controller topology`
+- Confirmed improvement:
+  - Run 94 `Bus 'scsi0.0' not found` did not recur.
+  - generated primary and secondary XML removed the protected libvirt disk
+    entries and reproduced the original SCSI controller through
+    `qemu:commandline`:
+    - `virtio-scsi-pci,id=scsi0,bus=pcie.0,addr=0x9,num_queues=2`
+    - `scsi-hd,bus=scsi0.0,...,id=scsi0-0-0-0`
+    - `scsi-hd,bus=scsi0.0,...,id=scsi0-0-0-1`
+  - both startup graphs reached the migration path:
+    - standby state became `running`
+    - pre-migrate socket contract passed
+    - pre-migrate chardev contract passed
+    - `query-migrate` progressed from `active` into primary `colo`
+- Failure evidence:
+  - secondary QEMU crashed during migration state load:
+
+```text
+qemu-kvm: ../system/memory.c:2666: memory_region_add_subregion_common:
+Assertion `!subregion->container' failed.
+```
+
+  - primary QEMU then logged:
+
+```text
+Can't receive COLO message: Input/output error
+```
+
+  - final Cloud DB state at evidence collection:
+    - `ftctl_protection.id=95`
+    - `protection_state=pairing`
+    - `transport_state=planned`
+    - `provisioning_state=Ready`
+    - primary VM `54` was DB `Running` on host id `3`
+    - standby VM `151` was DB `Stopped`
+  - runtime state after the crash:
+    - primary `query-migrate` returned `status=colo`
+    - primary `virsh domstate` returned `paused`
+    - secondary domain `i-2-151-VM` no longer existed in libvirt
+- Repetition analysis:
+  - this is not the Run 94 `scsi0.0` bus creation failure.
+  - it is a return to the migration-state assertion class seen in earlier
+    immutable-topology investigations.
+  - the new evidence narrows the remaining mismatch: QEMU can now create the
+    same visible `scsi0/scsi0-0-0-*` names, but the device state restored by
+    migration still does not match the exact libvirt-created SCSI/PCI device
+    properties closely enough.
+- Corrected direction:
+  - compare the normal libvirt-expanded QEMU command line for the original
+    Cloud VM against the FT generated command line for the SCSI controller and
+    protected disks.
+  - reproduce not only `id`, `bus`, `addr`, and `num_queues`, but every
+    migration-visible property that libvirt normally emits for the
+    `virtio-scsi-pci` controller and `scsi-hd` disks.
+  - add a startup topology diff guard before migration that checks command-line
+    parity for protected disk controller properties and fails fast with a
+    classifier such as `xcolo_startup_scsi_property_mismatch` instead of
+    reaching QEMU assertion.
+  - preserve the COLO network, RBD native backend, and commandline SCSI
+    controller reproduction fixes already validated by this run.
+
+### Libvirt QEMU Log Property Parity Implementation 2026-06-06
+
+- Source correction prepared after Run 95:
+  - use `/var/log/libvirt/qemu/<domain>.log` as the normal Cloud/libvirt argv
+    reference for protected guest-visible device properties.
+  - parse the latest normal QEMU argv block that is not an FT generated block
+    and does not contain `ftctl-colo-*`, `colo-compare`, or `filter-mirror`.
+  - extract normal `virtio-scsi-pci` and `scsi-hd` JSON device properties from
+    the log.
+  - when generating FT startup disk devices, prefer log-derived values for:
+    - `num_queues`
+    - `serial`
+    - `device_id`
+    - `bootindex`
+    - `write-cache`
+    - `share-rw`
+  - fall back to XML-derived values only when the log reference is unavailable.
+- Validation added:
+  - every protected generated `scsi-hd` must include `write-cache=on`.
+  - generated primary and secondary commandline contracts now require
+    `write-cache=on` before domain creation.
+- Local validation:
+  - `bash -n lib/ftctl/xcolo.sh`: passed
+  - `bash -n lib/ftctl/standby.sh`: passed
+  - embedded Python payload compile check: passed
+  - `git diff --check`: passed
+- Expected retest difference:
+  - generated FT argv should now match the normal Cloud/libvirt protected disk
+    device properties more closely.
+  - for `r97-link-01`, root disk bootindex should come from the normal log
+    (`bootindex=3`) instead of the transient rewrite boot order (`9`), and both
+    protected disks should carry `write-cache=on`.

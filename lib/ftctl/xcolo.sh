@@ -4168,6 +4168,7 @@ ftctl_xcolo_build_startup_disk_args() {
   local role="${2-}"
   local disk_runtime="${3-}"
   local out_var="${4}"
+  local reference_qemu_log="${5-}"
   local payload
 
   command -v python3 >/dev/null 2>&1 || {
@@ -4175,15 +4176,18 @@ ftctl_xcolo_build_startup_disk_args() {
     return 2
   }
 
-  payload="$(XML_PATH="${xml_path}" ROLE="${role}" DISK_RUNTIME="${disk_runtime}" python3 - <<'PY'
+  payload="$(XML_PATH="${xml_path}" ROLE="${role}" DISK_RUNTIME="${disk_runtime}" REFERENCE_QEMU_LOG="${reference_qemu_log}" python3 - <<'PY'
+import json
 import os
 import re
+import shlex
 import sys
 import xml.etree.ElementTree as ET
 
 xml_path = os.environ["XML_PATH"]
 role = os.environ["ROLE"]
 runtime_raw = os.environ.get("DISK_RUNTIME", "")
+reference_qemu_log = os.environ.get("REFERENCE_QEMU_LOG", "")
 
 def suffix(value):
     return re.sub(r"[^A-Za-z0-9_.-]", "_", value or "root")
@@ -4237,6 +4241,82 @@ def text_of(elem, default=""):
         return default
     return elem.text.strip()
 
+def parse_qemu_log_device_references(path):
+    refs = {}
+    controllers = {}
+    if not path or not os.path.exists(path):
+        return refs, controllers
+
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return refs, controllers
+
+    blocks = []
+    current = []
+    in_block = False
+    for line in lines:
+        if line.startswith("LC_ALL=C"):
+            if current:
+                blocks.append(current)
+            current = [line]
+            in_block = True
+            continue
+        if in_block:
+            current.append(line)
+            if line.strip() == "-msg timestamp=on" or line.strip() == "-msg timestamp=on \\":
+                blocks.append(current)
+                current = []
+                in_block = False
+    if current:
+        blocks.append(current)
+
+    def qemu_arg_after_device(line):
+        stripped = line.strip()
+        if not stripped.startswith("-device "):
+            return ""
+        value = stripped[len("-device "):].strip()
+        if value.endswith("\\"):
+            value = value[:-1].strip()
+        try:
+            parts = shlex.split(value)
+            if parts:
+                return parts[0]
+        except ValueError:
+            pass
+        return value.strip("'\"")
+
+    for block in reversed(blocks):
+        text = "".join(block)
+        if "/usr/libexec/qemu-kvm" not in text:
+            continue
+        if "ftctl-colo-" in text or "colo-compare" in text or "filter-mirror" in text:
+            continue
+        block_refs = {}
+        block_controllers = {}
+        for line in block:
+            arg = qemu_arg_after_device(line)
+            if not arg:
+                continue
+            try:
+                data = json.loads(arg)
+            except json.JSONDecodeError:
+                continue
+            driver = data.get("driver")
+            qdev_id = data.get("id")
+            if not driver or not qdev_id:
+                continue
+            if driver == "scsi-hd":
+                block_refs[qdev_id] = data
+            elif driver == "virtio-scsi-pci":
+                block_controllers[qdev_id] = data
+        if block_refs:
+            return block_refs, block_controllers
+    return refs, controllers
+
+reference_disks, reference_controllers = parse_qemu_log_device_references(reference_qemu_log)
+
 def disk_topology(target, disk, disk_index):
     target_elem = disk.find("target")
     bus_type = target_elem.get("bus") if target_elem is not None else ""
@@ -4260,6 +4340,10 @@ def disk_topology(target, disk, disk_index):
     serial = text_of(disk.find("serial"))
     boot = disk.find("boot")
     boot_order = boot.get("order") if boot is not None else ""
+    driver = disk.find("driver")
+    write_cache = ""
+    if driver is not None and (driver.get("cache") or "").strip() == "writeback":
+        write_cache = "on"
 
     return {
         "bus": f"{controller_id}.0",
@@ -4271,6 +4355,7 @@ def disk_topology(target, disk, disk_index):
         "qdev_id": qdev_id,
         "serial": serial,
         "boot_order": boot_order,
+        "write_cache": write_cache,
     }
 
 def pci_bus_aliases(devices):
@@ -4328,9 +4413,13 @@ def scsi_controller_command(devices, controller_index):
     addr = f"0x{slot:x}" if function == 0 else f"0x{slot:x}.0x{function:x}"
 
     opts = f"virtio-scsi-pci,id={controller_id},bus={bus},addr={addr}"
-    driver = controller.find("driver")
-    if driver is not None and driver.get("queues"):
-        opts += f",num_queues={driver.get('queues')}"
+    ref = reference_controllers.get(controller_id, {})
+    if ref.get("num_queues") is not None:
+        opts += f",num_queues={ref.get('num_queues')}"
+    else:
+        driver = controller.find("driver")
+        if driver is not None and driver.get("queues"):
+            opts += f",num_queues={driver.get('queues')}"
     return ["-device", opts]
 
 tree = ET.parse(xml_path)
@@ -4381,12 +4470,24 @@ for order, item in enumerate(entries):
         f"scsi-id={topo['scsi_id']},lun={topo['lun']},"
         f"drive={colo_bb},id={topo['qdev_id']}"
     )
-    if topo["serial"]:
-        guest_opts += f",serial={topo['serial']},device_id={topo['serial']}"
-    if topo["boot_order"]:
+    ref = reference_disks.get(topo["qdev_id"], {})
+    serial = str(ref.get("serial") or topo["serial"] or "")
+    device_id = str(ref.get("device_id") or serial)
+    if serial:
+        guest_opts += f",serial={serial}"
+    if device_id:
+        guest_opts += f",device_id={device_id}"
+    if ref.get("bootindex") is not None:
+        guest_opts += f",bootindex={ref.get('bootindex')}"
+    elif topo["boot_order"]:
         guest_opts += f",bootindex={topo['boot_order']}"
     elif order == 0:
         guest_opts += ",bootindex=1"
+    write_cache = str(ref.get("write-cache") or topo["write_cache"] or "")
+    if write_cache:
+        guest_opts += f",write-cache={write_cache}"
+    if ref.get("share-rw") is True:
+        guest_opts += ",share-rw=on"
     guest = ["-device", guest_opts]
     if role == "secondary":
         args.extend([
@@ -4484,6 +4585,8 @@ for idx, part in enumerate(parts):
     qdev_id = im.group(1) if im else ""
     if not re.fullmatch(r"scsi[0-9]+-[0-9]+-[0-9]+-[0-9]+", qdev_id or ""):
         errors.append(f"guest_qdev_not_original_scsi:{qdev_id or 'missing'}")
+    if ",write-cache=on" not in opts:
+        errors.append(f"guest_write_cache_missing:{qdev_id or opts}")
 
 if errors:
     print(",".join(errors))
@@ -4596,6 +4699,7 @@ if role == "primary":
         "virtio-scsi-pci,id=scsi",
         "scsi-hd,bus=scsi",
         "drive=ftctl-colo-",
+        "write-cache=on",
     ]:
         require(token)
 elif role == "secondary":
@@ -4609,6 +4713,7 @@ elif role == "secondary":
         "virtio-scsi-pci,id=scsi",
         "scsi-hd,bus=scsi",
         "drive=ftctl-colo-",
+        "write-cache=on",
     ]:
         require(token)
 else:
@@ -4663,7 +4768,7 @@ ftctl_xcolo_apply_startup_disk_graphs() {
   local disk_runtime="${4-}"
   local primary_net_args="${5-}"
   local secondary_net_args="${6-}"
-  local primary_disk_args secondary_disk_args
+  local primary_disk_args secondary_disk_args reference_qemu_log
   local primary_args secondary_args
 
   [[ -n "${vm}" && -f "${primary_xml}" && -f "${secondary_xml}" && -n "${disk_runtime}" ]] || return 1
@@ -4677,8 +4782,9 @@ ftctl_xcolo_apply_startup_disk_graphs() {
     return 1
   fi
 
-  ftctl_xcolo_build_startup_disk_args "${primary_xml}" "primary" "${disk_runtime}" primary_disk_args || return 1
-  ftctl_xcolo_build_startup_disk_args "${secondary_xml}" "secondary" "${disk_runtime}" secondary_disk_args || return 1
+  reference_qemu_log="/var/log/libvirt/qemu/${vm}.log"
+  ftctl_xcolo_build_startup_disk_args "${primary_xml}" "primary" "${disk_runtime}" primary_disk_args "${reference_qemu_log}" || return 1
+  ftctl_xcolo_build_startup_disk_args "${secondary_xml}" "secondary" "${disk_runtime}" secondary_disk_args "${reference_qemu_log}" || return 1
   primary_args="$(ftctl_xcolo_qemu_args_append "${primary_net_args}" "${primary_disk_args}")"
   secondary_args="$(ftctl_xcolo_secondary_args_with_disk_graph "${secondary_net_args}" "${secondary_disk_args}")"
   if [[ "${primary_args};${secondary_args}" == *"/dev/rbd/"* ]]; then
