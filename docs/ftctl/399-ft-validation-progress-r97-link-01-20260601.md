@@ -5476,3 +5476,77 @@ xcolo_guest_abi_manifest_reason=
   - primary QMP `query-block-jobs`: empty list
   - no `i-2-153-VM` / `r97-link-01-standby` runtime domain remains in libvirt
   - installed marker verification passed on all three hosts.
+
+### Run 98 Monitoring Result 2026-06-06
+
+- Test action:
+  - user started FT protection for primary VM `54` / `i-2-54-VM`.
+  - Cloud created standby VM `154` / `i-2-154-VM` and standby volumes:
+    - root: `b526594e-364c-48da-be8e-a401fdf430ad`
+    - data: `857925c6-908a-4c4a-974e-96fb3f27d97f`
+- Final Cloud DB result:
+  - `ftctl_protection.id=98`
+  - `protection_state=error`
+  - `transport_state=failed`
+  - `provisioning_state=Ready`
+  - `active_side=primary`
+  - `last_error=xcolo_colo_chardev_contract_not_ready`
+  - standby VM `154` is still DB `Running` on host id `1`.
+- Confirmed improvement:
+  - generated primary and standby XML both normalized VNC graphics/listen to
+    `0.0.0.0`.
+  - `xcolo_guest_abi_manifest=ok`.
+  - the previous Run 97 manifest failure on graphics/listen did not recur.
+- Failure evidence:
+
+```text
+conversion_stage=handshake_failed
+conversion_state=error
+xcolo_protocol_failure_phase=post_migrate_chardev_contract
+last_error=xcolo_colo_chardev_contract_not_ready
+```
+
+- Runtime evidence:
+  - primary `i-2-54-VM` was restored/running on `10.10.32.3`.
+  - primary current QMP `query-chardev` only shows normal libvirt channels
+    after rollback; the COLO chardevs are gone because the generated primary
+    domain was terminated and restored.
+  - secondary `i-2-154-VM` remains `paused` / `inmigrate` on `10.10.32.1`.
+  - secondary current QMP `query-chardev` shows:
+    - `red0`: `frontend-open=false`, `disconnected:tcp:10.10.32.3:9003`
+    - `red1`: `frontend-open=false`, tcp endpoint to `10.10.32.3:9004`
+  - standby RBD images remain mapped on `10.10.32.1`:
+    - `/dev/rbd10` for root
+    - `/dev/rbd12` for data
+- QEMU log evidence:
+
+```text
+primary:
+  QEMU waiting for compare1 on 0.0.0.0:9004
+  QEMU waiting for mirror0 on 0.0.0.0:9003
+  Can't receive COLO message: Input/output error
+
+secondary:
+  Unable to connect character device red0:
+    Failed to connect to '10.10.32.3:9003': Connection refused
+  memory_region_add_subregion_common:
+    Assertion `!subregion->container' failed.
+```
+
+- Interpretation:
+  - Run 98 advanced past the Run 97 manifest gate.
+  - The repeated lower-level QEMU assertion reappeared after the manifest gate
+    passed, so guest-visible runtime equality is still insufficient.
+  - The secondary QEMU crash happened before a stable COLO channel contract was
+    established. After rollback/recreate, `red0` could no longer connect
+    because primary generated-domain COLO listeners were already gone.
+  - The current `xcolo_colo_chardev_contract_not_ready` is therefore a
+    post-failure classification symptom; the root failure still includes the
+    secondary-side QEMU migration assertion.
+- Repetition guard:
+  - VNC/graphics mismatch is not repeated.
+  - `memory_region_add_subregion_common` is repeated and must be treated as the
+    main unresolved issue for the next design step.
+  - The next diagnosis must compare primary/secondary generated QEMU command
+    lines and live QEMU topology at the point immediately before migration, not
+    only the static manifest hash.
