@@ -4034,6 +4034,47 @@ tree.write(xml_path, encoding="unicode")
 PY
 }
 
+ftctl_xcolo_clone_primary_xml_for_secondary() {
+  local primary_xml="${1-}"
+  local secondary_xml="${2-}"
+  local secondary_name="${3-}"
+
+  command -v python3 >/dev/null 2>&1 || {
+    echo "ERROR: python3 is required for x-colo secondary XML clone" >&2
+    return 2
+  }
+
+  [[ -n "${primary_xml}" && -f "${primary_xml}" && -n "${secondary_xml}" && -n "${secondary_name}" ]] || return 1
+
+  PRIMARY_XML="${primary_xml}" SECONDARY_XML="${secondary_xml}" SECONDARY_NAME="${secondary_name}" python3 - <<'PY'
+import os
+import xml.etree.ElementTree as ET
+
+primary_xml = os.environ["PRIMARY_XML"]
+secondary_xml = os.environ["SECONDARY_XML"]
+secondary_name = os.environ["SECONDARY_NAME"]
+
+tree = ET.parse(primary_xml)
+root = tree.getroot()
+
+name = root.find("name")
+if name is None:
+    name = ET.Element("name")
+    root.insert(0, name)
+name.text = secondary_name
+
+# Keep the primary UUID and guest-visible device identity.  The secondary FT
+# runtime is a migration target, not an independently shaped VM.  Because it is
+# created on a different libvirt host, the duplicated UUID is intentional and
+# matches the live-migration/COLO ABI contract.
+for child in list(root):
+    if child.tag == "id":
+        root.remove(child)
+
+tree.write(secondary_xml, encoding="unicode")
+PY
+}
+
 ftctl_xcolo_disk_qdev_from_xml() {
   local xml_path="${1-}"
   local target="${2-}"
@@ -4627,6 +4668,141 @@ PY
     "role=${role}"
 }
 
+ftctl_xcolo_verify_generated_guest_abi_pair() {
+  local vm="${1-}"
+  local primary_xml="${2-}"
+  local secondary_xml="${3-}"
+  local phase="${4:-pre_create}"
+  local out="" rc=0
+
+  command -v python3 >/dev/null 2>&1 || {
+    echo "ERROR: python3 is required for x-colo guest ABI validation" >&2
+    return 2
+  }
+
+  [[ -n "${vm}" && -f "${primary_xml}" && -f "${secondary_xml}" ]] || return 1
+
+  out="$(PRIMARY_XML="${primary_xml}" SECONDARY_XML="${secondary_xml}" python3 - <<'PY'
+import hashlib
+import json
+import os
+import xml.etree.ElementTree as ET
+
+qemu_ns = "http://libvirt.org/schemas/domain/qemu/1.0"
+primary_xml = os.environ["PRIMARY_XML"]
+secondary_xml = os.environ["SECONDARY_XML"]
+
+def lname(tag):
+    return tag.rsplit("}", 1)[-1] if tag.startswith("{") else tag
+
+def canon_elem(elem, path=""):
+    name = lname(elem.tag)
+    if name == "commandline":
+        return None
+    if name in {"name", "id", "resource", "seclabel"}:
+        return None
+    if path == "/domain/devices" and name in {"graphics", "console", "channel"}:
+        return None
+    attrs = {
+        k: v for k, v in sorted(elem.attrib.items())
+        if k not in {"file", "dev", "dir", "socket", "pid", "port", "autoport", "listen"}
+    }
+    text = (elem.text or "").strip()
+    children = []
+    for child in list(elem):
+        item = canon_elem(child, f"{path}/{name}")
+        if item is not None:
+            children.append(item)
+    return [name, attrs, text, children]
+
+def qemu_args(root):
+    return [node.get("value", "") for node in root.findall(f".//{{{qemu_ns}}}arg")]
+
+def split_pairs(args):
+    pairs = []
+    idx = 0
+    while idx < len(args):
+        key = args[idx]
+        value = args[idx + 1] if idx + 1 < len(args) else ""
+        pairs.append((key, value))
+        idx += 2 if key.startswith("-") else 1
+    return pairs
+
+def guest_qemu_devices(root):
+    devices = []
+    for key, value in split_pairs(qemu_args(root)):
+        if key != "-device":
+            continue
+        if value.startswith(("scsi-hd,", "virtio-scsi-pci,", "virtio-blk-pci,", "virtio-net-pci,")):
+            devices.append(value)
+    return devices
+
+def manifest(path):
+    root = ET.parse(path).getroot()
+    payload = {
+        "xml": canon_elem(root, "/domain"),
+        "qemu_guest_devices": guest_qemu_devices(root),
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest(), payload
+
+phash, pmanifest = manifest(primary_xml)
+shash, smanifest = manifest(secondary_xml)
+if phash == shash:
+    print(f"ok primary={phash} secondary={shash}")
+    raise SystemExit(0)
+
+def first_diff(a, b, prefix=""):
+    if type(a) is not type(b):
+        return f"{prefix}:type:{type(a).__name__}!={type(b).__name__}"
+    if isinstance(a, dict):
+        for key in sorted(set(a) | set(b)):
+            if key not in a:
+                return f"{prefix}/{key}:missing_primary"
+            if key not in b:
+                return f"{prefix}/{key}:missing_secondary"
+            diff = first_diff(a[key], b[key], f"{prefix}/{key}")
+            if diff:
+                return diff
+        return ""
+    if isinstance(a, list):
+        if len(a) != len(b):
+            return f"{prefix}:len:{len(a)}!={len(b)}"
+        for idx, (left, right) in enumerate(zip(a, b)):
+            diff = first_diff(left, right, f"{prefix}[{idx}]")
+            if diff:
+                return diff
+        return ""
+    if a != b:
+        return f"{prefix}:{a!r}!={b!r}"
+    return ""
+
+reason = first_diff(pmanifest, smanifest) or "unknown_manifest_difference"
+print(f"mismatch primary={phash} secondary={shash} reason={reason}")
+raise SystemExit(1)
+PY
+)" || rc=$?
+
+  if [[ "${rc}" != "0" ]]; then
+    ftctl_state_set "${vm}" \
+      "xcolo_guest_abi_manifest=failed" \
+      "xcolo_guest_abi_manifest_phase=${phase}" \
+      "xcolo_guest_abi_manifest_reason=$(ftctl_xcolo_compact_log_value "${out}")" \
+      "xcolo_protocol_failure_phase=guest_abi_manifest" \
+      "last_error=xcolo_guest_abi_manifest_mismatch"
+    ftctl_log_event "colo" "xcolo.guest_abi_manifest" "fail" "${vm}" "" \
+      "phase=${phase} $(ftctl_xcolo_compact_log_value "${out}")"
+    return 1
+  fi
+
+  ftctl_state_set "${vm}" \
+    "xcolo_guest_abi_manifest=ok" \
+    "xcolo_guest_abi_manifest_phase=${phase}" \
+    "xcolo_guest_abi_manifest_result=$(ftctl_xcolo_compact_log_value "${out}")"
+  ftctl_log_event "colo" "xcolo.guest_abi_manifest" "ok" "${vm}" "" \
+    "phase=${phase} $(ftctl_xcolo_compact_log_value "${out}")"
+}
+
 ftctl_xcolo_validate_generated_commandline_contract() {
   local vm="${1-}"
   local xml_path="${2-}"
@@ -4807,6 +4983,7 @@ ftctl_xcolo_apply_startup_disk_graphs() {
   ftctl_xml_apply_qemu_commandline "${secondary_xml}" "${secondary_args}" || return 1
   ftctl_xcolo_validate_generated_commandline_contract "${vm}" "${primary_xml}" "primary" || return 1
   ftctl_xcolo_validate_generated_commandline_contract "${vm}" "${secondary_xml}" "secondary" || return 1
+  ftctl_xcolo_verify_generated_guest_abi_pair "${vm}" "${primary_xml}" "${secondary_xml}" "startup_disk_graph" || return 1
 
   ftctl_state_set "${vm}" \
     "xcolo_startup_disk_graph=enabled" \
@@ -4935,9 +5112,8 @@ ftctl_xcolo_prepare_block_generated_xmls() {
   ftctl_ensure_dir "$(dirname "${standby_generated_xml}")" "0755"
 
   cp -f "${primary_xml_backup}" "${primary_generated_xml}"
-  cp -f "${standby_xml_seed}" "${standby_generated_xml}"
-
-  ftctl_standby__rewrite_domain_name "${standby_generated_xml}" "${standby_vm_name}"
+  ftctl_xcolo_clone_primary_xml_for_secondary "${primary_xml_backup}" "${standby_generated_xml}" "${standby_vm_name}" ||
+    ftctl_xcolo_prepare_block_generated_xmls_fail "xcolo_secondary_primary_shape_clone_failed" "primary=${primary_xml_backup} path=${standby_generated_xml}" || return 1
 
   ftctl_xml_remove_qemu_commandline "${primary_generated_xml}" || true
   ftctl_xml_remove_qemu_commandline "${standby_generated_xml}" || true
@@ -4967,6 +5143,8 @@ ftctl_xcolo_prepare_block_generated_xmls() {
     ftctl_xcolo_prepare_block_generated_xmls_fail "xcolo_standby_host_xml_failed" "path=${standby_generated_xml}" || return 1
   ftctl_xml_ensure_iothread_id "${primary_generated_xml}" "1" ||
     ftctl_xcolo_prepare_block_generated_xmls_fail "xcolo_primary_iothread_xml_failed" "path=${primary_generated_xml}" || return 1
+  ftctl_xml_ensure_iothread_id "${standby_generated_xml}" "1" ||
+    ftctl_xcolo_prepare_block_generated_xmls_fail "xcolo_standby_iothread_xml_failed" "path=${standby_generated_xml}" || return 1
   ftctl_xml_apply_qemu_commandline "${primary_generated_xml}" "${primary_args}" ||
     ftctl_xcolo_prepare_block_generated_xmls_fail "xcolo_primary_qemu_commandline_xml_failed" "path=${primary_generated_xml}" || return 1
   ftctl_xml_apply_qemu_commandline "${standby_generated_xml}" "${secondary_args}" ||

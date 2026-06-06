@@ -5196,3 +5196,102 @@ Can't receive COLO message: Input/output error
   - primary QMP `query-migrate`: empty return
   - primary QMP `query-block-jobs`: empty list
   - no standby domain remains in libvirt
+
+### Run 96 Monitoring Result 2026-06-06
+
+- Test action:
+  - user started FT protection for primary VM `54` / `i-2-54-VM`.
+  - Cloud created standby VM `152` / `i-2-152-VM` and standby volumes:
+    - root: `c7c3a5e5-d007-421b-a380-6cd18ed6e59b`
+    - data: `f37cc9ca-4702-4a7d-b2aa-3c88720c4c54`
+- Current Cloud DB result:
+  - `ftctl_protection.id=96`
+  - `protection_state=error`
+  - `transport_state=failed`
+  - `provisioning_state=Ready`
+  - `last_error=xcolo_colo_chardev_contract_not_ready`
+  - standby VM `152` is still DB `Running` on host id `1`.
+- Confirmed improvement from the previous code change:
+  - generated FT disk args now include the normal libvirt/QEMU log-derived
+    properties.
+  - root disk generated as:
+    `id=scsi0-0-0-0,...,bootindex=3,write-cache=on`
+  - data disk generated as:
+    `id=scsi0-0-0-1,...,write-cache=on`
+  - this fixes the Run 95 commandline gap where FT startup used
+    `bootindex=9` and omitted `write-cache=on`.
+- Failure evidence:
+  - first secondary FT domain `i-2-152-VM` crashed while receiving migration:
+
+```text
+qemu-kvm: ../system/memory.c:2666: memory_region_add_subregion_common:
+Assertion `!subregion->container' failed.
+shutting down, reason=crashed
+```
+
+  - primary QEMU then reported the COLO channel break:
+
+```text
+Can't receive COLO message: Input/output error
+```
+
+  - the recovery/retry secondary domain was left in libvirt as `paused` /
+    `inmigrate`, listening on `10.10.32.1:9998`, but its red0 frontend could
+    not reconnect because the primary-side `9003` listener was already gone:
+
+```text
+Unable to connect character device red0:
+Failed to connect to '10.10.32.3:9003': Connection refused
+```
+
+- Repetition guard:
+  - this is the same high-level failure class as earlier
+    `memory_region_add_subregion_common` failures.
+  - it is not an exact repeat of the Run 95 root cause, because the previously
+    missing disk properties are now present in the generated commandline.
+  - the remaining issue must be treated as unresolved migration-visible guest
+    topology parity, not as another `write-cache`/`bootindex` omission.
+- Next required investigation direction:
+  - compare the complete normal libvirt-generated QEMU argv with generated FT
+    primary and secondary argv before migration.
+  - verify all migration-visible guest topology, not only disks:
+    - PCI controller and bus layout
+    - SCSI controller properties
+    - virtio-net/netdev features, especially vhost/vhostfd-derived behavior
+    - iothread/object presence that can affect device realization
+    - generated QEMU argument order around guest-visible devices
+  - add an automatic pre-migrate topology diff artifact to FTCTL state/debug
+    output so future repeated assertion failures show the exact remaining
+    mismatch instead of forcing manual log inspection.
+
+### Primary Canonical Guest ABI Implementation 2026-06-06
+
+- Design correction:
+  - treat the primary normal libvirt runtime shape as the canonical FT guest
+    ABI.
+  - stop using the Cloud-created standby XML as the guest-visible shape source
+    for the FT transient secondary domain.
+  - keep Cloud standby VM/volume lifecycle ownership unchanged; use the standby
+    object for management identity and block targets only.
+- Source changes prepared:
+  - added `ftctl_xcolo_clone_primary_xml_for_secondary`.
+  - secondary generated XML is now cloned from the primary XML backup and then
+    renamed to the standby domain name.
+  - the primary UUID and guest-visible device identity are intentionally kept
+    in the secondary transient XML because the secondary is a migration target.
+  - native `iothread id=1` is ensured on both generated primary and secondary
+    XMLs.
+  - added `ftctl_xcolo_verify_generated_guest_abi_pair`.
+  - after the final startup disk graph is applied, FTCTL now hashes the
+    generated primary and secondary guest ABI manifests and fails before
+    migration if they differ.
+- New failure classification:
+  - `last_error=xcolo_guest_abi_manifest_mismatch`
+  - `xcolo_protocol_failure_phase=guest_abi_manifest`
+- Repetition guard:
+  - if `memory_region_add_subregion_common` appears again after this change,
+    the next report must include whether the generated guest ABI manifest gate
+    passed.
+  - if the manifest gate passes but QEMU still asserts, the remaining mismatch
+    is in runtime argv/QMP topology that is not yet represented by the manifest,
+    and the manifest must be expanded instead of changing isolated disk options.
