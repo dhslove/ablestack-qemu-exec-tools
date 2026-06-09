@@ -6235,3 +6235,39 @@ xcolo_live_pci_identity_mismatch
   - this is intentional progress because it prevents the repeated
     `memory_region_add_subregion_common` secondary crash and leaves deterministic
     PCI identity evidence.
+
+### Run 105 Fix Deployment And Cleanup 2026-06-10
+
+- Source commit:
+  - `9f4ca5d fix: hard gate xcolo pci identity`
+- GitHub Actions:
+  - run `27219160231`
+  - RPM artifact upload succeeded.
+  - release publishing failed due GitHub secondary rate limit, so the run
+    artifact was downloaded directly instead of using a release asset.
+- Artifact:
+  - `ablestack_vm_ftctl-0.8.0-1.noarch.rpm`
+  - SHA256
+    `41b622ca4692843b3bdd1a3785fee27786eec0716340a0a0d88a83efff1eb3ff`
+- Installed marker verification:
+  - `10.10.32.1`: installed and marker
+    `xcolo_live_pci_identity_mismatch` present.
+  - `10.10.32.2`: installed and marker
+    `xcolo_live_pci_identity_mismatch` present.
+  - `10.10.32.3`: not installed in this pass because the host is down and not
+    reachable from management (`ping=fail`, `ssh22=closed`).
+- Cleanup result:
+  - `ftctl_protection.id=105` marked removed/stopped.
+  - `ftctl.*` details for VM `54` and standby VM `161` removed.
+  - standby domain `i-2-161-VM` removed from libvirt on `10.10.32.1`.
+  - standby RBD images removed:
+    - `2be4ca9a-db2c-42c2-b3ad-e2881d2a5044`
+    - `88b5a874-e572-4529-a0d7-e76e9cc75801`
+  - primary VM `i-2-54-VM` is now Running on host id `2`
+    (`10.10.32.2`), and `query-block-jobs` is empty.
+  - timers are active on `10.10.32.1` and `10.10.32.2`.
+- Retest readiness note:
+  - the target can be retested with the current primary on `10.10.32.2` and
+    peer host `10.10.32.1`.
+  - full 32.x cluster parity is not complete until `10.10.32.3` is recovered
+    and the same RPM is installed there.
