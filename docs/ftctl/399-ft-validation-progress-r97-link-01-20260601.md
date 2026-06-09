@@ -6131,3 +6131,107 @@ xcolo_pre_migrate_contract
 migration-abi-contract
 xcolo_primary_block_replication_contract_incomplete
 ```
+
+### Run 105 Monitoring Result 2026-06-07
+
+- Test action:
+  - user started FT protection after the pre-migrate contract gate deployment.
+  - Cloud created protection row `105` and standby VM `161` /
+    `i-2-161-VM`.
+- Confirmed progress:
+  - baseline seed completed for both disks:
+    - `sda` -> `2be4ca9a-db2c-42c2-b3ad-e2881d2a5044`
+    - `sdb` -> `88b5a874-e572-4529-a0d7-e76e9cc75801`
+  - generated primary and secondary runtimes both started.
+  - startup disk graph validation passed for both roles.
+  - guest ABI manifest hash matched.
+  - the new pre-migrate contract gate passed:
+
+```text
+xcolo_pre_migrate_contract=ok
+primary_guest_device_hash=300be4bcf48efd3a782ebb18f644c60234b33c7c293272b3c17e675e9a622b37
+secondary_guest_device_hash=300be4bcf48efd3a782ebb18f644c60234b33c7c293272b3c17e675e9a622b37
+primary_block_graph=yes
+secondary_block_graph=yes
+```
+
+  - `primary.migrate` was accepted.
+  - post-migrate startup-active validation initially saw both `9003` and
+    `9004` established.
+- Final state:
+
+```text
+ftctl_protection.id=105
+protection_state=error
+transport_state=failed
+active_side=primary
+last_error=xcolo_secondary_qemu_assert_memory_region_container
+primary=i-2-54-VM running on 10.10.32.3
+secondary=i-2-161-VM paused on 10.10.32.1
+```
+
+- Secondary QEMU evidence:
+
+```text
+qemu-kvm: ../system/memory.c:2666:
+memory_region_add_subregion_common: Assertion `!subregion->container' failed.
+shutting down, reason=crashed
+```
+
+- Additional evidence:
+  - pre-migrate contract did not fail, so this is not a COLO role or block
+    graph readiness failure.
+  - `live-topology-diff-before_migrate.txt` still recorded a pre-migrate PCI
+    identity warning:
+
+```text
+warning=xcolo_live_pci_identity_diff_observed
+pci_first_diff_index=3
+pci_primary={"addr":"bus=1 device=0 function=0","class":"PCI bridge: PCI device 1b36:000e","id":"id \"pci.6\"","subsystem":""}
+pci_secondary={"addr":"bus=0 device=2 function=1","class":"PCI bridge: PCI device 1b36:000c","id":"id \"pci.2\"","subsystem":""}
+```
+
+- Repetition guard:
+  - this is the same repeated post-migrate secondary QEMU assertion seen in
+    Runs 103 and 104.
+  - the new gate improved evidence quality but did not prevent the crash.
+  - do not revisit baseline seed, network socket readiness, or block graph
+    readiness for this failure unless new evidence contradicts Run 105.
+- Next direction:
+  - promote pre-migrate PCI identity mismatch from warning to hard failure.
+  - extend the migration ABI contract beyond guest `-device` lists to require
+    deterministic PCI bus identity/order from `info pci`, because QEMU crashes
+    while applying incoming migration memory/device state after a known PCI
+    identity mismatch.
+  - the fix should target secondary generated runtime topology so that `info
+    pci` identity matches primary before `primary.migrate`, rather than adding
+    another post-crash classifier.
+
+### Run 105 Fix Plan 2026-06-10
+
+- Design document:
+  - `369-ft-xcolo-live-pci-identity-hard-gate-design-20260610.md`
+- Correction target:
+  - convert `xcolo_live_pci_identity_diff_observed` from warning to hard
+    pre-migrate failure.
+  - keep BAR/IRQ/resource differences diagnostic-only.
+  - require stable PCI identity fields from `info pci` to match before
+    `primary.migrate`:
+    - bus / device / function;
+    - PCI class;
+    - QEMU id;
+    - subsystem identity when present.
+- New failure names:
+
+```text
+xcolo_live_pci_snapshot_missing
+xcolo_live_pci_identity_missing
+xcolo_live_pci_identity_mismatch
+```
+
+- Expected result for the next run:
+  - if the same Run 105 PCI identity mismatch repeats, fail before
+    `primary.migrate` with `xcolo_live_pci_identity_mismatch`.
+  - this is intentional progress because it prevents the repeated
+    `memory_region_add_subregion_common` secondary crash and leaves deterministic
+    PCI identity evidence.
