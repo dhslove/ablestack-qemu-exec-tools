@@ -2,6 +2,20 @@
 
 Date: 2026-06-10
 
+## Superseded Scope
+
+Run 112 proved that this deferred-materialization strategy is unsafe as a
+pre-migrate success condition for QEMU 9.2.4. It allowed `primary.migrate` to
+start while the secondary live PCI identity was still not materialized like the
+primary, and QEMU then asserted in
+`memory_region_add_subregion_common`.
+
+This document remains as historical evidence for the hypothesis tested in Run
+112, but its "defer and continue to migrate" rule is superseded by
+`376-ft-xcolo-premigrate-pci-identity-hard-abi-gate-design-20260610.md`.
+From that design forward, secondary live PCI identity or mtree PCI resource
+unmaterialization must fail before `primary.migrate`.
+
 ## Background
 
 Run 111 stopped before `primary.migrate` with:

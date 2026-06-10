@@ -7014,3 +7014,138 @@ qemu-kvm: Unable to connect character device red0: Failed to connect to '10.10.3
   - no FTCTL runtime/profile files matched `i-2-54-VM`, `i-2-176-VM`, or
     `r97-link-01`.
   - standby RBD images were absent from the RBD pool.
+
+### Run 112 Monitor Result 2026-06-10
+
+- Trigger:
+  - user started FT protection for `r97-link-01` after Run 111 cleanup.
+- Runtime identifiers:
+  - protection row: `112`
+  - primary VM: `54` / `i-2-54-VM`
+  - standby VM: `177` / `i-2-177-VM`
+  - primary host: `10.10.32.3`
+  - standby host: `10.10.32.1`
+  - standby root volume image:
+    `83e067d2-4e30-453f-b821-349401a6c37a`
+  - standby data volume image:
+    `b26917ab-fd07-4283-a12e-1296f4694e2e`
+- Final Cloud state:
+  - `ftctl_protection`: `protection_state=error`,
+    `transport_state=failed`, `active_side=primary`.
+  - `last_error=xcolo_secondary_qemu_assert_memory_region_container`.
+  - primary VM was recovered to `Running`.
+  - standby VM remained `Running` in Cloud DB and `paused` in libvirt.
+- Progress confirmed:
+  - the Run 111 deferred-mtree change was installed and active.
+  - pre-migrate topology gate no longer stopped the run with
+    `xcolo_pre_migrate_secondary_pci_resources_unmaterialized`.
+  - `primary.migrate` was reached and accepted.
+  - pre-guest traffic gate passed:
+    - `primary_status=paused`
+    - `chardev_contract=yes`
+  - socket/chardev contract was valid before guest traffic:
+    - primary `9003/9004`: listening
+    - secondary `9003/9004`: established
+    - mirror path:
+      `primary:m0 -> mirror0 -> secondary:red0 -> f1`
+    - compare path:
+      `secondary:f2 -> red1 -> primary:compare1 -> comp0`
+- Failure:
+  - after `primary.migrate`, secondary QEMU hit:
+
+```text
+qemu-kvm: ../system/memory.c:2666: memory_region_add_subregion_common:
+Assertion `!subregion->container' failed.
+```
+
+  - primary QEMU then reported:
+
+```text
+Can't receive COLO message: Input/output error
+```
+
+  - post-migrate role transition timed out after 30 attempts because secondary
+    QMP/chardev queries failed after the assertion.
+- Debug evidence:
+  - pre-migrate contract was `state=ok`.
+  - primary and secondary guest device hashes matched:
+    `300be4bcf48efd3a782ebb18f644c60234b33c7c293272b3c17e675e9a622b37`.
+  - primary and secondary block graphs were both detected as valid.
+  - live PCI identity was still not equal:
+    - primary PCI identity count: `18`
+    - secondary PCI identity count: `12`
+    - missing secondary PCI identity count: `6`
+    - first diff:
+      primary `bus=1 device=0 function=0 id "pci.6"` versus secondary
+      `bus=0 device=2 function=1 id "pci.2"`.
+- Recovery evidence:
+  - `block_conversion.handshake_recover result=ok`.
+  - `xcolo.runtime_recover result=ok`.
+  - primary QMP `query-status`: `running`.
+  - primary QMP `query-block-jobs`: empty list.
+  - no primary-side lock file remained.
+- Interpretation:
+  - this is real progress from Run 111 because the test crossed the previous
+    pre-migrate gate and entered QEMU migration/COLO state transfer.
+  - the deferred secondary PCI materialization hypothesis is only partially
+    valid. Deferring the PCI resource mismatch allowed migrate to start, but
+    QEMU 9.2.4 still asserted while applying migration state to a secondary
+    PCI topology whose live identity/resource materialization was not equal to
+    the primary.
+  - the repeated root is not the 9003/9004 network path in this run. The
+    network/chardev contract was ready before guest traffic; the sockets closed
+    only after secondary QEMU crashed.
+- Next improvement direction:
+  - stop treating `xcolo_live_pci_identity_deferred_for_incoming` as safe
+    enough to enter `primary.migrate`.
+  - the next code change must make the secondary live PCI identity/materialized
+    bridge topology match the primary before migration state load, or fail
+    earlier with an explicit ABI error instead of allowing QEMU to assert.
+  - concrete focus: clone and verify the primary's live PCI bridge/device
+    realization from the libvirt QEMU argv and QMP `info pci`/`info mtree`,
+    especially the six missing secondary PCI identities, before issuing
+    `primary.migrate`.
+- Repetition guard:
+  - if another run reaches `primary.migrate` with primary/secondary PCI identity
+    counts still `18` versus `12` and fails with the same
+    `memory_region_add_subregion_common` assertion, it is a repeated blocker,
+    not a new network/chardev issue.
+  - the next run should be judged improved only if the pre-migrate secondary
+    live PCI identity count and resource layout materially converge toward the
+    primary, or the system refuses migrate before QEMU crash with a specific
+    ABI mismatch report.
+
+### Run 112 Fix Plan 2026-06-10
+
+- Design document:
+  - `376-ft-xcolo-premigrate-pci-identity-hard-abi-gate-design-20260610.md`
+- Conflict resolution:
+  - `375-ft-xcolo-secondary-mtree-deferred-materialization-design-20260610.md`
+    now marks the Run 111 deferred-materialization strategy as superseded for
+    pre-migrate success decisions.
+- Correction:
+  - stop treating incoming secondary PCI identity mismatch as a warning.
+  - when secondary `info pci` shows unassigned incoming PCI bridge/device
+    identity, fail before `primary.migrate` with
+    `xcolo_live_pci_identity_unmaterialized`.
+  - when secondary mtree has materially more zero-range PCI bridge aliases than
+    primary before migrate, fail before `primary.migrate` with
+    `xcolo_pre_migrate_secondary_pci_resources_unmaterialized`.
+  - keep debug capture so the next topology-cloning change can compare primary
+    and secondary QEMU argv, `info pci`, `info qtree`, and `info mtree`.
+- Validation:
+  - `bash -n lib/ftctl/xcolo.sh`: passed.
+  - `bash -n bin/ablestack_vm_ftctl_selftest.sh`: passed.
+  - `git diff --check`: passed.
+  - targeted selftests passed with shellcheck no-op because the repository has
+    pre-existing shellcheck warnings unrelated to this change:
+    - `selftest_case_xcolo_mtree_zero_alias_fails_before_migrate`
+    - `selftest_case_xcolo_mtree_zero_alias_fails_after_migrate`
+- Expected next test result:
+  - QEMU should no longer reach the
+    `memory_region_add_subregion_common` assertion for the same PCI mismatch.
+  - If the secondary PCI topology is still not materialized like primary, FTCTL
+    should stop before `primary.migrate` with a specific ABI/topology error.
+  - A later success-oriented fix must make the secondary live PCI identity match
+    primary, likely by cloning secondary command/device ordering from the
+    primary libvirt QEMU argv rather than only matching normalized device hash.

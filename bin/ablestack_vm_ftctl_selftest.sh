@@ -4524,11 +4524,11 @@ EOF
   : > "${debug_dir}/secondary-info-pci-${phase}.txt"
 }
 
-selftest_case_xcolo_mtree_zero_alias_deferred_before_migrate() (
+selftest_case_xcolo_mtree_zero_alias_fails_before_migrate() (
   selftest_reset_env
-  selftest_info "x-colo secondary mtree zero PCI aliases are deferred before migrate"
+  selftest_info "x-colo secondary mtree zero PCI aliases fail before migrate"
 
-  local vm="xcolo-mtree-deferred"
+  local vm="xcolo-mtree-pre-fail"
   local phase="before_migrate"
   ftctl_state_init_vm "${vm}"
   selftest_write_xcolo_mtree_deferred_fixture "${vm}" "${phase}"
@@ -4536,10 +4536,10 @@ selftest_case_xcolo_mtree_zero_alias_deferred_before_migrate() (
   ftctl_xcolo_analyze_runtime_topology_diff "${vm}" "${phase}" "pre_migrate"
 
   selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_pre_migrate_topology_gate_state")" \
-    "deferred" "pre-migrate zero PCI aliases should be deferred"
+    "failed" "pre-migrate zero PCI aliases should fail"
   selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_pre_migrate_topology_gate_error")" \
-    "xcolo_pre_migrate_secondary_pci_resources_deferred_for_incoming" \
-    "pre-migrate deferred error recorded"
+    "xcolo_pre_migrate_secondary_pci_resources_unmaterialized" \
+    "pre-migrate materialization error recorded"
   selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_pre_migrate_mtree_secondary_zero_pci_alias_count")" \
     "3" "pre-migrate secondary zero alias count"
 )
@@ -4663,7 +4663,7 @@ selftest_main() {
   selftest_case_reconcile_waits_for_cloud_failback_after_fence_clear
   selftest_case_reconcile_waits_for_cloud_dr_failback_after_fence_clear
   selftest_case_failback_reprotect_clears_standby_verify_state
-  selftest_case_xcolo_mtree_zero_alias_deferred_before_migrate
+  selftest_case_xcolo_mtree_zero_alias_fails_before_migrate
   selftest_case_xcolo_mtree_zero_alias_fails_after_migrate
   selftest_case_events_json
   selftest_info "all checks passed"

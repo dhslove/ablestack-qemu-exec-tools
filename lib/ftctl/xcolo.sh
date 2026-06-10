@@ -2473,12 +2473,12 @@ elif not p_pci_identity or not s_pci_identity:
     raise SystemExit(1)
 elif p_pci_identity != s_pci_identity:
     if pci_incoming_unassigned(secondary_pci):
-        print("error=")
-        print("warning=xcolo_live_pci_identity_deferred_for_incoming")
-        print(f"pci_reason=secondary_incoming_pci_unassigned primary_hash={digest(p_pci_identity)} secondary_hash={digest(s_pci_identity)}")
+        print("error=xcolo_live_pci_identity_unmaterialized")
+        print(f"reason=secondary_incoming_pci_unassigned primary_hash={digest(p_pci_identity)} secondary_hash={digest(s_pci_identity)}")
         print(f"pci_first_diff_index={pci_id_diff['first_index']}")
         print("pci_primary=" + json.dumps(pci_id_diff["first_left"], sort_keys=True, separators=(",", ":")))
         print("pci_secondary=" + json.dumps(pci_id_diff["first_right"], sort_keys=True, separators=(",", ":")))
+        raise SystemExit(1)
     else:
         print("error=xcolo_live_pci_identity_mismatch")
         print(f"reason=info_pci_identity_diff primary_hash={digest(p_pci_identity)} secondary_hash={digest(s_pci_identity)}")
@@ -3142,8 +3142,8 @@ if context == "pre_migrate":
         candidate_device = qtree_missing_devices[0]
         candidate_reason = "qtree_missing_device"
     elif len(secondary_zero_pci_aliases) > len(primary_zero_pci_aliases) + 2:
-        gate_state = "deferred"
-        gate_error = "xcolo_pre_migrate_secondary_pci_resources_deferred_for_incoming"
+        gate_state = "failed"
+        gate_error = "xcolo_pre_migrate_secondary_pci_resources_unmaterialized"
         gate_reason = secondary_zero_pci_aliases[0]
         candidate_region = secondary_zero_pci_aliases[0]
         candidate_reason = "secondary_zero_range_pci_alias"
