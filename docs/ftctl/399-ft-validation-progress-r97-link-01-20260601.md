@@ -6967,3 +6967,50 @@ qemu-kvm: Unable to connect character device red0: Failed to connect to '10.10.3
   - if the next run reaches the old QEMU assertion again, the post-migrate
     materialization gate is too late or incomplete and must capture evidence
     before secondary exits.
+
+### Run 111 Fix Deployment And Cleanup 2026-06-10
+
+- Code commit:
+  - `bded92f09ff8ca374ba22dbb921f9d656aee40ef`
+  - `fix: defer xcolo incoming mtree materialization`
+- Local validation:
+  - `bash -n lib/ftctl/xcolo.sh`: passed.
+  - `bash -n bin/ablestack_vm_ftctl_selftest.sh`: passed.
+  - `git diff --check`: passed.
+  - targeted selftests passed:
+    - `selftest_case_xcolo_mtree_zero_alias_deferred_before_migrate`
+    - `selftest_case_xcolo_mtree_zero_alias_fails_after_migrate`
+  - full selftest with shellcheck mocked did not complete cleanly; it stopped
+    in an existing backend-validation area before reaching all later cases.
+- Build:
+  - GitHub Actions run `27263803133` completed successfully.
+  - Built RPM SHA256:
+    `1313c17b4826bb6828b6d9a4ef521fc5b1c830044d5b519896457bda57ae5fe9`.
+- Deployment:
+  - deployed `ablestack_vm_ftctl-0.8.0-1.noarch` to `10.10.32.1`,
+    `10.10.32.2`, and `10.10.32.3`.
+  - all three hosts reported active `ablestack-vm-ftctl.timer` and
+    `ablestack-vm-hangctl.timer`.
+  - installed script markers were verified on all three hosts:
+    - `xcolo_pre_migrate_secondary_pci_resources_deferred_for_incoming`
+    - `xcolo_post_migrate_secondary_pci_resources_unmaterialized`
+- Cleanup:
+  - Run 111 active protection row was marked removed/disabled.
+  - `ftctl.*` VM details for VM `54` and standby VM `176` were removed.
+  - standby domain `i-2-176-VM` was destroyed/undefined.
+  - standby VM `176` was marked `Expunging`.
+  - standby volumes `337` and `338` were marked `Expunged`.
+  - standby RBD images were removed:
+    - `361039a4-3557-4e37-84fb-191b1d634fe8`
+    - `f7646f32-f880-4923-9fe5-9717720c8926`
+  - stale secondary-host maps for the primary/standby images were removed from
+    `10.10.32.1`; primary host maps on `10.10.32.3` were preserved.
+- Retest readiness checks:
+  - active protection count for primary VM `54`: `0`.
+  - active `ftctl.*` details for VM `54`/`176`: `0`.
+  - primary VM `i-2-54-VM` state: `running` on `10.10.32.3`.
+  - primary QMP `query-block-jobs`: empty list.
+  - no standby domain `i-2-176-VM` remains on the 32.x hosts.
+  - no FTCTL runtime/profile files matched `i-2-54-VM`, `i-2-176-VM`, or
+    `r97-link-01`.
+  - standby RBD images were absent from the RBD pool.
