@@ -6800,3 +6800,38 @@ shutting down, reason=crashed
   - if the next run still reaches QEMU assertion after `primary.migrate`, the
     mtree zero-alias detector is incomplete and must be expanded with a more
     precise PCI BAR/mtree materialization rule.
+
+### Run 110 Fix Deployment And Cleanup 2026-06-10
+
+- Code commit:
+  - `c262e7b9d12b64fddfa4a48c3e2744bd7912d380`
+  - `fix: gate xcolo secondary mtree materialization`
+- Build:
+  - GitHub Actions run `27259176324` completed successfully.
+  - Built RPM SHA256:
+    `fb7e945e1567c38d3fdd3d04672871375e06161cc93c3bd45e314b9932e7e666`
+- Deployment:
+  - deployed to `10.10.32.1`, `10.10.32.2`, and `10.10.32.3`.
+  - all hosts reported `ablestack_vm_ftctl-0.8.0-1.noarch`.
+  - installed script markers were verified on all hosts:
+    - `xcolo_pre_migrate_secondary_pci_resources_unmaterialized`
+    - `secondary_qemu_assert_memory_region_container`
+  - `ablestack-vm-ftctl.timer` and `ablestack-vm-hangctl.timer` were active on
+    all three hosts after deployment and cleanup.
+- Cleanup:
+  - Run 110 active protection was marked removed.
+  - `ftctl.*` details for VM `54` and standby VM `175` were removed.
+  - standby VM `i-2-175-VM` was destroyed, undefined, and marked `Expunging`.
+  - standby volumes `335` and `336` were marked `Expunged`.
+  - standby RBD images were unmapped and removed:
+    - `21e24b9b-7167-4918-9c19-d5ae84f97427`
+    - `5fc9a137-5c11-4a89-8f48-aec5e0da55d4`
+- Retest readiness checks:
+  - active protection count for VM `54`/`175`: `0`.
+  - active `ftctl.*` details for VM `54`/`175`: `0`.
+  - active standby volumes `335`/`336`: `0`.
+  - primary VM `i-2-54-VM` state: `Running` on host id `3`.
+  - primary QMP `query-block-jobs`: empty list.
+  - no remaining FTCTL runtime/profile files matched `i-2-54-VM`,
+    `i-2-175-VM`, or `r97-link-01`.
+  - standby RBD images for Run 110 were absent from the RBD pool.
