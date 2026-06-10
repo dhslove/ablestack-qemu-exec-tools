@@ -2917,6 +2917,7 @@ ftctl_xcolo_analyze_runtime_topology_diff() {
   local debug_dir="" summary="" rc=0
   local post_pci_diff_count="" post_qtree_diff_count="" post_mtree_diff_count=""
   local candidate_device="" candidate_region="" candidate_reason=""
+  local gate_state="" gate_error="" gate_reason=""
 
   [[ -n "${vm}" ]] || return 0
   debug_dir="$(ftctl_xcolo_debug_dir "${vm}")"
@@ -2997,6 +2998,36 @@ def normalize_qtree(raw):
             lines.append(text)
     return lines
 
+QTREE_DEV_RE = re.compile(r'^dev:\s*([^,]+)(?:,\s*id\s*"([^"]+)")?')
+
+def qtree_devices(raw):
+    devices = []
+    for line in raw.splitlines():
+        text = norm_line(line)
+        match = QTREE_DEV_RE.match(text)
+        if not match:
+            continue
+        driver = match.group(1).strip()
+        dev_id = (match.group(2) or "").strip()
+        if dev_id:
+            devices.append(f"id:{dev_id}|driver:{driver}")
+        else:
+            devices.append(f"driver:{driver}")
+    return devices
+
+def qtree_missing(left, right):
+    right_counts = {}
+    for item in right:
+        right_counts[item] = right_counts.get(item, 0) + 1
+    missing = []
+    for item in left:
+        count = right_counts.get(item, 0)
+        if count > 0:
+            right_counts[item] = count - 1
+        else:
+            missing.append(item)
+    return missing
+
 MTREE_VOLATILE_RE = re.compile(r"\s+@[0-9a-fA-Fx]+")
 
 def normalize_mtree(raw):
@@ -3048,6 +3079,8 @@ primary_qtree = normalize_qtree(read_text(f"primary-info-qtree-{phase}.txt"))
 secondary_qtree = normalize_qtree(read_text(f"secondary-info-qtree-{phase}.txt"))
 primary_mtree = normalize_mtree(read_text(f"primary-info-mtree-{phase}.txt"))
 secondary_mtree = normalize_mtree(read_text(f"secondary-info-mtree-{phase}.txt"))
+primary_qtree_devices = qtree_devices(read_text(f"primary-info-qtree-{phase}.txt"))
+secondary_qtree_devices = qtree_devices(read_text(f"secondary-info-qtree-{phase}.txt"))
 
 pci_diff_count, pci_first_index, pci_first_primary, pci_first_secondary = diff_summary(primary_pci, secondary_pci)
 qtree_diff_count, qtree_first_index, qtree_first_primary, qtree_first_secondary = diff_summary(primary_qtree, secondary_qtree)
@@ -3055,9 +3088,14 @@ mtree_diff_count, mtree_first_index, mtree_first_primary, mtree_first_secondary 
 
 primary_mtree_dups = repeated_items(primary_mtree)
 secondary_mtree_dups = repeated_items(secondary_mtree)
+qtree_missing_devices = qtree_missing(primary_qtree_devices, secondary_qtree_devices)
+qtree_extra_devices = qtree_missing(secondary_qtree_devices, primary_qtree_devices)
 candidate_device = ""
 candidate_region = ""
 candidate_reason = ""
+gate_state = "ok"
+gate_error = ""
+gate_reason = ""
 
 if mtree_diff_count:
     candidate_region = mtree_first_secondary if mtree_first_secondary != "<missing>" else mtree_first_primary
@@ -3074,6 +3112,22 @@ if pci_diff_count and not candidate_device:
     if not candidate_reason:
         candidate_reason = "pci_first_diff"
 
+if context == "pre_migrate":
+    if len(primary_qtree_devices) > 0 and len(secondary_qtree_devices) == 0:
+        gate_state = "failed"
+        gate_error = "xcolo_pre_migrate_secondary_qtree_empty"
+        gate_reason = "secondary_qtree_empty"
+    elif len(primary_mtree) > 0 and len(secondary_mtree) <= 1:
+        gate_state = "failed"
+        gate_error = "xcolo_pre_migrate_secondary_mtree_empty"
+        gate_reason = "secondary_mtree_empty"
+    elif qtree_missing_devices:
+        gate_state = "failed"
+        gate_error = "xcolo_pre_migrate_guest_topology_missing"
+        gate_reason = qtree_missing_devices[0]
+        candidate_device = qtree_missing_devices[0]
+        candidate_reason = "qtree_missing_device"
+
 print(f"context={context}")
 print(f"phase={phase}")
 print(f"pci_primary_count={len(primary_pci)}")
@@ -3085,12 +3139,19 @@ print("pci_first_secondary=" + compact(json.dumps(pci_first_secondary, sort_keys
 print(f"qtree_primary_lines={len(primary_qtree)}")
 print(f"qtree_secondary_lines={len(secondary_qtree)}")
 print(f"qtree_diff_count={qtree_diff_count}")
+print(f"qtree_primary_device_count={len(primary_qtree_devices)}")
+print(f"qtree_secondary_device_count={len(secondary_qtree_devices)}")
+print(f"qtree_missing_device_count={len(qtree_missing_devices)}")
+print(f"qtree_extra_device_count={len(qtree_extra_devices)}")
+print("qtree_first_missing_device=" + compact(qtree_missing_devices[0] if qtree_missing_devices else ""))
+print("qtree_first_extra_device=" + compact(qtree_extra_devices[0] if qtree_extra_devices else ""))
 print(f"qtree_first_diff_index={qtree_first_index}")
 print("qtree_first_primary=" + compact(qtree_first_primary))
 print("qtree_first_secondary=" + compact(qtree_first_secondary))
 print(f"mtree_primary_lines={len(primary_mtree)}")
 print(f"mtree_secondary_lines={len(secondary_mtree)}")
 print(f"mtree_diff_count={mtree_diff_count}")
+print(f"mtree_secondary_empty={'yes' if len(secondary_mtree) <= 1 else 'no'}")
 print(f"mtree_first_diff_index={mtree_first_index}")
 print("mtree_first_primary=" + compact(mtree_first_primary))
 print("mtree_first_secondary=" + compact(mtree_first_secondary))
@@ -3099,6 +3160,9 @@ print(f"mtree_secondary_duplicate_count={len(secondary_mtree_dups)}")
 print("assert_candidate_device=" + compact(candidate_device or "unknown"))
 print("assert_candidate_region=" + compact(candidate_region or "unknown"))
 print("assert_candidate_reason=" + compact(candidate_reason or "insufficient_diff_evidence"))
+print(f"topology_gate_state={gate_state}")
+print(f"topology_gate_error={gate_error}")
+print("topology_gate_reason=" + compact(gate_reason))
 print(f"pci_identity_hash=primary:{digest(primary_pci)} secondary:{digest(secondary_pci)}")
 print(f"qtree_hash=primary:{digest(primary_qtree)} secondary:{digest(secondary_qtree)}")
 print(f"mtree_hash=primary:{digest(primary_mtree)} secondary:{digest(secondary_mtree)}")
@@ -3112,6 +3176,9 @@ PY
   candidate_device="$(printf '%s\n' "${summary}" | sed -n 's/^assert_candidate_device=//p' | head -n1)"
   candidate_region="$(printf '%s\n' "${summary}" | sed -n 's/^assert_candidate_region=//p' | head -n1)"
   candidate_reason="$(printf '%s\n' "${summary}" | sed -n 's/^assert_candidate_reason=//p' | head -n1)"
+  gate_state="$(printf '%s\n' "${summary}" | sed -n 's/^topology_gate_state=//p' | head -n1)"
+  gate_error="$(printf '%s\n' "${summary}" | sed -n 's/^topology_gate_error=//p' | head -n1)"
+  gate_reason="$(printf '%s\n' "${summary}" | sed -n 's/^topology_gate_reason=//p' | head -n1)"
 
   ftctl_state_set "${vm}" \
     "xcolo_${context}_topology_analyzed=yes" \
@@ -3120,8 +3187,49 @@ PY
     "xcolo_${context}_mtree_diff_count=${post_mtree_diff_count}" \
     "xcolo_assert_candidate_device=$(ftctl_xcolo_compact_log_value "${candidate_device}")" \
     "xcolo_assert_candidate_region=$(ftctl_xcolo_compact_log_value "${candidate_region}")" \
-    "xcolo_assert_candidate_reason=$(ftctl_xcolo_compact_log_value "${candidate_reason}")"
+    "xcolo_assert_candidate_reason=$(ftctl_xcolo_compact_log_value "${candidate_reason}")" \
+    "xcolo_${context}_topology_gate_state=${gate_state}" \
+    "xcolo_${context}_topology_gate_error=${gate_error}" \
+    "xcolo_${context}_topology_gate_reason=$(ftctl_xcolo_compact_log_value "${gate_reason}")"
   return "${rc}"
+}
+
+ftctl_xcolo_require_pre_migrate_runtime_topology_gate() {
+  local vm="${1-}"
+  local secondary_vm="${2:-$vm}"
+  local phase="${3:-before_migrate}"
+  local gate_state="" gate_error="" gate_reason=""
+
+  [[ -n "${vm}" && -n "${secondary_vm}" ]] || return 1
+  [[ "${FTCTL_DRY_RUN}" != "1" ]] || return 0
+
+  ftctl_xcolo_capture_live_runtime_topology_one "${vm}" "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" "primary" "${phase}" || true
+  ftctl_xcolo_capture_live_runtime_topology_one "${vm}" "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" "secondary" "${phase}" || true
+  ftctl_xcolo_analyze_runtime_topology_diff "${vm}" "${phase}" "pre_migrate" || true
+
+  gate_state="$(ftctl_state_get "${vm}" "xcolo_pre_migrate_topology_gate_state" 2>/dev/null || true)"
+  gate_error="$(ftctl_state_get "${vm}" "xcolo_pre_migrate_topology_gate_error" 2>/dev/null || true)"
+  gate_reason="$(ftctl_state_get "${vm}" "xcolo_pre_migrate_topology_gate_reason" 2>/dev/null || true)"
+  if [[ "${gate_state}" == "failed" ]]; then
+    [[ -n "${gate_error}" ]] || gate_error="xcolo_pre_migrate_topology_incomplete"
+    ftctl_state_set "${vm}" \
+      "conversion_stage=pre_migrate_topology_analysis_failed" \
+      "conversion_state=error" \
+      "protection_state=error" \
+      "transport_state=failed" \
+      "xcolo_protocol_failure_phase=pre_migrate_topology_analysis" \
+      "xcolo_last_runtime_error=${gate_error}" \
+      "last_error=${gate_error}"
+    ftctl_log_event "colo" "xcolo.pre_migrate_topology_gate" "fail" "${vm}" "" \
+      "secondary=${secondary_vm} reason=$(ftctl_xcolo_compact_log_value "${gate_reason}") error=${gate_error}"
+    return 1
+  fi
+
+  ftctl_state_set "${vm}" \
+    "xcolo_protocol_failure_phase=" \
+    "xcolo_pre_migrate_topology_gate_state=ok"
+  ftctl_log_event "colo" "xcolo.pre_migrate_topology_gate" "ok" "${vm}" "" \
+    "secondary=${secondary_vm} pci_diff=$(ftctl_state_get "${vm}" "xcolo_pre_migrate_pci_diff_count" 2>/dev/null || true) qtree_diff=$(ftctl_state_get "${vm}" "xcolo_pre_migrate_qtree_diff_count" 2>/dev/null || true) mtree_diff=$(ftctl_state_get "${vm}" "xcolo_pre_migrate_mtree_diff_count" 2>/dev/null || true)"
 }
 
 ftctl_xcolo_capture_post_migrate_secondary_failure_evidence() {
@@ -5126,6 +5234,7 @@ ftctl_xcolo_prebuilt_primary_stage() {
   ftctl_xcolo_require_checkpoint_delay_before_migrate "${vm}" || return 1
   ftctl_xcolo_record_pre_migrate_evidence "${vm}" "on" || true
   ftctl_xcolo_preflight_firewall_contract "${vm}" || return 1
+  ftctl_xcolo_require_pre_migrate_runtime_topology_gate "${vm}" "${vm}" "before_migrate" || return 1
   ftctl_xcolo_gate_before_guest_traffic "${vm}" "${vm}" || return 1
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
     "{\"execute\":\"migrate\",\"arguments\":{\"uri\":\"${FTCTL_PROFILE_XCOLO_MIGRATE_URI}\"}}" \
@@ -8297,6 +8406,7 @@ ftctl_xcolo_execute_handshake_with_nodes() {
   ftctl_xcolo_preflight_firewall_contract "${vm}" || return 1
   ftctl_xcolo_require_primary_filter_cmdline_ready "${vm}" "pre_migrate" || return 1
   ftctl_xcolo_require_topology_audit_ready "${vm}" "${secondary_vm}" "pre_migrate" || return 1
+  ftctl_xcolo_require_pre_migrate_runtime_topology_gate "${vm}" "${secondary_vm}" "before_migrate" || return 1
   ftctl_xcolo_assert_no_premigrate_filter_mirror_send "${vm}" "before_migrate" || return 1
   ftctl_xcolo_gate_before_guest_traffic "${vm}" "${secondary_vm}" || return 1
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
@@ -8369,6 +8479,7 @@ ftctl_xcolo_execute_handshake_with_disk_plan() {
   ftctl_xcolo_preflight_firewall_contract "${vm}" || return 1
   ftctl_xcolo_require_primary_filter_cmdline_ready "${vm}" "pre_migrate" || return 1
   ftctl_xcolo_require_topology_audit_ready "${vm}" "${secondary_vm}" "pre_migrate" || return 1
+  ftctl_xcolo_require_pre_migrate_runtime_topology_gate "${vm}" "${secondary_vm}" "before_migrate" || return 1
   ftctl_xcolo_assert_no_premigrate_filter_mirror_send "${vm}" "before_migrate" || return 1
   ftctl_xcolo_gate_before_guest_traffic "${vm}" "${secondary_vm}" || return 1
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \

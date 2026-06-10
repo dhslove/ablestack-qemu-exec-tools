@@ -6488,3 +6488,62 @@ Assertion `!subregion->container' failed.
   - primary qemu command line does not contain COLO runtime markers such as
     `colo-compare`, `filter-mirror`, `ftctl-colo`, `9003`, `9004`, or `9998`.
   - `ablestack-vm-ftctl.timer` is active on all three 32.x hosts.
+
+### Run 108 Result 2026-06-10
+
+- Test:
+  - user started FT protection for `r97-link-01` after Run 107 deployment.
+- Observed progress:
+  - `primary.migrate` was reached.
+  - primary QMP reached `query-migrate status=colo`.
+  - primary recovered back to normal `running` after failure handling.
+- Final state:
+
+```text
+protection_state=error
+transport_state=failed
+last_error=xcolo_secondary_qemu_assert_memory_region_container
+xcolo_protocol_failure_phase=post_migrate_secondary_crash
+```
+
+- Secondary QEMU assertion repeated:
+
+```text
+qemu-kvm: ../system/memory.c:2666: memory_region_add_subregion_common:
+Assertion `!subregion->container' failed.
+```
+
+- Analyzer evidence:
+
+```text
+xcolo_live_pci_identity_primary_count=18
+xcolo_live_pci_identity_secondary_count=12
+xcolo_live_pci_identity_diff_count=15
+xcolo_live_pci_identity_missing_count=6
+xcolo_live_pci_resource_diff_count=129
+xcolo_post_migrate_crash_qtree_diff_count=95
+xcolo_post_migrate_crash_mtree_diff_count=498
+```
+
+- Repetition guard:
+  - this is not a new COLO channel/firewall/disk hypothesis.
+  - the repeated assertion means migration is still being attempted before the
+    secondary live guest topology is proven complete.
+  - the next fix must stop before `primary.migrate` when `qtree/mtree` evidence
+    already shows an incomplete secondary topology.
+
+### Run 108 Fix Plan 2026-06-10
+
+- Design document:
+  - `372-ft-xcolo-pre-migrate-topology-gate-design-20260610.md`
+- Correction:
+  - keep existing QEMU COLO command sample alignment, RBD path policy, disk
+    graph, and filter ordering intact.
+  - reuse the topology analyzer before `primary.migrate`, not only after a
+    secondary crash.
+  - fail with `xcolo_protocol_failure_phase=pre_migrate_topology_analysis` if
+    secondary `qtree/mtree` is empty or missing primary guest-visible device
+    entries.
+  - preserve `info pci` resource differences as evidence because secondary
+    `-incoming` can legitimately defer PCI resource assignment before
+    migration.
