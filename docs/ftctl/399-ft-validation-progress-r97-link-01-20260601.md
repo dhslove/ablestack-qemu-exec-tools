@@ -6771,3 +6771,32 @@ shutting down, reason=crashed
   - the secondary also attempted `red0` before primary `9003` was available;
     the next analysis must decide whether this is a symptom of the secondary
     crash/start ordering or an independent channel ordering defect.
+
+### Run 110 Fix Plan 2026-06-10
+
+- Design document:
+  - `374-ft-xcolo-secondary-mtree-materialization-gate-design-20260610.md`
+- QEMU 9.2.4 code basis:
+  - `memory_region_add_subregion_common()` asserts when a MemoryRegion already
+    has a container and QEMU attempts to add it again.
+  - Run 110 secondary mtree showed PCI bridge aliases and BAR-backed regions
+    still materialized as zero-range entries while primary had assigned runtime
+    BAR ranges.
+- Correction:
+  - keep generated QEMU command sample alignment, COLO filter order, disk graph,
+    and RBD path policy unchanged.
+  - extend runtime topology analysis with zero-range PCI alias counts from
+    `info mtree`.
+  - fail before `primary.migrate` when secondary has materially more zero-range
+    PCI aliases than primary.
+  - classify role-transition timeout as
+    `xcolo_secondary_qemu_assert_memory_region_container` if secondary QEMU log
+    contains `memory_region_add_subregion_common` or `subregion->container`.
+- Repetition guard:
+  - if the next run fails before `primary.migrate` with
+    `xcolo_pre_migrate_secondary_pci_resources_unmaterialized`, the change is
+    working as a crash-prevention gate, but the next fix must materialize or
+    eliminate the secondary PCI resource mismatch.
+  - if the next run still reaches QEMU assertion after `primary.migrate`, the
+    mtree zero-alias detector is incomplete and must be expanded with a more
+    precise PCI BAR/mtree materialization rule.

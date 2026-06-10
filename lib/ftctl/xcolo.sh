@@ -2916,6 +2916,7 @@ ftctl_xcolo_analyze_runtime_topology_diff() {
   local context="${3:-post_migrate}"
   local debug_dir="" summary="" rc=0
   local post_pci_diff_count="" post_qtree_diff_count="" post_mtree_diff_count=""
+  local primary_zero_pci_alias_count="" secondary_zero_pci_alias_count=""
   local candidate_device="" candidate_region="" candidate_reason=""
   local gate_state="" gate_error="" gate_reason=""
 
@@ -3068,6 +3069,17 @@ def repeated_items(items):
         seen.add(item)
     return dup
 
+ZERO_RANGE_RE = re.compile(r"^0+0-0+0 ")
+
+def zero_range_pci_aliases(items):
+    aliases = []
+    for item in items:
+        if not ZERO_RANGE_RE.match(item):
+            continue
+        if "alias pci_bridge_" in item or "alias pcie" in item:
+            aliases.append(item)
+    return aliases
+
 def compact(value, limit=300):
     value = str(value).replace("\n", " ").replace("\t", " ")
     value = re.sub(r"\s+", " ", value).strip()
@@ -3088,6 +3100,8 @@ mtree_diff_count, mtree_first_index, mtree_first_primary, mtree_first_secondary 
 
 primary_mtree_dups = repeated_items(primary_mtree)
 secondary_mtree_dups = repeated_items(secondary_mtree)
+primary_zero_pci_aliases = zero_range_pci_aliases(primary_mtree)
+secondary_zero_pci_aliases = zero_range_pci_aliases(secondary_mtree)
 qtree_missing_devices = qtree_missing(primary_qtree_devices, secondary_qtree_devices)
 qtree_extra_devices = qtree_missing(secondary_qtree_devices, primary_qtree_devices)
 candidate_device = ""
@@ -3127,6 +3141,12 @@ if context == "pre_migrate":
         gate_reason = qtree_missing_devices[0]
         candidate_device = qtree_missing_devices[0]
         candidate_reason = "qtree_missing_device"
+    elif len(secondary_zero_pci_aliases) > len(primary_zero_pci_aliases) + 2:
+        gate_state = "failed"
+        gate_error = "xcolo_pre_migrate_secondary_pci_resources_unmaterialized"
+        gate_reason = secondary_zero_pci_aliases[0]
+        candidate_region = secondary_zero_pci_aliases[0]
+        candidate_reason = "secondary_zero_range_pci_alias"
 
 print(f"context={context}")
 print(f"phase={phase}")
@@ -3157,6 +3177,9 @@ print("mtree_first_primary=" + compact(mtree_first_primary))
 print("mtree_first_secondary=" + compact(mtree_first_secondary))
 print(f"mtree_primary_duplicate_count={len(primary_mtree_dups)}")
 print(f"mtree_secondary_duplicate_count={len(secondary_mtree_dups)}")
+print(f"mtree_primary_zero_pci_alias_count={len(primary_zero_pci_aliases)}")
+print(f"mtree_secondary_zero_pci_alias_count={len(secondary_zero_pci_aliases)}")
+print("mtree_first_secondary_zero_pci_alias=" + compact(secondary_zero_pci_aliases[0] if secondary_zero_pci_aliases else ""))
 print("assert_candidate_device=" + compact(candidate_device or "unknown"))
 print("assert_candidate_region=" + compact(candidate_region or "unknown"))
 print("assert_candidate_reason=" + compact(candidate_reason or "insufficient_diff_evidence"))
@@ -3173,6 +3196,8 @@ PY
   post_pci_diff_count="$(printf '%s\n' "${summary}" | sed -n 's/^pci_diff_count=//p' | head -n1)"
   post_qtree_diff_count="$(printf '%s\n' "${summary}" | sed -n 's/^qtree_diff_count=//p' | head -n1)"
   post_mtree_diff_count="$(printf '%s\n' "${summary}" | sed -n 's/^mtree_diff_count=//p' | head -n1)"
+  primary_zero_pci_alias_count="$(printf '%s\n' "${summary}" | sed -n 's/^mtree_primary_zero_pci_alias_count=//p' | head -n1)"
+  secondary_zero_pci_alias_count="$(printf '%s\n' "${summary}" | sed -n 's/^mtree_secondary_zero_pci_alias_count=//p' | head -n1)"
   candidate_device="$(printf '%s\n' "${summary}" | sed -n 's/^assert_candidate_device=//p' | head -n1)"
   candidate_region="$(printf '%s\n' "${summary}" | sed -n 's/^assert_candidate_region=//p' | head -n1)"
   candidate_reason="$(printf '%s\n' "${summary}" | sed -n 's/^assert_candidate_reason=//p' | head -n1)"
@@ -3185,6 +3210,8 @@ PY
     "xcolo_${context}_pci_diff_count=${post_pci_diff_count}" \
     "xcolo_${context}_qtree_diff_count=${post_qtree_diff_count}" \
     "xcolo_${context}_mtree_diff_count=${post_mtree_diff_count}" \
+    "xcolo_${context}_mtree_primary_zero_pci_alias_count=${primary_zero_pci_alias_count}" \
+    "xcolo_${context}_mtree_secondary_zero_pci_alias_count=${secondary_zero_pci_alias_count}" \
     "xcolo_assert_candidate_device=$(ftctl_xcolo_compact_log_value "${candidate_device}")" \
     "xcolo_assert_candidate_region=$(ftctl_xcolo_compact_log_value "${candidate_region}")" \
     "xcolo_assert_candidate_reason=$(ftctl_xcolo_compact_log_value "${candidate_reason}")" \
@@ -8421,6 +8448,21 @@ ftctl_xcolo_wait_post_migrate_role_transition() {
     fi
     sleep 1
   done
+
+  ftctl_xcolo_capture_post_migrate_secondary_failure_evidence "${vm}" "${secondary_vm}" "post_migrate_role_transition_timeout" || true
+  if ftctl_xcolo_secondary_qemu_assert_memory_region_container_observed "${vm}" "${secondary_vm}"; then
+    ftctl_state_set "${vm}" \
+      "xcolo_post_migrate_role_transition_gate=failed" \
+      "xcolo_post_migrate_role_transition_reason=secondary_qemu_assert_memory_region_container" \
+      "xcolo_protocol_failure_phase=post_migrate_secondary_crash" \
+      "xcolo_secondary_qemu_assert=memory_region_add_subregion_common" \
+      "xcolo_secondary_crash_detected=yes" \
+      "xcolo_primary_filter_activation_failed_reason=secondary_qemu_assert_memory_region_container" \
+      "last_error=xcolo_secondary_qemu_assert_memory_region_container"
+    ftctl_log_event "colo" "xcolo.post_migrate_role_transition_gate" "fail" "${vm}" "" \
+      "reason=secondary_qemu_assert_memory_region_container attempts=${timeout} primary_migrate=$(ftctl_state_get "${vm}" "xcolo_post_migrate_role_transition_primary_migrate" 2>/dev/null || true) secondary_migrate=$(ftctl_state_get "${vm}" "xcolo_post_migrate_role_transition_secondary_migrate" 2>/dev/null || true)"
+    return 1
+  fi
 
   if [[ "${failure_reason}" == *"query"* ]]; then
     ftctl_state_set "${vm}" \
