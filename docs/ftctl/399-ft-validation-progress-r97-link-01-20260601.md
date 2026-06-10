@@ -6390,3 +6390,67 @@ xcolo_live_pci_identity=deferred
   - primary qemu command line no longer contains COLO runtime markers such as
     `colo-compare`, `filter-mirror`, `ftctl-colo`, `9003`, or `9004`.
   - `ablestack-vm-ftctl.timer` is active on all three 32.x hosts.
+
+### Run 107 Monitoring Result 2026-06-10
+
+- User started FT protection for `r97-link-01`.
+- Runtime:
+  - `ftctl_protection.id=107`
+  - primary VM `i-2-54-VM`
+  - standby VM `i-2-172-VM`
+  - primary host `10.10.32.3`
+  - peer host `10.10.32.1`
+- Progress:
+  - cloud-managed standby VM and volumes were created.
+  - baseline seed proceeded.
+  - the previous pre-migrate hard stop was not repeated:
+
+```text
+xcolo_live_pci_identity=deferred
+xcolo_live_pci_identity_warning=xcolo_live_pci_identity_deferred_for_incoming
+xcolo_pre_migrate_contract=ok
+xcolo_channel_mirror_established=yes
+xcolo_channel_compare_established=yes
+xcolo_primary_filter_status_pre_migrate=on
+```
+
+  - `primary.migrate` was reached.
+  - QMP `query-migrate` reported `status=colo` for a period.
+- Final state:
+
+```text
+protection_state=error
+transport_state=failed
+last_error=xcolo_secondary_qemu_assert_memory_region_container
+xcolo_protocol_failure_phase=post_migrate_secondary_crash
+```
+
+- Secondary QEMU assertion:
+
+```text
+qemu-kvm: ../system/memory.c:2666: memory_region_add_subregion_common:
+Assertion `!subregion->container' failed.
+```
+
+- Repetition guard:
+  - this is progress from Run 106 because the pre-migrate PCI identity gate was
+    passed and the workflow reached actual COLO migration.
+  - the recurring assertion is now the active bottleneck and must be analyzed
+    from post-migrate `pci/qtree/mtree` evidence instead of being described as a
+    generic topology mismatch.
+
+### Run 107 Fix Plan 2026-06-10
+
+- Design document:
+  - `371-ft-xcolo-post-migrate-topology-analyzer-design-20260610.md`
+- Correction:
+  - keep current QEMU command-line, disk graph, RBD path, and COLO filter
+    ordering intact.
+  - add PCI identity/resource diff counts to the pre-migrate gate.
+  - add post-migrate secondary crash topology analysis for:
+    - live qemu argv;
+    - `info pci`;
+    - `info qtree`;
+    - `info mtree`.
+  - record candidate device/region keys so the next failure can be classified as
+    either a new narrowed candidate or a true repeated loop.

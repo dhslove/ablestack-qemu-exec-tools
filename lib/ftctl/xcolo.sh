@@ -2384,6 +2384,30 @@ def digest(obj):
     encoded = json.dumps(obj, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
+def diff_summary(left, right):
+    max_len = max(len(left), len(right))
+    diff_count = 0
+    first_index = ""
+    first_left = ""
+    first_right = ""
+    for idx in range(max_len):
+        lval = left[idx] if idx < len(left) else "<missing>"
+        rval = right[idx] if idx < len(right) else "<missing>"
+        if lval != rval:
+            diff_count += 1
+            if first_index == "":
+                first_index = str(idx)
+                first_left = lval
+                first_right = rval
+    return {
+        "diff_count": diff_count,
+        "missing_count": max(0, len(left) - len(right)),
+        "extra_count": max(0, len(right) - len(left)),
+        "first_index": first_index,
+        "first_left": first_left,
+        "first_right": first_right,
+    }
+
 p_args = argv_list(primary_argv)
 s_args = argv_list(secondary_argv)
 p_devices = guest_devices(primary_argv)
@@ -2392,6 +2416,8 @@ p_pci = normalize_pci(primary_pci)
 s_pci = normalize_pci(secondary_pci)
 p_pci_identity = pci_identity(primary_pci)
 s_pci_identity = pci_identity(secondary_pci)
+pci_id_diff = diff_summary(p_pci_identity, s_pci_identity)
+pci_raw_diff = diff_summary(p_pci, s_pci)
 
 if not p_args and not s_args:
     print("error=xcolo_live_runtime_argv_empty")
@@ -2450,27 +2476,15 @@ elif p_pci_identity != s_pci_identity:
         print("error=")
         print("warning=xcolo_live_pci_identity_deferred_for_incoming")
         print(f"pci_reason=secondary_incoming_pci_unassigned primary_hash={digest(p_pci_identity)} secondary_hash={digest(s_pci_identity)}")
-        max_len = max(len(p_pci_identity), len(s_pci_identity))
-        for idx in range(max_len):
-            left = p_pci_identity[idx] if idx < len(p_pci_identity) else "<missing>"
-            right = s_pci_identity[idx] if idx < len(s_pci_identity) else "<missing>"
-            if left != right:
-                print(f"pci_first_diff_index={idx}")
-                print("pci_primary=" + json.dumps(left, sort_keys=True, separators=(",", ":")))
-                print("pci_secondary=" + json.dumps(right, sort_keys=True, separators=(",", ":")))
-                break
+        print(f"pci_first_diff_index={pci_id_diff['first_index']}")
+        print("pci_primary=" + json.dumps(pci_id_diff["first_left"], sort_keys=True, separators=(",", ":")))
+        print("pci_secondary=" + json.dumps(pci_id_diff["first_right"], sort_keys=True, separators=(",", ":")))
     else:
         print("error=xcolo_live_pci_identity_mismatch")
         print(f"reason=info_pci_identity_diff primary_hash={digest(p_pci_identity)} secondary_hash={digest(s_pci_identity)}")
-        max_len = max(len(p_pci_identity), len(s_pci_identity))
-        for idx in range(max_len):
-            left = p_pci_identity[idx] if idx < len(p_pci_identity) else "<missing>"
-            right = s_pci_identity[idx] if idx < len(s_pci_identity) else "<missing>"
-            if left != right:
-                print(f"pci_first_diff_index={idx}")
-                print("pci_primary=" + json.dumps(left, sort_keys=True, separators=(",", ":")))
-                print("pci_secondary=" + json.dumps(right, sort_keys=True, separators=(",", ":")))
-                break
+        print(f"pci_first_diff_index={pci_id_diff['first_index']}")
+        print("pci_primary=" + json.dumps(pci_id_diff["first_left"], sort_keys=True, separators=(",", ":")))
+        print("pci_secondary=" + json.dumps(pci_id_diff["first_right"], sort_keys=True, separators=(",", ":")))
         raise SystemExit(1)
 elif p_pci != s_pci:
     print("error=")
@@ -2480,11 +2494,25 @@ else:
     print("error=")
 if p_pci != s_pci:
     print(f"pci_raw_hash=primary:{digest(p_pci)} secondary:{digest(s_pci)}")
+print(f"pci_identity_primary_count={len(p_pci_identity)}")
+print(f"pci_identity_secondary_count={len(s_pci_identity)}")
+print(f"pci_identity_diff_count={pci_id_diff['diff_count']}")
+print(f"pci_identity_missing_count={pci_id_diff['missing_count']}")
+print(f"pci_identity_extra_count={pci_id_diff['extra_count']}")
+print(f"pci_resource_diff_count={pci_raw_diff['diff_count']}")
 print(f"reason=ok device_hash={digest(p_devices)} pci_identity_hash={digest(p_pci_identity)} devices={len(p_devices)} pci_devices={len(p_pci_identity)} pci_lines_primary={len(p_pci)} pci_lines_secondary={len(s_pci)}")
 PY
 )" || rc=$?
 
   ftctl_xcolo_write_debug_file "${vm}" "live-topology-diff-${phase}.txt" "${payload}" || true
+  local pci_identity_primary_count="" pci_identity_secondary_count="" pci_identity_diff_count=""
+  local pci_identity_missing_count="" pci_identity_extra_count="" pci_resource_diff_count=""
+  pci_identity_primary_count="$(printf '%s\n' "${payload}" | sed -n 's/^pci_identity_primary_count=//p' | head -n1)"
+  pci_identity_secondary_count="$(printf '%s\n' "${payload}" | sed -n 's/^pci_identity_secondary_count=//p' | head -n1)"
+  pci_identity_diff_count="$(printf '%s\n' "${payload}" | sed -n 's/^pci_identity_diff_count=//p' | head -n1)"
+  pci_identity_missing_count="$(printf '%s\n' "${payload}" | sed -n 's/^pci_identity_missing_count=//p' | head -n1)"
+  pci_identity_extra_count="$(printf '%s\n' "${payload}" | sed -n 's/^pci_identity_extra_count=//p' | head -n1)"
+  pci_resource_diff_count="$(printf '%s\n' "${payload}" | sed -n 's/^pci_resource_diff_count=//p' | head -n1)"
   if [[ "${rc}" != "0" ]]; then
     error_name="$(printf '%s\n' "${payload}" | sed -n 's/^error=//p' | head -n1)"
     reason="$(printf '%s\n' "${payload}" | sed -n 's/^reason=//p' | head -n1)"
@@ -2499,6 +2527,12 @@ PY
       "xcolo_live_runtime_topology_reason=$(ftctl_xcolo_compact_log_value "${reason}")" \
       "xcolo_live_pci_identity=failed" \
       "xcolo_live_pci_identity_first_diff_index=${pci_first_diff_index}" \
+      "xcolo_live_pci_identity_primary_count=${pci_identity_primary_count}" \
+      "xcolo_live_pci_identity_secondary_count=${pci_identity_secondary_count}" \
+      "xcolo_live_pci_identity_diff_count=${pci_identity_diff_count}" \
+      "xcolo_live_pci_identity_missing_count=${pci_identity_missing_count}" \
+      "xcolo_live_pci_identity_extra_count=${pci_identity_extra_count}" \
+      "xcolo_live_pci_resource_diff_count=${pci_resource_diff_count}" \
       "xcolo_live_pci_identity_primary=$(ftctl_xcolo_compact_log_value "${pci_primary}")" \
       "xcolo_live_pci_identity_secondary=$(ftctl_xcolo_compact_log_value "${pci_secondary}")" \
       "xcolo_live_pci_evidence=${error_name}" \
@@ -2527,6 +2561,12 @@ PY
     "xcolo_live_pci_identity=${pci_identity_state}" \
     "xcolo_live_pci_identity_warning=${pci_warning}" \
     "xcolo_live_pci_identity_first_diff_index=${pci_first_diff_index}" \
+    "xcolo_live_pci_identity_primary_count=${pci_identity_primary_count}" \
+    "xcolo_live_pci_identity_secondary_count=${pci_identity_secondary_count}" \
+    "xcolo_live_pci_identity_diff_count=${pci_identity_diff_count}" \
+    "xcolo_live_pci_identity_missing_count=${pci_identity_missing_count}" \
+    "xcolo_live_pci_identity_extra_count=${pci_identity_extra_count}" \
+    "xcolo_live_pci_resource_diff_count=${pci_resource_diff_count}" \
     "xcolo_live_pci_identity_primary=$(ftctl_xcolo_compact_log_value "${pci_primary}")" \
     "xcolo_live_pci_identity_secondary=$(ftctl_xcolo_compact_log_value "${pci_secondary}")" \
     "xcolo_live_pci_evidence=${pci_warning:-none}" \
@@ -2870,6 +2910,220 @@ ftctl_xcolo_secondary_qemu_assert_memory_region_container_observed() {
   return 1
 }
 
+ftctl_xcolo_analyze_runtime_topology_diff() {
+  local vm="${1-}"
+  local phase="${2:-post_migrate_secondary_crash}"
+  local context="${3:-post_migrate}"
+  local debug_dir="" summary="" rc=0
+  local post_pci_diff_count="" post_qtree_diff_count="" post_mtree_diff_count=""
+  local candidate_device="" candidate_region="" candidate_reason=""
+
+  [[ -n "${vm}" ]] || return 0
+  debug_dir="$(ftctl_xcolo_debug_dir "${vm}")"
+  summary="$(DEBUG_DIR="${debug_dir}" PHASE="${phase}" CONTEXT="${context}" python3 - <<'PY'
+import hashlib
+import json
+import os
+import re
+
+debug_dir = os.environ.get("DEBUG_DIR", "")
+phase = os.environ.get("PHASE", "")
+context = os.environ.get("CONTEXT", "")
+
+def read_text(name):
+    path = os.path.join(debug_dir, name)
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            return handle.read()
+    except FileNotFoundError:
+        return ""
+
+def digest(obj):
+    encoded = json.dumps(obj, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+def norm_line(line):
+    return re.sub(r"\s+", " ", line.strip())
+
+PCI_HEADER_RE = re.compile(r"^Bus\s+([0-9a-fA-F]+),\s*device\s+([0-9a-fA-F]+),\s*function\s+([0-9a-fA-F]+):$")
+
+def pci_identity(raw):
+    records = []
+    current = None
+    for line in raw.splitlines():
+        text = norm_line(line)
+        if not text:
+            continue
+        match = PCI_HEADER_RE.match(text)
+        if match:
+            if current is not None:
+                records.append(current)
+            current = {
+                "addr": f"bus={int(match.group(1), 10)} device={int(match.group(2), 10)} function={int(match.group(3), 10)}",
+                "class": "",
+                "subsystem": "",
+                "id": "",
+            }
+            continue
+        if current is None:
+            continue
+        if text.startswith(("BAR", "IRQ", "BUS ", "secondary bus ", "subordinate bus ")):
+            continue
+        if text.startswith(("IO range ", "memory range ", "prefetchable memory range ")):
+            continue
+        if ": PCI device " in text and not current["class"]:
+            current["class"] = text
+            continue
+        if text.startswith("PCI subsystem "):
+            current["subsystem"] = text
+            continue
+        if text.startswith("id "):
+            current["id"] = text
+            continue
+    if current is not None:
+        records.append(current)
+    return records
+
+def normalize_qtree(raw):
+    lines = []
+    for line in raw.splitlines():
+        text = norm_line(line)
+        if not text:
+            continue
+        if text.startswith(("dev:", "bus:", "child<", "gpio-", "link<")):
+            lines.append(text)
+            continue
+        if any(key in text for key in (" addr =", " bus =", " class ", " device_id =", " serial =", " mac =")):
+            lines.append(text)
+    return lines
+
+MTREE_VOLATILE_RE = re.compile(r"\s+@[0-9a-fA-Fx]+")
+
+def normalize_mtree(raw):
+    lines = []
+    for line in raw.splitlines():
+        text = norm_line(line)
+        if not text:
+            continue
+        if text.startswith(("FlatView", "Root memory region")):
+            continue
+        text = MTREE_VOLATILE_RE.sub("", text)
+        lines.append(text)
+    return lines
+
+def diff_summary(left, right):
+    max_len = max(len(left), len(right))
+    diff_count = 0
+    first_index = ""
+    first_left = ""
+    first_right = ""
+    for idx in range(max_len):
+        lval = left[idx] if idx < len(left) else "<missing>"
+        rval = right[idx] if idx < len(right) else "<missing>"
+        if lval != rval:
+            diff_count += 1
+            if first_index == "":
+                first_index = str(idx)
+                first_left = lval
+                first_right = rval
+    return diff_count, first_index, first_left, first_right
+
+def repeated_items(items):
+    seen = set()
+    dup = []
+    for item in items:
+        if item in seen and item not in dup:
+            dup.append(item)
+        seen.add(item)
+    return dup
+
+def compact(value, limit=300):
+    value = str(value).replace("\n", " ").replace("\t", " ")
+    value = re.sub(r"\s+", " ", value).strip()
+    return value[:limit]
+
+primary_pci = pci_identity(read_text(f"primary-info-pci-{phase}.txt"))
+secondary_pci = pci_identity(read_text(f"secondary-info-pci-{phase}.txt"))
+primary_qtree = normalize_qtree(read_text(f"primary-info-qtree-{phase}.txt"))
+secondary_qtree = normalize_qtree(read_text(f"secondary-info-qtree-{phase}.txt"))
+primary_mtree = normalize_mtree(read_text(f"primary-info-mtree-{phase}.txt"))
+secondary_mtree = normalize_mtree(read_text(f"secondary-info-mtree-{phase}.txt"))
+
+pci_diff_count, pci_first_index, pci_first_primary, pci_first_secondary = diff_summary(primary_pci, secondary_pci)
+qtree_diff_count, qtree_first_index, qtree_first_primary, qtree_first_secondary = diff_summary(primary_qtree, secondary_qtree)
+mtree_diff_count, mtree_first_index, mtree_first_primary, mtree_first_secondary = diff_summary(primary_mtree, secondary_mtree)
+
+primary_mtree_dups = repeated_items(primary_mtree)
+secondary_mtree_dups = repeated_items(secondary_mtree)
+candidate_device = ""
+candidate_region = ""
+candidate_reason = ""
+
+if mtree_diff_count:
+    candidate_region = mtree_first_secondary if mtree_first_secondary != "<missing>" else mtree_first_primary
+    candidate_reason = "mtree_first_diff"
+if secondary_mtree_dups:
+    candidate_region = secondary_mtree_dups[0]
+    candidate_reason = "secondary_mtree_duplicate_region"
+if qtree_diff_count:
+    candidate_device = qtree_first_secondary if qtree_first_secondary != "<missing>" else qtree_first_primary
+    if not candidate_reason:
+        candidate_reason = "qtree_first_diff"
+if pci_diff_count and not candidate_device:
+    candidate_device = json.dumps(pci_first_secondary if pci_first_secondary != "<missing>" else pci_first_primary, sort_keys=True, separators=(",", ":"))
+    if not candidate_reason:
+        candidate_reason = "pci_first_diff"
+
+print(f"context={context}")
+print(f"phase={phase}")
+print(f"pci_primary_count={len(primary_pci)}")
+print(f"pci_secondary_count={len(secondary_pci)}")
+print(f"pci_diff_count={pci_diff_count}")
+print(f"pci_first_diff_index={pci_first_index}")
+print("pci_first_primary=" + compact(json.dumps(pci_first_primary, sort_keys=True, separators=(",", ":"))))
+print("pci_first_secondary=" + compact(json.dumps(pci_first_secondary, sort_keys=True, separators=(",", ":"))))
+print(f"qtree_primary_lines={len(primary_qtree)}")
+print(f"qtree_secondary_lines={len(secondary_qtree)}")
+print(f"qtree_diff_count={qtree_diff_count}")
+print(f"qtree_first_diff_index={qtree_first_index}")
+print("qtree_first_primary=" + compact(qtree_first_primary))
+print("qtree_first_secondary=" + compact(qtree_first_secondary))
+print(f"mtree_primary_lines={len(primary_mtree)}")
+print(f"mtree_secondary_lines={len(secondary_mtree)}")
+print(f"mtree_diff_count={mtree_diff_count}")
+print(f"mtree_first_diff_index={mtree_first_index}")
+print("mtree_first_primary=" + compact(mtree_first_primary))
+print("mtree_first_secondary=" + compact(mtree_first_secondary))
+print(f"mtree_primary_duplicate_count={len(primary_mtree_dups)}")
+print(f"mtree_secondary_duplicate_count={len(secondary_mtree_dups)}")
+print("assert_candidate_device=" + compact(candidate_device or "unknown"))
+print("assert_candidate_region=" + compact(candidate_region or "unknown"))
+print("assert_candidate_reason=" + compact(candidate_reason or "insufficient_diff_evidence"))
+print(f"pci_identity_hash=primary:{digest(primary_pci)} secondary:{digest(secondary_pci)}")
+print(f"qtree_hash=primary:{digest(primary_qtree)} secondary:{digest(secondary_qtree)}")
+print(f"mtree_hash=primary:{digest(primary_mtree)} secondary:{digest(secondary_mtree)}")
+PY
+)" || rc=$?
+
+  ftctl_xcolo_write_debug_file "${vm}" "runtime-topology-analysis-${phase}.txt" "${summary}" || true
+  post_pci_diff_count="$(printf '%s\n' "${summary}" | sed -n 's/^pci_diff_count=//p' | head -n1)"
+  post_qtree_diff_count="$(printf '%s\n' "${summary}" | sed -n 's/^qtree_diff_count=//p' | head -n1)"
+  post_mtree_diff_count="$(printf '%s\n' "${summary}" | sed -n 's/^mtree_diff_count=//p' | head -n1)"
+  candidate_device="$(printf '%s\n' "${summary}" | sed -n 's/^assert_candidate_device=//p' | head -n1)"
+  candidate_region="$(printf '%s\n' "${summary}" | sed -n 's/^assert_candidate_region=//p' | head -n1)"
+  candidate_reason="$(printf '%s\n' "${summary}" | sed -n 's/^assert_candidate_reason=//p' | head -n1)"
+
+  ftctl_state_set "${vm}" \
+    "xcolo_${context}_topology_analyzed=yes" \
+    "xcolo_${context}_pci_diff_count=${post_pci_diff_count}" \
+    "xcolo_${context}_qtree_diff_count=${post_qtree_diff_count}" \
+    "xcolo_${context}_mtree_diff_count=${post_mtree_diff_count}" \
+    "xcolo_assert_candidate_device=$(ftctl_xcolo_compact_log_value "${candidate_device}")" \
+    "xcolo_assert_candidate_region=$(ftctl_xcolo_compact_log_value "${candidate_region}")" \
+    "xcolo_assert_candidate_reason=$(ftctl_xcolo_compact_log_value "${candidate_reason}")"
+  return "${rc}"
+}
+
 ftctl_xcolo_capture_post_migrate_secondary_failure_evidence() {
   local vm="${1-}"
   local secondary_vm="${2:-$vm}"
@@ -2891,6 +3145,7 @@ ftctl_xcolo_capture_post_migrate_secondary_failure_evidence() {
   ftctl_xcolo_capture_live_runtime_topology_one "${vm}" "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" "primary" "${phase}" || true
   ftctl_xcolo_capture_live_runtime_topology_one "${vm}" "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" "secondary" "${phase}" || true
   ftctl_xcolo_capture_qemu_proc_args_pair "${vm}" "${secondary_vm}" "${phase}" primary_argv secondary_argv || true
+  ftctl_xcolo_analyze_runtime_topology_diff "${vm}" "${phase}" "post_migrate_crash" || true
 
   summary="$(DEBUG_DIR="${debug_dir}" PHASE="${phase}" PRIMARY_ARGV="${primary_argv}" SECONDARY_ARGV="${secondary_argv}" python3 - <<'PY'
 import hashlib
@@ -2941,7 +3196,12 @@ print(f"secondary_log_assertion={assertion or 'not_observed'}")
 PY
 )" || summary="phase=${phase}"$'\n'"summary=failed"
   ftctl_xcolo_write_debug_file "${vm}" "migration-abi-failure-summary-${phase}.txt" "${summary}" || true
-  ftctl_state_set "${vm}" "xcolo_post_migrate_failure_evidence_captured=yes"
+  ftctl_state_set "${vm}" \
+    "xcolo_post_migrate_failure_evidence_captured=yes" \
+    "xcolo_post_migrate_crash_analyzed=$(ftctl_state_get "${vm}" "xcolo_post_migrate_crash_topology_analyzed" 2>/dev/null || printf no)" \
+    "xcolo_post_migrate_pci_diff_count=$(ftctl_state_get "${vm}" "xcolo_post_migrate_crash_pci_diff_count" 2>/dev/null || true)" \
+    "xcolo_post_migrate_qtree_diff_count=$(ftctl_state_get "${vm}" "xcolo_post_migrate_crash_qtree_diff_count" 2>/dev/null || true)" \
+    "xcolo_post_migrate_mtree_diff_count=$(ftctl_state_get "${vm}" "xcolo_post_migrate_crash_mtree_diff_count" 2>/dev/null || true)"
 }
 
 ftctl_xcolo_primary_filter_mirror_send_errno() {
