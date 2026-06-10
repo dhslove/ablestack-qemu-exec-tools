@@ -4489,6 +4489,81 @@ selftest_case_failback_reprotect_clears_standby_verify_state() (
   selftest_assert_not_contains "${out}" '"standby_verify_state":"running-network-unknown"' "status omits stale standby verify state"
 )
 
+selftest_write_xcolo_mtree_deferred_fixture() {
+  local vm="${1-}"
+  local phase="${2-}"
+  local debug_dir
+
+  debug_dir="$(ftctl_xcolo_debug_dir "${vm}")"
+  mkdir -p "${debug_dir}"
+  cat > "${debug_dir}/primary-info-qtree-${phase}.txt" <<'EOF'
+dev: i440FX-pcihost, id ""
+dev: pci-bridge, id "pci.6"
+dev: virtio-scsi-pci, id "scsi0"
+dev: virtio-net-pci, id "net0"
+EOF
+  cat > "${debug_dir}/secondary-info-qtree-${phase}.txt" <<'EOF'
+dev: i440FX-pcihost, id ""
+dev: pci-bridge, id "pci.6"
+dev: virtio-scsi-pci, id "scsi0"
+dev: virtio-net-pci, id "net0"
+EOF
+  cat > "${debug_dir}/primary-info-mtree-${phase}.txt" <<'EOF'
+0000000000000000-00000000ffffffff (prio 0, ram): pc.ram
+00000000febf0000-00000000febf0fff (prio 1, i/o): alias pci_bridge_mem @pci_bridge_pci 0000000000000000-0000000000000fff
+00000000fec00000-00000000fec00fff (prio 1, i/o): alias pci_bridge_io @pci_bridge_pci 0000000000000000-0000000000000fff
+00000000fed00000-00000000fed00fff (prio 1, i/o): alias pci_bridge_pref_mem @pci_bridge_pci 0000000000000000-0000000000000fff
+EOF
+  cat > "${debug_dir}/secondary-info-mtree-${phase}.txt" <<'EOF'
+0000000000000000-00000000ffffffff (prio 0, ram): pc.ram
+0000000000000000-0000000000000000 (prio 1, i/o): alias pci_bridge_mem @pci_bridge_pci 0000000000000000-0000000000000000
+0000000000000000-0000000000000000 (prio 1, i/o): alias pci_bridge_io @pci_bridge_pci 0000000000000000-0000000000000000
+0000000000000000-0000000000000000 (prio 1, i/o): alias pci_bridge_pref_mem @pci_bridge_pci 0000000000000000-0000000000000000
+EOF
+  : > "${debug_dir}/primary-info-pci-${phase}.txt"
+  : > "${debug_dir}/secondary-info-pci-${phase}.txt"
+}
+
+selftest_case_xcolo_mtree_zero_alias_deferred_before_migrate() (
+  selftest_reset_env
+  selftest_info "x-colo secondary mtree zero PCI aliases are deferred before migrate"
+
+  local vm="xcolo-mtree-deferred"
+  local phase="before_migrate"
+  ftctl_state_init_vm "${vm}"
+  selftest_write_xcolo_mtree_deferred_fixture "${vm}" "${phase}"
+
+  ftctl_xcolo_analyze_runtime_topology_diff "${vm}" "${phase}" "pre_migrate"
+
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_pre_migrate_topology_gate_state")" \
+    "deferred" "pre-migrate zero PCI aliases should be deferred"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_pre_migrate_topology_gate_error")" \
+    "xcolo_pre_migrate_secondary_pci_resources_deferred_for_incoming" \
+    "pre-migrate deferred error recorded"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_pre_migrate_mtree_secondary_zero_pci_alias_count")" \
+    "3" "pre-migrate secondary zero alias count"
+)
+
+selftest_case_xcolo_mtree_zero_alias_fails_after_migrate() (
+  selftest_reset_env
+  selftest_info "x-colo secondary mtree zero PCI aliases fail after migrate"
+
+  local vm="xcolo-mtree-post-fail"
+  local phase="after_migrate_materialization"
+  ftctl_state_init_vm "${vm}"
+  selftest_write_xcolo_mtree_deferred_fixture "${vm}" "${phase}"
+
+  ftctl_xcolo_analyze_runtime_topology_diff "${vm}" "${phase}" "post_migrate_materialization"
+
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_post_migrate_materialization_topology_gate_state")" \
+    "failed" "post-migrate zero PCI aliases should fail"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_post_migrate_materialization_topology_gate_error")" \
+    "xcolo_post_migrate_secondary_pci_resources_unmaterialized" \
+    "post-migrate materialization error recorded"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_post_migrate_materialization_mtree_secondary_zero_pci_alias_count")" \
+    "3" "post-migrate secondary zero alias count"
+)
+
 selftest_case_events_json() {
   selftest_reset_env
   selftest_info "events json output"
@@ -4588,8 +4663,18 @@ selftest_main() {
   selftest_case_reconcile_waits_for_cloud_failback_after_fence_clear
   selftest_case_reconcile_waits_for_cloud_dr_failback_after_fence_clear
   selftest_case_failback_reprotect_clears_standby_verify_state
+  selftest_case_xcolo_mtree_zero_alias_deferred_before_migrate
+  selftest_case_xcolo_mtree_zero_alias_fails_after_migrate
   selftest_case_events_json
   selftest_info "all checks passed"
 }
 
-selftest_main "$@"
+if [[ -n "${FTCTL_SELFTEST_CASES:-}" ]]; then
+  IFS=',' read -r -a _ftctl_selftest_cases <<< "${FTCTL_SELFTEST_CASES}"
+  for _ftctl_selftest_case in "${_ftctl_selftest_cases[@]}"; do
+    [[ -n "${_ftctl_selftest_case}" ]] || continue
+    "${_ftctl_selftest_case}"
+  done
+else
+  selftest_main "$@"
+fi

@@ -3142,8 +3142,29 @@ if context == "pre_migrate":
         candidate_device = qtree_missing_devices[0]
         candidate_reason = "qtree_missing_device"
     elif len(secondary_zero_pci_aliases) > len(primary_zero_pci_aliases) + 2:
+        gate_state = "deferred"
+        gate_error = "xcolo_pre_migrate_secondary_pci_resources_deferred_for_incoming"
+        gate_reason = secondary_zero_pci_aliases[0]
+        candidate_region = secondary_zero_pci_aliases[0]
+        candidate_reason = "secondary_zero_range_pci_alias"
+elif context == "post_migrate_materialization":
+    if len(primary_qtree_devices) > 0 and len(secondary_qtree_devices) == 0:
         gate_state = "failed"
-        gate_error = "xcolo_pre_migrate_secondary_pci_resources_unmaterialized"
+        gate_error = "xcolo_post_migrate_secondary_qtree_empty"
+        gate_reason = "secondary_qtree_empty"
+    elif len(primary_mtree) > 0 and len(secondary_mtree) <= 1:
+        gate_state = "failed"
+        gate_error = "xcolo_post_migrate_secondary_mtree_empty"
+        gate_reason = "secondary_mtree_empty"
+    elif qtree_missing_devices:
+        gate_state = "failed"
+        gate_error = "xcolo_post_migrate_guest_topology_missing"
+        gate_reason = qtree_missing_devices[0]
+        candidate_device = qtree_missing_devices[0]
+        candidate_reason = "qtree_missing_device"
+    elif len(secondary_zero_pci_aliases) > len(primary_zero_pci_aliases) + 2:
+        gate_state = "failed"
+        gate_error = "xcolo_post_migrate_secondary_pci_resources_unmaterialized"
         gate_reason = secondary_zero_pci_aliases[0]
         candidate_region = secondary_zero_pci_aliases[0]
         candidate_reason = "secondary_zero_range_pci_alias"
@@ -3252,11 +3273,62 @@ ftctl_xcolo_require_pre_migrate_runtime_topology_gate() {
     return 1
   fi
 
+  if [[ "${gate_state}" == "deferred" ]]; then
+    [[ -n "${gate_error}" ]] || gate_error="xcolo_pre_migrate_topology_deferred"
+    ftctl_state_set "${vm}" \
+      "xcolo_protocol_failure_phase=" \
+      "xcolo_pre_migrate_topology_gate_state=deferred" \
+      "xcolo_pre_migrate_topology_deferred=yes" \
+      "xcolo_pre_migrate_topology_deferred_reason=$(ftctl_xcolo_compact_log_value "${gate_reason}")" \
+      "xcolo_pre_migrate_topology_deferred_error=${gate_error}"
+    ftctl_log_event "colo" "xcolo.pre_migrate_topology_gate" "defer" "${vm}" "" \
+      "secondary=${secondary_vm} reason=$(ftctl_xcolo_compact_log_value "${gate_reason}") error=${gate_error}"
+    return 0
+  fi
+
   ftctl_state_set "${vm}" \
     "xcolo_protocol_failure_phase=" \
     "xcolo_pre_migrate_topology_gate_state=ok"
   ftctl_log_event "colo" "xcolo.pre_migrate_topology_gate" "ok" "${vm}" "" \
     "secondary=${secondary_vm} pci_diff=$(ftctl_state_get "${vm}" "xcolo_pre_migrate_pci_diff_count" 2>/dev/null || true) qtree_diff=$(ftctl_state_get "${vm}" "xcolo_pre_migrate_qtree_diff_count" 2>/dev/null || true) mtree_diff=$(ftctl_state_get "${vm}" "xcolo_pre_migrate_mtree_diff_count" 2>/dev/null || true)"
+}
+
+ftctl_xcolo_require_post_migrate_materialization_gate() {
+  local vm="${1-}"
+  local secondary_vm="${2:-$vm}"
+  local phase="${3:-after_migrate_materialization}"
+  local gate_state="" gate_error="" gate_reason=""
+
+  [[ -n "${vm}" && -n "${secondary_vm}" ]] || return 1
+  [[ "${FTCTL_DRY_RUN}" != "1" ]] || return 0
+
+  ftctl_xcolo_capture_live_runtime_topology_one "${vm}" "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" "primary" "${phase}" || true
+  ftctl_xcolo_capture_live_runtime_topology_one "${vm}" "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" "secondary" "${phase}" || true
+  ftctl_xcolo_analyze_runtime_topology_diff "${vm}" "${phase}" "post_migrate_materialization" || true
+
+  gate_state="$(ftctl_state_get "${vm}" "xcolo_post_migrate_materialization_topology_gate_state" 2>/dev/null || true)"
+  gate_error="$(ftctl_state_get "${vm}" "xcolo_post_migrate_materialization_topology_gate_error" 2>/dev/null || true)"
+  gate_reason="$(ftctl_state_get "${vm}" "xcolo_post_migrate_materialization_topology_gate_reason" 2>/dev/null || true)"
+  if [[ "${gate_state}" == "failed" ]]; then
+    [[ -n "${gate_error}" ]] || gate_error="xcolo_post_migrate_topology_incomplete"
+    ftctl_state_set "${vm}" \
+      "conversion_stage=post_migrate_materialization_failed" \
+      "conversion_state=error" \
+      "protection_state=error" \
+      "transport_state=failed" \
+      "xcolo_protocol_failure_phase=post_migrate_materialization" \
+      "xcolo_last_runtime_error=${gate_error}" \
+      "last_error=${gate_error}"
+    ftctl_log_event "colo" "xcolo.post_migrate_materialization_gate" "fail" "${vm}" "" \
+      "secondary=${secondary_vm} reason=$(ftctl_xcolo_compact_log_value "${gate_reason}") error=${gate_error}"
+    return 1
+  fi
+
+  ftctl_state_set "${vm}" \
+    "xcolo_post_migrate_materialization_gate_state=ok" \
+    "xcolo_post_migrate_materialization_gate_reason=$(ftctl_xcolo_compact_log_value "${gate_reason}")"
+  ftctl_log_event "colo" "xcolo.post_migrate_materialization_gate" "ok" "${vm}" "" \
+    "secondary=${secondary_vm} pci_diff=$(ftctl_state_get "${vm}" "xcolo_post_migrate_materialization_pci_diff_count" 2>/dev/null || true) qtree_diff=$(ftctl_state_get "${vm}" "xcolo_post_migrate_materialization_qtree_diff_count" 2>/dev/null || true) mtree_diff=$(ftctl_state_get "${vm}" "xcolo_post_migrate_materialization_mtree_diff_count" 2>/dev/null || true)"
 }
 
 ftctl_xcolo_capture_post_migrate_secondary_failure_evidence() {
@@ -8507,6 +8579,11 @@ ftctl_xcolo_activate_primary_filters_after_migrate() {
   if ! ftctl_xcolo_wait_post_migrate_role_transition "${vm}" "${secondary_vm}"; then
     ftctl_log_event "colo" "xcolo.post_migrate_filter_activation" "fail" "${vm}" "" \
       "mode=startup-active reason=role_transition_not_ready gate_reason=$(ftctl_state_get "${vm}" "xcolo_post_migrate_role_transition_reason" 2>/dev/null || true)"
+    return 1
+  fi
+  if ! ftctl_xcolo_require_post_migrate_materialization_gate "${vm}" "${secondary_vm}" "after_migrate_materialization"; then
+    ftctl_log_event "colo" "xcolo.post_migrate_filter_activation" "fail" "${vm}" "" \
+      "mode=startup-active reason=post_migrate_materialization_not_ready gate_reason=$(ftctl_state_get "${vm}" "xcolo_post_migrate_materialization_topology_gate_reason" 2>/dev/null || true)"
     return 1
   fi
   if ! ftctl_xcolo_wait_colo_chardev_contract "${vm}" "${secondary_vm}" "post_activation_contract"; then

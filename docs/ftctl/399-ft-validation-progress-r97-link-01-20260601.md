@@ -6935,3 +6935,35 @@ qemu-kvm: Unable to connect character device red0: Failed to connect to '10.10.3
     materially changed.
   - do not classify another identical run as a new network or chardev issue
     unless `mtree_secondary_zero_pci_alias_count` is fixed first.
+
+### Run 111 Fix Plan 2026-06-10
+
+- Design document:
+  - `375-ft-xcolo-secondary-mtree-deferred-materialization-design-20260610.md`
+- Conflict resolution:
+  - `374-ft-xcolo-secondary-mtree-materialization-gate-design-20260610.md`
+    now states that its hard pre-migrate zero-alias failure rule is superseded
+    in part by the deferred materialization design.
+- Correction:
+  - keep hard failures for missing guest qtree devices and empty secondary
+    qtree/mtree snapshots.
+  - change pre-migrate secondary zero-range PCI alias mismatch from hard fail to
+    deferred when guest topology is otherwise present.
+  - after `primary.migrate`, run a new post-migrate materialization gate before
+    treating filter activation as stable.
+  - if secondary zero-range PCI aliases remain after migration, fail with
+    `xcolo_post_migrate_secondary_pci_resources_unmaterialized`.
+- Local validation:
+  - targeted selftests passed:
+    - `selftest_case_xcolo_mtree_zero_alias_deferred_before_migrate`
+    - `selftest_case_xcolo_mtree_zero_alias_fails_after_migrate`
+- Repetition guard:
+  - if the next run reaches `primary.migrate` and then fails at
+    `post_migrate_materialization`, this is progress and means the deferred
+    incoming hypothesis was exercised.
+  - if the next run still fails before `primary.migrate` with
+    `xcolo_pre_migrate_secondary_pci_resources_unmaterialized`, the new code is
+    not installed or guest topology is no longer equal.
+  - if the next run reaches the old QEMU assertion again, the post-migrate
+    materialization gate is too late or incomplete and must capture evidence
+    before secondary exits.

@@ -2,6 +2,14 @@
 
 Date: 2026-06-10
 
+Status: Superseded in part by
+`375-ft-xcolo-secondary-mtree-deferred-materialization-design-20260610.md`.
+The zero-range PCI alias detector remains valid evidence, but pre-migrate
+zero-range aliases are no longer always a hard failure when guest topology and
+command contract match. In that case, the later design treats the secondary
+incoming shape as deferred and moves the hard materialization check to
+post-migrate.
+
 ## Background
 
 Run 110 showed that the post-migrate role-transition gate improved failure
