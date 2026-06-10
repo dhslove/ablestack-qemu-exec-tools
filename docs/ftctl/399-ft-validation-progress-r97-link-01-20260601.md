@@ -6355,3 +6355,38 @@ xcolo_live_pci_identity=deferred
     strict for secondary `-incoming`.
   - the next run must either pass pre-migrate topology and reach migration, or
     fail with a new post-gate reason backed by the preserved evidence.
+
+### Run 106 Fix Deployment And Cleanup 2026-06-10
+
+- Code commit:
+  - `b1d8e2d50d2dc809d470f12b8e458827f7992ce1`
+  - `fix: defer incoming pci identity`
+- Build:
+  - GitHub Actions run `27246968152` completed successfully.
+  - Built RPM SHA256:
+    `aed200ef34671e5161e5f5f9818c59fb343e43f0c99c18baa723929641e3cfc6`
+- Deployment:
+  - deployed to `10.10.32.1`, `10.10.32.2`, and `10.10.32.3`.
+  - all hosts reported `ablestack_vm_ftctl-0.8.0-1.noarch`.
+  - installed script markers were verified on all hosts:
+    - `xcolo_live_pci_identity_deferred_for_incoming`
+    - `pci_incoming_unassigned`
+- Cleanup:
+  - Run 106 active protection was marked removed.
+  - `ftctl.*` details for VM `54` and standby VM `171` were removed.
+  - standby VM `i-2-171-VM` was marked `Expunging`.
+  - standby volumes `327` and `328` were marked `Expunged`.
+  - standby RBD images were unmapped and removed:
+    - `30447406-b01a-42ea-8581-5277b05e9c1c`
+    - `39708659-be24-4632-9325-34a65c525f4f`
+  - primary VM `i-2-54-VM` was restored from the non-COLO `primary.xml` and
+    restarted on `10.10.32.3`.
+- Retest readiness checks:
+  - active protection count for VM `54`/`171`: `0`.
+  - active `ftctl.*` details for VM `54`/`171`: `0`.
+  - active standby volumes for VM `171`: `0`.
+  - primary VM `i-2-54-VM` state: `Running` on host id `3`.
+  - primary QMP `query-block-jobs`: empty list.
+  - primary qemu command line no longer contains COLO runtime markers such as
+    `colo-compare`, `filter-mirror`, `ftctl-colo`, `9003`, or `9004`.
+  - `ablestack-vm-ftctl.timer` is active on all three 32.x hosts.
