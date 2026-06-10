@@ -2270,12 +2270,13 @@ ftctl_xcolo_verify_live_runtime_topology_pair() {
   primary_pci="$(cat "${primary_pci_file}" 2>/dev/null || true)"
   secondary_pci="$(cat "${secondary_pci_file}" 2>/dev/null || true)"
 
-  payload="$(PRIMARY_ARGV="${primary_argv}" SECONDARY_ARGV="${secondary_argv}" PRIMARY_PCI="${primary_pci}" SECONDARY_PCI="${secondary_pci}" python3 - <<'PY'
+  payload="$(PHASE="${phase}" PRIMARY_ARGV="${primary_argv}" SECONDARY_ARGV="${secondary_argv}" PRIMARY_PCI="${primary_pci}" SECONDARY_PCI="${secondary_pci}" python3 - <<'PY'
 import hashlib
 import json
 import os
 import re
 
+phase = os.environ.get("PHASE", "")
 primary_argv = os.environ.get("PRIMARY_ARGV", "")
 secondary_argv = os.environ.get("SECONDARY_ARGV", "")
 primary_pci = os.environ.get("PRIMARY_PCI", "")
@@ -2473,12 +2474,17 @@ elif not p_pci_identity or not s_pci_identity:
     raise SystemExit(1)
 elif p_pci_identity != s_pci_identity:
     if pci_incoming_unassigned(secondary_pci):
-        print("error=xcolo_live_pci_identity_unmaterialized")
-        print(f"reason=secondary_incoming_pci_unassigned primary_hash={digest(p_pci_identity)} secondary_hash={digest(s_pci_identity)}")
         print(f"pci_first_diff_index={pci_id_diff['first_index']}")
         print("pci_primary=" + json.dumps(pci_id_diff["first_left"], sort_keys=True, separators=(",", ":")))
         print("pci_secondary=" + json.dumps(pci_id_diff["first_right"], sort_keys=True, separators=(",", ":")))
-        raise SystemExit(1)
+        if phase == "before_migrate":
+            print("error=")
+            print("warning=xcolo_live_pci_identity_deferred_for_incoming")
+            print(f"reason=secondary_incoming_pci_unassigned_deferred phase={phase} primary_hash={digest(p_pci_identity)} secondary_hash={digest(s_pci_identity)}")
+        else:
+            print("error=xcolo_live_pci_identity_unmaterialized")
+            print(f"reason=secondary_incoming_pci_unassigned phase={phase} primary_hash={digest(p_pci_identity)} secondary_hash={digest(s_pci_identity)}")
+            raise SystemExit(1)
     else:
         print("error=xcolo_live_pci_identity_mismatch")
         print(f"reason=info_pci_identity_diff primary_hash={digest(p_pci_identity)} secondary_hash={digest(s_pci_identity)}")
@@ -3142,8 +3148,8 @@ if context == "pre_migrate":
         candidate_device = qtree_missing_devices[0]
         candidate_reason = "qtree_missing_device"
     elif len(secondary_zero_pci_aliases) > len(primary_zero_pci_aliases) + 2:
-        gate_state = "failed"
-        gate_error = "xcolo_pre_migrate_secondary_pci_resources_unmaterialized"
+        gate_state = "deferred"
+        gate_error = "xcolo_pre_migrate_secondary_pci_resources_deferred_for_incoming"
         gate_reason = secondary_zero_pci_aliases[0]
         candidate_region = secondary_zero_pci_aliases[0]
         candidate_reason = "secondary_zero_range_pci_alias"
@@ -9412,6 +9418,16 @@ ftctl_xcolo_rollback_block_primary_create_failure() {
     ftctl_log_event "colo" "block_conversion.rollback.secondary_rbd_unmap" "warn" "${vm}" "" "cause=${reason}"
   }
   ftctl_primary_activate_from_backup "${vm}" || {
+    ftctl_state_set "${vm}" \
+      "conversion_stage=${rollback_stage}:primary_restore_failed" \
+      "conversion_state=error" \
+      "protection_state=error" \
+      "transport_state=failed" \
+      "active_side=primary" \
+      "standby_state=stopped" \
+      "peer_domain_expected=false" \
+      "xcolo_last_runtime_error=${reason}:primary_restore_failed" \
+      "last_error=${reason}:primary_restore_failed"
     ftctl_log_event "colo" "block_conversion.rollback.primary_restore" "warn" "${vm}" "" "cause=${reason}"
     return 1
   }
@@ -9463,6 +9479,17 @@ ftctl_xcolo_rollback_startup_gate_failure() {
       "cause=${reason}"
   }
   ftctl_primary_activate_from_backup "${vm}" || {
+    ftctl_state_set "${vm}" \
+      "conversion_stage=rollback_after_startup_gate_failed:primary_restore_failed" \
+      "conversion_state=error" \
+      "protection_state=error" \
+      "transport_state=failed" \
+      "active_side=primary" \
+      "standby_state=stopped" \
+      "peer_domain_expected=false" \
+      "cloud_runtime_restore=failed_before_protection_ready" \
+      "xcolo_last_runtime_error=${reason}:primary_restore_failed" \
+      "last_error=${reason}:primary_restore_failed"
     ftctl_log_event "colo" "block_conversion.rollback_startup_gate.primary_restore" "warn" "${vm}" "" \
       "cause=${reason}"
     return 1

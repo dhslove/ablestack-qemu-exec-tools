@@ -35,11 +35,18 @@ guest devices and block graphs look compatible.
 
 ## Principle
 
+2026-06-10 update after Run 113: this document's pre-migrate hard failure rule
+for an incoming secondary with unassigned PCI/BAR resources is superseded by
+`377-ft-xcolo-incoming-secondary-premigrate-deferred-pci-design-20260610.md`.
+The hard failure rule remains valid after migration state has been loaded. At
+`before_migrate`, the known incoming-secondary unassigned shape is now treated
+as an explicit deferred warning.
+
 For FT/X-COLO, pre-migrate ABI compatibility is stricter than "same requested
 devices". The secondary must be a migration-compatible live target before
 `primary.migrate` is allowed.
 
-Therefore:
+Run 112 therefore required:
 
 1. Do not treat `xcolo_live_pci_identity_deferred_for_incoming` as a successful
    pre-migrate condition.
@@ -52,6 +59,10 @@ Therefore:
    primary/secondary QEMU argv, `info pci`, `info qtree`, `info mtree`, block
    graph, and chardev snapshots.
 
+Run 113 supersedes item 1 for the specific incoming-secondary unassigned shape
+at `before_migrate`. That shape is now a deferred warning before migration and a
+hard failure after migration.
+
 ## Immediate Code Change
 
 ### Live PCI Identity Gate
@@ -63,11 +74,19 @@ Current behavior:
   `warning=xcolo_live_pci_identity_deferred_for_incoming`;
 - return success and allow the next stage.
 
-New behavior:
+Run 112 new behavior:
 
 - emit `error=xcolo_live_pci_identity_unmaterialized`;
 - record the first primary/secondary PCI identity difference and count fields;
 - fail the pre-migrate gate before `primary.migrate`.
+
+Run 113 superseding behavior:
+
+- at `before_migrate`, emit
+  `warning=xcolo_live_pci_identity_deferred_for_incoming` for the known incoming
+  secondary unassigned shape and continue;
+- after migration, keep `xcolo_live_pci_identity_unmaterialized` as a hard
+  failure.
 
 ### Mtree Zero-Alias Gate
 
@@ -78,12 +97,19 @@ Current behavior:
   `xcolo_pre_migrate_secondary_pci_resources_deferred_for_incoming`;
 - the caller treats `deferred` as success.
 
-New behavior:
+Run 112 new behavior:
 
 - in pre-migrate context, materially more secondary zero-range PCI aliases
   produce:
   `xcolo_pre_migrate_secondary_pci_resources_unmaterialized`;
 - the caller treats this as a hard failure.
+
+Run 113 superseding behavior:
+
+- in pre-migrate context, materially more secondary zero-range PCI aliases
+  produce:
+  `xcolo_pre_migrate_secondary_pci_resources_deferred_for_incoming`;
+- after migration, zero-range PCI aliases remain a hard materialization failure.
 
 ## Next Topology-Cloning Direction
 
@@ -128,4 +154,3 @@ The next test is considered improved if:
 The next test is not considered successful FT activation yet unless secondary
 PCI identity/materialized bridge topology matches primary and migration proceeds
 without assertion.
-
