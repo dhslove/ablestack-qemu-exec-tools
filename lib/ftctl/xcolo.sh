@@ -3456,6 +3456,16 @@ secondary_raw = sys.argv[2] if len(sys.argv) > 2 else ""
 primary_rc = sys.argv[3] if len(sys.argv) > 3 else "1"
 secondary_rc = sys.argv[4] if len(sys.argv) > 4 else "1"
 
+if primary_rc == "0" and secondary_rc == "0":
+    query_state = "ok"
+elif primary_rc != "0" and secondary_rc != "0":
+    query_state = "both_query_failed"
+elif primary_rc != "0":
+    query_state = "primary_query_failed"
+else:
+    query_state = "secondary_query_failed"
+query_transient = "yes" if query_state != "ok" else "no"
+
 def entry(raw, label):
     try:
         data = json.loads(raw)
@@ -3536,6 +3546,8 @@ if primary_rc != "0" or secondary_rc != "0":
 print(f"ready={ready}")
 print(f"directional_ready={ready}")
 print(f"strict_frontend_ready={strict_ready}")
+print(f"query_state={query_state}")
+print(f"query_transient={query_transient}")
 print("reason=" + ",".join(reasons))
 print("strict_frontend_reason=" + ",".join(strict_reasons))
 print("output_frontend_policy=backend_connected")
@@ -8236,11 +8248,14 @@ ftctl_xcolo_capture_post_migrate_transition_state() {
   local phase="${3:-pre_activation}"
   local expected_filter_status="${4:-off}"
   local primary_migrate="" secondary_migrate="" primary_colo="" secondary_colo=""
+  local primary_status="" secondary_status=""
   local primary_migrate_error_desc="" secondary_migrate_error_desc=""
   local invalid_message="no"
 
   ftctl_xcolo_query_migrate_status "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" primary_migrate || true
   ftctl_xcolo_query_migrate_status "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" secondary_migrate || true
+  ftctl_xcolo_query_status_name "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" primary_status || true
+  ftctl_xcolo_query_status_name "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" secondary_status || true
   ftctl_xcolo_query_colo_mode "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" primary_colo || true
   ftctl_xcolo_query_colo_mode "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" secondary_colo || true
   if [[ "${primary_migrate}" == "failed" ]]; then
@@ -8261,6 +8276,8 @@ ftctl_xcolo_capture_post_migrate_transition_state() {
   ftctl_state_set "${vm}" \
     "xcolo_post_migrate_${phase}_primary_migrate_status=${primary_migrate}" \
     "xcolo_post_migrate_${phase}_secondary_migrate_status=${secondary_migrate}" \
+    "xcolo_post_migrate_${phase}_primary_status=${primary_status}" \
+    "xcolo_post_migrate_${phase}_secondary_status=${secondary_status}" \
     "xcolo_post_migrate_${phase}_primary_colo_mode=${primary_colo}" \
     "xcolo_post_migrate_${phase}_secondary_colo_mode=${secondary_colo}" \
     "xcolo_post_migrate_${phase}_primary_migrate_error_desc=${primary_migrate_error_desc}" \
@@ -8270,9 +8287,11 @@ ftctl_xcolo_capture_post_migrate_transition_state() {
     "xcolo_post_migrate_${phase}_filter_qom_ready=$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_ready" 2>/dev/null || true)" \
     "xcolo_post_migrate_${phase}_filter_qom_reason=$(ftctl_state_get "${vm}" "xcolo_primary_filter_qom_reason" 2>/dev/null || true)" \
     "xcolo_post_migrate_${phase}_chardev_contract_ready=$(ftctl_state_get "${vm}" "xcolo_post_migrate_${phase}_chardev_contract_ready" 2>/dev/null || true)" \
-    "xcolo_post_migrate_${phase}_chardev_contract_reason=$(ftctl_state_get "${vm}" "xcolo_post_migrate_${phase}_chardev_contract_reason" 2>/dev/null || true)"
+    "xcolo_post_migrate_${phase}_chardev_contract_reason=$(ftctl_state_get "${vm}" "xcolo_post_migrate_${phase}_chardev_contract_reason" 2>/dev/null || true)" \
+    "xcolo_post_migrate_${phase}_chardev_contract_query_state=$(ftctl_state_get "${vm}" "xcolo_post_migrate_${phase}_chardev_contract_query_state" 2>/dev/null || true)" \
+    "xcolo_post_migrate_${phase}_chardev_contract_query_transient=$(ftctl_state_get "${vm}" "xcolo_post_migrate_${phase}_chardev_contract_query_transient" 2>/dev/null || true)"
   ftctl_log_event "colo" "xcolo.post_migrate_transition" "ok" "${vm}" "" \
-    "phase=${phase} filter_expected=${expected_filter_status} primary_migrate=${primary_migrate} secondary_migrate=${secondary_migrate} primary_colo=${primary_colo} secondary_colo=${secondary_colo} invalid_message=${invalid_message} chardev_contract=$(ftctl_state_get "${vm}" "xcolo_post_migrate_${phase}_chardev_contract_ready" 2>/dev/null || true)"
+    "phase=${phase} filter_expected=${expected_filter_status} primary_migrate=${primary_migrate} secondary_migrate=${secondary_migrate} primary_status=${primary_status} secondary_status=${secondary_status} primary_colo=${primary_colo} secondary_colo=${secondary_colo} invalid_message=${invalid_message} chardev_contract=$(ftctl_state_get "${vm}" "xcolo_post_migrate_${phase}_chardev_contract_ready" 2>/dev/null || true) query_state=$(ftctl_state_get "${vm}" "xcolo_post_migrate_${phase}_chardev_contract_query_state" 2>/dev/null || true)"
 }
 
 ftctl_xcolo_gate_post_migrate_before_filter_activation() {
@@ -8316,6 +8335,113 @@ ftctl_xcolo_gate_post_migrate_before_filter_activation() {
   return 1
 }
 
+ftctl_xcolo_post_migrate_status_transition_ok() {
+  local status="${1-}"
+  [[ "${status}" == "active" || "${status}" == "colo" ]]
+}
+
+ftctl_xcolo_wait_post_migrate_role_transition() {
+  local vm="${1-}"
+  local secondary_vm="${2-}"
+  local timeout="${FTCTL_XCOLO_POST_MIGRATE_ROLE_TRANSITION_WAIT_SEC:-30}"
+  local i primary_migrate secondary_migrate primary_status secondary_status
+  local invalid_message chardev_ready chardev_reason query_transient query_state
+  local failure_reason="timeout"
+
+  [[ -n "${vm}" && -n "${secondary_vm}" ]] || return 1
+  [[ "${timeout}" =~ ^[0-9]+$ && "${timeout}" -gt 0 ]] || timeout="30"
+
+  ftctl_state_set "${vm}" \
+    "xcolo_post_migrate_role_transition_gate=waiting" \
+    "xcolo_post_migrate_role_transition_attempts=0" \
+    "xcolo_post_migrate_role_transition_reason="
+
+  for ((i=0; i<timeout; i++)); do
+    ftctl_xcolo_capture_post_migrate_transition_state "${vm}" "${secondary_vm}" "role_transition" "on"
+    primary_migrate="$(ftctl_state_get "${vm}" "xcolo_post_migrate_role_transition_primary_migrate_status" 2>/dev/null || true)"
+    secondary_migrate="$(ftctl_state_get "${vm}" "xcolo_post_migrate_role_transition_secondary_migrate_status" 2>/dev/null || true)"
+    primary_status="$(ftctl_state_get "${vm}" "xcolo_post_migrate_role_transition_primary_status" 2>/dev/null || true)"
+    secondary_status="$(ftctl_state_get "${vm}" "xcolo_post_migrate_role_transition_secondary_status" 2>/dev/null || true)"
+    invalid_message="$(ftctl_state_get "${vm}" "xcolo_post_migrate_role_transition_invalid_message" 2>/dev/null || true)"
+    chardev_ready="$(ftctl_state_get "${vm}" "xcolo_post_migrate_role_transition_chardev_contract_ready" 2>/dev/null || true)"
+    chardev_reason="$(ftctl_state_get "${vm}" "xcolo_post_migrate_role_transition_chardev_contract_reason" 2>/dev/null || true)"
+    query_transient="$(ftctl_state_get "${vm}" "xcolo_post_migrate_role_transition_chardev_contract_query_transient" 2>/dev/null || true)"
+    query_state="$(ftctl_state_get "${vm}" "xcolo_post_migrate_role_transition_chardev_contract_query_state" 2>/dev/null || true)"
+
+    ftctl_state_set "${vm}" \
+      "xcolo_post_migrate_role_transition_attempts=$((i + 1))" \
+      "xcolo_post_migrate_role_transition_primary_migrate=${primary_migrate}" \
+      "xcolo_post_migrate_role_transition_secondary_migrate=${secondary_migrate}" \
+      "xcolo_post_migrate_role_transition_primary_status=${primary_status}" \
+      "xcolo_post_migrate_role_transition_secondary_status=${secondary_status}" \
+      "xcolo_post_migrate_role_transition_chardev_query_state=${query_state}" \
+      "xcolo_post_migrate_role_transition_chardev_query_transient=${query_transient}"
+
+    if [[ "${invalid_message}" == "yes" ]]; then
+      failure_reason="invalid_message_after_migrate"
+      ftctl_state_set "${vm}" \
+        "xcolo_post_migrate_role_transition_gate=failed" \
+        "xcolo_post_migrate_role_transition_reason=${failure_reason}" \
+        "xcolo_protocol_failure_phase=post_migrate_role_transition" \
+        "last_error=xcolo_migrate_stream_failed_during_role_transition"
+      ftctl_log_event "colo" "xcolo.post_migrate_role_transition_gate" "fail" "${vm}" "" \
+        "reason=${failure_reason} primary_migrate=${primary_migrate} secondary_migrate=${secondary_migrate} query_state=${query_state}"
+      return 1
+    fi
+
+    if [[ "${primary_migrate}" == "failed" || "${secondary_migrate}" == "failed" ]]; then
+      failure_reason="migrate_failed"
+      ftctl_state_set "${vm}" \
+        "xcolo_post_migrate_role_transition_gate=failed" \
+        "xcolo_post_migrate_role_transition_reason=${failure_reason}" \
+        "xcolo_protocol_failure_phase=post_migrate_role_transition" \
+        "last_error=xcolo_post_migrate_role_transition_failed"
+      ftctl_log_event "colo" "xcolo.post_migrate_role_transition_gate" "fail" "${vm}" "" \
+        "reason=${failure_reason} primary_migrate=${primary_migrate} secondary_migrate=${secondary_migrate} query_state=${query_state}"
+      return 1
+    fi
+
+    if ftctl_xcolo_post_migrate_status_transition_ok "${primary_migrate}" &&
+        ftctl_xcolo_post_migrate_status_transition_ok "${secondary_migrate}" &&
+        [[ "${chardev_ready}" == "yes" ]]; then
+      ftctl_state_set "${vm}" \
+        "xcolo_post_migrate_role_transition_gate=ready" \
+        "xcolo_post_migrate_role_transition_reason=ready"
+      ftctl_log_event "colo" "xcolo.post_migrate_role_transition_gate" "ok" "${vm}" "" \
+        "attempts=$((i + 1)) primary_migrate=${primary_migrate} secondary_migrate=${secondary_migrate} primary_status=${primary_status} secondary_status=${secondary_status} query_state=${query_state}"
+      return 0
+    fi
+
+    if [[ "${query_transient}" == "yes" ]]; then
+      failure_reason="chardev_query_transient"
+    elif [[ -n "${chardev_reason}" ]]; then
+      failure_reason="${chardev_reason}"
+    else
+      failure_reason="role_transition_not_ready"
+    fi
+    sleep 1
+  done
+
+  if [[ "${failure_reason}" == *"query"* ]]; then
+    ftctl_state_set "${vm}" \
+      "xcolo_post_migrate_role_transition_gate=failed" \
+      "xcolo_post_migrate_role_transition_reason=${failure_reason}" \
+      "xcolo_protocol_failure_phase=post_migrate_role_transition" \
+      "xcolo_primary_filter_activation_failed_reason=${failure_reason}" \
+      "last_error=xcolo_secondary_chardev_query_unstable_after_migrate"
+  else
+    ftctl_state_set "${vm}" \
+      "xcolo_post_migrate_role_transition_gate=failed" \
+      "xcolo_post_migrate_role_transition_reason=${failure_reason}" \
+      "xcolo_protocol_failure_phase=post_migrate_chardev_contract" \
+      "xcolo_primary_filter_activation_failed_reason=${failure_reason}" \
+      "last_error=xcolo_colo_chardev_contract_not_ready"
+  fi
+  ftctl_log_event "colo" "xcolo.post_migrate_role_transition_gate" "fail" "${vm}" "" \
+    "reason=${failure_reason} attempts=${timeout} primary_migrate=$(ftctl_state_get "${vm}" "xcolo_post_migrate_role_transition_primary_migrate" 2>/dev/null || true) secondary_migrate=$(ftctl_state_get "${vm}" "xcolo_post_migrate_role_transition_secondary_migrate" 2>/dev/null || true) query_state=$(ftctl_state_get "${vm}" "xcolo_post_migrate_role_transition_chardev_query_state" 2>/dev/null || true)"
+  return 1
+}
+
 ftctl_xcolo_activate_primary_filters_after_migrate() {
   local vm="${1-}"
   local secondary_vm="${2-}"
@@ -8336,6 +8462,11 @@ ftctl_xcolo_activate_primary_filters_after_migrate() {
   fi
 
   ftctl_xcolo_wait_primary_filter_chardev_binding "${vm}" || true
+  if ! ftctl_xcolo_wait_post_migrate_role_transition "${vm}" "${secondary_vm}"; then
+    ftctl_log_event "colo" "xcolo.post_migrate_filter_activation" "fail" "${vm}" "" \
+      "mode=startup-active reason=role_transition_not_ready gate_reason=$(ftctl_state_get "${vm}" "xcolo_post_migrate_role_transition_reason" 2>/dev/null || true)"
+    return 1
+  fi
   if ! ftctl_xcolo_wait_colo_chardev_contract "${vm}" "${secondary_vm}" "post_activation_contract"; then
     if ftctl_xcolo_primary_invalid_message_observed "${vm}" ||
         ftctl_xcolo_primary_log_has_filter_mirror_send_failure "${vm}"; then

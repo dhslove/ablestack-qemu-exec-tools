@@ -6639,3 +6639,33 @@ xcolo_primary_filter_activation_failed_reason=mirror_path_secondary_red0=query_f
     observed failure in this run.
   - the active bottleneck moved to post-migrate chardev contract verification
     and secondary chardev query/availability during filter activation.
+
+### Run 109 Fix Plan 2026-06-10
+
+- Design document:
+  - `373-ft-xcolo-post-migrate-role-transition-gate-design-20260610.md`
+- QEMU 9.2.4 code basis:
+  - `query-chardev` frontend-open reflects QEMU chardev frontend handler state,
+    not only socket backend connectivity.
+  - COLO source/secondary role transition happens after `migrate` is accepted,
+    before checkpoint exchange is stable.
+- Correction:
+  - keep the current QEMU COLO command sample alignment, XML topology, RBD
+    stable path policy, disk graph, and filter object order unchanged.
+  - classify `query-chardev` failure as `query_state` and
+    `query_transient` instead of collapsing it into a final contract failure
+    immediately.
+  - add a post-migrate role-transition gate before the final chardev contract
+    gate.
+  - retry QMP status, migration status, COLO mode, socket snapshot, and chardev
+    contract evidence during the role-transition window.
+  - fail with `xcolo_protocol_failure_phase=post_migrate_role_transition` and
+    `last_error=xcolo_secondary_chardev_query_unstable_after_migrate` only when
+    secondary chardev query remains unavailable for the whole transition
+    window.
+- Repetition guard:
+  - if the next run still fails with `Received invalid message 0x0000` or
+    `Can't receive COLO message`, this fix did not address the channel contract
+    root cause and the next analysis must return to QEMU protocol ordering.
+  - if the next run fails with the new role-transition state keys, the failure
+    is expected to be more precisely localized than Run 109.
