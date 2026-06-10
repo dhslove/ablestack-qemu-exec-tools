@@ -6454,3 +6454,37 @@ Assertion `!subregion->container' failed.
     - `info mtree`.
   - record candidate device/region keys so the next failure can be classified as
     either a new narrowed candidate or a true repeated loop.
+
+### Run 107 Fix Deployment And Cleanup 2026-06-10
+
+- Code commit:
+  - `b9da26c39c12b2b1a3a4a1bf41187a17eb772fcd`
+  - `fix: analyze xcolo post-migrate topology`
+- Build:
+  - GitHub Actions run `27248774739` completed successfully.
+  - Built RPM SHA256:
+    `964b6d59184dc536e44f385135e3e20ccdbf02ab5dc1d619d1c635c07aacab47`
+- Deployment:
+  - deployed to `10.10.32.1`, `10.10.32.2`, and `10.10.32.3`.
+  - all hosts reported `ablestack_vm_ftctl-0.8.0-1.noarch`.
+  - installed script markers were verified on all hosts:
+    - `ftctl_xcolo_analyze_runtime_topology_diff`
+    - `runtime-topology-analysis`
+    - `xcolo_live_pci_identity_diff_count`
+- Cleanup:
+  - Run 107 active protection was marked removed.
+  - `ftctl.*` details for VM `54` and standby VM `172` were removed.
+  - standby VM `i-2-172-VM` was destroyed, undefined, and marked `Expunging`.
+  - standby volumes `329` and `330` were marked `Expunged`.
+  - standby RBD images were unmapped and removed:
+    - `8eef18c3-3f37-4925-8160-d8eed643d740`
+    - `9de78f02-a618-40a1-99dc-cba16d6376a9`
+- Retest readiness checks:
+  - active protection count for VM `54`/`172`: `0`.
+  - active `ftctl.*` details for VM `54`/`172`: `0`.
+  - active standby volumes for VM `172`: `0`.
+  - primary VM `i-2-54-VM` state: `Running` on host id `3`.
+  - primary QMP `query-block-jobs`: empty list.
+  - primary qemu command line does not contain COLO runtime markers such as
+    `colo-compare`, `filter-mirror`, `ftctl-colo`, `9003`, `9004`, or `9998`.
+  - `ablestack-vm-ftctl.timer` is active on all three 32.x hosts.
