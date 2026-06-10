@@ -7191,3 +7191,110 @@ Can't receive COLO message: Input/output error
   - no FTCTL runtime/profile files matched `i-2-54-VM`, `i-2-177-VM`, or
     `r97-link-01`.
   - standby RBD images were absent from the RBD pool.
+
+### Run 113 Result 2026-06-10
+
+- Test target:
+  - primary VM `54`, domain `i-2-54-VM`, display name `r97-link-01`.
+  - standby VM `178`, domain `i-2-178-VM`.
+  - primary host `10.10.32.3`, secondary host `10.10.32.1`.
+- Result:
+  - failed before `primary.migrate`.
+  - `ftctl_protection` row `113` ended with
+    `protection_state=error`, `transport_state=failed`, and
+    `last_error=xcolo_live_pci_identity_unmaterialized`.
+- Progress made:
+  - baseline seed for both disks completed.
+  - generated primary/secondary startup disk graph validation passed.
+  - primary generated listener startup succeeded.
+  - secondary incoming domain startup succeeded.
+  - COLO channel attach succeeded.
+  - FTCTL stopped before QEMU migration/assertion, which confirmed the Run 112
+    crash-prevention gate worked.
+- Root cause:
+  - the hard pre-migrate PCI identity gate was too strict for an incoming
+    secondary waiting for migration state.
+  - secondary `info pci` showed the expected incoming-unassigned shape:
+    root ports with `secondary bus 0`, `subordinate bus 0`, `IRQ 0`, and BARs
+    not mapped.
+  - primary already had materialized bridge/BAR resources, so the identity hash
+    differed before migration even though this does not by itself prove a bad
+    migration target.
+- Additional cleanup issue:
+  - rollback destroyed the secondary, but primary restoration failed and left
+    primary running with FT generated quorum/overlay block nodes.
+  - Cloud API stop/start was required to restore the primary to the normal
+    Cloud/libvirt RBD graph.
+
+### Run 113 Fix Plan 2026-06-10
+
+- Design document:
+  - `377-ft-xcolo-incoming-secondary-premigrate-deferred-pci-design-20260610.md`
+- Conflict resolution:
+  - `376-ft-xcolo-premigrate-pci-identity-hard-abi-gate-design-20260610.md`
+    now marks the pre-migrate incoming-secondary hard failure as superseded by
+    the Run 113 design.
+- Correction:
+  - pass `phase` into the live PCI identity analyzer.
+  - at `before_migrate`, treat the known incoming-secondary unassigned PCI/BAR
+    shape as `xcolo_live_pci_identity_deferred_for_incoming`, not as a hard
+    failure.
+  - after migration, keep the same unassigned shape as
+    `xcolo_live_pci_identity_unmaterialized`.
+  - restore the pre-migrate mtree zero-alias gate to deferred state:
+    `xcolo_pre_migrate_secondary_pci_resources_deferred_for_incoming`.
+  - keep post-migrate mtree zero-alias materialization as a hard failure.
+  - on rollback primary-restore failure, set explicit state:
+    `active_side=primary`, `peer_domain_expected=false`,
+    `standby_state=stopped`, and sticky `*:primary_restore_failed`.
+- Validation:
+  - `bash -n lib/ftctl/xcolo.sh`: passed.
+  - `bash -n bin/ablestack_vm_ftctl_selftest.sh`: passed.
+  - `git diff --check`: passed.
+  - targeted selftests passed:
+    - `selftest_case_xcolo_mtree_zero_alias_defers_before_migrate`
+    - `selftest_case_xcolo_mtree_zero_alias_fails_after_migrate`
+    - `selftest_case_xcolo_live_pci_incoming_defers_before_migrate`
+    - `selftest_case_xcolo_live_pci_incoming_fails_after_migrate`
+  - full selftest still stops at repository pre-existing shellcheck warnings,
+    unrelated to this change.
+
+### Run 113 Fix Build Deployment And Cleanup 2026-06-10
+
+- Code commit:
+  - `894ec767951353fefa4225508b5977322e10791b`
+  - `fix: defer incoming xcolo pci materialization`
+- Build:
+  - GitHub Actions run `27282329090` completed successfully.
+  - Built RPM SHA256:
+    `3a15fa7b55afe20b4e3d35f872b10fbb8b9684c71b85a607b1cb38e99983831a`.
+- Deployment:
+  - deployed `ablestack_vm_ftctl-0.8.0-1.noarch` to `10.10.32.1`,
+    `10.10.32.2`, and `10.10.32.3`.
+  - all three hosts reported active `ablestack-vm-ftctl.timer` and
+    `ablestack-vm-hangctl.timer`.
+  - installed script marker verified on all three hosts:
+    `xcolo_live_pci_identity_deferred_for_incoming`.
+- Cleanup:
+  - host-side `unprotect --force-cleanup` completed successfully.
+  - because primary remained on the FT generated block graph, Cloud API
+    stop/start was executed for VM `d08503ff-ea56-4e35-bdf8-2f0ebf81382c`.
+  - after Cloud restart, primary `query-named-block-nodes` showed only normal
+    `libvirt-*` RBD nodes and no `ftctl-*`, `primary-active`, or `quorum` nodes.
+  - standby VM `178` was destroyed/expunged through Cloud API.
+  - standby RBD images were unmapped from `10.10.32.1` and removed:
+    - `9a30c0b7-553f-4e87-840e-d03cc12697c9`
+    - `b8f0ac21-9ee8-47ea-af07-a037512f1055`
+  - Run 113 active protection row was marked removed/disabled.
+  - `ftctl.*` VM details for VM `54` and standby VM `178` were removed.
+  - standby volumes `341` and `342` were marked `Expunged`.
+  - FTCTL runtime/profile/debug files for `i-2-54-VM`, `i-2-178-VM`, and
+    `r97-link-01` were removed from 32.x hosts.
+- Retest readiness checks:
+  - active protection count for primary VM `54`: `0`.
+  - active `ftctl.*` details for VM `54`/`178`: `0`.
+  - primary VM `i-2-54-VM` state: `running` on `10.10.32.3`.
+  - primary QGA `guest-ping`: OK.
+  - primary QMP `query-block-jobs`: empty list.
+  - no standby domain `i-2-178-VM` remains on the 32.x hosts.
+  - standby RBD images are absent from the RBD pool.
