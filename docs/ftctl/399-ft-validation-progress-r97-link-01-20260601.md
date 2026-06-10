@@ -7149,3 +7149,45 @@ Can't receive COLO message: Input/output error
   - A later success-oriented fix must make the secondary live PCI identity match
     primary, likely by cloning secondary command/device ordering from the
     primary libvirt QEMU argv rather than only matching normalized device hash.
+
+### Run 112 Fix Build Deployment And Cleanup 2026-06-10
+
+- Code commit:
+  - `6645c2e7bedbd837978f2bbfd3780dd9b62d43ef`
+  - `fix: hard gate xcolo secondary pci identity`
+- Build:
+  - GitHub Actions run `27278740809` completed successfully.
+  - Built RPM SHA256:
+    `fb3a9bb8ab11dffcc1d0c52a932495d9bdf85df0d04101361fb0e50637decf20`.
+- Deployment:
+  - deployed `ablestack_vm_ftctl-0.8.0-1.noarch` to `10.10.32.1`,
+    `10.10.32.2`, and `10.10.32.3`.
+  - all three hosts reported active `ablestack-vm-ftctl.timer` and
+    `ablestack-vm-hangctl.timer`.
+  - installed script markers were verified on all three hosts:
+    - `xcolo_live_pci_identity_unmaterialized`
+    - `xcolo_pre_migrate_secondary_pci_resources_unmaterialized`
+  - the obsolete pre-migrate success marker
+    `xcolo_pre_migrate_secondary_pci_resources_deferred_for_incoming` was absent
+    from installed `xcolo.sh` on all three hosts.
+- Cleanup:
+  - Run 112 active protection row was marked removed/disabled.
+  - `ftctl.*` VM details for VM `54` and standby VM `177` were removed.
+  - standby domain `i-2-177-VM` was destroyed/undefined.
+  - standby VM `177` was marked `Expunging`.
+  - standby volumes `339` and `340` were marked `Expunged`.
+  - standby RBD images were removed after unmapping stale `/dev/rbd1` and
+    `/dev/rbd2` watchers on `10.10.32.1`:
+    - `83e067d2-4e30-453f-b821-349401a6c37a`
+    - `b26917ab-fd07-4283-a12e-1296f4694e2e`
+  - FTCTL runtime/profile/debug files for `i-2-54-VM`, `i-2-177-VM`, and
+    `r97-link-01` were removed from the 32.x hosts.
+- Retest readiness checks:
+  - active protection count for primary VM `54`: `0`.
+  - active `ftctl.*` details for VM `54`/`177`: `0`.
+  - primary VM `i-2-54-VM` state: `running` on `10.10.32.3`.
+  - primary QMP `query-block-jobs`: empty list.
+  - no standby domain `i-2-177-VM` remains on the 32.x hosts.
+  - no FTCTL runtime/profile files matched `i-2-54-VM`, `i-2-177-VM`, or
+    `r97-link-01`.
+  - standby RBD images were absent from the RBD pool.
