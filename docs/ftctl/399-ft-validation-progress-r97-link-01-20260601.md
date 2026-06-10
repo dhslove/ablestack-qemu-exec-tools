@@ -6706,3 +6706,68 @@ xcolo_primary_filter_activation_failed_reason=mirror_path_secondary_red0=query_f
   - no remaining FTCTL runtime/profile files matched `i-2-54-VM`,
     `i-2-174-VM`, or `r97-link-01`.
   - standby RBD images for Run 109 were absent from the RBD pool.
+
+### Run 110 Monitor Result 2026-06-10
+
+- Test:
+  - user started FT protection for `r97-link-01` after Run 109
+    role-transition gate deployment.
+- Run identity:
+  - protection id: `110`
+  - primary VM: `54` / `i-2-54-VM`
+  - standby VM: `175` / `i-2-175-VM`
+  - primary host: `10.10.32.3`
+  - secondary host: `10.10.32.1`
+- Progress observed:
+  - standby VM was created in Cloud DB and later reached DB `Running`.
+  - primary and secondary libvirt domains entered paused runtime during XCOLO
+    activation.
+  - pre-migrate runtime topology gate passed again:
+
+```text
+xcolo_pre_migrate_topology_gate_state=ok
+```
+
+  - post-migrate role-transition gate was entered and retried:
+
+```text
+xcolo_post_migrate_role_transition_gate=waiting
+xcolo_post_migrate_role_transition_attempts=28
+xcolo_post_migrate_role_transition_primary_migrate=colo
+xcolo_post_migrate_role_transition_secondary_migrate=
+xcolo_post_migrate_role_transition_chardev_query_state=secondary_query_failed
+xcolo_post_migrate_role_transition_chardev_query_transient=yes
+```
+
+- Final state:
+
+```text
+protection_state=error
+transport_state=failed
+active_side=primary
+last_error=xcolo_secondary_chardev_query_unstable_after_migrate
+xcolo_protocol_failure_phase=post_migrate_role_transition
+xcolo_post_migrate_role_transition_gate=failed
+xcolo_post_migrate_role_transition_attempts=30
+xcolo_post_migrate_role_transition_reason=chardev_query_transient
+```
+
+- Secondary QEMU evidence:
+
+```text
+Unable to connect character device red0: Failed to connect to '10.10.32.3:9003': Connection refused
+qemu-kvm: ../system/memory.c:2666: memory_region_add_subregion_common:
+Assertion `!subregion->container' failed.
+shutting down, reason=crashed
+```
+
+- Repetition guard:
+  - this is not a successful COLO activation.
+  - the new role-transition gate improved classification: the failure is no
+    longer reported as generic `xcolo_colo_chardev_contract_not_ready`.
+  - the same secondary QEMU memory-region assertion reappeared behind the
+    chardev query failure, so the next fix must return to secondary migration
+    ABI/topology parity rather than extending chardev wait time.
+  - the secondary also attempted `red0` before primary `9003` was available;
+    the next analysis must decide whether this is a symptom of the secondary
+    crash/start ordering or an independent channel ordering defect.
