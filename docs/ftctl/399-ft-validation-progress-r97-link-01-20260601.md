@@ -6547,3 +6547,39 @@ xcolo_post_migrate_crash_mtree_diff_count=498
   - preserve `info pci` resource differences as evidence because secondary
     `-incoming` can legitimately defer PCI resource assignment before
     migration.
+
+### Run 108 Fix Deployment And Cleanup 2026-06-10
+
+- Code commit:
+  - `4b057cfdb52c08afc4b901c8d30b65858e848fce`
+  - `fix: gate xcolo pre-migrate topology`
+- Build:
+  - GitHub Actions run `27252986066` completed successfully.
+  - Built RPM SHA256:
+    `77893361a2c37c999c16c45f939d9a0b527681263cb0a78eff842a88746d4957`
+- Deployment:
+  - deployed to `10.10.32.1`, `10.10.32.2`, and `10.10.32.3`.
+  - all hosts reported `ablestack_vm_ftctl-0.8.0-1.noarch`.
+  - installed script markers were verified on all hosts:
+    - `ftctl_xcolo_require_pre_migrate_runtime_topology_gate`
+    - `xcolo_pre_migrate_topology_gate_state`
+    - `qtree_missing_device_count`
+- Cleanup:
+  - Run 108 active protection was marked removed.
+  - `ftctl.*` details for VM `54` and standby VM `173` were removed.
+  - standby VM `i-2-173-VM` was destroyed, undefined, and marked `Expunging`.
+  - standby volumes `331` and `332` were marked `Expunged`.
+  - standby RBD images were unmapped and removed:
+    - `40b41b61-b1b0-4027-a114-909887a8b5b9`
+    - `cd645099-506d-4e88-bf28-d64d673e2c60`
+- Retest readiness checks:
+  - active protection count for VM `54`/`173`: `0`.
+  - active `ftctl.*` details for VM `54`/`173`: `0`.
+  - active standby volumes for VM `173`: `0`.
+  - primary VM `i-2-54-VM` state: `Running` on host id `3`.
+  - primary QMP `query-block-jobs`: empty list.
+  - primary qemu command line does not contain COLO runtime markers such as
+    `colo-compare`, `filter-mirror`, `ftctl-colo`, `9003`, `9004`, or `9998`.
+  - standby RBD images for Run 108 were absent from the RBD pool.
+  - `ablestack-vm-ftctl.timer` and `ablestack-vm-hangctl.timer` are active on
+    all three 32.x hosts.
