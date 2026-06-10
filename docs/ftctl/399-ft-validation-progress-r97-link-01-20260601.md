@@ -6271,3 +6271,87 @@ xcolo_live_pci_identity_mismatch
     peer host `10.10.32.1`.
   - full 32.x cluster parity is not complete until `10.10.32.3` is recovered
     and the same RPM is installed there.
+
+### Run 106 Monitoring Result 2026-06-10
+
+- Trigger:
+  - user started FT protection for `r97-link-01`.
+- Runtime:
+  - `ftctl_protection.id=106`
+  - primary VM `i-2-54-VM`
+  - standby VM `i-2-171-VM`
+  - primary host `10.10.32.3`
+  - peer host `10.10.32.1`
+- Progress:
+  - cloud-managed standby VM and volumes were created.
+  - baseline seed completed for both disks:
+    - `sda`: `30447406-b01a-42ea-8581-5277b05e9c1c`
+    - `sdb`: `39708659-be24-4632-9325-34a65c525f4f`
+  - primary runtime was restarted with COLO network objects.
+  - validation stopped before `primary.migrate`.
+- Final state:
+
+```text
+protection_state=error
+transport_state=failed
+last_error=xcolo_live_pci_identity_mismatch
+conversion_stage=pre_migrate_live_topology_failed
+conversion_state=error
+xcolo_protocol_failure_phase=pre_migrate_live_topology
+```
+
+- Evidence:
+
+```text
+error=xcolo_live_pci_identity_mismatch
+reason=info_pci_identity_diff
+primary_hash=fcef3d1417811e51b2a8f245afd0a280fba92ce09d79f38ee03a05898cb8e94a
+secondary_hash=cd06d6a9c91de206b99973143bf8c54b87b68ff7cf2cf75f8a847006a3a687c8
+pci_first_diff_index=3
+pci_primary={"addr":"bus=1 device=0 function=0","class":"PCI bridge: PCI device 1b36:000e","id":"id \"pci.6\"","subsystem":""}
+pci_secondary={"addr":"bus=0 device=2 function=1","class":"PCI bridge: PCI device 1b36:000c","id":"id \"pci.2\"","subsystem":""}
+```
+
+- Repetition guard:
+  - the previous `memory_region_add_subregion_common` QEMU assertion did not
+    recur.
+  - the new hard gate worked as intended: the same class of PCI identity drift
+    was detected before migration memory/device state was injected.
+  - this is progress, not a loop: the failure moved from post-migrate secondary
+    QEMU crash to deterministic pre-migrate ABI evidence.
+- Next direction:
+  - generate the secondary runtime from the primary live PCI bridge topology,
+    not from a partial/static standby XML shape.
+  - specifically preserve the extra `pcie-pci-bridge` position where primary
+    has `pci.6` at `bus=1 device=0 function=0`, instead of allowing secondary
+    to keep `pci.2` as the next identity at `bus=0 device=2 function=1`.
+
+### Run 106 Fix Plan 2026-06-10
+
+- Additional inspection after Run 106:
+  - `primary.generated.xml` and `standby.generated.xml` both preserve
+    `pcie-to-pci-bridge` alias `pci.6` with address bus `0x01`, slot `0x00`.
+  - generated qemu command-line guest disk devices also match for primary and
+    secondary.
+  - the mismatch is from live secondary `info pci` while the secondary is still
+    an incoming migration target; its PCI bridge BARs and secondary bus numbers
+    are not assigned yet.
+- Correction:
+  - keep generated argv/device mismatch as a hard pre-migrate failure.
+  - keep fully assigned live PCI identity mismatch as a hard failure.
+  - treat the secondary incoming unassigned PCI shape as a deferred evidence
+    state, not as a pre-migrate hard failure:
+
+```text
+warning=xcolo_live_pci_identity_deferred_for_incoming
+xcolo_live_pci_identity=deferred
+```
+
+- Design document:
+  - `370-ft-xcolo-secondary-incoming-pci-deferred-gate-design-20260610.md`
+- Repetition guard:
+  - this is not a return to the earlier loop.  The previous fix prevented the
+    QEMU assertion and exposed that the live `info pci` gate itself was too
+    strict for secondary `-incoming`.
+  - the next run must either pass pre-migrate topology and reach migration, or
+    fail with a new post-gate reason backed by the preserved evidence.

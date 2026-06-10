@@ -2370,6 +2370,16 @@ def pci_identity(raw):
         records.append(current)
     return records
 
+def pci_incoming_unassigned(raw):
+    text = raw or ""
+    if not text.strip():
+        return False
+    bridge_count = len(re.findall(r"PCI bridge: PCI device 1b36:000c", text))
+    zero_secondary = len(re.findall(r"secondary bus 0\.", text))
+    zero_subordinate = len(re.findall(r"subordinate bus 0\.", text))
+    not_mapped = "(not mapped)" in text
+    return bridge_count >= 2 and zero_secondary >= 2 and zero_subordinate >= 2 and not_mapped
+
 def digest(obj):
     encoded = json.dumps(obj, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -2436,18 +2446,32 @@ elif not p_pci_identity or not s_pci_identity:
     print(f"reason=missing_info_pci_identity primary_identity={len(p_pci_identity)} secondary_identity={len(s_pci_identity)} primary_lines={len(p_pci)} secondary_lines={len(s_pci)}")
     raise SystemExit(1)
 elif p_pci_identity != s_pci_identity:
-    print("error=xcolo_live_pci_identity_mismatch")
-    print(f"reason=info_pci_identity_diff primary_hash={digest(p_pci_identity)} secondary_hash={digest(s_pci_identity)}")
-    max_len = max(len(p_pci_identity), len(s_pci_identity))
-    for idx in range(max_len):
-        left = p_pci_identity[idx] if idx < len(p_pci_identity) else "<missing>"
-        right = s_pci_identity[idx] if idx < len(s_pci_identity) else "<missing>"
-        if left != right:
-            print(f"pci_first_diff_index={idx}")
-            print("pci_primary=" + json.dumps(left, sort_keys=True, separators=(",", ":")))
-            print("pci_secondary=" + json.dumps(right, sort_keys=True, separators=(",", ":")))
-            break
-    raise SystemExit(1)
+    if pci_incoming_unassigned(secondary_pci):
+        print("error=")
+        print("warning=xcolo_live_pci_identity_deferred_for_incoming")
+        print(f"pci_reason=secondary_incoming_pci_unassigned primary_hash={digest(p_pci_identity)} secondary_hash={digest(s_pci_identity)}")
+        max_len = max(len(p_pci_identity), len(s_pci_identity))
+        for idx in range(max_len):
+            left = p_pci_identity[idx] if idx < len(p_pci_identity) else "<missing>"
+            right = s_pci_identity[idx] if idx < len(s_pci_identity) else "<missing>"
+            if left != right:
+                print(f"pci_first_diff_index={idx}")
+                print("pci_primary=" + json.dumps(left, sort_keys=True, separators=(",", ":")))
+                print("pci_secondary=" + json.dumps(right, sort_keys=True, separators=(",", ":")))
+                break
+    else:
+        print("error=xcolo_live_pci_identity_mismatch")
+        print(f"reason=info_pci_identity_diff primary_hash={digest(p_pci_identity)} secondary_hash={digest(s_pci_identity)}")
+        max_len = max(len(p_pci_identity), len(s_pci_identity))
+        for idx in range(max_len):
+            left = p_pci_identity[idx] if idx < len(p_pci_identity) else "<missing>"
+            right = s_pci_identity[idx] if idx < len(s_pci_identity) else "<missing>"
+            if left != right:
+                print(f"pci_first_diff_index={idx}")
+                print("pci_primary=" + json.dumps(left, sort_keys=True, separators=(",", ":")))
+                print("pci_secondary=" + json.dumps(right, sort_keys=True, separators=(",", ":")))
+                break
+        raise SystemExit(1)
 elif p_pci != s_pci:
     print("error=")
     print("warning=xcolo_live_pci_resource_diff_ignored")
@@ -2489,11 +2513,22 @@ PY
 
   reason="$(printf '%s\n' "${payload}" | sed -n 's/^reason=//p' | head -n1)"
   pci_warning="$(printf '%s\n' "${payload}" | sed -n 's/^warning=//p' | head -n1)"
+  pci_first_diff_index="$(printf '%s\n' "${payload}" | sed -n 's/^pci_first_diff_index=//p' | head -n1)"
+  pci_primary="$(printf '%s\n' "${payload}" | sed -n 's/^pci_primary=//p' | head -n1)"
+  pci_secondary="$(printf '%s\n' "${payload}" | sed -n 's/^pci_secondary=//p' | head -n1)"
+  local pci_identity_state="ok"
+  if [[ "${pci_warning}" == "xcolo_live_pci_identity_deferred_for_incoming" ]]; then
+    pci_identity_state="deferred"
+  fi
   ftctl_state_set "${vm}" \
     "xcolo_live_runtime_topology=ok" \
     "xcolo_live_runtime_topology_phase=${phase}" \
     "xcolo_live_runtime_topology_reason=$(ftctl_xcolo_compact_log_value "${reason}")" \
-    "xcolo_live_pci_identity=ok" \
+    "xcolo_live_pci_identity=${pci_identity_state}" \
+    "xcolo_live_pci_identity_warning=${pci_warning}" \
+    "xcolo_live_pci_identity_first_diff_index=${pci_first_diff_index}" \
+    "xcolo_live_pci_identity_primary=$(ftctl_xcolo_compact_log_value "${pci_primary}")" \
+    "xcolo_live_pci_identity_secondary=$(ftctl_xcolo_compact_log_value "${pci_secondary}")" \
     "xcolo_live_pci_evidence=${pci_warning:-none}" \
     "xcolo_live_qtree_evidence=collected" \
     "xcolo_live_mtree_evidence=collected"
