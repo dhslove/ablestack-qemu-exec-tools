@@ -6835,3 +6835,103 @@ shutting down, reason=crashed
   - no remaining FTCTL runtime/profile files matched `i-2-54-VM`,
     `i-2-175-VM`, or `r97-link-01`.
   - standby RBD images for Run 110 were absent from the RBD pool.
+
+### Run 111 Monitor Result 2026-06-10
+
+- Test target:
+  - primary VM: `r97-link-01`, VM id `54`, domain `i-2-54-VM`.
+  - standby VM: `r97-link-01-standby`, VM id `176`, domain `i-2-176-VM`.
+  - protection id: `111`.
+  - primary host: `10.10.32.3`.
+  - secondary host: `10.10.32.1`.
+- Final state:
+  - `protection_state=error`.
+  - `transport_state=failed`.
+  - `active_side=primary`.
+  - `last_error=xcolo_pre_migrate_secondary_pci_resources_unmaterialized`.
+  - primary VM `i-2-54-VM` remained `Running` on host id `3`.
+  - standby VM `i-2-176-VM` remained `Running` in Cloud DB on host id `1`,
+    while libvirt reported the domain as paused.
+- Primary FTCTL state evidence:
+  - `xcolo_protocol_failure_phase=pre_migrate_topology_analysis`.
+  - `xcolo_pre_migrate_topology_gate_state=failed`.
+  - `xcolo_pre_migrate_topology_gate_error=xcolo_pre_migrate_secondary_pci_resources_unmaterialized`.
+  - `xcolo_pre_migrate_qtree_diff_count=0`.
+  - `xcolo_pre_migrate_mtree_diff_count=497`.
+  - `xcolo_pre_migrate_mtree_primary_zero_pci_alias_count=0`.
+  - `xcolo_pre_migrate_mtree_secondary_zero_pci_alias_count=48`.
+  - `xcolo_pre_migrate_topology_gate_reason=0000000000000000-0000000000000000_(prio_1,_i/o):_alias_pci_bridge_mem_@pci_bridge_pci_0000000000000000-0000000000000000`.
+- Captured debug analysis:
+
+```text
+context=pre_migrate
+phase=before_migrate
+pci_primary_count=18
+pci_secondary_count=12
+pci_diff_count=15
+pci_first_diff_index=3
+qtree_primary_lines=95
+qtree_secondary_lines=95
+qtree_diff_count=0
+qtree_primary_device_count=57
+qtree_secondary_device_count=57
+qtree_missing_device_count=0
+qtree_extra_device_count=0
+mtree_primary_lines=498
+mtree_secondary_lines=285
+mtree_diff_count=497
+mtree_primary_zero_pci_alias_count=0
+mtree_secondary_zero_pci_alias_count=48
+mtree_first_secondary_zero_pci_alias=0000000000000000-0000000000000000 (prio 1, i/o): alias pci_bridge_mem @pci_bridge_pci 0000000000000000-0000000000000000
+assert_candidate_reason=secondary_zero_range_pci_alias
+topology_gate_state=failed
+topology_gate_error=xcolo_pre_migrate_secondary_pci_resources_unmaterialized
+```
+
+- Migration ABI contract check:
+
+```text
+state=ok
+guest_device_count=20
+primary_guest_device_hash=300be4bc...
+secondary_guest_device_hash=300be4bc...
+primary_block_graph=yes
+secondary_block_graph=yes
+```
+
+- Secondary QEMU log:
+
+```text
+qemu-kvm: Unable to connect character device red0: Failed to connect to '10.10.32.3:9003': Connection refused
+```
+
+- Result interpretation:
+  - this run did not complete FT protection.
+  - the Run 110 gate improved behavior: the system stopped before
+    `primary.migrate`, so the previous secondary QEMU
+    `memory_region_add_subregion_common` assertion was not reached.
+  - guest-visible qtree and command contract still match, but the secondary
+    incoming VM has not materialized PCI resources to the same runtime mtree
+    shape as the primary.
+  - the next correction must materialize or eliminate the secondary PCI resource
+    mismatch before migrate. Waiting longer or retrying the same migrate path is
+    a repeat-risk because `qtree_diff_count=0` while `mtree_diff_count=497`.
+  - the `red0` connection refusal is still present. In this run it is secondary
+    QEMU attempting to connect before primary `9003` is listening, but the run
+    is gated earlier by mtree materialization; handle it after or together with
+    the secondary startup/materialization fix.
+- Evidence retention:
+  - debug files were copied from
+    `10.10.32.3:/run/ablestack-vm-ftctl/debug/xcolo/i-2-54-VM` to
+    `/tmp/run111-evidence/i-2-54-VM`.
+  - cleanup was not performed after this failure so the failed state remains
+    available for follow-up analysis.
+- Repetition guard:
+  - this is progress from Run 110 because QEMU did not crash and the gate
+    identified the exact pre-migrate topology mismatch.
+  - if the next run again fails with
+    `xcolo_pre_migrate_secondary_pci_resources_unmaterialized`, report it as a
+    repeated blocker unless the secondary mtree or PCI materialization counts
+    materially changed.
+  - do not classify another identical run as a new network or chardev issue
+    unless `mtree_secondary_zero_pci_alias_count` is fixed first.
