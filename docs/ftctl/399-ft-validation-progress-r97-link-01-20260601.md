@@ -6583,3 +6583,59 @@ xcolo_post_migrate_crash_mtree_diff_count=498
   - standby RBD images for Run 108 were absent from the RBD pool.
   - `ablestack-vm-ftctl.timer` and `ablestack-vm-hangctl.timer` are active on
     all three 32.x hosts.
+
+### Run 109 Monitor Result 2026-06-10
+
+- Test:
+  - user started FT protection for `r97-link-01` after Run 108 topology gate
+    deployment.
+- Run identity:
+  - protection id: `109`
+  - primary VM: `54` / `i-2-54-VM`
+  - standby VM: `174` / `i-2-174-VM`
+  - primary host: `10.10.32.3`
+  - secondary host: `10.10.32.1`
+- Progress observed:
+  - baseline seed completed for both `sda` and `sdb`.
+  - generated primary and secondary domains started.
+  - pre-migrate live topology capture completed.
+  - pre-migrate runtime topology gate passed:
+
+```text
+xcolo_pre_migrate_topology_gate_state=ok
+xcolo_pre_migrate_qtree_diff_count=0
+xcolo_pre_migrate_mtree_diff_count=493
+xcolo_pre_migrate_pci_diff_count=15
+```
+
+  - `primary.migrate` was executed and accepted.
+  - post-migrate transition initially reported `primary_migrate=active` and
+    `secondary_migrate=active`.
+- Final state:
+
+```text
+protection_state=error
+transport_state=failed
+last_error=xcolo_colo_chardev_contract_not_ready
+xcolo_protocol_failure_phase=post_migrate_chardev_contract
+```
+
+- Chardev evidence:
+
+```text
+xcolo_post_migrate_startup_active_validation_chardev_contract_ready=yes
+xcolo_post_migrate_startup_active_validation_chardev_contract_directional_ready=yes
+xcolo_post_migrate_startup_active_validation_chardev_contract_strict_frontend_ready=no
+xcolo_post_migrate_startup_active_validation_chardev_contract_primary_mirror0=present_closed
+xcolo_post_migrate_startup_active_validation_chardev_contract_primary_mirror0_backend=connected
+xcolo_post_migrate_startup_active_validation_chardev_contract_secondary_red0=present_open
+xcolo_post_migrate_startup_active_validation_chardev_contract_secondary_red0_backend=connected
+xcolo_primary_filter_activation_failed_reason=mirror_path_secondary_red0=query_failed,compare_path_secondary_red1=query_failed/query_failed
+```
+
+- Repetition guard:
+  - this is progress from Run 108.
+  - the previous `memory_region_add_subregion_common` assertion was not the
+    observed failure in this run.
+  - the active bottleneck moved to post-migrate chardev contract verification
+    and secondary chardev query/availability during filter activation.
