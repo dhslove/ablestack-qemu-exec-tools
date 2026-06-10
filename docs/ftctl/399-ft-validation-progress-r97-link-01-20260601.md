@@ -6669,3 +6669,40 @@ xcolo_primary_filter_activation_failed_reason=mirror_path_secondary_red0=query_f
     root cause and the next analysis must return to QEMU protocol ordering.
   - if the next run fails with the new role-transition state keys, the failure
     is expected to be more precisely localized than Run 109.
+
+### Run 109 Fix Deployment And Cleanup 2026-06-10
+
+- Code commit:
+  - `4c8ea943c30b5fd97aa9ec9c7bbd85457a966ec6`
+  - `fix: wait xcolo post-migrate role transition`
+- Build:
+  - GitHub Actions run `27255659381` completed successfully.
+  - Built RPM SHA256:
+    `6b6a9a901892001cfb177ab8555df759aa17e00c6da9c1c87f11d0acf33a3203`
+- Deployment:
+  - deployed to `10.10.32.1`, `10.10.32.2`, and `10.10.32.3`.
+  - all hosts reported `ablestack_vm_ftctl-0.8.0-1.noarch`.
+  - installed script markers were verified on all hosts:
+    - `ftctl_xcolo_wait_post_migrate_role_transition`
+    - `query_transient`
+  - `ablestack-vm-ftctl.timer` and `ablestack-vm-hangctl.timer` were active on
+    all three hosts after deployment and cleanup.
+- Cleanup:
+  - Run 109 active protection was marked removed.
+  - `ftctl.*` details for VM `54` and standby VM `174` were removed.
+  - standby VM `i-2-174-VM` was destroyed, undefined, and marked `Expunging`.
+  - standby volumes `333` and `334` were marked `Expunged`.
+  - standby RBD images were unmapped and removed:
+    - `3c246c5d-d19d-49ec-98ce-197df3ca97fe`
+    - `69982112-c591-4481-84f6-10645a21452f`
+  - stale `/run/ablestack-vm-ftctl/xcolo-primary-create.i-2-54-VM.*`
+    directories were removed from `10.10.32.3`.
+- Retest readiness checks:
+  - active protection count for VM `54`/`174`: `0`.
+  - active `ftctl.*` details for VM `54`/`174`: `0`.
+  - active standby volumes `333`/`334`: `0`.
+  - primary VM `i-2-54-VM` state: `Running` on host id `3`.
+  - primary QMP `query-block-jobs`: empty list.
+  - no remaining FTCTL runtime/profile files matched `i-2-54-VM`,
+    `i-2-174-VM`, or `r97-link-01`.
+  - standby RBD images for Run 109 were absent from the RBD pool.
