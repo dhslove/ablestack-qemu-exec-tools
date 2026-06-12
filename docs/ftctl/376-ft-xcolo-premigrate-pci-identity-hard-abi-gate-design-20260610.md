@@ -36,8 +36,19 @@ guest devices and block graphs look compatible.
 ## Principle
 
 2026-06-10 update after Run 113: this document's pre-migrate hard failure rule
-for an incoming secondary with unassigned PCI/BAR resources is superseded by
+for an incoming secondary with unassigned PCI/BAR resources was temporarily
+superseded by
 `377-ft-xcolo-incoming-secondary-premigrate-deferred-pci-design-20260610.md`.
+
+2026-06-12 update after Run 114: the deferral rule was proven unsafe because it
+allowed the same condition to reach QEMU's migration state application path and
+trigger `memory_region_add_subregion_common` assertion. The active rule is now
+`378-ft-xcolo-premigrate-materialization-failfast-design-20260612.md`, which
+restores fail-fast behavior with the explicit error:
+
+```text
+xcolo_secondary_pci_resource_unmaterialized_before_migrate
+```
 The hard failure rule remains valid after migration state has been loaded. At
 `before_migrate`, the known incoming-secondary unassigned shape is now treated
 as an explicit deferred warning.

@@ -2,6 +2,27 @@
 
 Date: 2026-06-10
 
+## Superseded
+
+2026-06-12 update after Run 114: this document's pre-migrate deferral rule is
+superseded by
+`378-ft-xcolo-premigrate-materialization-failfast-design-20260612.md`.
+
+Run 114 proved that allowing an incoming secondary with unassigned PCI/BAR
+resources and zero-range PCI mtree aliases to proceed to `primary.migrate`
+reaches a QEMU 9.2.4 assertion path:
+
+```text
+qemu-kvm: ../system/memory.c:2666: memory_region_add_subregion_common:
+Assertion `!subregion->container' failed.
+```
+
+The current rule is therefore fail-fast before `primary.migrate` with:
+
+```text
+xcolo_secondary_pci_resource_unmaterialized_before_migrate
+```
+
 ## Background
 
 Run 113 stopped before `primary.migrate` with:

@@ -7298,3 +7298,66 @@ Can't receive COLO message: Input/output error
   - primary QMP `query-block-jobs`: empty list.
   - no standby domain `i-2-178-VM` remains on the 32.x hosts.
   - standby RBD images are absent from the RBD pool.
+
+### Run 114 Result 2026-06-12
+
+- Test target:
+  - primary VM `54`, domain `i-2-54-VM`, display name `r97-link-01`.
+  - standby VM `179`, domain `i-2-179-VM`.
+  - primary host `10.10.32.3`, secondary host `10.10.32.1`.
+- Result:
+  - baseline seed, generated XML startup, COLO channel attach, pre-migrate guest
+    traffic gate, and `primary.migrate` completed.
+  - post-migrate startup active validation passed and 9003/9004 sockets were
+    established.
+  - secondary QEMU then crashed while applying migration state:
+
+```text
+qemu-kvm: ../system/memory.c:2666: memory_region_add_subregion_common:
+Assertion `!subregion->container' failed.
+```
+
+- Classification:
+  - this is the same materialization blocker family as Runs 112/113, but Run
+    114 proved the Run 113 deferral policy was unsafe.
+  - the repeated issue is not the older invalid COLO message/network path.
+  - evidence showed `qtree_diff_count=0`, but live PCI/mtree resources were not
+    materialized on the secondary:
+    - `pci_primary_count=18`
+    - `pci_secondary_count=12`
+    - `pci_identity_diff_count=15`
+    - `pci_identity_missing_count=6`
+    - `mtree_primary_zero_pci_alias_count=0`
+    - `mtree_secondary_zero_pci_alias_count=48`
+    - `assert_candidate_reason=secondary_zero_range_pci_alias`
+- Run 114 state after rollback:
+  - primary restored to running normal runtime on `10.10.32.3`.
+  - standby was left as paused libvirt runtime on `10.10.32.1` while Cloud DB
+    still showed the standby as `Running`.
+  - protection row `114` remained present with
+    `last_error=xcolo_secondary_qemu_assert_memory_region_container`.
+
+### Run 114 Fix Plan 2026-06-12
+
+- Design document:
+  - `378-ft-xcolo-premigrate-materialization-failfast-design-20260612.md`
+- Conflict resolution:
+  - `377-ft-xcolo-incoming-secondary-premigrate-deferred-pci-design-20260610.md`
+    is now marked superseded by the Run 114 fail-fast design.
+  - `376-ft-xcolo-premigrate-pci-identity-hard-abi-gate-design-20260610.md`
+    now records that the temporary Run 113 deferral was reversed after Run 114.
+- Correction:
+  - if the secondary incoming VM shows unassigned PCI/BAR resources before
+    migration, FTCTL must stop before `primary.migrate` with:
+    `xcolo_secondary_pci_resource_unmaterialized_before_migrate`.
+  - if secondary mtree shows substantially more zero-range PCI aliases than the
+    primary before migration, FTCTL must stop with the same error.
+  - post-migrate materialization failure remains a hard error, but the expected
+    repeated Run 114 condition should no longer reach that phase.
+- Repetition control:
+  - if the next run returns
+    `xcolo_secondary_pci_resource_unmaterialized_before_migrate`, that is the
+    same blocker caught earlier and safer than Run 114.
+  - if the next run still reaches QEMU
+    `memory_region_add_subregion_common`, the pre-migrate evidence gate is
+    incomplete and must be extended before another topology change is attempted.

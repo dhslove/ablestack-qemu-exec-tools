@@ -2478,9 +2478,15 @@ elif p_pci_identity != s_pci_identity:
         print("pci_primary=" + json.dumps(pci_id_diff["first_left"], sort_keys=True, separators=(",", ":")))
         print("pci_secondary=" + json.dumps(pci_id_diff["first_right"], sort_keys=True, separators=(",", ":")))
         if phase == "before_migrate":
-            print("error=")
-            print("warning=xcolo_live_pci_identity_deferred_for_incoming")
-            print(f"reason=secondary_incoming_pci_unassigned_deferred phase={phase} primary_hash={digest(p_pci_identity)} secondary_hash={digest(s_pci_identity)}")
+            print("error=xcolo_secondary_pci_resource_unmaterialized_before_migrate")
+            print(f"reason=secondary_incoming_pci_unassigned_before_migrate phase={phase} primary_hash={digest(p_pci_identity)} secondary_hash={digest(s_pci_identity)}")
+            print(f"pci_identity_primary_count={len(p_pci_identity)}")
+            print(f"pci_identity_secondary_count={len(s_pci_identity)}")
+            print(f"pci_identity_diff_count={pci_id_diff['diff_count']}")
+            print(f"pci_identity_missing_count={pci_id_diff['missing_count']}")
+            print(f"pci_identity_extra_count={pci_id_diff['extra_count']}")
+            print(f"pci_resource_diff_count={pci_raw_diff['diff_count']}")
+            raise SystemExit(1)
         else:
             print("error=xcolo_live_pci_identity_unmaterialized")
             print(f"reason=secondary_incoming_pci_unassigned phase={phase} primary_hash={digest(p_pci_identity)} secondary_hash={digest(s_pci_identity)}")
@@ -2556,15 +2562,11 @@ PY
   pci_first_diff_index="$(printf '%s\n' "${payload}" | sed -n 's/^pci_first_diff_index=//p' | head -n1)"
   pci_primary="$(printf '%s\n' "${payload}" | sed -n 's/^pci_primary=//p' | head -n1)"
   pci_secondary="$(printf '%s\n' "${payload}" | sed -n 's/^pci_secondary=//p' | head -n1)"
-  local pci_identity_state="ok"
-  if [[ "${pci_warning}" == "xcolo_live_pci_identity_deferred_for_incoming" ]]; then
-    pci_identity_state="deferred"
-  fi
   ftctl_state_set "${vm}" \
     "xcolo_live_runtime_topology=ok" \
     "xcolo_live_runtime_topology_phase=${phase}" \
     "xcolo_live_runtime_topology_reason=$(ftctl_xcolo_compact_log_value "${reason}")" \
-    "xcolo_live_pci_identity=${pci_identity_state}" \
+    "xcolo_live_pci_identity=ok" \
     "xcolo_live_pci_identity_warning=${pci_warning}" \
     "xcolo_live_pci_identity_first_diff_index=${pci_first_diff_index}" \
     "xcolo_live_pci_identity_primary_count=${pci_identity_primary_count}" \
@@ -3148,8 +3150,8 @@ if context == "pre_migrate":
         candidate_device = qtree_missing_devices[0]
         candidate_reason = "qtree_missing_device"
     elif len(secondary_zero_pci_aliases) > len(primary_zero_pci_aliases) + 2:
-        gate_state = "deferred"
-        gate_error = "xcolo_pre_migrate_secondary_pci_resources_deferred_for_incoming"
+        gate_state = "failed"
+        gate_error = "xcolo_secondary_pci_resource_unmaterialized_before_migrate"
         gate_reason = secondary_zero_pci_aliases[0]
         candidate_region = secondary_zero_pci_aliases[0]
         candidate_reason = "secondary_zero_range_pci_alias"
