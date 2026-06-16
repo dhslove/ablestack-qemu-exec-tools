@@ -271,3 +271,117 @@ condition. The state must preserve enough evidence to continue the real fix:
 The longer-term fix remains to build the secondary incoming runtime from the
 primary's actual launch ABI so that the target reaches a migration-compatible
 PCI/mtree state before migration is attempted.
+
+## Run 122 Design: Secondary Incoming Defer Control
+
+Run 121 proved that the crash-prevention gate works: FTCTL stopped before
+`primary.migrate` with:
+
+```text
+xcolo_pre_migrate_secondary_pci_resource_unmaterialized
+```
+
+The remaining problem is not another condition that should be ignored. The
+secondary process contained the generated devices in the command line and
+qtree, but the QEMU incoming process had not materialized the same PCI
+resources as the primary:
+
+```text
+generated:True,argv:True,qtree:True,pci:False
+```
+
+The next implementation must therefore control when the secondary starts
+accepting migration data.
+
+### Required Startup Model
+
+The secondary generated command line must use QEMU deferred incoming mode:
+
+```text
+-incoming defer
+```
+
+The actual migration URI remains the same operational endpoint:
+
+```text
+tcp:<secondary-host>:9998
+```
+
+but it must be stored as FTCTL state and passed later through QMP:
+
+```json
+{"execute":"migrate-incoming","arguments":{"uri":"tcp:<secondary-host>:9998"}}
+```
+
+This is not device hotplug. All guest-visible devices, disk replication graphs,
+network redirectors, and COLO filters must still exist at QEMU startup. QMP is
+used only to start the incoming migration listener after FTCTL verifies the
+secondary runtime shape.
+
+### Execution Order
+
+The cold-conversion FT path must use this order:
+
+1. Generate primary and secondary XML from the primary shape.
+2. Add QEMU COLO command-line objects to both generated XMLs.
+3. Start primary generated QEMU and wait for COLO frontend listeners.
+4. Start secondary generated QEMU with `-incoming defer`.
+5. Verify secondary startup materialization:
+
+   ```text
+   generated=True
+   argv=True
+   qtree=True
+   pci=True
+   mtree=True
+   ```
+
+6. Prepare secondary NBD exports and attach primary NBD children.
+7. Run QMP `migrate-incoming` on the secondary.
+8. Re-check secondary and pair topology after incoming is accepted.
+9. Run primary `migrate` only after all gates pass.
+
+If step 5 fails, the error must be:
+
+```text
+xcolo_secondary_startup_pci_unmaterialized
+```
+
+If step 8 fails, the error must remain phase-specific:
+
+```text
+xcolo_pre_migrate_secondary_pci_resource_unmaterialized
+```
+
+### Cleanup Contract
+
+Any failure after secondary runtime RBD preparation must unmap standby RBDs on
+the peer host. The unmap logic must not depend only on previously written state
+keys because Run 121 showed that secondary domains can be destroyed while
+`/dev/rbdN` mappings still hold watchers. Cleanup must also inspect the active
+disk plan and unmap secondary destination images if they remain mapped.
+
+### Retest Signal
+
+The next retest must report one of these states:
+
+```text
+xcolo_secondary_startup_materialization=ok
+xcolo_secondary_migrate_incoming=ok
+xcolo_secondary_incoming_materialization=ok
+```
+
+or fail safely before `primary.migrate` with one of:
+
+```text
+xcolo_secondary_startup_pci_unmaterialized
+xcolo_pre_migrate_secondary_pci_resource_unmaterialized
+```
+
+The following outcomes remain invalid regressions:
+
+```text
+memory_region_add_subregion_common assertion
+Received invalid message 0x0000
+Can't receive COLO message
+```

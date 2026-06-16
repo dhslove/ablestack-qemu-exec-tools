@@ -7680,3 +7680,213 @@ If the next test fails fast with
 `xcolo_pre_migrate_secondary_pci_resource_unmaterialized`, the next development
 step is not another guard. It must implement secondary incoming runtime
 construction from the primary's actual launch ABI.
+
+## Run 121 - Pre-Migrate Materialization Guard Fired
+
+Date: 2026-06-16
+
+### Result
+
+Run 121 confirmed that the Run 120 guard fired before `primary.migrate`.
+
+Observed active row:
+
+```text
+ftctl_protection.id=119
+primary_vm_id=54
+secondary_vm_id=184
+secondary_vm_name=i-2-184-VM
+protection_state=error
+transport_state=failed
+last_error=xcolo_pre_migrate_secondary_pci_resource_unmaterialized
+```
+
+The primary VM was recovered to a normal running libvirt domain on
+`10.10.32.3`:
+
+```text
+virsh domstate i-2-54-VM: running
+query-status.status: running
+query-block-jobs: []
+```
+
+No secondary QEMU assertion was observed in this run. This is progress compared
+with Run 119, where the flow reached COLO and crashed the secondary with:
+
+```text
+memory_region_add_subregion_common: Assertion `!subregion->container' failed.
+```
+
+### Failure Evidence
+
+The pre-migrate materialization pipeline failed at the PCI visibility layer:
+
+```text
+state=failed
+failure_layer=pci_missing
+first_missing_id=scsi0-0-0-0
+first_missing_driver=scsi-hd
+first_missing_path=generated:True,argv:True,qtree:True,pci:False
+first_reason=info_pci_missing_device
+primary_generated_count=9
+secondary_generated_count=9
+primary_argv_count=20
+secondary_argv_count=20
+primary_qtree_count=20
+secondary_qtree_count=20
+primary_pci_count=14
+secondary_pci_count=8
+```
+
+The live topology diff showed that the secondary incoming runtime had not
+materialized the same PCI bridge layout:
+
+```text
+pci_primary={"addr":"bus=1 device=0 function=0","class":"PCI bridge: PCI device 1b36:000e","id":"id \"pci.6\""}
+pci_secondary={"addr":"bus=0 device=2 function=1","class":"PCI bridge: PCI device 1b36:000c","id":"id \"pci.2\""}
+error=xcolo_secondary_pci_resource_unmaterialized_before_migrate
+reason=secondary_incoming_pci_unassigned_before_migrate
+pci_identity_primary_count=18
+pci_identity_secondary_count=12
+pci_identity_missing_count=6
+```
+
+Secondary `info pci` showed unmapped or unassigned bridge resources, for
+example root ports with `secondary bus 0`, `IRQ 0`, and BARs not mapped. This
+means the secondary process contained the generated devices and command-line
+objects, but QEMU had not assigned the runtime PCI resources needed to accept
+the incoming migration state safely.
+
+The secondary QEMU log also showed that `red0` initially failed to connect
+because the primary mirror listener was not ready yet:
+
+```text
+Unable to connect character device red0:
+Failed to connect to '10.10.32.3:9003': Connection refused
+```
+
+This did not become the final failure in Run 121; the final hard stop was the
+pre-migrate PCI materialization gate.
+
+### Residue To Clean Before Next Retest
+
+Run 121 left the test in an error state and must be cleaned before retry:
+
+```text
+ftctl_protection.id=119 remains active/error
+i-2-184-VM is Stopped in Cloud DB
+standby RBDs remain mapped on 10.10.32.1:
+  /dev/rbd1 -> 8df38170-ec4c-4dc5-ae89-bf7049347393
+  /dev/rbd2 -> 55078461-4c6d-4d5d-8116-8b02ba251035
+```
+
+### Repetition Control
+
+This is not the same failure as Run 119. The same underlying secondary
+materialization problem is still present, but the failure mode improved:
+
+- Run 119: the flow reached `primary.migrate`, entered COLO, and crashed the
+  secondary QEMU process.
+- Run 121: FTCTL detected the unsafe secondary PCI state before migrate and
+  stopped without a QEMU assertion.
+
+The next fix must not add another guard. The next fix must make the secondary
+incoming runtime materialize the same migration ABI as the primary before
+`primary.migrate`. Specifically, FTCTL must use the primary's actual launch ABI
+to construct the secondary incoming process so that generated manifest, live
+argv, qtree, `info pci`, and mtree all converge before migration.
+
+## Run 122 - Implement Secondary Incoming Defer Control
+
+Date: 2026-06-16
+
+### Design Applied
+
+Run 122 changes the startup contract for the secondary incoming domain:
+
+```text
+old: -incoming tcp:<secondary>:9998
+new: -incoming defer
+```
+
+The migration URI is now activated later through QMP:
+
+```json
+{"execute":"migrate-incoming","arguments":{"uri":"tcp:<secondary>:9998"}}
+```
+
+This keeps all guest devices, COLO network filters, and disk replication graph
+objects fixed at QEMU startup, while delaying only the incoming migration
+listener until FTCTL can verify secondary materialization.
+
+### Code Changes
+
+- `ftctl_xcolo_build_secondary_qemu_args()` now emits `-incoming defer` by
+  default.
+- `ftctl_xcolo_secondary_args_with_disk_graph()` preserves deferred incoming
+  when disk graph arguments are appended.
+- `ftctl_xcolo_secondary_accept_deferred_incoming()` sends QMP
+  `migrate-incoming` and records:
+
+  ```text
+  xcolo_secondary_incoming_mode=defer
+  xcolo_secondary_incoming_uri=<uri>
+  xcolo_secondary_migrate_incoming=ok|failed
+  ```
+
+- `ftctl_xcolo_require_secondary_startup_materialization_gate()` verifies
+  secondary materialization before QMP `migrate-incoming`.
+- Both single-node and multi-disk handshake paths now enforce:
+
+  ```text
+  secondary startup materialization gate
+  secondary QMP migrate-incoming
+  pre-migrate pair topology gate
+  primary migrate
+  ```
+
+- Secondary runtime RBD cleanup now has a disk-plan fallback so stale
+  `/dev/rbdN` mappings are unmapped even if state-key cleanup misses them.
+
+### Validation
+
+Local syntax and targeted selftests passed:
+
+```text
+bash -n lib/ftctl/xcolo.sh
+bash -n bin/ablestack_vm_ftctl_selftest.sh
+git diff --check
+FTCTL_SELFTEST_CASES=
+  selftest_case_xcolo_and_xml,
+  selftest_case_xcolo_block_handshake_sets_checkpoint_before_migrate,
+  selftest_case_xcolo_multi_disk_handshake_exports_all_disks,
+  selftest_case_xcolo_virtio_vnet_hdr_support,
+  selftest_case_xcolo_live_pci_incoming_fails_before_migrate
+```
+
+### Retest Expectation
+
+The next retest should show one of these progress markers before
+`primary.migrate`:
+
+```text
+xcolo_secondary_startup_materialization=ok
+xcolo_secondary_migrate_incoming=ok
+xcolo_secondary_incoming_materialization=ok
+```
+
+If secondary PCI resources still do not materialize, the expected safe failure
+is now either:
+
+```text
+xcolo_secondary_startup_pci_unmaterialized
+```
+
+or:
+
+```text
+xcolo_pre_migrate_secondary_pci_resource_unmaterialized
+```
+
+If `memory_region_add_subregion_common` appears again, this change failed to
+contain the unsafe migration entry point and must be treated as a regression.

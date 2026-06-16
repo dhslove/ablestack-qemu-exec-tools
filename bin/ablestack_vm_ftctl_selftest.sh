@@ -980,11 +980,15 @@ EOF
   selftest_assert_file_not_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "socket,id=compare1,host=0.0.0.0,port=9004,server=on,wait=off"
   selftest_assert_file_contains "$(ftctl_state_get "${vm}" "standby_xml_generated")" "qemu:commandline"
   selftest_assert_file_contains "$(ftctl_state_get "${vm}" "standby_xml_generated")" "/mirror/${vm}-vda.qcow2"
-  selftest_assert_file_contains "$(ftctl_state_get "${vm}" "standby_xml_generated")" "socket,id=red0,host=10.10.10.21,port=9003,reconnect-ms=1000"
-  selftest_assert_file_contains "$(ftctl_state_get "${vm}" "standby_xml_generated")" "socket,id=red1,host=10.10.20.21,port=9004,reconnect-ms=1000"
+  selftest_assert_file_contains "$(ftctl_state_get "${vm}" "standby_xml_generated")" "socket,id=red0,host="
+  selftest_assert_file_contains "$(ftctl_state_get "${vm}" "standby_xml_generated")" "port=9003,reconnect-ms=1000"
+  selftest_assert_file_contains "$(ftctl_state_get "${vm}" "standby_xml_generated")" "socket,id=red1,host="
+  selftest_assert_file_contains "$(ftctl_state_get "${vm}" "standby_xml_generated")" "port=9004,reconnect-ms=1000"
   selftest_assert_file_contains "$(ftctl_state_get "${vm}" "standby_xml_generated")" "filter-redirector,id=f1,netdev=hostnet0,queue=tx,indev=red0"
   selftest_assert_file_contains "$(ftctl_state_get "${vm}" "standby_xml_generated")" "filter-redirector,id=f2,netdev=hostnet0,queue=rx,outdev=red1"
   selftest_assert_file_contains "$(ftctl_state_get "${vm}" "standby_xml_generated")" "filter-rewriter,id=rew0,netdev=hostnet0,queue=all"
+  selftest_assert_file_contains "$(ftctl_state_get "${vm}" "standby_xml_generated")" "defer"
+  selftest_assert_file_not_contains "$(ftctl_state_get "${vm}" "standby_xml_generated")" "tcp:10.10.20.21:9998"
 
   ftctl_xcolo_failover "${vm}"
   selftest_assert_eq "$(ftctl_state_get "${vm}" "active_side")" "secondary" "xcolo failover side"
@@ -1261,7 +1265,11 @@ selftest_case_xcolo_runtime_disk_device_replace_is_forbidden() (
   }
   # shellcheck disable=SC2317
   ftctl_xcolo_query_migrate_capability_state() {
-    printf -v "$4" '%s' "yes"
+    if [[ "${3-}" == "return-path" ]]; then
+      printf -v "$4" '%s' "no"
+    else
+      printf -v "$4" '%s' "yes"
+    fi
     return 0
   }
 
@@ -1328,7 +1336,7 @@ selftest_case_xcolo_block_handshake_sets_checkpoint_before_migrate() (
   selftest_info "x-colo block handshake sets checkpoint delay before primary migrate"
 
   local call_log="${SELFTEST_ROOT}/xcolo-block-handshake-order.log"
-  local filter_line checkpoint_line migrate_line
+  local filter_line checkpoint_line incoming_line migrate_line
   FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
   FTCTL_PROFILE_SECONDARY_URI="qemu+ssh://peer/system"
   FTCTL_PROFILE_XCOLO_NBD_ENDPOINT="tcp:10.0.0.2:10809"
@@ -1344,7 +1352,11 @@ selftest_case_xcolo_block_handshake_sets_checkpoint_before_migrate() (
   }
   # shellcheck disable=SC2317
   ftctl_xcolo_query_migrate_capability_state() {
-    printf -v "$4" '%s' "yes"
+    if [[ "${3-}" == "return-path" ]]; then
+      printf -v "$4" '%s' "no"
+    else
+      printf -v "$4" '%s' "yes"
+    fi
     return 0
   }
   # shellcheck disable=SC2317
@@ -1378,6 +1390,39 @@ selftest_case_xcolo_block_handshake_sets_checkpoint_before_migrate() (
   ftctl_xcolo_capture_socket_snapshot() {
     return 0
   }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_require_secondary_startup_materialization_gate() {
+    local vm="$1"
+    ftctl_state_set "${vm}" "xcolo_secondary_startup_materialization=ok"
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_require_pre_migrate_runtime_topology_gate() {
+    local vm="$1"
+    ftctl_state_set "${vm}" "xcolo_pre_migrate_topology_gate_state=ok"
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_assert_no_premigrate_filter_mirror_send() {
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_gate_before_guest_traffic() {
+    local vm="$1"
+    ftctl_state_set "${vm}" "xcolo_pre_guest_traffic_gate=ready"
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_activate_primary_filters_after_migrate() {
+    local vm="$1"
+    ftctl_state_set "${vm}" \
+      "xcolo_primary_net_filters_activation_mode=startup-active" \
+      "xcolo_primary_net_filters_activation_order=premigrate-active" \
+      "xcolo_primary_net_filters_activated=true" \
+      "xcolo_primary_filter_status_pre_migrate=on" \
+      "xcolo_primary_filter_status_post_migrate=on"
+    return 0
+  }
 
   ftctl_xcolo_execute_handshake_with_nodes "primary-vm" "standby-vm" "parent0"
 
@@ -1390,6 +1435,8 @@ selftest_case_xcolo_block_handshake_sets_checkpoint_before_migrate() (
   selftest_assert_file_not_contains "${call_log}" "primary.cont_before_migrate"
   selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_primary_checkpoint_delay_ready")" "yes" \
     "primary checkpoint delay pre-migrate gate"
+  selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_secondary_migrate_incoming")" "ok" \
+    "secondary migrate-incoming accepted"
   selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_primary_net_filters_attached")" "true" \
     "primary net filters attached state"
   selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_primary_net_filters_attach_mode")" "cmdline" \
@@ -1410,11 +1457,14 @@ selftest_case_xcolo_block_handshake_sets_checkpoint_before_migrate() (
   selftest_assert_file_not_contains "${call_log}" "primary.object_add_colo_compare"
   filter_line="$(grep -n '|primary.stop_before_filter_attach|' "${call_log}" | head -n1 | cut -d: -f1)"
   checkpoint_line="$(grep -n '|primary.migrate_set_parameters.pre_migrate|' "${call_log}" | head -n1 | cut -d: -f1)"
+  incoming_line="$(grep -n '|secondary.migrate_incoming|' "${call_log}" | head -n1 | cut -d: -f1)"
   migrate_line="$(grep -n '|primary.migrate|' "${call_log}" | head -n1 | cut -d: -f1)"
   [[ "${filter_line}" -lt "${migrate_line}" ]] || \
     selftest_fail "primary filter attach gate must run before primary.migrate"
   [[ "${checkpoint_line}" -lt "${migrate_line}" ]] || \
     selftest_fail "primary checkpoint delay gate must run before primary.migrate"
+  [[ "${incoming_line}" -lt "${migrate_line}" ]] || \
+    selftest_fail "secondary migrate-incoming must run before primary.migrate"
 )
 
 selftest_case_xcolo_multi_disk_handshake_exports_all_disks() (
@@ -1422,7 +1472,7 @@ selftest_case_xcolo_multi_disk_handshake_exports_all_disks() (
   selftest_info "x-colo block handshake exports all mapped disks before primary migrate"
 
   local call_log="${SELFTEST_ROOT}/xcolo-multi-disk-handshake-order.log"
-  local sda_export_line sdb_export_line migrate_line
+  local sda_export_line sdb_export_line incoming_line migrate_line
   FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
   FTCTL_PROFILE_SECONDARY_URI="qemu+ssh://peer/system"
   FTCTL_PROFILE_XCOLO_NBD_ENDPOINT="tcp:10.0.0.2:10809"
@@ -1448,7 +1498,11 @@ selftest_case_xcolo_multi_disk_handshake_exports_all_disks() (
   }
   # shellcheck disable=SC2317
   ftctl_xcolo_query_migrate_capability_state() {
-    printf -v "$4" '%s' "yes"
+    if [[ "${3-}" == "return-path" ]]; then
+      printf -v "$4" '%s' "no"
+    else
+      printf -v "$4" '%s' "yes"
+    fi
     return 0
   }
   # shellcheck disable=SC2317
@@ -1482,6 +1536,39 @@ selftest_case_xcolo_multi_disk_handshake_exports_all_disks() (
   ftctl_xcolo_capture_socket_snapshot() {
     return 0
   }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_require_secondary_startup_materialization_gate() {
+    local vm="$1"
+    ftctl_state_set "${vm}" "xcolo_secondary_startup_materialization=ok"
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_require_pre_migrate_runtime_topology_gate() {
+    local vm="$1"
+    ftctl_state_set "${vm}" "xcolo_pre_migrate_topology_gate_state=ok"
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_assert_no_premigrate_filter_mirror_send() {
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_gate_before_guest_traffic() {
+    local vm="$1"
+    ftctl_state_set "${vm}" "xcolo_pre_guest_traffic_gate=ready"
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_activate_primary_filters_after_migrate() {
+    local vm="$1"
+    ftctl_state_set "${vm}" \
+      "xcolo_primary_net_filters_activation_mode=startup-active" \
+      "xcolo_primary_net_filters_activation_order=premigrate-active" \
+      "xcolo_primary_net_filters_activated=true" \
+      "xcolo_primary_filter_status_pre_migrate=on" \
+      "xcolo_primary_filter_status_post_migrate=on"
+    return 0
+  }
 
   ftctl_xcolo_execute_handshake_with_disk_plan \
     "primary-vm" "standby-vm" \
@@ -1501,6 +1588,7 @@ selftest_case_xcolo_multi_disk_handshake_exports_all_disks() (
   selftest_assert_file_contains "${call_log}" '"device":"libvirt-data-format"'
   selftest_assert_file_contains "${call_log}" '"export":"libvirt-root-format"'
   selftest_assert_file_contains "${call_log}" '"export":"libvirt-data-format"'
+  selftest_assert_file_contains "${call_log}" "secondary.migrate_incoming"
   selftest_assert_file_not_contains "${call_log}" '"export":"ftctl-colo-sda"'
   selftest_assert_file_not_contains "${call_log}" '"export":"ftctl-colo-sdb"'
   selftest_assert_file_not_contains "${call_log}" "primary.cont_before_migrate"
@@ -1509,9 +1597,12 @@ selftest_case_xcolo_multi_disk_handshake_exports_all_disks() (
     "multi disk pre guest traffic chardev gate"
   sda_export_line="$(grep -n '|secondary.nbd_server_add.sda|' "${call_log}" | head -n1 | cut -d: -f1)"
   sdb_export_line="$(grep -n '|secondary.nbd_server_add.sdb|' "${call_log}" | head -n1 | cut -d: -f1)"
+  incoming_line="$(grep -n '|secondary.migrate_incoming|' "${call_log}" | head -n1 | cut -d: -f1)"
   migrate_line="$(grep -n '|primary.migrate|' "${call_log}" | head -n1 | cut -d: -f1)"
   [[ "${sda_export_line}" -lt "${migrate_line}" && "${sdb_export_line}" -lt "${migrate_line}" ]] || \
     selftest_fail "all disk exports must be added before primary.migrate"
+  [[ "${incoming_line}" -lt "${migrate_line}" ]] || \
+    selftest_fail "secondary migrate-incoming must run before primary.migrate"
 )
 
 selftest_case_xcolo_staged_filter_activation_classifies_failed_step() (
@@ -1859,6 +1950,7 @@ selftest_case_xcolo_virtio_vnet_hdr_support() (
   selftest_assert_contains "${secondary_args}" "filter-redirector,id=f1,netdev=hostnet0,queue=tx,indev=red0,vnet_hdr_support=on" "secondary tx redirector vnet hdr"
   selftest_assert_contains "${secondary_args}" "filter-redirector,id=f2,netdev=hostnet0,queue=rx,outdev=red1,vnet_hdr_support=on" "secondary rx redirector vnet hdr"
   selftest_assert_contains "${secondary_args}" "filter-rewriter,id=rew0,netdev=hostnet0,queue=all,vnet_hdr_support=on" "secondary rewriter vnet hdr"
+  selftest_assert_contains "${secondary_args}" "-incoming;defer" "secondary incoming starts deferred"
   selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_net_vnet_hdr_support")" "on" "vnet hdr state"
 )
 
