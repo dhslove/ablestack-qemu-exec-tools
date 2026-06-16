@@ -140,3 +140,75 @@ The next run should end in one of these states:
 The desired near-term result is not necessarily a full FT pass. It is an
 unambiguous answer to why the live Secondary runtime differs from the Primary
 despite matching generated definitions.
+
+## Run 117 Follow-Up: Deferred Pre-Migrate PCI Materialization
+
+Run 117 produced the intended pipeline evidence. The result was:
+
+```text
+generated manifest: ok
+live QEMU argv: ok
+qtree: ok
+materialization failure layer: pci_missing
+first missing id: scsi0-0-0-0
+first missing path: generated:True,argv:True,qtree:True,pci:False
+```
+
+This means the Secondary incoming runtime had the intended guest devices in the
+generated definition, in the actual command line, and in qtree. The remaining
+gap was PCI resource assignment and mtree mapping before `primary.migrate`.
+
+That condition must no longer be treated as a pre-migrate hard failure. It is a
+deferred materialization condition that must be rechecked after migration starts
+the incoming side.
+
+### Updated Gate Rule
+
+Pre-migrate hard failures:
+
+- generated manifest mismatch;
+- live QEMU argv mismatch;
+- missing qtree devices;
+- missing QMP/domain snapshots;
+- COLO socket/filter/channel readiness failures.
+
+Pre-migrate deferred warnings:
+
+- `pci_missing`;
+- `pci_unassigned`;
+- secondary bridge `secondary bus 0` / `subordinate bus 0`;
+- secondary BAR `(not mapped)`;
+- secondary mtree zero-length PCI bridge aliases.
+
+Post-migrate hard failures:
+
+- any remaining `pci_missing`;
+- any remaining `pci_unassigned`;
+- any remaining mtree zero-length PCI bridge aliases;
+- any Primary/Secondary PCI identity divergence after incoming materialization.
+
+The post-migrate hard error is:
+
+```text
+xcolo_post_migrate_pci_materialization_failed
+```
+
+### Implementation Notes
+
+`ftctl_xcolo_verify_live_runtime_topology_pair()` must return success for a
+pre-migrate PCI-resource-only difference when generated/argv/qtree checks have
+already succeeded. It must set:
+
+```text
+xcolo_live_runtime_topology=deferred
+xcolo_live_pci_identity=deferred
+xcolo_pre_migrate_pci_materialization_deferred=yes
+```
+
+`ftctl_xcolo_require_pre_migrate_runtime_topology_gate()` must also treat
+mtree/PCI-resource-only differences as `deferred` and allow orchestration to
+continue to `primary.migrate`.
+
+`ftctl_xcolo_require_post_migrate_materialization_gate()` must run the
+materialization analyzer and reject any remaining PCI/mtree materialization
+failure as a hard post-migrate error.

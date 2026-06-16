@@ -4524,9 +4524,9 @@ EOF
   : > "${debug_dir}/secondary-info-pci-${phase}.txt"
 }
 
-selftest_case_xcolo_mtree_zero_alias_fails_before_migrate() (
+selftest_case_xcolo_mtree_zero_alias_defers_before_migrate() (
   selftest_reset_env
-  selftest_info "x-colo secondary mtree zero PCI aliases fail before migrate"
+  selftest_info "x-colo secondary mtree zero PCI aliases defer before migrate"
 
   local vm="xcolo-mtree-pre-fail"
   local phase="before_migrate"
@@ -4536,10 +4536,10 @@ selftest_case_xcolo_mtree_zero_alias_fails_before_migrate() (
   ftctl_xcolo_analyze_runtime_topology_diff "${vm}" "${phase}" "pre_migrate"
 
   selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_pre_migrate_topology_gate_state")" \
-    "failed" "pre-migrate zero PCI aliases should fail"
+    "deferred" "pre-migrate zero PCI aliases should defer"
   selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_pre_migrate_topology_gate_error")" \
-    "xcolo_secondary_pci_resource_unmaterialized_before_migrate" \
-    "pre-migrate unmaterialized PCI resource error recorded"
+    "xcolo_pre_migrate_pci_materialization_deferred_until_migrate" \
+    "pre-migrate unmaterialized PCI resource deferred"
   selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_pre_migrate_mtree_secondary_zero_pci_alias_count")" \
     "3" "pre-migrate secondary zero alias count"
 )
@@ -4571,6 +4571,23 @@ selftest_write_xcolo_incoming_pci_fixture() {
 
   debug_dir="$(ftctl_xcolo_debug_dir "${vm}")"
   mkdir -p "${debug_dir}"
+  cat > "${debug_dir}/primary-generated-pci-manifest-startup_disk_graph.json" <<'EOF'
+{
+  "qemu_guest_devices": [
+    {"driver": "pcie-root-port", "opts": {"id": "pci.1"}},
+    {"driver": "virtio-scsi-pci", "opts": {"id": "scsi0"}}
+  ]
+}
+EOF
+  cp "${debug_dir}/primary-generated-pci-manifest-startup_disk_graph.json" \
+    "${debug_dir}/secondary-generated-pci-manifest-startup_disk_graph.json"
+  cat > "${debug_dir}/primary-info-qtree-${phase}.txt" <<'EOF'
+dev: pcie-root-port, id "pci.1"
+dev: virtio-scsi-pci, id "scsi0"
+EOF
+  cp "${debug_dir}/primary-info-qtree-${phase}.txt" "${debug_dir}/secondary-info-qtree-${phase}.txt"
+  : > "${debug_dir}/primary-info-mtree-${phase}.txt"
+  : > "${debug_dir}/secondary-info-mtree-${phase}.txt"
   cat > "${debug_dir}/primary-info-pci-${phase}.txt" <<'EOF'
   Bus  0, device   0, function 0:
     Host bridge: PCI device 8086:29c0
@@ -4615,9 +4632,9 @@ EOF
 EOF
 }
 
-selftest_case_xcolo_live_pci_incoming_fails_before_migrate() (
+selftest_case_xcolo_live_pci_incoming_defers_before_migrate() (
   selftest_reset_env
-  selftest_info "x-colo incoming secondary PCI identity fails before migrate"
+  selftest_info "x-colo incoming secondary PCI identity defers before migrate"
 
   local vm="xcolo-live-pci-pre-fail"
   local phase="before_migrate"
@@ -4638,14 +4655,19 @@ selftest_case_xcolo_live_pci_incoming_fails_before_migrate() (
     local argv=$'-device\n{"driver":"pcie-root-port","id":"pci.1","bus":"pcie.0","addr":"0x2"}\n-device\n{"driver":"virtio-scsi-pci","id":"scsi0","bus":"pcie.0","addr":"0x9"}'
     printf -v "${out_primary}" '%s' "${argv}"
     printf -v "${out_secondary}" '%s' "${argv}"
+    ftctl_xcolo_write_debug_file "${vm}" "primary-live-qemu-argv-${phase}.txt" "${argv}"
+    ftctl_xcolo_write_debug_file "${vm}" "secondary-live-qemu-argv-${phase}.txt" "${argv}"
     return 0
   }
 
   ftctl_xcolo_verify_live_runtime_topology_pair "${vm}" "${vm}-standby" "${phase}" || rc=$?
-  selftest_assert_eq "${rc}" "1" "incoming PCI identity must fail before migrate"
-  selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" \
-    "xcolo_secondary_pci_resource_unmaterialized_before_migrate" \
-    "pre-migrate incoming PCI identity error"
+  selftest_assert_eq "${rc}" "0" "incoming PCI identity may defer before migrate"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_live_runtime_topology")" \
+    "deferred" "pre-migrate incoming PCI identity deferred"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_live_pci_identity")" \
+    "deferred" "pre-migrate live PCI identity deferred"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_pre_migrate_pci_materialization_deferred")" \
+    "yes" "pre-migrate materialization deferred marker"
 )
 
 selftest_case_xcolo_live_pci_incoming_fails_after_migrate() (
@@ -4671,6 +4693,8 @@ selftest_case_xcolo_live_pci_incoming_fails_after_migrate() (
     local argv=$'-device\n{"driver":"pcie-root-port","id":"pci.1","bus":"pcie.0","addr":"0x2"}\n-device\n{"driver":"virtio-scsi-pci","id":"scsi0","bus":"pcie.0","addr":"0x9"}'
     printf -v "${out_primary}" '%s' "${argv}"
     printf -v "${out_secondary}" '%s' "${argv}"
+    ftctl_xcolo_write_debug_file "${vm}" "primary-live-qemu-argv-${phase}.txt" "${argv}"
+    ftctl_xcolo_write_debug_file "${vm}" "secondary-live-qemu-argv-${phase}.txt" "${argv}"
     return 0
   }
 
@@ -5025,9 +5049,9 @@ selftest_main() {
   selftest_case_reconcile_waits_for_cloud_failback_after_fence_clear
   selftest_case_reconcile_waits_for_cloud_dr_failback_after_fence_clear
   selftest_case_failback_reprotect_clears_standby_verify_state
-  selftest_case_xcolo_mtree_zero_alias_fails_before_migrate
+  selftest_case_xcolo_mtree_zero_alias_defers_before_migrate
   selftest_case_xcolo_mtree_zero_alias_fails_after_migrate
-  selftest_case_xcolo_live_pci_incoming_fails_before_migrate
+  selftest_case_xcolo_live_pci_incoming_defers_before_migrate
   selftest_case_xcolo_live_pci_incoming_fails_after_migrate
   selftest_case_xcolo_generated_pci_manifest_pair_ok
   selftest_case_xcolo_generated_pci_manifest_pair_mismatch

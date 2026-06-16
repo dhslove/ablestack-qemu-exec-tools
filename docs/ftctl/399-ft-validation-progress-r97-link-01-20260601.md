@@ -7516,3 +7516,67 @@ The report must include:
 
 If these fields repeat unchanged, the next change must target that exact layer.
 Do not cycle back into generic PCI topology or COLO protocol explanations.
+
+## Run 117 - Pre-Migrate PCI Materialization Is Deferred, Not Missing Intent
+
+Date: 2026-06-16
+
+### Result
+
+Run 117 failed with the same top-level error:
+
+```text
+xcolo_secondary_pci_resource_unmaterialized_before_migrate
+```
+
+However, the new materialization pipeline evidence narrowed the actual layer:
+
+- generated manifest: `ok`;
+- live QEMU argv: `ok`;
+- qtree: `ok`;
+- materialization failure layer: `pci_missing`;
+- first missing id: `scsi0-0-0-0`;
+- first missing driver: `scsi-hd`;
+- first missing path: `generated:True,argv:True,qtree:True,pci:False`;
+- secondary mtree zero PCI alias count: `48`.
+
+### Repetition Control
+
+This is the same failure family but not the same diagnosis. We now know the
+device intent exists through qtree and only PCI resource/mtree materialization
+is incomplete before migration.
+
+The next change must not alter generated topology again. It must move
+PCI-resource-only checks from a pre-migrate hard gate to a pre-migrate deferred
+warning, then enforce them as a post-migrate hard materialization gate.
+
+## Run 118 - Deferred Pre-Migrate Materialization Implementation Target
+
+Date: 2026-06-16
+
+### Design Target
+
+Pre-migrate must allow this exact condition to proceed:
+
+```text
+generated:True, argv:True, qtree:True, pci:False
+```
+
+The condition must be recorded as:
+
+```text
+xcolo_live_runtime_topology=deferred
+xcolo_live_pci_identity=deferred
+xcolo_pre_migrate_pci_materialization_deferred=yes
+```
+
+Post-migrate must not allow the same condition. If it remains, the expected
+hard error is:
+
+```text
+xcolo_post_migrate_pci_materialization_failed
+```
+
+The next retest should therefore show whether the flow reaches
+`primary.migrate` and then fails or succeeds at the post-migrate materialization
+gate.
