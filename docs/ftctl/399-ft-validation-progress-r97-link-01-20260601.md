@@ -7407,3 +7407,112 @@ The next change must not keep repeating live-only diagnosis. It must add a
 generated Primary/Secondary PCI manifest equality gate and explicit rollback
 graph restoration checks as described in
 `379-ft-xcolo-canonical-pci-manifest-and-rollback-design-20260616.md`.
+
+## Run 116 - Generated Manifest Passes, Live Secondary Still Unmaterialized
+
+Date: 2026-06-16
+
+### Result
+
+Run 116 reached the new generated manifest gate and passed it. This proves the
+new pre-runtime manifest check is active and that the generated Primary and
+Secondary definitions are identical at the canonical PCI manifest level.
+
+Observed state:
+
+- protection row: `116`;
+- primary VM: `i-2-54-VM`, Cloud VM id `54`, running on `10.10.32.3`;
+- standby VM: `i-2-181-VM`, Cloud VM id `181`;
+- final protection state: `error/failed`;
+- last error: `xcolo_secondary_pci_resource_unmaterialized_before_migrate`.
+
+Generated gate evidence:
+
+- `xcolo.guest_abi_manifest`: `ok`;
+- `xcolo.generated_pci_manifest`: `ok`;
+- generated PCI manifest hash:
+  `c1c417aab462dbc1c5f3cd31359b178b807153160102cce5c60ca4bd37d029df`;
+- primary/secondary generated manifest counts: `17` / `17`;
+- generated diff file result:
+  `ok primary=c1c417... secondary=c1c417...`.
+
+Live runtime evidence before `primary.migrate`:
+
+- `xcolo.live_runtime_topology`: `fail`;
+- error: `xcolo_secondary_pci_resource_unmaterialized_before_migrate`;
+- primary PCI identity count: `18`;
+- secondary PCI identity count: `12`;
+- PCI identity diff count: `15`;
+- PCI identity missing count: `6`;
+- first diff:
+  - primary: `bus=1 device=0 function=0`, `PCI bridge 1b36:000e`, `id "pci.6"`;
+  - secondary: `bus=0 device=2 function=1`, `PCI bridge 1b36:000c`, `id "pci.2"`.
+
+Rollback evidence:
+
+- secondary generated runtime was destroyed;
+- primary generated runtime was destroyed;
+- primary was reactivated from backup XML;
+- rollback graph validation passed:
+  `block_conversion.rollback.primary_restore_graph=ok`;
+- after rollback, Primary had no active block jobs and no `ftctl-*` or `quorum`
+  nodes in `info block`.
+
+### Repetition Control
+
+This is the same live secondary incoming PCI materialization blocker, but it is
+not the same diagnostic state as Run 115.
+
+Progress since Run 115:
+
+- generated Primary/Secondary PCI manifest equality is now proven before
+  runtime startup;
+- rollback no longer leaves Primary on generated FT block graph;
+- the failure is narrowed to the gap between generated XML/QEMU command-line
+  equality and what QEMU/libvirt materializes for the incoming secondary before
+  migration.
+
+The next fix must therefore focus on why the secondary incoming domain keeps
+PCI bridges/resources unassigned despite matching generated manifest, not on
+another static manifest change.
+
+## Run 117 - Materialization Pipeline Diagnostics Implementation
+
+Date: 2026-06-16
+
+### Design Target
+
+Run 116 proved generated manifest equality and rollback restoration, but it did
+not explain where the Secondary runtime lost PCI materialization. Run 117
+therefore adds a pipeline diagnostic layer instead of repeating another broad
+static manifest change.
+
+The new diagnostic path is:
+
+```text
+generated manifest -> QEMU argv -> qtree -> info pci -> mtree
+```
+
+Expected evidence files for the next test:
+
+- `materialization-pipeline-before_migrate.json`;
+- `materialization-pipeline-diff-before_migrate.txt`;
+- `materialization-pipeline-summary-before_migrate.txt`.
+
+### Repetition Control
+
+If the next test still fails with
+`xcolo_secondary_pci_resource_unmaterialized_before_migrate`, it must be treated
+as the same failure family only if the materialization layer also repeats.
+
+The report must include:
+
+- `xcolo_materialization_failure_layer`;
+- `xcolo_materialization_first_missing_id`;
+- `xcolo_materialization_first_missing_driver`;
+- `xcolo_materialization_first_missing_path`;
+- whether generated manifest, live argv, qtree, `info pci`, or mtree is the
+  first failing layer.
+
+If these fields repeat unchanged, the next change must target that exact layer.
+Do not cycle back into generic PCI topology or COLO protocol explanations.

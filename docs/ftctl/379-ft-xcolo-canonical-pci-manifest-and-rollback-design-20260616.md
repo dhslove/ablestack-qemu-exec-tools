@@ -160,3 +160,20 @@ Repeated `xcolo_secondary_pci_resource_unmaterialized_before_migrate` without
 generated manifest evidence is not acceptable after this change. If that error
 appears again, the report must include whether the generated manifest gate
 passed and exactly what differed after QEMU materialization.
+
+## Run 116 Follow-Up
+
+Run 116 proved that this generated manifest gate and rollback restoration gate
+work, but also proved that generated equality is not sufficient by itself.
+
+The generated Primary and Secondary manifests matched, yet the live secondary
+incoming runtime still materialized fewer PCI identities than the Primary before
+`primary.migrate`. Therefore the next design layer is not another static
+manifest-only comparison. It must trace the full materialization pipeline:
+
+```text
+generated manifest -> QEMU argv -> qtree -> info pci -> mtree
+```
+
+The follow-up design is recorded in
+`380-ft-xcolo-materialization-pipeline-diagnostics-design-20260616.md`.

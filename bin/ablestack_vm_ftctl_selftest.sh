@@ -4722,7 +4722,9 @@ selftest_write_xcolo_generated_manifest_xml() {
     <qemu:arg value='-device'/>
     <qemu:arg value='pcie-root-port,id=pci.1,bus=pcie.0,addr=${root_port_addr},chassis=1,port=0x10'/>
     <qemu:arg value='-device'/>
-    <qemu:arg value='virtio-net-pci,netdev=hostnet0,id=net0,bus=pci.1,addr=0x0,mac=52:54:00:aa:bb:cc'/>
+    <qemu:arg value='pcie-pci-bridge,id=pci.6,bus=pci.1,addr=0x0'/>
+    <qemu:arg value='-device'/>
+    <qemu:arg value='virtio-net-pci,netdev=hostnet0,id=net0,bus=pci.6,addr=0x0,mac=52:54:00:aa:bb:cc'/>
   </qemu:commandline>
 </domain>
 EOF
@@ -4745,6 +4747,8 @@ selftest_case_xcolo_generated_pci_manifest_pair_ok() (
   selftest_assert_eq "${rc}" "0" "identical generated PCI manifest should pass"
   selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_generated_pci_manifest")" \
     "ok" "generated PCI manifest ok state"
+  selftest_assert_file_contains "$(ftctl_xcolo_debug_dir "${vm}")/primary-generated-pci-manifest-selftest.json" \
+    "pcie-pci-bridge"
 )
 
 selftest_case_xcolo_generated_pci_manifest_pair_mismatch() (
@@ -4767,6 +4771,135 @@ selftest_case_xcolo_generated_pci_manifest_pair_mismatch() (
     "generated PCI manifest mismatch error"
   selftest_assert_file_contains "$(ftctl_xcolo_debug_dir "${vm}")/generated-pci-manifest-diff-selftest.txt" \
     "mismatch"
+)
+
+selftest_write_xcolo_materialization_pipeline_base() {
+  local vm="${1-}"
+  local phase="${2-}"
+  local mode="${3:-ok}"
+  local debug_dir primary_xml secondary_xml
+
+  debug_dir="$(ftctl_xcolo_debug_dir "${vm}")"
+  mkdir -p "${debug_dir}"
+  primary_xml="${SELFTEST_ROOT}/primary.xml"
+  secondary_xml="${SELFTEST_ROOT}/secondary.xml"
+  selftest_write_xcolo_generated_manifest_xml "${primary_xml}" "${vm}" "0x2"
+  selftest_write_xcolo_generated_manifest_xml "${secondary_xml}" "${vm}-standby" "0x2"
+  ftctl_xcolo_verify_generated_pci_manifest_pair "${vm}" "${primary_xml}" "${secondary_xml}" "startup_disk_graph"
+
+  cat > "${debug_dir}/primary-live-qemu-argv-${phase}.txt" <<'EOF'
+-device
+pcie-root-port,id=pci.1,bus=pcie.0,addr=0x2,chassis=1,port=0x10
+-device
+pcie-pci-bridge,id=pci.6,bus=pci.1,addr=0x0
+-device
+virtio-net-pci,netdev=hostnet0,id=net0,bus=pci.6,addr=0x0,mac=52:54:00:aa:bb:cc
+EOF
+  if [[ "${mode}" == "argv_missing" ]]; then
+    cat > "${debug_dir}/secondary-live-qemu-argv-${phase}.txt" <<'EOF'
+-device
+pcie-root-port,id=pci.1,bus=pcie.0,addr=0x2,chassis=1,port=0x10
+-device
+virtio-net-pci,netdev=hostnet0,id=net0,bus=pci.6,addr=0x0,mac=52:54:00:aa:bb:cc
+EOF
+  else
+    cp "${debug_dir}/primary-live-qemu-argv-${phase}.txt" "${debug_dir}/secondary-live-qemu-argv-${phase}.txt"
+  fi
+
+  cat > "${debug_dir}/primary-info-qtree-${phase}.txt" <<'EOF'
+dev: pcie-root-port, id "pci.1"
+dev: pcie-pci-bridge, id "pci.6"
+dev: virtio-net-pci, id "net0"
+EOF
+  cp "${debug_dir}/primary-info-qtree-${phase}.txt" "${debug_dir}/secondary-info-qtree-${phase}.txt"
+
+  cat > "${debug_dir}/primary-info-pci-${phase}.txt" <<'EOF'
+  Bus  0, device   2, function 0:
+    PCI bridge: PCI device 1b36:000c
+      secondary bus 1.
+      subordinate bus 2.
+      BAR0: 32 bit memory at 0x82d47000 [0x82d47fff]
+      id "pci.1"
+  Bus  1, device   0, function 0:
+    PCI bridge: PCI device 1b36:000e
+      secondary bus 2.
+      subordinate bus 2.
+      BAR0: 64 bit memory at 0x82c00000 [0x82c000ff]
+      id "pci.6"
+  Bus  2, device   0, function 0:
+    Ethernet controller: PCI device 1af4:1000
+      BAR0: I/O at 0x6040 [0x607f]
+      id "net0"
+EOF
+  if [[ "${mode}" == "pci_unassigned" ]]; then
+    cat > "${debug_dir}/secondary-info-pci-${phase}.txt" <<'EOF'
+  Bus  0, device   2, function 0:
+    PCI bridge: PCI device 1b36:000c
+      secondary bus 1.
+      subordinate bus 2.
+      BAR0: 32 bit memory at 0x82d47000 [0x82d47fff]
+      id "pci.1"
+  Bus  1, device   0, function 0:
+    PCI bridge: PCI device 1b36:000e
+      secondary bus 0.
+      subordinate bus 0.
+      BAR0: 64 bit memory (not mapped)
+      id "pci.6"
+  Bus  2, device   0, function 0:
+    Ethernet controller: PCI device 1af4:1000
+      BAR0: I/O at 0x6040 [0x607f]
+      id "net0"
+EOF
+  else
+    cp "${debug_dir}/primary-info-pci-${phase}.txt" "${debug_dir}/secondary-info-pci-${phase}.txt"
+  fi
+
+  cat > "${debug_dir}/primary-info-mtree-${phase}.txt" <<'EOF'
+00000000febf0000-00000000febf0fff (prio 1, i/o): alias pci_bridge_mem @pci_bridge_pci 0000000000000000-0000000000000fff
+EOF
+  cp "${debug_dir}/primary-info-mtree-${phase}.txt" "${debug_dir}/secondary-info-mtree-${phase}.txt"
+}
+
+selftest_case_xcolo_materialization_pipeline_reports_argv_missing() (
+  selftest_reset_env
+  selftest_info "x-colo materialization pipeline reports argv missing layer"
+
+  local vm="xcolo-materialization-argv-missing"
+  local phase="before_migrate"
+  ftctl_state_init_vm "${vm}"
+  selftest_write_xcolo_materialization_pipeline_base "${vm}" "${phase}" "argv_missing"
+
+  ftctl_xcolo_analyze_materialization_pipeline "${vm}" "${phase}" "selftest"
+
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_materialization_pipeline")" \
+    "failed" "materialization pipeline should fail"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_materialization_failure_layer")" \
+    "argv_missing" "argv missing layer recorded"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_materialization_first_missing_id")" \
+    "pci.6" "argv missing device id"
+  selftest_assert_file_contains "$(ftctl_xcolo_debug_dir "${vm}")/materialization-pipeline-diff-${phase}.txt" \
+    "failure_layer=argv_missing"
+)
+
+selftest_case_xcolo_materialization_pipeline_reports_pci_unassigned() (
+  selftest_reset_env
+  selftest_info "x-colo materialization pipeline reports PCI unassigned layer"
+
+  local vm="xcolo-materialization-pci-unassigned"
+  local phase="before_migrate"
+  ftctl_state_init_vm "${vm}"
+  selftest_write_xcolo_materialization_pipeline_base "${vm}" "${phase}" "pci_unassigned"
+
+  ftctl_xcolo_analyze_materialization_pipeline "${vm}" "${phase}" "selftest"
+
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_materialization_pipeline")" \
+    "failed" "materialization pipeline should fail"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_materialization_failure_layer")" \
+    "pci_unassigned" "PCI unassigned layer recorded"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_materialization_first_missing_id")" \
+    "pci.6" "PCI unassigned device id"
+  selftest_assert_file_contains "$(ftctl_xcolo_debug_dir "${vm}")/materialization-pipeline-${phase}.json" \
+    '"resource_unassigned": true'
 )
 
 selftest_case_xcolo_primary_restore_detects_generated_graph() (
@@ -4898,6 +5031,8 @@ selftest_main() {
   selftest_case_xcolo_live_pci_incoming_fails_after_migrate
   selftest_case_xcolo_generated_pci_manifest_pair_ok
   selftest_case_xcolo_generated_pci_manifest_pair_mismatch
+  selftest_case_xcolo_materialization_pipeline_reports_argv_missing
+  selftest_case_xcolo_materialization_pipeline_reports_pci_unassigned
   selftest_case_xcolo_primary_restore_detects_generated_graph
   selftest_case_events_json
   selftest_info "all checks passed"

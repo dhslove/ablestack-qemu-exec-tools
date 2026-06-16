@@ -2246,6 +2246,359 @@ ftctl_xcolo_capture_live_runtime_topology_one() {
   ftctl_xcolo_write_debug_file "${vm}" "${prefix}-info-mtree-${phase}.txt" "${text}" || true
 }
 
+ftctl_xcolo_analyze_materialization_pipeline() {
+  local vm="${1-}"
+  local phase="${2:-before_migrate}"
+  local context="${3:-live_runtime}"
+  local debug_dir="" payload="" rc=0
+  local state="" layer="" first_id="" first_driver="" first_path="" missing_count="" first_reason=""
+
+  [[ -n "${vm}" ]] || return 0
+  debug_dir="$(ftctl_xcolo_debug_dir "${vm}")"
+
+  payload="$(DEBUG_DIR="${debug_dir}" PHASE="${phase}" CONTEXT="${context}" python3 - <<'PY'
+import glob
+import json
+import os
+import re
+
+debug_dir = os.environ.get("DEBUG_DIR", "")
+phase = os.environ.get("PHASE", "")
+context = os.environ.get("CONTEXT", "")
+
+def read_text(name):
+    path = os.path.join(debug_dir, name)
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            return handle.read()
+    except FileNotFoundError:
+        return ""
+
+def load_manifest(role):
+    preferred = os.path.join(debug_dir, f"{role}-generated-pci-manifest-startup_disk_graph.json")
+    paths = [preferred] if os.path.exists(preferred) else []
+    paths.extend(sorted(glob.glob(os.path.join(debug_dir, f"{role}-generated-pci-manifest-*.json"))))
+    seen = set()
+    for path in paths:
+        if path in seen:
+            continue
+        seen.add(path)
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                return path, json.load(handle)
+        except Exception:
+            continue
+    return "", {}
+
+def compact(value, limit=500):
+    value = str(value).replace("\n", " ").replace("\t", " ")
+    value = re.sub(r"\s+", " ", value).strip()
+    return value[:limit]
+
+def parse_qemu_device_arg(value):
+    value = value.strip()
+    if not value:
+        return None
+    if value.startswith("{"):
+        try:
+            data = json.loads(value)
+        except Exception:
+            return {"id": "", "driver": value, "raw": value, "opts": {}}
+        driver = str(data.get("driver", ""))
+        opts = {str(k): str(v) for k, v in data.items() if k != "driver"}
+        return {"id": opts.get("id", ""), "driver": driver, "raw": value, "opts": dict(sorted(opts.items()))}
+    parts = value.split(",")
+    driver = parts[0]
+    opts = {}
+    flags = []
+    for item in parts[1:]:
+        if not item:
+            continue
+        if "=" in item:
+            key, val = item.split("=", 1)
+            opts[key] = val
+        else:
+            flags.append(item)
+    return {"id": opts.get("id", ""), "driver": driver, "raw": value, "opts": dict(sorted(opts.items())), "flags": sorted(flags)}
+
+def parse_argv_devices(raw):
+    args = [line for line in raw.splitlines() if line]
+    by_id = {}
+    ordered = []
+    for idx, arg in enumerate(args):
+        if arg != "-device" or idx + 1 >= len(args):
+            continue
+        parsed = parse_qemu_device_arg(args[idx + 1])
+        if not parsed:
+            continue
+        dev_id = parsed.get("id", "")
+        if dev_id:
+            by_id[dev_id] = parsed
+        ordered.append(parsed)
+    return by_id, ordered
+
+def manifest_devices(payload):
+    by_id = {}
+    ordered = []
+    for row in payload.get("qemu_guest_devices", []) if isinstance(payload, dict) else []:
+        opts = row.get("opts", {}) if isinstance(row, dict) else {}
+        dev_id = str(opts.get("id", ""))
+        driver = str(row.get("driver", ""))
+        if not dev_id:
+            continue
+        item = {"id": dev_id, "driver": driver, "source": "qemu_guest_devices", "raw": row}
+        by_id[dev_id] = item
+        ordered.append(item)
+    for row in payload.get("controllers", []) if isinstance(payload, dict) else []:
+        if not isinstance(row, dict):
+            continue
+        dev_id = str(row.get("alias", ""))
+        driver = str(row.get("model", "") or row.get("model_attrs", {}).get("name", ""))
+        if not dev_id or dev_id in by_id:
+            continue
+        if driver not in {"pcie-root-port", "pci-bridge", "pcie-pci-bridge", "virtio-scsi"}:
+            continue
+        item = {"id": dev_id, "driver": driver, "source": "controllers", "raw": row}
+        by_id[dev_id] = item
+        ordered.append(item)
+    return by_id, ordered
+
+QTREE_DEV_RE = re.compile(r'^dev:\s*([^,]+)(?:,\s*id\s*"([^"]+)")?')
+
+def qtree_devices(raw):
+    by_id = {}
+    for line in raw.splitlines():
+        text = re.sub(r"\s+", " ", line.strip())
+        match = QTREE_DEV_RE.match(text)
+        if not match:
+            continue
+        driver = match.group(1).strip()
+        dev_id = (match.group(2) or "").strip()
+        if dev_id:
+            by_id[dev_id] = {"id": dev_id, "driver": driver, "raw": text}
+    return by_id
+
+PCI_HEADER_RE = re.compile(r"^Bus\s+([0-9a-fA-F]+),\s*device\s+([0-9a-fA-F]+),\s*function\s+([0-9a-fA-F]+):$")
+
+def pci_devices(raw):
+    by_id = {}
+    current = None
+    for line in raw.splitlines():
+        text = re.sub(r"\s+", " ", line.strip())
+        if not text:
+            continue
+        match = PCI_HEADER_RE.match(text)
+        if match:
+            if current and current.get("id"):
+                by_id[current["id"]] = current
+            current = {
+                "addr": f"bus={int(match.group(1), 10)} device={int(match.group(2), 10)} function={int(match.group(3), 10)}",
+                "class": "",
+                "id": "",
+                "raw": [text],
+                "resource_unassigned": False,
+            }
+            continue
+        if current is None:
+            continue
+        current["raw"].append(text)
+        if ": PCI device " in text and not current["class"]:
+            current["class"] = text
+        if text.startswith("id "):
+            current["id"] = text[3:].strip().strip('"')
+        if "(not mapped)" in text or text.startswith("secondary bus 0.") or text.startswith("subordinate bus 0."):
+            current["resource_unassigned"] = True
+    if current and current.get("id"):
+        by_id[current["id"]] = current
+    return by_id
+
+ZERO_RANGE_RE = re.compile(r"^0+0-0+0 ")
+
+def zero_pci_aliases(raw):
+    rows = []
+    for line in raw.splitlines():
+        text = re.sub(r"\s+", " ", line.strip())
+        if ZERO_RANGE_RE.match(text) and ("alias pci_bridge_" in text or "alias pcie" in text):
+            rows.append(text)
+    return rows
+
+def path_string(parts):
+    return ",".join(f"{key}:{value}" for key, value in parts)
+
+primary_manifest_path, primary_manifest = load_manifest("primary")
+secondary_manifest_path, secondary_manifest = load_manifest("secondary")
+primary_generated, primary_generated_ordered = manifest_devices(primary_manifest)
+secondary_generated, secondary_generated_ordered = manifest_devices(secondary_manifest)
+primary_argv, primary_argv_ordered = parse_argv_devices(read_text(f"primary-live-qemu-argv-{phase}.txt"))
+secondary_argv, secondary_argv_ordered = parse_argv_devices(read_text(f"secondary-live-qemu-argv-{phase}.txt"))
+primary_qtree = qtree_devices(read_text(f"primary-info-qtree-{phase}.txt"))
+secondary_qtree = qtree_devices(read_text(f"secondary-info-qtree-{phase}.txt"))
+primary_pci = pci_devices(read_text(f"primary-info-pci-{phase}.txt"))
+secondary_pci = pci_devices(read_text(f"secondary-info-pci-{phase}.txt"))
+primary_zero_aliases = zero_pci_aliases(read_text(f"primary-info-mtree-{phase}.txt"))
+secondary_zero_aliases = zero_pci_aliases(read_text(f"secondary-info-mtree-{phase}.txt"))
+
+expected_ids = []
+for item in primary_generated_ordered:
+    dev_id = item.get("id", "")
+    if dev_id and dev_id not in expected_ids:
+        expected_ids.append(dev_id)
+if not expected_ids:
+    for item in primary_argv_ordered:
+        dev_id = item.get("id", "")
+        if dev_id and dev_id not in expected_ids:
+            expected_ids.append(dev_id)
+
+records = []
+failure = None
+for dev_id in expected_ids:
+    base = primary_generated.get(dev_id) or primary_argv.get(dev_id) or {"id": dev_id, "driver": "unknown"}
+    driver = base.get("driver", "unknown")
+    checks = [
+        ("generated", dev_id in primary_generated and dev_id in secondary_generated),
+        ("argv", dev_id in primary_argv and dev_id in secondary_argv),
+        ("qtree", dev_id in primary_qtree and dev_id in secondary_qtree),
+        ("pci", dev_id in primary_pci and dev_id in secondary_pci),
+    ]
+    layer = ""
+    reason = ""
+    if dev_id not in secondary_generated and primary_generated:
+        layer = "generated_missing"
+        reason = "secondary_generated_manifest_missing_device"
+    elif dev_id not in primary_argv or dev_id not in secondary_argv:
+        layer = "argv_missing"
+        reason = "live_qemu_argv_missing_device"
+    elif dev_id not in primary_qtree or dev_id not in secondary_qtree:
+        layer = "qtree_missing"
+        reason = "qtree_missing_device"
+    elif dev_id not in primary_pci or dev_id not in secondary_pci:
+        layer = "pci_missing"
+        reason = "info_pci_missing_device"
+    elif secondary_pci.get(dev_id, {}).get("resource_unassigned"):
+        layer = "pci_unassigned"
+        reason = "secondary_pci_resource_unassigned"
+    record = {
+        "id": dev_id,
+        "driver": driver,
+        "checks": dict(checks),
+        "primary_pci": primary_pci.get(dev_id, {}),
+        "secondary_pci": secondary_pci.get(dev_id, {}),
+        "failure_layer": layer,
+        "reason": reason,
+    }
+    records.append(record)
+    if layer and failure is None:
+        failure = record
+
+if failure is None and len(secondary_zero_aliases) > len(primary_zero_aliases) + 2:
+    failure = {
+        "id": "",
+        "driver": "",
+        "failure_layer": "mtree_unmapped",
+        "reason": "secondary_zero_range_pci_alias",
+        "checks": {"generated": True, "argv": True, "qtree": True, "pci": True, "mtree": False},
+        "secondary_mtree_first_zero_alias": secondary_zero_aliases[0] if secondary_zero_aliases else "",
+    }
+
+state = "failed" if failure else "ok"
+layer = failure.get("failure_layer", "") if failure else ""
+first_id = failure.get("id", "") if failure else ""
+first_driver = failure.get("driver", "") if failure else ""
+first_reason = failure.get("reason", "ok") if failure else "ok"
+first_checks = failure.get("checks", {}) if failure else {"generated": True, "argv": True, "qtree": True, "pci": True, "mtree": True}
+first_path = path_string(first_checks.items())
+
+artifact = {
+    "context": context,
+    "phase": phase,
+    "state": state,
+    "failure_layer": layer,
+    "first_missing_id": first_id,
+    "first_missing_driver": first_driver,
+    "first_missing_path": first_path,
+    "first_reason": first_reason,
+    "primary_manifest": primary_manifest_path,
+    "secondary_manifest": secondary_manifest_path,
+    "counts": {
+        "primary_generated": len(primary_generated),
+        "secondary_generated": len(secondary_generated),
+        "primary_argv": len(primary_argv),
+        "secondary_argv": len(secondary_argv),
+        "primary_qtree": len(primary_qtree),
+        "secondary_qtree": len(secondary_qtree),
+        "primary_pci": len(primary_pci),
+        "secondary_pci": len(secondary_pci),
+        "primary_zero_aliases": len(primary_zero_aliases),
+        "secondary_zero_aliases": len(secondary_zero_aliases),
+    },
+    "records": records,
+}
+
+json_path = os.path.join(debug_dir, f"materialization-pipeline-{phase}.json")
+txt_path = os.path.join(debug_dir, f"materialization-pipeline-diff-{phase}.txt")
+try:
+    with open(json_path, "w", encoding="utf-8") as handle:
+        json.dump(artifact, handle, sort_keys=True, indent=2)
+        handle.write("\n")
+    with open(txt_path, "w", encoding="utf-8") as handle:
+        handle.write(f"state={state}\n")
+        handle.write(f"failure_layer={layer}\n")
+        handle.write(f"first_missing_id={first_id}\n")
+        handle.write(f"first_missing_driver={first_driver}\n")
+        handle.write(f"first_missing_path={first_path}\n")
+        handle.write(f"first_reason={first_reason}\n")
+        handle.write("counts=" + json.dumps(artifact["counts"], sort_keys=True, separators=(",", ":")) + "\n")
+except Exception as exc:
+    print(f"state=failed")
+    print(f"failure_layer=artifact_write_failed")
+    print(f"first_reason={compact(exc)}")
+    raise SystemExit(0)
+
+print(f"state={state}")
+print(f"failure_layer={layer}")
+print(f"first_missing_id={first_id}")
+print(f"first_missing_driver={first_driver}")
+print(f"first_missing_path={first_path}")
+print(f"first_reason={compact(first_reason)}")
+print(f"missing_count={sum(1 for record in records if record.get('failure_layer'))}")
+print(f"primary_generated_count={len(primary_generated)}")
+print(f"secondary_generated_count={len(secondary_generated)}")
+print(f"primary_argv_count={len(primary_argv)}")
+print(f"secondary_argv_count={len(secondary_argv)}")
+print(f"primary_qtree_count={len(primary_qtree)}")
+print(f"secondary_qtree_count={len(secondary_qtree)}")
+print(f"primary_pci_count={len(primary_pci)}")
+print(f"secondary_pci_count={len(secondary_pci)}")
+PY
+)" || rc=$?
+
+  : "${rc}"
+  ftctl_xcolo_write_debug_file "${vm}" "materialization-pipeline-summary-${phase}.txt" "${payload}" || true
+
+  state="$(printf '%s\n' "${payload}" | sed -n 's/^state=//p' | head -n1)"
+  layer="$(printf '%s\n' "${payload}" | sed -n 's/^failure_layer=//p' | head -n1)"
+  first_id="$(printf '%s\n' "${payload}" | sed -n 's/^first_missing_id=//p' | head -n1)"
+  first_driver="$(printf '%s\n' "${payload}" | sed -n 's/^first_missing_driver=//p' | head -n1)"
+  first_path="$(printf '%s\n' "${payload}" | sed -n 's/^first_missing_path=//p' | head -n1)"
+  missing_count="$(printf '%s\n' "${payload}" | sed -n 's/^missing_count=//p' | head -n1)"
+  first_reason="$(printf '%s\n' "${payload}" | sed -n 's/^first_reason=//p' | head -n1)"
+  [[ -n "${state}" ]] || state="unknown"
+
+  ftctl_state_set "${vm}" \
+    "xcolo_materialization_pipeline=${state}" \
+    "xcolo_materialization_phase=${phase}" \
+    "xcolo_materialization_context=${context}" \
+    "xcolo_materialization_failure_layer=${layer}" \
+    "xcolo_materialization_missing_count=${missing_count}" \
+    "xcolo_materialization_first_missing_id=$(ftctl_xcolo_compact_log_value "${first_id}")" \
+    "xcolo_materialization_first_missing_driver=$(ftctl_xcolo_compact_log_value "${first_driver}")" \
+    "xcolo_materialization_first_missing_path=$(ftctl_xcolo_compact_log_value "${first_path}")" \
+    "xcolo_materialization_first_reason=$(ftctl_xcolo_compact_log_value "${first_reason}")"
+  ftctl_log_event "colo" "xcolo.materialization_pipeline" "${state}" "${vm}" "" \
+    "phase=${phase} layer=${layer} id=$(ftctl_xcolo_compact_log_value "${first_id}") path=$(ftctl_xcolo_compact_log_value "${first_path}")"
+  return 0
+}
+
 ftctl_xcolo_verify_live_runtime_topology_pair() {
   local vm="${1-}"
   local secondary_vm="${2-}"
@@ -2517,6 +2870,7 @@ PY
 )" || rc=$?
 
   ftctl_xcolo_write_debug_file "${vm}" "live-topology-diff-${phase}.txt" "${payload}" || true
+  ftctl_xcolo_analyze_materialization_pipeline "${vm}" "${phase}" "live_runtime" || true
   local pci_identity_primary_count="" pci_identity_secondary_count="" pci_identity_diff_count=""
   local pci_identity_missing_count="" pci_identity_extra_count="" pci_resource_diff_count=""
   pci_identity_primary_count="$(printf '%s\n' "${payload}" | sed -n 's/^pci_identity_primary_count=//p' | head -n1)"
@@ -6514,13 +6868,22 @@ diff_file = os.environ["DIFF_FILE"]
 GUEST_QEMU_DEVICE_DRIVERS = {
     "pcie-root-port",
     "pci-bridge",
+    "pcie-pci-bridge",
     "virtio-scsi-pci",
     "scsi-hd",
+    "ide-cd",
     "virtio-blk-pci",
     "virtio-net-pci",
     "virtio-serial-pci",
+    "virtserialport",
     "virtio-balloon-pci",
     "virtio-rng-pci",
+    "qemu-xhci",
+    "usb-tablet",
+    "i6300esb",
+    "ich9-intel-hda",
+    "hda-duplex",
+    "isa-serial",
     "qxl",
     "virtio-vga",
     "VGA",
