@@ -7361,3 +7361,49 @@ Assertion `!subregion->container' failed.
   - if the next run still reaches QEMU
     `memory_region_add_subregion_common`, the pre-migrate evidence gate is
     incomplete and must be extended before another topology change is attempted.
+## Run 115 - Generated Runtime Reaches Pre-Migrate Fail-Fast
+
+Date: 2026-06-16
+
+### Result
+
+Run 115 confirmed that the pre-migrate materialization fail-fast gate prevents
+the previous QEMU assertion path, but it also confirmed that Primary and
+Secondary runtime PCI topology equality is not yet guaranteed.
+
+Observed state:
+
+- protection row: `115`;
+- primary VM: `i-2-54-VM`, Cloud VM id `54`, running on `10.10.32.3`;
+- standby VM: `i-2-180-VM`, Cloud VM id `180`;
+- final protection state: `error/failed`;
+- last error:
+  `xcolo_secondary_pci_resource_unmaterialized_before_migrate:primary_restore_failed`.
+
+Primary/Secondary live evidence before `primary.migrate`:
+
+- primary PCI identity count: `18`;
+- secondary PCI identity count: `12`;
+- PCI identity diff count: `15`;
+- PCI identity missing count: `6`;
+- first diff: primary `pci.6 bus=1 device=0`, secondary
+  `pci.2 bus=0 device=2 function=1`.
+
+Rollback evidence:
+
+- the primary domain remained running, but `query-named-block-nodes` still
+  showed generated FTCTL block graph nodes such as `ftctl-colo-*`,
+  `ftctl-primary-active-*`, and `quorum`;
+- this means rollback must verify Cloud-managed graph restoration, not only
+  domain running state.
+
+### Repetition Control
+
+This is not a new protocol error. It is the same materialization family caught
+earlier than Run 114. The improvement is that QEMU did not reach
+`memory_region_add_subregion_common`.
+
+The next change must not keep repeating live-only diagnosis. It must add a
+generated Primary/Secondary PCI manifest equality gate and explicit rollback
+graph restoration checks as described in
+`379-ft-xcolo-canonical-pci-manifest-and-rollback-design-20260616.md`.

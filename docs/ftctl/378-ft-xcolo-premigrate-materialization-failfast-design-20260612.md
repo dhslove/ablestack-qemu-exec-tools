@@ -2,6 +2,12 @@
 
 Date: 2026-06-12
 
+Update: this document defines the crash-prevention fail-fast gate. The root
+topology fix is extended by
+`379-ft-xcolo-canonical-pci-manifest-and-rollback-design-20260616.md`, which
+adds generated Primary/Secondary PCI manifest equality and rollback graph
+restoration checks.
+
 ## Background
 
 Run 114 disproved the Run 113 assumption that an incoming secondary with

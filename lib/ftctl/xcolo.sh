@@ -6477,6 +6477,324 @@ PY
     "phase=${phase} $(ftctl_xcolo_compact_log_value "${out}")"
 }
 
+ftctl_xcolo_verify_generated_pci_manifest_pair() {
+  local vm="${1-}"
+  local primary_xml="${2-}"
+  local secondary_xml="${3-}"
+  local phase="${4:-startup_disk_graph}"
+  local out="" rc=0 debug_dir primary_manifest secondary_manifest diff_file
+
+  command -v python3 >/dev/null 2>&1 || {
+    echo "ERROR: python3 is required for x-colo PCI manifest validation" >&2
+    return 2
+  }
+
+  [[ -n "${vm}" && -f "${primary_xml}" && -f "${secondary_xml}" ]] || return 1
+
+  debug_dir="$(ftctl_xcolo_debug_dir "${vm}")"
+  ftctl_ensure_dir "${debug_dir}" "0755"
+  primary_manifest="${debug_dir}/primary-generated-pci-manifest-${phase}.json"
+  secondary_manifest="${debug_dir}/secondary-generated-pci-manifest-${phase}.json"
+  diff_file="${debug_dir}/generated-pci-manifest-diff-${phase}.txt"
+
+  out="$(PRIMARY_XML="${primary_xml}" SECONDARY_XML="${secondary_xml}" PRIMARY_MANIFEST="${primary_manifest}" SECONDARY_MANIFEST="${secondary_manifest}" DIFF_FILE="${diff_file}" python3 - <<'PY'
+import hashlib
+import json
+import os
+import re
+import sys
+import xml.etree.ElementTree as ET
+
+primary_xml = os.environ["PRIMARY_XML"]
+secondary_xml = os.environ["SECONDARY_XML"]
+primary_manifest = os.environ["PRIMARY_MANIFEST"]
+secondary_manifest = os.environ["SECONDARY_MANIFEST"]
+diff_file = os.environ["DIFF_FILE"]
+
+GUEST_QEMU_DEVICE_DRIVERS = {
+    "pcie-root-port",
+    "pci-bridge",
+    "virtio-scsi-pci",
+    "scsi-hd",
+    "virtio-blk-pci",
+    "virtio-net-pci",
+    "virtio-serial-pci",
+    "virtio-balloon-pci",
+    "virtio-rng-pci",
+    "qxl",
+    "virtio-vga",
+    "VGA",
+    "cirrus-vga",
+}
+
+HOST_LOCAL_XML_ATTRS = {
+    "file",
+    "dev",
+    "dir",
+    "socket",
+    "pid",
+    "port",
+    "autoport",
+    "listen",
+    "address",
+}
+
+def lname(tag):
+    return tag.rsplit("}", 1)[-1] if tag.startswith("{") else tag
+
+def norm_attrs(elem, drop_host_local=False):
+    attrs = {}
+    for key, value in sorted(elem.attrib.items()):
+        if drop_host_local and key in HOST_LOCAL_XML_ATTRS:
+            continue
+        attrs[key] = value
+    return attrs
+
+def elem_text(elem):
+    return (elem.text or "").strip() if elem is not None else ""
+
+def first(root, path):
+    return root.find(path)
+
+def child_attrs(elem, name, drop_host_local=False):
+    child = elem.find(name) if elem is not None else None
+    return norm_attrs(child, drop_host_local) if child is not None else {}
+
+def scalar_manifest(root):
+    os_type = first(root, "os/type")
+    cpu = first(root, "cpu")
+    memory = first(root, "memory")
+    current_memory = first(root, "currentMemory")
+    vcpu = first(root, "vcpu")
+    features = first(root, "features")
+    feature_names = []
+    if features is not None:
+        for child in list(features):
+            feature_names.append([lname(child.tag), norm_attrs(child)])
+    return {
+        "domain_type": root.get("type", ""),
+        "machine": os_type.get("machine", "") if os_type is not None else "",
+        "arch": os_type.get("arch", "") if os_type is not None else "",
+        "os_type": elem_text(os_type),
+        "cpu": [norm_attrs(cpu), elem_text(cpu)] if cpu is not None else [],
+        "memory": [norm_attrs(memory), elem_text(memory)] if memory is not None else [],
+        "currentMemory": [norm_attrs(current_memory), elem_text(current_memory)] if current_memory is not None else [],
+        "vcpu": [norm_attrs(vcpu), elem_text(vcpu)] if vcpu is not None else [],
+        "features": sorted(feature_names),
+    }
+
+def device_alias(elem):
+    alias = elem.find("alias") if elem is not None else None
+    return alias.get("name", "") if alias is not None else ""
+
+def device_address(elem):
+    address = elem.find("address") if elem is not None else None
+    return norm_attrs(address) if address is not None else {}
+
+def pci_controllers(devices):
+    rows = []
+    if devices is None:
+        return rows
+    for controller in devices.findall("controller"):
+        ctype = controller.get("type", "")
+        if ctype not in {"pci", "scsi", "usb", "virtio-serial"}:
+            continue
+        row = {
+            "type": ctype,
+            "model": controller.get("model", ""),
+            "index": controller.get("index", ""),
+            "alias": device_alias(controller),
+            "address": device_address(controller),
+            "model_attrs": child_attrs(controller, "model"),
+            "target_attrs": child_attrs(controller, "target"),
+            "driver_attrs": child_attrs(controller, "driver"),
+        }
+        rows.append(row)
+    return sorted(rows, key=lambda row: json.dumps(row, sort_keys=True, separators=(",", ":")))
+
+def pci_devices(devices):
+    rows = []
+    if devices is None:
+        return rows
+    for tag in ("interface", "disk", "video", "memballoon", "rng", "serial"):
+        for elem in devices.findall(tag):
+            if tag == "disk" and elem.get("device", "") != "disk":
+                continue
+            address = elem.find("address")
+            if address is None or address.get("type") not in {"pci", "drive"}:
+                continue
+            row = {
+                "tag": tag,
+                "type": elem.get("type", ""),
+                "device": elem.get("device", ""),
+                "alias": device_alias(elem),
+                "address": norm_attrs(address),
+                "target": child_attrs(elem, "target"),
+                "model": child_attrs(elem, "model"),
+                "mac": child_attrs(elem, "mac"),
+                "driver": child_attrs(elem, "driver"),
+            }
+            rows.append(row)
+    return sorted(rows, key=lambda row: json.dumps(row, sort_keys=True, separators=(",", ":")))
+
+def qemu_args(root):
+    values = []
+    for elem in root.iter():
+        if lname(elem.tag) != "arg":
+            continue
+        value = elem.get("value")
+        if value is not None:
+            values.append(value)
+    return values
+
+def split_qemu_pairs(args):
+    pairs = []
+    idx = 0
+    while idx < len(args):
+        key = args[idx]
+        if key.startswith("-"):
+            value = args[idx + 1] if idx + 1 < len(args) else ""
+            pairs.append((key, value))
+            idx += 2
+        else:
+            idx += 1
+    return pairs
+
+def parse_device_arg(value):
+    value = value.strip()
+    if not value:
+        return None
+    if value.startswith("{"):
+        try:
+            data = json.loads(value)
+        except Exception:
+            return {"driver": value, "opts": {}}
+        driver = data.get("driver", "")
+        if driver not in GUEST_QEMU_DEVICE_DRIVERS:
+            return None
+        opts = {str(k): str(v) for k, v in sorted(data.items()) if k != "driver"}
+        return {"driver": driver, "opts": opts}
+    parts = value.split(",")
+    driver = parts[0]
+    if driver not in GUEST_QEMU_DEVICE_DRIVERS:
+        return None
+    opts = {}
+    flags = []
+    for item in parts[1:]:
+        if not item:
+            continue
+        if "=" in item:
+            key, val = item.split("=", 1)
+            opts[key] = val
+        else:
+            flags.append(item)
+    return {"driver": driver, "opts": dict(sorted(opts.items())), "flags": sorted(flags)}
+
+def qemu_guest_devices(root):
+    rows = []
+    for key, value in split_qemu_pairs(qemu_args(root)):
+        if key != "-device":
+            continue
+        parsed = parse_device_arg(value)
+        if parsed is not None:
+            rows.append(parsed)
+    return sorted(rows, key=lambda row: json.dumps(row, sort_keys=True, separators=(",", ":")))
+
+def manifest(path):
+    root = ET.parse(path).getroot()
+    devices = root.find("devices")
+    payload = {
+        "scalar": scalar_manifest(root),
+        "controllers": pci_controllers(devices),
+        "devices": pci_devices(devices),
+        "qemu_guest_devices": qemu_guest_devices(root),
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    return digest, payload
+
+def first_diff(a, b, prefix=""):
+    if type(a) is not type(b):
+        return f"{prefix}:type:{type(a).__name__}!={type(b).__name__}"
+    if isinstance(a, dict):
+        for key in sorted(set(a) | set(b)):
+            if key not in a:
+                return f"{prefix}/{key}:missing_primary"
+            if key not in b:
+                return f"{prefix}/{key}:missing_secondary"
+            diff = first_diff(a[key], b[key], f"{prefix}/{key}")
+            if diff:
+                return diff
+        return ""
+    if isinstance(a, list):
+        if len(a) != len(b):
+            return f"{prefix}:len:{len(a)}!={len(b)}"
+        for idx, (left, right) in enumerate(zip(a, b)):
+            diff = first_diff(left, right, f"{prefix}[{idx}]")
+            if diff:
+                return diff
+        return ""
+    if a != b:
+        return f"{prefix}:{a!r}!={b!r}"
+    return ""
+
+try:
+    phash, pmanifest = manifest(primary_xml)
+    shash, smanifest = manifest(secondary_xml)
+except Exception as exc:
+    print(f"error=manifest_build_failed reason={exc}")
+    sys.exit(1)
+
+with open(primary_manifest, "w", encoding="utf-8") as fh:
+    json.dump(pmanifest, fh, sort_keys=True, indent=2)
+    fh.write("\n")
+with open(secondary_manifest, "w", encoding="utf-8") as fh:
+    json.dump(smanifest, fh, sort_keys=True, indent=2)
+    fh.write("\n")
+
+primary_count = sum(len(pmanifest[key]) if isinstance(pmanifest[key], list) else 1 for key in pmanifest)
+secondary_count = sum(len(smanifest[key]) if isinstance(smanifest[key], list) else 1 for key in smanifest)
+
+if phash == shash:
+    with open(diff_file, "w", encoding="utf-8") as fh:
+        fh.write(f"ok primary={phash} secondary={shash}\n")
+    print(f"ok primary={phash} secondary={shash} primary_count={primary_count} secondary_count={secondary_count}")
+    sys.exit(0)
+
+reason = first_diff(pmanifest, smanifest) or "unknown_manifest_difference"
+with open(diff_file, "w", encoding="utf-8") as fh:
+    fh.write(f"mismatch primary={phash} secondary={shash} reason={reason}\n")
+print(f"mismatch primary={phash} secondary={shash} primary_count={primary_count} secondary_count={secondary_count} reason={reason}")
+sys.exit(1)
+PY
+)" || rc=$?
+
+  if [[ "${rc}" != "0" ]]; then
+    ftctl_state_set "${vm}" \
+      "xcolo_generated_pci_manifest=failed" \
+      "xcolo_generated_pci_manifest_phase=${phase}" \
+      "xcolo_generated_pci_manifest_reason=$(ftctl_xcolo_compact_log_value "${out}")" \
+      "xcolo_generated_pci_manifest_primary=${primary_manifest}" \
+      "xcolo_generated_pci_manifest_secondary=${secondary_manifest}" \
+      "xcolo_generated_pci_manifest_diff=${diff_file}" \
+      "xcolo_protocol_failure_phase=generated_pci_manifest" \
+      "last_error=xcolo_generated_pci_manifest_mismatch"
+    ftctl_log_event "colo" "xcolo.generated_pci_manifest" "fail" "${vm}" "" \
+      "phase=${phase} $(ftctl_xcolo_compact_log_value "${out}")"
+    return 1
+  fi
+
+  ftctl_state_set "${vm}" \
+    "xcolo_generated_pci_manifest=ok" \
+    "xcolo_generated_pci_manifest_phase=${phase}" \
+    "xcolo_generated_pci_manifest_result=$(ftctl_xcolo_compact_log_value "${out}")" \
+    "xcolo_generated_pci_manifest_primary=${primary_manifest}" \
+    "xcolo_generated_pci_manifest_secondary=${secondary_manifest}" \
+    "xcolo_generated_pci_manifest_diff=${diff_file}"
+  ftctl_log_event "colo" "xcolo.generated_pci_manifest" "ok" "${vm}" "" \
+    "phase=${phase} $(ftctl_xcolo_compact_log_value "${out}")"
+}
+
 ftctl_xcolo_validate_generated_commandline_contract() {
   local vm="${1-}"
   local xml_path="${2-}"
@@ -6658,6 +6976,7 @@ ftctl_xcolo_apply_startup_disk_graphs() {
   ftctl_xcolo_validate_generated_commandline_contract "${vm}" "${primary_xml}" "primary" || return 1
   ftctl_xcolo_validate_generated_commandline_contract "${vm}" "${secondary_xml}" "secondary" || return 1
   ftctl_xcolo_verify_generated_guest_abi_pair "${vm}" "${primary_xml}" "${secondary_xml}" "startup_disk_graph" || return 1
+  ftctl_xcolo_verify_generated_pci_manifest_pair "${vm}" "${primary_xml}" "${secondary_xml}" "startup_disk_graph" || return 1
 
   ftctl_state_set "${vm}" \
     "xcolo_startup_disk_graph=enabled" \
@@ -9397,10 +9716,110 @@ ftctl_xcolo_finish_primary_generated_async() {
     "path=${generated_xml} log_dir=${tmp_dir}"
 }
 
+ftctl_xcolo_primary_has_generated_block_graph() {
+  local vm="${1-}"
+  local out_var="${2-}"
+  local out="" rc=0
+
+  [[ -n "${vm}" ]] || return 2
+  if [[ "${FTCTL_DRY_RUN}" == "1" ]]; then
+    [[ -n "${out_var}" ]] && printf -v "${out_var}" '%s' "dry-run"
+    return 1
+  fi
+
+  ftctl_xcolo_qmp "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" '{"execute":"query-named-block-nodes"}' out rc
+  ftctl_xcolo_write_debug_file "${vm}" "primary-restore-query-named-block-nodes.json" "${out}" || true
+  [[ -n "${out_var}" ]] && printf -v "${out_var}" '%s' "${out}"
+  [[ "${rc}" == "0" ]] || return 2
+
+  case "${out}" in
+    *"ftctl-colo-"*|*"ftctl-primary-active-"*|*"ftctl-primary-parent-"*)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+ftctl_xcolo_force_primary_restore_from_backup() {
+  local vm="${1-}"
+  local reason="${2-xcolo_restore_primary}"
+  local out="" err="" rc=0 graph="" graph_rc=0
+
+  [[ -n "${vm}" ]] || return 1
+  if [[ "${FTCTL_DRY_RUN}" == "1" ]]; then
+    ftctl_log_event "colo" "block_conversion.rollback.primary_force_restore" "skip" "${vm}" "" \
+      "reason=dry_run cause=${reason}"
+    return 0
+  fi
+
+  out=""
+  err=""
+  rc=0
+  ftctl_virsh "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC}" out err rc -- -c "${FTCTL_PROFILE_PRIMARY_URI}" destroy "${vm}" || true
+  : "${out}"
+  case "${err}" in
+    *"failed to get domain"*|*"domain is not running"*|*"Domain not found"*) rc=0 ;;
+  esac
+  if [[ "${rc}" != "0" ]]; then
+    ftctl_state_set "${vm}" \
+      "cloud_runtime_restore=primary_destroy_failed" \
+      "last_error=${reason}:primary_destroy_failed"
+    ftctl_log_event "colo" "block_conversion.rollback.primary_destroy" "fail" "${vm}" "${rc}" \
+      "cause=${reason} error=$(ftctl_xcolo_compact_log_value "${err}")"
+    return "${rc}"
+  fi
+
+  ftctl_log_event "colo" "block_conversion.rollback.primary_destroy" "ok" "${vm}" "" \
+    "cause=${reason}"
+
+  ftctl_primary_activate_from_backup "${vm}" || {
+    ftctl_state_set "${vm}" \
+      "cloud_runtime_restore=primary_activate_failed" \
+      "last_error=${reason}:primary_restore_failed"
+    ftctl_log_event "colo" "block_conversion.rollback.primary_restore" "warn" "${vm}" "" \
+      "cause=${reason}"
+    return 1
+  }
+
+  ftctl_xcolo_primary_has_generated_block_graph "${vm}" graph
+  graph_rc=$?
+  : "${graph}"
+  if [[ "${graph_rc}" == "0" ]]; then
+    ftctl_state_set "${vm}" \
+      "cloud_runtime_restore=generated_graph_present" \
+      "xcolo_primary_restore_graph=generated_graph_present" \
+      "xcolo_protocol_failure_phase=rollback_primary_restore" \
+      "last_error=xcolo_primary_restore_generated_graph_present"
+    ftctl_log_event "colo" "block_conversion.rollback.primary_restore_graph" "fail" "${vm}" "" \
+      "cause=${reason} graph=generated_ftctl_nodes_present"
+    return 1
+  fi
+
+  case "${graph_rc}" in
+    2)
+      ftctl_state_set "${vm}" \
+        "cloud_runtime_restore=qmp_verify_failed" \
+        "xcolo_primary_restore_graph=qmp_verify_failed" \
+        "xcolo_protocol_failure_phase=rollback_primary_restore" \
+        "last_error=xcolo_primary_restore_qmp_failed"
+      ftctl_log_event "colo" "block_conversion.rollback.primary_restore_graph" "fail" "${vm}" "" \
+        "cause=${reason} graph=qmp_verify_failed"
+      return 1
+      ;;
+  esac
+
+  ftctl_state_set "${vm}" \
+    "cloud_runtime_restore=verified_cloud_runtime" \
+    "xcolo_primary_restore_graph=clean"
+  ftctl_log_event "colo" "block_conversion.rollback.primary_restore_graph" "ok" "${vm}" "" \
+    "cause=${reason}"
+}
+
 ftctl_xcolo_rollback_block_primary_create_failure() {
   local vm="${1-}"
   local reason="${2-xcolo_block_primary_create_failed}"
   local rollback_stage="rollback_after_primary_create_failed"
+  local restore_cmd="ftctl_xcolo_force_primary_restore_from_backup"
 
   if [[ "${FTCTL_DRY_RUN}" == "1" ]]; then
     ftctl_log_event "colo" "block_conversion.rollback" "skip" "${vm}" "" "reason=dry_run cause=${reason}"
@@ -9410,6 +9829,7 @@ ftctl_xcolo_rollback_block_primary_create_failure() {
   case "${reason}" in
     xcolo_baseline_seed_failed:*|xcolo_baseline_source_not_ready:*|xcolo_baseline_nbd_start_failed:*|xcolo_baseline_copy_failed:*)
       rollback_stage="rollback_after_baseline_seed_failed"
+      restore_cmd="ftctl_primary_activate_from_backup"
       ;;
   esac
 
@@ -9419,7 +9839,7 @@ ftctl_xcolo_rollback_block_primary_create_failure() {
   ftctl_xcolo_unmap_secondary_runtime_rbd "${vm}" || {
     ftctl_log_event "colo" "block_conversion.rollback.secondary_rbd_unmap" "warn" "${vm}" "" "cause=${reason}"
   }
-  ftctl_primary_activate_from_backup "${vm}" || {
+  "${restore_cmd}" "${vm}" "${reason}" || {
     ftctl_state_set "${vm}" \
       "conversion_stage=${rollback_stage}:primary_restore_failed" \
       "conversion_state=error" \
@@ -9480,7 +9900,7 @@ ftctl_xcolo_rollback_startup_gate_failure() {
     ftctl_log_event "colo" "block_conversion.rollback_startup_gate.secondary_rbd_unmap" "warn" "${vm}" "" \
       "cause=${reason}"
   }
-  ftctl_primary_activate_from_backup "${vm}" || {
+  ftctl_xcolo_force_primary_restore_from_backup "${vm}" "${reason}" || {
     ftctl_state_set "${vm}" \
       "conversion_stage=rollback_after_startup_gate_failed:primary_restore_failed" \
       "conversion_state=error" \

@@ -4681,6 +4681,118 @@ selftest_case_xcolo_live_pci_incoming_fails_after_migrate() (
     "post-migrate incoming PCI identity error"
 )
 
+selftest_write_xcolo_generated_manifest_xml() {
+  local path="${1-}"
+  local vm_name="${2-}"
+  local root_port_addr="${3:-0x2}"
+
+  cat > "${path}" <<EOF
+<domain type='kvm' xmlns:qemu='http://libvirt.org/schemas/domain/qemu/1.0'>
+  <name>${vm_name}</name>
+  <uuid>11111111-2222-3333-4444-555555555555</uuid>
+  <memory unit='KiB'>1048576</memory>
+  <currentMemory unit='KiB'>1048576</currentMemory>
+  <vcpu placement='static'>1</vcpu>
+  <os>
+    <type arch='x86_64' machine='pc-q35-rhel9.6.0'>hvm</type>
+  </os>
+  <features>
+    <acpi/>
+    <apic/>
+  </features>
+  <cpu mode='host-model'/>
+  <devices>
+    <controller type='pci' index='0' model='pcie-root'>
+      <alias name='pcie.0'/>
+    </controller>
+    <controller type='pci' index='1' model='pcie-root-port'>
+      <model name='pcie-root-port'/>
+      <target chassis='1' port='0x10'/>
+      <alias name='pci.1'/>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x02' function='0x0'/>
+    </controller>
+    <interface type='bridge'>
+      <mac address='52:54:00:aa:bb:cc'/>
+      <model type='virtio'/>
+      <alias name='net0'/>
+      <address type='pci' domain='0x0000' bus='0x01' slot='0x00' function='0x0'/>
+    </interface>
+  </devices>
+  <qemu:commandline>
+    <qemu:arg value='-device'/>
+    <qemu:arg value='pcie-root-port,id=pci.1,bus=pcie.0,addr=${root_port_addr},chassis=1,port=0x10'/>
+    <qemu:arg value='-device'/>
+    <qemu:arg value='virtio-net-pci,netdev=hostnet0,id=net0,bus=pci.1,addr=0x0,mac=52:54:00:aa:bb:cc'/>
+  </qemu:commandline>
+</domain>
+EOF
+}
+
+selftest_case_xcolo_generated_pci_manifest_pair_ok() (
+  selftest_reset_env
+  selftest_info "x-colo generated PCI manifest accepts identical topology"
+
+  local vm="xcolo-generated-manifest-ok"
+  local primary_xml="${SELFTEST_ROOT}/primary.xml"
+  local secondary_xml="${SELFTEST_ROOT}/secondary.xml"
+  local rc=0
+
+  ftctl_state_init_vm "${vm}"
+  selftest_write_xcolo_generated_manifest_xml "${primary_xml}" "${vm}" "0x2"
+  selftest_write_xcolo_generated_manifest_xml "${secondary_xml}" "${vm}-standby" "0x2"
+
+  ftctl_xcolo_verify_generated_pci_manifest_pair "${vm}" "${primary_xml}" "${secondary_xml}" "selftest" || rc=$?
+  selftest_assert_eq "${rc}" "0" "identical generated PCI manifest should pass"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_generated_pci_manifest")" \
+    "ok" "generated PCI manifest ok state"
+)
+
+selftest_case_xcolo_generated_pci_manifest_pair_mismatch() (
+  selftest_reset_env
+  selftest_info "x-colo generated PCI manifest rejects topology mismatch"
+
+  local vm="xcolo-generated-manifest-mismatch"
+  local primary_xml="${SELFTEST_ROOT}/primary.xml"
+  local secondary_xml="${SELFTEST_ROOT}/secondary.xml"
+  local rc=0
+
+  ftctl_state_init_vm "${vm}"
+  selftest_write_xcolo_generated_manifest_xml "${primary_xml}" "${vm}" "0x2"
+  selftest_write_xcolo_generated_manifest_xml "${secondary_xml}" "${vm}-standby" "0x3"
+
+  ftctl_xcolo_verify_generated_pci_manifest_pair "${vm}" "${primary_xml}" "${secondary_xml}" "selftest" || rc=$?
+  selftest_assert_eq "${rc}" "1" "mismatched generated PCI manifest should fail"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" \
+    "xcolo_generated_pci_manifest_mismatch" \
+    "generated PCI manifest mismatch error"
+  selftest_assert_file_contains "$(ftctl_xcolo_debug_dir "${vm}")/generated-pci-manifest-diff-selftest.txt" \
+    "mismatch"
+)
+
+selftest_case_xcolo_primary_restore_detects_generated_graph() (
+  selftest_reset_env
+  selftest_info "x-colo primary restore detects generated FT block graph"
+
+  local vm="xcolo-primary-restore-graph"
+  local graph="" rc=0
+
+  ftctl_state_init_vm "${vm}"
+  FTCTL_DRY_RUN="0"
+  FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
+
+  # shellcheck disable=SC2317
+  ftctl_xcolo_qmp() {
+    local _uri="${1-}" _domain="${2-}" _payload="${3-}" out_var="${4}" rc_var="${5}"
+    : "${_uri}${_domain}${_payload}"
+    printf -v "${out_var}" '%s' '{"return":[{"node-name":"ftctl-colo-sda"},{"node-name":"ftctl-primary-active-sda"}]}'
+    printf -v "${rc_var}" '%s' "0"
+  }
+
+  ftctl_xcolo_primary_has_generated_block_graph "${vm}" graph || rc=$?
+  selftest_assert_eq "${rc}" "0" "generated FT graph should be detected"
+  selftest_assert_contains "${graph}" "ftctl-colo-sda" "graph evidence contains ftctl node"
+)
+
 selftest_case_events_json() {
   selftest_reset_env
   selftest_info "events json output"
@@ -4784,6 +4896,9 @@ selftest_main() {
   selftest_case_xcolo_mtree_zero_alias_fails_after_migrate
   selftest_case_xcolo_live_pci_incoming_fails_before_migrate
   selftest_case_xcolo_live_pci_incoming_fails_after_migrate
+  selftest_case_xcolo_generated_pci_manifest_pair_ok
+  selftest_case_xcolo_generated_pci_manifest_pair_mismatch
+  selftest_case_xcolo_primary_restore_detects_generated_graph
   selftest_case_events_json
   selftest_info "all checks passed"
 }
