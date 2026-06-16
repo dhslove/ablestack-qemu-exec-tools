@@ -7580,3 +7580,103 @@ xcolo_post_migrate_pci_materialization_failed
 The next retest should therefore show whether the flow reaches
 `primary.migrate` and then fails or succeeds at the post-migrate materialization
 gate.
+
+## Run 119 - Primary Reached COLO, Secondary Crashed During Incoming Materialization
+
+Date: 2026-06-16
+
+### Result
+
+Run 119 confirmed that the Run 118 change moved the flow past the previous
+pre-migrate blocker:
+
+- `xcolo_guest_abi_manifest=ok`;
+- `xcolo_generated_pci_manifest=ok`;
+- `xcolo_materialization_phase=before_migrate`;
+- `xcolo_materialization_failure_layer=pci_missing`;
+- `xcolo_materialization_first_missing_id=scsi0-0-0-0`;
+- `xcolo_materialization_first_missing_path=generated:True,argv:True,qtree:True,pci:False`;
+- `xcolo_live_runtime_topology=deferred`;
+- `xcolo_live_pci_identity=deferred`;
+- `xcolo_pre_migrate_pci_materialization_deferred=yes`;
+- `xcolo_pre_migrate_contract=ok`;
+- `xcolo_pre_guest_traffic_gate=ready`.
+
+The primary then reached COLO mode:
+
+```text
+virsh domstate i-2-54-VM: paused
+query-migrate.status: colo
+```
+
+The secondary domain `i-2-183-VM` crashed on host `10.10.32.1`:
+
+```text
+qemu-kvm: ../system/memory.c:2666: memory_region_add_subregion_common:
+Assertion `!subregion->container' failed.
+```
+
+The primary then logged:
+
+```text
+Can't receive COLO message: Input/output error
+```
+
+### Repetition Control
+
+This is not a repeat of the Run 117 pre-migrate hard stop. The deferred gate
+worked: the flow reached `primary.migrate`, entered COLO, and failed when the
+secondary incoming runtime tried to materialize the migrated state.
+
+The repeating symptom is the QEMU memory-region assertion. The next fix must
+therefore focus on why the secondary incoming process still has a PCI/mtree
+shape that causes QEMU to add a memory subregion twice or into an already owned
+container during migration load.
+
+Do not go back to static generated manifest edits unless evidence shows the
+live command line or qtree diverged. In Run 119, generated manifest, live argv,
+and qtree were already present; the remaining failure is in incoming migration
+materialization.
+
+## Run 120 - Fail Fast Before Unsafe Incoming Materialization
+
+Date: 2026-06-16
+
+### Design Target
+
+Run 119 proved that the Run 118 defer rule is unsafe for the current QEMU 9.2.4
+COLO path. The secondary incoming runtime crashed during migration state load:
+
+```text
+memory_region_add_subregion_common: Assertion `!subregion->container' failed.
+```
+
+The immediate correction is to prevent the crash loop. If the secondary
+incoming runtime still shows:
+
+```text
+generated:True, argv:True, qtree:True, pci:False
+```
+
+or mtree zero-length PCI bridge aliases before `primary.migrate`, FTCTL must
+fail before migration with:
+
+```text
+xcolo_pre_migrate_secondary_pci_resource_unmaterialized
+```
+
+### Repetition Control
+
+The next test is expected to stop before `primary.migrate` if the same
+secondary materialization condition exists. That is progress compared with Run
+119 because it prevents the QEMU assertion and keeps both Cloud/libvirt state
+recoverable.
+
+If the next test still reaches `query-migrate.status=colo` and the secondary
+crashes with `memory_region_add_subregion_common`, then this Run 120 guard did
+not fire and the implementation must be treated as incomplete.
+
+If the next test fails fast with
+`xcolo_pre_migrate_secondary_pci_resource_unmaterialized`, the next development
+step is not another guard. It must implement secondary incoming runtime
+construction from the primary's actual launch ABI.

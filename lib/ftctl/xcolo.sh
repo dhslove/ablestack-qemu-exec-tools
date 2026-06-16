@@ -2892,6 +2892,7 @@ PY
     materialization_path="$(ftctl_state_get "${vm}" "xcolo_materialization_first_missing_path" 2>/dev/null || true)"
     materialization_reason="$(ftctl_state_get "${vm}" "xcolo_materialization_first_reason" 2>/dev/null || true)"
     if [[ "${phase}" == "before_migrate" \
+      && "${FTCTL_XCOLO_ALLOW_PRE_MIGRATE_DEFERRED_MATERIALIZATION:-0}" == "1" \
       && "${error_name}" == "xcolo_secondary_pci_resource_unmaterialized_before_migrate" \
       && "${materialization_path}" == *"generated:True"* \
       && "${materialization_path}" == *"argv:True"* \
@@ -2925,6 +2926,17 @@ PY
         "phase=${phase} error=${error_name} layer=${materialization_layer} path=$(ftctl_xcolo_compact_log_value "${materialization_path}")"
       return 0
     fi
+    if [[ "${phase}" == "before_migrate" \
+      && "${error_name}" == "xcolo_secondary_pci_resource_unmaterialized_before_migrate" \
+      && "${materialization_path}" == *"generated:True"* \
+      && "${materialization_path}" == *"argv:True"* \
+      && "${materialization_path}" == *"qtree:True"* \
+      && ( "${materialization_layer}" == "pci_missing" \
+        || "${materialization_layer}" == "pci_unassigned" \
+        || "${materialization_layer}" == "mtree_unmapped" ) ]]; then
+      error_name="xcolo_pre_migrate_secondary_pci_resource_unmaterialized"
+      reason="incoming_secondary_not_migration_abi_materialized layer=${materialization_layer} path=${materialization_path} reason=${materialization_reason}"
+    fi
     ftctl_state_set "${vm}" \
       "xcolo_live_runtime_topology=failed" \
       "xcolo_live_runtime_topology_phase=${phase}" \
@@ -2942,7 +2954,11 @@ PY
       "xcolo_live_pci_evidence=${error_name}" \
       "xcolo_live_qtree_evidence=collected" \
       "xcolo_live_mtree_evidence=collected" \
-      "xcolo_protocol_failure_phase=pre_migrate_live_topology" \
+      "xcolo_pre_migrate_pci_materialization_deferred=no" \
+      "xcolo_pre_migrate_pci_materialization_failure_layer=${materialization_layer}" \
+      "xcolo_pre_migrate_pci_materialization_failure_path=$(ftctl_xcolo_compact_log_value "${materialization_path}")" \
+      "xcolo_pre_migrate_pci_materialization_failure_reason=$(ftctl_xcolo_compact_log_value "${materialization_reason}")" \
+      "xcolo_protocol_failure_phase=pre_migrate_materialization" \
       "last_error=${error_name}"
     ftctl_log_event "colo" "xcolo.live_runtime_topology" "fail" "${vm}" "" \
       "phase=${phase} error=${error_name} reason=$(ftctl_xcolo_compact_log_value "${reason}")"
@@ -3542,8 +3558,8 @@ if context == "pre_migrate":
         candidate_device = qtree_missing_devices[0]
         candidate_reason = "qtree_missing_device"
     elif len(secondary_zero_pci_aliases) > len(primary_zero_pci_aliases) + 2:
-        gate_state = "deferred"
-        gate_error = "xcolo_pre_migrate_pci_materialization_deferred_until_migrate"
+        gate_state = "failed"
+        gate_error = "xcolo_pre_migrate_secondary_pci_resource_unmaterialized"
         gate_reason = secondary_zero_pci_aliases[0]
         candidate_region = secondary_zero_pci_aliases[0]
         candidate_reason = "secondary_zero_range_pci_alias"

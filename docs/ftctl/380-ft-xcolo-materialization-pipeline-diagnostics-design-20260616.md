@@ -212,3 +212,62 @@ continue to `primary.migrate`.
 `ftctl_xcolo_require_post_migrate_materialization_gate()` must run the
 materialization analyzer and reject any remaining PCI/mtree materialization
 failure as a hard post-migrate error.
+
+## Run 119 Correction: Pre-Migrate Defer Is Unsafe For QEMU 9.2.4
+
+Run 119 disproved the assumption that `generated:True, argv:True, qtree:True,
+pci:False` can safely be deferred until after `primary.migrate`.
+
+The flow did proceed past the previous blocker, but the secondary incoming QEMU
+crashed while loading the migration state:
+
+```text
+memory_region_add_subregion_common: Assertion `!subregion->container' failed
+```
+
+The primary-side `Can't receive COLO message: Input/output error` was only a
+consequence of the secondary crash.
+
+### Superseded Rule
+
+The following pre-migrate rule is superseded:
+
+```text
+generated:True, argv:True, qtree:True, pci:False -> defer
+```
+
+For QEMU 9.2.4 in this FTCTL path, that condition means the secondary incoming
+runtime is not yet migration-ABI materialized enough to accept the primary
+state safely.
+
+### New Gate Rule
+
+Pre-migrate hard failures now include:
+
+- `pci_missing`;
+- `pci_unassigned`;
+- secondary bridge `secondary bus 0` / `subordinate bus 0`;
+- secondary BAR `(not mapped)`;
+- secondary mtree zero-length PCI bridge aliases.
+
+The pre-migrate hard error is:
+
+```text
+xcolo_pre_migrate_secondary_pci_resource_unmaterialized
+```
+
+### Implementation Target
+
+The immediate implementation must prevent another QEMU assertion loop by
+failing before `primary.migrate` when the secondary incoming runtime shows this
+condition. The state must preserve enough evidence to continue the real fix:
+
+- `xcolo_materialization_failure_layer`;
+- `xcolo_materialization_first_missing_path`;
+- `xcolo_pre_migrate_pci_materialization_failure_layer`;
+- `xcolo_pre_migrate_pci_materialization_failure_path`;
+- `xcolo_protocol_failure_phase=pre_migrate_materialization`.
+
+The longer-term fix remains to build the secondary incoming runtime from the
+primary's actual launch ABI so that the target reaches a migration-compatible
+PCI/mtree state before migration is attempted.
