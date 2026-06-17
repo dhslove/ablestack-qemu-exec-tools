@@ -552,6 +552,66 @@ ftctl_xcolo_secondary_accept_deferred_incoming() {
     "secondary=${secondary_vm} status=${status:-unknown} migrate_status=${migrate_status:-unknown}"
 }
 
+ftctl_xcolo_require_pre_migrate_receiver_ready() {
+  local vm="${1-}"
+  local secondary_vm="${2-}"
+  local phase="${3:-pre_migrate_receiver}"
+  local status="" migrate_status="" migrate_error="" running=""
+
+  [[ -n "${vm}" && -n "${secondary_vm}" ]] || return 1
+  [[ "${FTCTL_DRY_RUN}" != "1" ]] || return 0
+
+  ftctl_xcolo_query_status_name "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" status || true
+  ftctl_xcolo_query_running_flag "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" running || true
+  ftctl_xcolo_query_migrate_status "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" migrate_status || true
+  ftctl_xcolo_query_migrate_error_desc "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" migrate_error || true
+
+  if [[ -n "${migrate_error}" || "${migrate_status}" == "failed" || "${migrate_status}" == "cancelled" ]]; then
+    ftctl_state_set "${vm}" \
+      "xcolo_pre_migrate_receiver_ready=failed" \
+      "xcolo_pre_migrate_receiver_phase=${phase}" \
+      "xcolo_pre_migrate_receiver_status=${status}" \
+      "xcolo_pre_migrate_receiver_running=${running}" \
+      "xcolo_pre_migrate_receiver_migrate_status=${migrate_status}" \
+      "xcolo_pre_migrate_receiver_error=$(ftctl_xcolo_compact_log_value "${migrate_error}")" \
+      "xcolo_protocol_failure_phase=pre_migrate_receiver" \
+      "last_error=xcolo_pre_migrate_receiver_not_ready"
+    ftctl_log_event "colo" "xcolo.pre_migrate_receiver" "fail" "${vm}" "" \
+      "secondary=${secondary_vm} status=${status:-unknown} running=${running:-unknown} migrate_status=${migrate_status:-unknown} error=$(ftctl_xcolo_compact_log_value "${migrate_error}")"
+    return 1
+  fi
+
+  ftctl_state_set "${vm}" \
+    "xcolo_pre_migrate_receiver_ready=ok" \
+    "xcolo_pre_migrate_receiver_phase=${phase}" \
+    "xcolo_pre_migrate_receiver_status=${status}" \
+    "xcolo_pre_migrate_receiver_running=${running}" \
+    "xcolo_pre_migrate_receiver_migrate_status=${migrate_status}" \
+    "xcolo_protocol_failure_phase="
+  ftctl_log_event "colo" "xcolo.pre_migrate_receiver" "ok" "${vm}" "" \
+    "secondary=${secondary_vm} status=${status:-unknown} running=${running:-unknown} migrate_status=${migrate_status:-unknown}"
+}
+
+ftctl_xcolo_record_pre_migrate_materialization_result() {
+  local vm="${1-}"
+  local gate_state
+
+  [[ -n "${vm}" ]] || return 0
+  gate_state="$(ftctl_state_get "${vm}" "xcolo_pre_migrate_topology_gate_state" 2>/dev/null || true)"
+  case "${gate_state}" in
+    deferred)
+      ftctl_state_set "${vm}" \
+        "xcolo_secondary_incoming_materialization=deferred_expected" \
+        "xcolo_secondary_incoming_materialization_phase=before_migrate"
+      ;;
+    *)
+      ftctl_state_set "${vm}" \
+        "xcolo_secondary_incoming_materialization=ok" \
+        "xcolo_secondary_incoming_materialization_phase=before_migrate"
+      ;;
+  esac
+}
+
 ftctl_xcolo_colo_mode_active() {
   local mode="${1-}"
   [[ -n "${mode}" && "${mode}" != "none" ]]
@@ -2953,7 +3013,6 @@ PY
     materialization_path="$(ftctl_state_get "${vm}" "xcolo_materialization_first_missing_path" 2>/dev/null || true)"
     materialization_reason="$(ftctl_state_get "${vm}" "xcolo_materialization_first_reason" 2>/dev/null || true)"
     if [[ "${phase}" == "before_migrate" \
-      && "${FTCTL_XCOLO_ALLOW_PRE_MIGRATE_DEFERRED_MATERIALIZATION:-0}" == "1" \
       && "${error_name}" == "xcolo_secondary_pci_resource_unmaterialized_before_migrate" \
       && "${materialization_path}" == *"generated:True"* \
       && "${materialization_path}" == *"argv:True"* \
@@ -3619,7 +3678,7 @@ if context == "pre_migrate":
         candidate_device = qtree_missing_devices[0]
         candidate_reason = "qtree_missing_device"
     elif len(secondary_zero_pci_aliases) > len(primary_zero_pci_aliases) + 2:
-        gate_state = "failed"
+        gate_state = "deferred"
         gate_error = "xcolo_pre_migrate_secondary_pci_resource_unmaterialized"
         gate_reason = secondary_zero_pci_aliases[0]
         candidate_region = secondary_zero_pci_aliases[0]
@@ -3790,6 +3849,28 @@ ftctl_xcolo_require_secondary_startup_materialization_gate() {
   materialization_layer="$(ftctl_state_get "${vm}" "xcolo_materialization_failure_layer" 2>/dev/null || true)"
   materialization_path="$(ftctl_state_get "${vm}" "xcolo_materialization_first_missing_path" 2>/dev/null || true)"
   materialization_reason="$(ftctl_state_get "${vm}" "xcolo_materialization_first_reason" 2>/dev/null || true)"
+  if [[ "${materialization_path}" == *"generated:True"* \
+    && "${materialization_path}" == *"argv:True"* \
+    && "${materialization_path}" == *"qtree:True"* \
+    && ( "${materialization_layer}" == "pci_missing" \
+      || "${materialization_layer}" == "pci_unassigned" \
+      || "${materialization_layer}" == "mtree_unmapped" \
+      || "${topology_error}" == "xcolo_secondary_pci_resource_unmaterialized_before_migrate" \
+      || "${topology_error}" == "xcolo_live_pci_identity_unmaterialized" \
+      || "${topology_error}" == "xcolo_pre_migrate_secondary_pci_resource_unmaterialized" ) ]]; then
+    ftctl_state_set "${vm}" \
+      "xcolo_secondary_startup_materialization=deferred" \
+      "xcolo_secondary_startup_materialization_phase=${phase}" \
+      "xcolo_secondary_startup_intent=ok" \
+      "xcolo_secondary_startup_deferred_pci=yes" \
+      "xcolo_secondary_startup_deferred_layer=${materialization_layer}" \
+      "xcolo_secondary_startup_deferred_path=$(ftctl_xcolo_compact_log_value "${materialization_path}")" \
+      "xcolo_secondary_startup_deferred_reason=$(ftctl_xcolo_compact_log_value "${materialization_reason}")" \
+      "xcolo_protocol_failure_phase="
+    ftctl_log_event "colo" "xcolo.secondary_startup_materialization" "defer" "${vm}" "" \
+      "secondary=${secondary_vm} layer=${materialization_layer} path=$(ftctl_xcolo_compact_log_value "${materialization_path}") reason=$(ftctl_xcolo_compact_log_value "${materialization_reason}")"
+    return 0
+  fi
   [[ -n "${topology_error}" ]] || topology_error="xcolo_secondary_startup_pci_unmaterialized"
   case "${topology_error}" in
     xcolo_live_runtime_topology_mismatch|xcolo_secondary_pci_resource_unmaterialized_before_migrate|xcolo_live_pci_identity_unmaterialized|xcolo_pre_migrate_secondary_pci_resource_unmaterialized)
@@ -5891,8 +5972,9 @@ ftctl_xcolo_prebuilt_primary_stage() {
   ftctl_xcolo_preflight_firewall_contract "${vm}" || return 1
   ftctl_xcolo_require_secondary_startup_materialization_gate "${vm}" "${vm}" "secondary_startup_materialization" || return 1
   ftctl_xcolo_secondary_accept_deferred_incoming "${vm}" "${vm}" "pre_migrate" || return 1
+  ftctl_xcolo_require_pre_migrate_receiver_ready "${vm}" "${vm}" "pre_migrate_receiver" || return 1
   ftctl_xcolo_require_pre_migrate_runtime_topology_gate "${vm}" "${vm}" "before_migrate" || return 1
-  ftctl_state_set "${vm}" "xcolo_secondary_incoming_materialization=ok"
+  ftctl_xcolo_record_pre_migrate_materialization_result "${vm}"
   ftctl_xcolo_gate_before_guest_traffic "${vm}" "${vm}" || return 1
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
     "{\"execute\":\"migrate\",\"arguments\":{\"uri\":\"${FTCTL_PROFILE_XCOLO_MIGRATE_URI}\"}}" \
@@ -9545,8 +9627,9 @@ ftctl_xcolo_execute_handshake_with_nodes() {
   ftctl_xcolo_require_topology_audit_ready "${vm}" "${secondary_vm}" "pre_migrate" || return 1
   ftctl_xcolo_require_secondary_startup_materialization_gate "${vm}" "${secondary_vm}" "secondary_startup_materialization" || return 1
   ftctl_xcolo_secondary_accept_deferred_incoming "${vm}" "${secondary_vm}" "pre_migrate" || return 1
+  ftctl_xcolo_require_pre_migrate_receiver_ready "${vm}" "${secondary_vm}" "pre_migrate_receiver" || return 1
   ftctl_xcolo_require_pre_migrate_runtime_topology_gate "${vm}" "${secondary_vm}" "before_migrate" || return 1
-  ftctl_state_set "${vm}" "xcolo_secondary_incoming_materialization=ok"
+  ftctl_xcolo_record_pre_migrate_materialization_result "${vm}"
   ftctl_xcolo_assert_no_premigrate_filter_mirror_send "${vm}" "before_migrate" || return 1
   ftctl_xcolo_gate_before_guest_traffic "${vm}" "${secondary_vm}" || return 1
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
@@ -9621,8 +9704,9 @@ ftctl_xcolo_execute_handshake_with_disk_plan() {
   ftctl_xcolo_require_topology_audit_ready "${vm}" "${secondary_vm}" "pre_migrate" || return 1
   ftctl_xcolo_require_secondary_startup_materialization_gate "${vm}" "${secondary_vm}" "secondary_startup_materialization" || return 1
   ftctl_xcolo_secondary_accept_deferred_incoming "${vm}" "${secondary_vm}" "pre_migrate" || return 1
+  ftctl_xcolo_require_pre_migrate_receiver_ready "${vm}" "${secondary_vm}" "pre_migrate_receiver" || return 1
   ftctl_xcolo_require_pre_migrate_runtime_topology_gate "${vm}" "${secondary_vm}" "before_migrate" || return 1
-  ftctl_state_set "${vm}" "xcolo_secondary_incoming_materialization=ok"
+  ftctl_xcolo_record_pre_migrate_materialization_result "${vm}"
   ftctl_xcolo_assert_no_premigrate_filter_mirror_send "${vm}" "before_migrate" || return 1
   ftctl_xcolo_gate_before_guest_traffic "${vm}" "${secondary_vm}" || return 1
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
@@ -10374,11 +10458,26 @@ ftctl_xcolo_force_primary_restore_from_backup() {
       ;;
   esac
 
-  ftctl_state_set "${vm}" \
-    "cloud_runtime_restore=verified_cloud_runtime" \
-    "xcolo_primary_restore_graph=clean"
+  local restored_state="unknown"
+  restored_state="$(ftctl_xcolo_primary_domain_state "${vm}" 2>/dev/null || echo "unknown")"
+  case "${restored_state}" in
+    running|paused|pmsuspended)
+      ftctl_state_set "${vm}" \
+        "cloud_runtime_restore=primary_running" \
+        "cloud_runtime_restore_verified=verified_cloud_runtime" \
+        "cloud_runtime_restore_libvirt_state=${restored_state}" \
+        "cloud_runtime_restore_needs_reconcile=yes" \
+        "xcolo_primary_restore_graph=clean"
+      ;;
+    *)
+      ftctl_state_set "${vm}" \
+        "cloud_runtime_restore=verified_cloud_runtime" \
+        "cloud_runtime_restore_libvirt_state=${restored_state}" \
+        "xcolo_primary_restore_graph=clean"
+      ;;
+  esac
   ftctl_log_event "colo" "block_conversion.rollback.primary_restore_graph" "ok" "${vm}" "" \
-    "cause=${reason}"
+    "cause=${reason} libvirt_state=${restored_state}"
 }
 
 ftctl_xcolo_rollback_block_primary_create_failure() {

@@ -1336,7 +1336,7 @@ selftest_case_xcolo_block_handshake_sets_checkpoint_before_migrate() (
   selftest_info "x-colo block handshake sets checkpoint delay before primary migrate"
 
   local call_log="${SELFTEST_ROOT}/xcolo-block-handshake-order.log"
-  local filter_line checkpoint_line incoming_line migrate_line
+  local filter_line checkpoint_line incoming_line receiver_line migrate_line
   FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
   FTCTL_PROFILE_SECONDARY_URI="qemu+ssh://peer/system"
   FTCTL_PROFILE_XCOLO_NBD_ENDPOINT="tcp:10.0.0.2:10809"
@@ -1403,6 +1403,13 @@ selftest_case_xcolo_block_handshake_sets_checkpoint_before_migrate() (
     return 0
   }
   # shellcheck disable=SC2317
+  ftctl_xcolo_require_pre_migrate_receiver_ready() {
+    local vm="$1"
+    printf '%s|%s|%s|%s|%s\n' "colo" "xcolo.pre_migrate_receiver" "${FTCTL_PROFILE_SECONDARY_URI}" "${vm}" "mock" >> "${call_log}"
+    ftctl_state_set "${vm}" "xcolo_pre_migrate_receiver_ready=ok"
+    return 0
+  }
+  # shellcheck disable=SC2317
   ftctl_xcolo_assert_no_premigrate_filter_mirror_send() {
     return 0
   }
@@ -1458,6 +1465,7 @@ selftest_case_xcolo_block_handshake_sets_checkpoint_before_migrate() (
   filter_line="$(grep -n '|primary.stop_before_filter_attach|' "${call_log}" | head -n1 | cut -d: -f1)"
   checkpoint_line="$(grep -n '|primary.migrate_set_parameters.pre_migrate|' "${call_log}" | head -n1 | cut -d: -f1)"
   incoming_line="$(grep -n '|secondary.migrate_incoming|' "${call_log}" | head -n1 | cut -d: -f1)"
+  receiver_line="$(grep -n '|xcolo.pre_migrate_receiver|' "${call_log}" | head -n1 | cut -d: -f1)"
   migrate_line="$(grep -n '|primary.migrate|' "${call_log}" | head -n1 | cut -d: -f1)"
   [[ "${filter_line}" -lt "${migrate_line}" ]] || \
     selftest_fail "primary filter attach gate must run before primary.migrate"
@@ -1465,6 +1473,8 @@ selftest_case_xcolo_block_handshake_sets_checkpoint_before_migrate() (
     selftest_fail "primary checkpoint delay gate must run before primary.migrate"
   [[ "${incoming_line}" -lt "${migrate_line}" ]] || \
     selftest_fail "secondary migrate-incoming must run before primary.migrate"
+  [[ "${incoming_line}" -lt "${receiver_line}" && "${receiver_line}" -lt "${migrate_line}" ]] || \
+    selftest_fail "pre-migrate receiver gate must run after migrate-incoming and before primary.migrate"
 )
 
 selftest_case_xcolo_multi_disk_handshake_exports_all_disks() (
@@ -1472,7 +1482,7 @@ selftest_case_xcolo_multi_disk_handshake_exports_all_disks() (
   selftest_info "x-colo block handshake exports all mapped disks before primary migrate"
 
   local call_log="${SELFTEST_ROOT}/xcolo-multi-disk-handshake-order.log"
-  local sda_export_line sdb_export_line incoming_line migrate_line
+  local sda_export_line sdb_export_line incoming_line receiver_line migrate_line
   FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
   FTCTL_PROFILE_SECONDARY_URI="qemu+ssh://peer/system"
   FTCTL_PROFILE_XCOLO_NBD_ENDPOINT="tcp:10.0.0.2:10809"
@@ -1549,6 +1559,13 @@ selftest_case_xcolo_multi_disk_handshake_exports_all_disks() (
     return 0
   }
   # shellcheck disable=SC2317
+  ftctl_xcolo_require_pre_migrate_receiver_ready() {
+    local vm="$1"
+    printf '%s|%s|%s|%s|%s\n' "colo" "xcolo.pre_migrate_receiver" "${FTCTL_PROFILE_SECONDARY_URI}" "${vm}" "mock" >> "${call_log}"
+    ftctl_state_set "${vm}" "xcolo_pre_migrate_receiver_ready=ok"
+    return 0
+  }
+  # shellcheck disable=SC2317
   ftctl_xcolo_assert_no_premigrate_filter_mirror_send() {
     return 0
   }
@@ -1598,11 +1615,14 @@ selftest_case_xcolo_multi_disk_handshake_exports_all_disks() (
   sda_export_line="$(grep -n '|secondary.nbd_server_add.sda|' "${call_log}" | head -n1 | cut -d: -f1)"
   sdb_export_line="$(grep -n '|secondary.nbd_server_add.sdb|' "${call_log}" | head -n1 | cut -d: -f1)"
   incoming_line="$(grep -n '|secondary.migrate_incoming|' "${call_log}" | head -n1 | cut -d: -f1)"
+  receiver_line="$(grep -n '|xcolo.pre_migrate_receiver|' "${call_log}" | head -n1 | cut -d: -f1)"
   migrate_line="$(grep -n '|primary.migrate|' "${call_log}" | head -n1 | cut -d: -f1)"
   [[ "${sda_export_line}" -lt "${migrate_line}" && "${sdb_export_line}" -lt "${migrate_line}" ]] || \
     selftest_fail "all disk exports must be added before primary.migrate"
   [[ "${incoming_line}" -lt "${migrate_line}" ]] || \
     selftest_fail "secondary migrate-incoming must run before primary.migrate"
+  [[ "${incoming_line}" -lt "${receiver_line}" && "${receiver_line}" -lt "${migrate_line}" ]] || \
+    selftest_fail "pre-migrate receiver gate must run after migrate-incoming and before primary.migrate"
 )
 
 selftest_case_xcolo_staged_filter_activation_classifies_failed_step() (
@@ -4726,7 +4746,7 @@ EOF
 
 selftest_case_xcolo_live_pci_incoming_fails_before_migrate() (
   selftest_reset_env
-  selftest_info "x-colo incoming secondary PCI identity fails before migrate"
+  selftest_info "x-colo incoming secondary PCI identity defers before migrate"
 
   local vm="xcolo-live-pci-pre-fail"
   local phase="before_migrate"
@@ -4753,16 +4773,15 @@ selftest_case_xcolo_live_pci_incoming_fails_before_migrate() (
   }
 
   ftctl_xcolo_verify_live_runtime_topology_pair "${vm}" "${vm}-standby" "${phase}" || rc=$?
-  selftest_assert_eq "${rc}" "1" "incoming PCI identity must fail before migrate"
+  selftest_assert_eq "${rc}" "0" "incoming PCI identity must defer before migrate"
   selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_live_runtime_topology")" \
-    "failed" "pre-migrate incoming PCI identity failed"
+    "deferred" "pre-migrate incoming PCI identity deferred"
   selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_live_pci_identity")" \
-    "failed" "pre-migrate live PCI identity failed"
+    "deferred" "pre-migrate live PCI identity deferred"
   selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_pre_migrate_pci_materialization_deferred")" \
-    "no" "pre-migrate materialization deferred marker disabled"
-  selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" \
-    "xcolo_pre_migrate_secondary_pci_resource_unmaterialized" \
-    "pre-migrate incoming PCI materialization error"
+    "yes" "pre-migrate materialization deferred marker enabled"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_protocol_failure_phase")" \
+    "" "pre-migrate deferred materialization is not a failure phase"
 )
 
 selftest_case_xcolo_live_pci_incoming_fails_after_migrate() (

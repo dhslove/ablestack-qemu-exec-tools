@@ -7875,6 +7875,92 @@ xcolo_secondary_migrate_incoming=ok
 xcolo_secondary_incoming_materialization=ok
 ```
 
+## Run 123 - Incoming-Defer Pre-Migrate Gate Reclassified
+
+### Trigger
+
+After deploying Run 122, the user started another FT protection test for
+`r97-link-01` / `i-2-54-VM`.
+
+### Observed Result
+
+The run failed at:
+
+```text
+xcolo_pre_migrate_secondary_pci_resource_unmaterialized
+```
+
+Current Cloud/DB state at failure:
+
+```text
+ftctl_protection.id=120
+primary_vm_id=54
+secondary_vm_id=185
+protection_state=error
+transport_state=failed
+last_error=xcolo_pre_migrate_secondary_pci_resource_unmaterialized
+```
+
+The primary libvirt runtime was restored and running, but the Cloud DB still
+showed VM `54` as `Stopped`. This is a restore/reconcile gap that must be marked
+explicitly by qemu-side state.
+
+### Evidence
+
+The Run 122 implementation did take effect:
+
+- Secondary QEMU started with `-incoming defer`.
+- Generated Primary/Secondary PCI manifest matched.
+- Startup disk graph was generated for both `sda` and `sdb`.
+- Baseline seeding ran.
+- QEMU assertion and COLO invalid-message failures were avoided.
+
+The remaining mismatch was not missing command-line intent:
+
+```text
+generated:True,argv:True,qtree:True,pci:False
+```
+
+Secondary `info pci` still showed:
+
+```text
+secondary bus 0
+IRQ 0
+BAR not mapped
+```
+
+while qtree already contained `virtio-scsi-pci` and both `scsi-hd` devices.
+
+### Repetition Check
+
+This is the same materialization family as Runs 121/122, but Run 123 narrowed
+the cause. It is no longer a generated-manifest or command-line shape problem.
+It is a gate placement problem: FTCTL is requiring final PCI resource
+assignment before QMP `migrate-incoming` and before the incoming migration
+stream can materialize the secondary runtime.
+
+If the next run still fails with the same
+`generated:True,argv:True,qtree:True,pci:False` before `migrate-incoming`, that
+is a repeated implementation failure and must be reported immediately.
+
+### Required Fix
+
+The next implementation must split the gates:
+
+1. pre-migrate startup intent gate accepts qtree/block/chardev presence and
+   records deferred PCI resource assignment;
+2. QMP `migrate-incoming` runs after startup intent is valid;
+3. pre-primary-migrate receiver gate checks secondary QMP/liveness/listener
+   readiness, not final `info pci` BAR mapping;
+4. post-migrate materialization gate enforces the full PCI/qtree/mtree/block
+   contract;
+5. primary restore must mark libvirt runtime truth for Cloud reconciliation:
+
+```text
+cloud_runtime_restore=primary_running
+cloud_runtime_restore_needs_reconcile=yes
+```
+
 If secondary PCI resources still do not materialize, the expected safe failure
 is now either:
 

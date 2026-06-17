@@ -385,3 +385,75 @@ memory_region_add_subregion_common assertion
 Received invalid message 0x0000
 Can't receive COLO message
 ```
+
+## Run 123 Design: Split Pre-Migrate Intent From Post-Migrate Materialization
+
+Run 122 proved that `-incoming defer` is applied and that the generated
+Primary/Secondary PCI manifest is identical. It also showed that the old gate
+still used the wrong acceptance point: it required complete `info pci` resource
+assignment before the secondary had accepted an incoming migration stream.
+
+The observed secondary state is valid for an incoming-deferred domain:
+
+- generated command line contains the intended devices;
+- `/proc` argv contains the intended devices;
+- QEMU qtree contains the intended devices and block graph;
+- `info pci` still reports bridges with `secondary bus 0`, IRQ `0`, and unmapped
+  BARs.
+
+This must not be treated as a pre-migrate hard failure. It means the secondary
+has startup intent, but PCI resource materialization is deferred until incoming
+migration is started.
+
+### Revised Gate Model
+
+1. **Startup intent gate**
+   - Hard-require generated/argv/qtree/block graph/chardev presence.
+   - Accept `generated:True,argv:True,qtree:True,pci:False` as expected
+     deferred PCI materialization.
+   - Record:
+
+   ```text
+   xcolo_secondary_startup_intent=ok
+   xcolo_secondary_startup_deferred_pci=yes
+   ```
+
+2. **Secondary receiver gate**
+   - Run QMP `migrate-incoming` after startup intent passes.
+   - Require QMP command success and a live secondary QMP status.
+   - Record:
+
+   ```text
+   xcolo_secondary_migrate_incoming=ok
+   xcolo_pre_migrate_receiver_ready=ok
+   ```
+
+3. **Pre-migrate topology gate**
+   - Treat PCI/mtree resource unmaterialized evidence as a deferred condition
+     when generated/argv/qtree all agree.
+   - Continue only if qtree/block/chardev intent is present.
+   - Do not assert final migration ABI from `info pci` at this point.
+
+4. **Post-migrate materialization gate**
+   - After `primary.migrate`, enforce the full materialization contract:
+     Primary and Secondary `info pci`, qtree, mtree, and block graph must match
+     the migration ABI.
+   - Any remaining PCI/mtree materialization failure remains a hard error:
+
+   ```text
+   xcolo_post_migrate_pci_materialization_failed
+   ```
+
+### Restore Contract
+
+Run 122 also showed that failed conversion can restore the libvirt runtime while
+Cloud DB remains `Stopped`. The qemu-side fix must mark this explicitly so the
+Cloud side can reconcile or at least surface the mismatch:
+
+```text
+cloud_runtime_restore=primary_running
+cloud_runtime_restore_needs_reconcile=yes
+```
+
+The qemu-side code must not update Cloud DB directly. It records the runtime
+truth and leaves Cloud-managed lifecycle reconciliation to Cloud/Mold service.
