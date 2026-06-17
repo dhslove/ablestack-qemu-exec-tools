@@ -488,6 +488,21 @@ v2k_linux_bootstrap_try_mount_partitions() {
   return 1
 }
 
+v2k_linux_bootstrap_try_mount_partitions_set() {
+  local mnt="$1"
+  shift || true
+  local nbd_dev root_part
+  [[ -n "${mnt}" && "$#" -gt 0 ]] || return 1
+  for nbd_dev in "$@"; do
+    root_part="$(v2k_linux_bootstrap_try_mount_partitions "${nbd_dev}" "${mnt}" || true)"
+    if [[ -n "${root_part}" ]]; then
+      echo "${root_part}"
+      return 0
+    fi
+  done
+  return 1
+}
+
 v2k_linux_bootstrap_dbg_cmd() {
   # Run a command and return compact single-line output for event logging.
   # Never fail the caller.
@@ -612,6 +627,19 @@ v2k_linux_bootstrap_lvm_cfg_for_nbd() {
   printf '%s' "devices { use_devicesfile=0 global_filter=[ \"a|^/dev/${bn}$|\", \"a|^/dev/${bn}p[0-9]+$|\", \"r|.*|\" ] filter=[ \"a|^/dev/${bn}$|\", \"a|^/dev/${bn}p[0-9]+$|\", \"r|.*|\" ] }"
 }
 
+v2k_linux_bootstrap_lvm_cfg_for_nbd_set() {
+  local filters="" dev bn
+  [[ "$#" -gt 0 ]] || return 1
+  for dev in "$@"; do
+    [[ -n "${dev}" ]] || continue
+    bn="${dev##*/}"
+    [[ -n "${filters}" ]] && filters+=", "
+    filters+="\"a|^/dev/${bn}$|\", \"a|^/dev/${bn}p[0-9]+$|\""
+  done
+  [[ -n "${filters}" ]] || return 1
+  printf '%s' "devices { use_devicesfile=0 global_filter=[ ${filters}, \"r|.*|\" ] filter=[ ${filters}, \"r|.*|\" ] }"
+}
+
 v2k_linux_bootstrap_lvm_range_cfg() {
   local nbd_alt="$1"
   [[ -n "${nbd_alt}" ]] || return 1
@@ -636,6 +664,31 @@ EOF
   printf -v "${out_dir_name}" '%s' "${private_lvm_dir}"
 }
 
+v2k_linux_bootstrap_setup_lvm_system_dir_for_nbd_set() {
+  local out_dir_name="$1"
+  shift || true
+  local private_lvm_dir filters="" dev bn
+  [[ -n "${out_dir_name}" && "$#" -gt 0 ]] || return 1
+  for dev in "$@"; do
+    [[ -n "${dev}" ]] || continue
+    bn="${dev##*/}"
+    [[ -n "${filters}" ]] && filters+=", "
+    filters+="\"a|^/dev/${bn}$|\", \"a|^/dev/${bn}p[0-9]+$|\""
+  done
+  [[ -n "${filters}" ]] || return 1
+  private_lvm_dir="$(mktemp -d /tmp/v2k_lvm.XXXXXX)"
+  chmod 700 "${private_lvm_dir}" >/dev/null 2>&1 || true
+  mkdir -p "${private_lvm_dir}/devices"
+  cat > "${private_lvm_dir}/lvm.conf" <<EOF
+devices {
+    use_devicesfile = 0
+    global_filter = [ ${filters}, "r|.*|" ]
+    filter = [ ${filters}, "r|.*|" ]
+}
+EOF
+  printf -v "${out_dir_name}" '%s' "${private_lvm_dir}"
+}
+
 v2k_linux_bootstrap_dev_under_nbd() {
   local dev="$1" nbd_dev="$2"
   local dev_mm
@@ -643,6 +696,21 @@ v2k_linux_bootstrap_dev_under_nbd() {
   dev_mm="$(lsblk -dn -o MAJ:MIN "${dev}" 2>/dev/null | head -n1 || true)"
   [[ -n "${dev_mm}" ]] || return 1
   lsblk -rn -o MAJ:MIN "${nbd_dev}" 2>/dev/null | grep -Fx -- "${dev_mm}" >/dev/null
+}
+
+v2k_linux_bootstrap_dev_under_nbd_set() {
+  local dev="$1"
+  shift || true
+  local nbd_dev
+  [[ -b "${dev}" && "$#" -gt 0 ]] || return 1
+  for nbd_dev in "$@"; do
+    v2k_linux_bootstrap_dev_under_nbd "${dev}" "${nbd_dev}" && return 0
+  done
+  return 1
+}
+
+v2k_linux_bootstrap_nbd_set_json() {
+  jq -nc --argjson nbd "$(printf '%s\n' "$@" | jq -R . | jq -s .)" '{nbd:$nbd}'
 }
 
 v2k_linux_bootstrap_lvm_pv_candidates() {
@@ -969,6 +1037,142 @@ v2k_linux_bootstrap_try_mount_lvm() {
   return 1
 }
 
+v2k_linux_bootstrap_try_mount_lvm_set() {
+  local mnt="$1"
+  shift || true
+  v2k_has_lvm_tools || return 1
+  [[ -n "${mnt}" && "$#" -gt 0 ]] || return 1
+
+  local cfg nbd_json
+  cfg="$(v2k_linux_bootstrap_lvm_cfg_for_nbd_set "$@")"
+  nbd_json="$(v2k_linux_bootstrap_nbd_set_json "$@")"
+
+  v2k_event INFO "linux_bootstrap" "" "lvm_debug_pre" \
+    "$(v2k_linux_bootstrap_json \
+      --argjson nbd_set "${nbd_json}" \
+      --arg note "pre-activation snapshot for multi-NBD set" \
+      --arg lsblk "$(v2k_linux_bootstrap_dbg_cmd lsblk -rn -o NAME,TYPE,SIZE,FSTYPE,UUID,MOUNTPOINT "$@")" \
+      --arg blkid "$(v2k_linux_bootstrap_dbg_cmd blkid "$@")" \
+      '{nbd_set:$nbd_set.nbd,note:$note,lsblk:$lsblk,blkid:$blkid}')"
+
+  udevadm settle >/dev/null 2>&1 || true
+  sleep 1
+
+  local scan_out scan_rc vgs_out vgs_rc
+  local attempt=0 max_retry=5 vgs=""
+  while [[ "${attempt}" -lt "${max_retry}" ]]; do
+    attempt=$((attempt+1))
+    v2k_linux_bootstrap_run_event "cmd_pvscan_direct" scan_out scan_rc -- \
+      lvm pvscan --config "${cfg}" --cache --activate ay
+    v2k_linux_bootstrap_run_event "cmd_vgs_direct" vgs_out vgs_rc -- \
+      lvm vgs --config "${cfg}" --noheadings -o vg_name
+    vgs="$(echo "${vgs_out}" | awk '{$1=$1}; $1!=""{print $1}' | sort -u)"
+    if [[ -n "${vgs}" ]]; then
+      v2k_event INFO "linux_bootstrap" "" "lvm_vg_found_retry" \
+        "$(v2k_linux_bootstrap_json --argjson attempt "${attempt}" --arg vgs "${vgs}" '{attempt:$attempt,vgs:$vgs}')"
+      break
+    fi
+    v2k_event WARN "linux_bootstrap" "" "lvm_scan_retry" \
+      "$(v2k_linux_bootstrap_json --argjson attempt "${attempt}" --arg note "waiting for lvm visibility" '{attempt:$attempt,note:$note}')"
+    sleep 2
+    udevadm settle >/dev/null 2>&1 || true
+  done
+
+  local activated=0 vg
+  if [[ -n "${vgs}" ]]; then
+    v2k_event INFO "linux_bootstrap" "" "lvm_vgs_found" \
+      "$(v2k_linux_bootstrap_json --arg vgs "${vgs}" '{vgs:$vgs}')"
+    for vg in ${vgs}; do
+      [[ -n "${vg}" ]] || continue
+      if lvm vgchange --config "${cfg}" -ay "${vg}"; then
+        activated=1
+      fi
+    done
+  else
+    v2k_event WARN "linux_bootstrap" "" "lvm_no_vgs_found" \
+      "$(v2k_linux_bootstrap_json --arg note "vgscan found nothing on multi-NBD set" --argjson scan_rc "${scan_rc:-0}" '{note:$note,scan_rc:$scan_rc}')"
+  fi
+
+  v2k_event INFO "linux_bootstrap" "" "lvm_debug_post" \
+    "$(v2k_linux_bootstrap_json \
+      --argjson activated "${activated}" \
+      --arg pvs "$(v2k_linux_bootstrap_dbg_cmd lvm pvs --config "${cfg}" --noheadings -o pv_name,pv_uuid,vg_name)" \
+      --arg vgs "$(v2k_linux_bootstrap_dbg_cmd lvm vgs --config "${cfg}" --noheadings -o vg_name,vg_uuid,vg_attr)" \
+      --arg lvs "$(v2k_linux_bootstrap_dbg_cmd lvm lvs --config "${cfg}" --noheadings -o lv_name,vg_name,lv_attr,lv_path,devices)" \
+      '{activated:$activated,pvs:$pvs,vgs:$vgs,lvs:$lvs}')"
+
+  local lvlist_raw
+  lvlist_raw="$(lvm lvs --config "${cfg}" --noheadings --separator '|' -o vg_name,lv_name,lv_path,lv_attr,devices 2>/dev/null || true)"
+
+  local vg_name lvname lvpath lvattr devices lv mounted_src has_identity mout mrc
+  while IFS='|' read -r vg_name lvname lvpath lvattr devices; do
+    vg_name="$(printf '%s' "${vg_name}" | awk '{$1=$1};1')"
+    lvname="$(printf '%s' "${lvname}" | awk '{$1=$1};1')"
+    lvpath="$(printf '%s' "${lvpath:-}" | awk '{$1=$1};1')"
+    lvattr="$(printf '%s' "${lvattr:-}" | awk '{$1=$1};1')"
+    devices="$(printf '%s' "${devices:-}" | awk '{$1=$1};1')"
+    [[ -n "${vg_name}" && -n "${lvname}" ]] || continue
+
+    v2k_event INFO "linux_bootstrap" "" "root_lvm_candidate" \
+      "$(v2k_linux_bootstrap_json \
+        --arg vg "${vg_name}" --arg lv "${lvname}" --arg lv_path "${lvpath}" \
+        --arg lv_attr "${lvattr}" --arg devices "${devices}" \
+        '{vg:$vg,lv:$lv,lv_path:$lv_path,lv_attr:$lv_attr,devices:$devices}')"
+
+    if [[ "${lvattr}" == *p* ]]; then
+      v2k_event WARN "linux_bootstrap" "" "root_lv_partial" \
+        "$(v2k_linux_bootstrap_json \
+          --arg vg "${vg_name}" --arg lv "${lvname}" --arg devices "${devices}" \
+          --arg note "LV is partial; one or more PVs are still missing" \
+          '{vg:$vg,lv:$lv,devices:$devices,note:$note}')"
+      continue
+    fi
+
+    lv="${lvpath:-/dev/${vg_name}/${lvname}}"
+    v2k_linux_bootstrap_wait_blockdev "${lv}" 10 || true
+    udevadm settle >/dev/null 2>&1 || true
+
+    if ! v2k_linux_bootstrap_dev_under_nbd_set "${lv}" "$@"; then
+      v2k_event ERROR "linux_bootstrap" "" "lvm_lv_path_collision" \
+        "$(v2k_linux_bootstrap_json \
+          --arg lv "${lv}" --arg devices "${devices}" \
+          --arg note "LV path exists but is not under the current NBD set" \
+          '{lv:$lv,devices:$devices,note:$note}')"
+      continue
+    fi
+
+    v2k_linux_bootstrap_umount_robust "${mnt}" --recursive >/dev/null 2>&1 || true
+    v2k_linux_bootstrap_run_event "mount_try_lv" mout mrc -- \
+      v2k_linux_bootstrap_mount_robust "${lv}" "${mnt}" "ro"
+    [[ "${mrc}" -eq 0 ]] || continue
+
+    mounted_src="$(findmnt -rn -o SOURCE --target "${mnt}" 2>/dev/null || true)"
+    if [[ -z "${mounted_src}" ]] || ! v2k_linux_bootstrap_dev_under_nbd_set "${mounted_src}" "$@"; then
+      v2k_event ERROR "linux_bootstrap" "" "mounted_source_not_on_nbd" \
+        "$(v2k_linux_bootstrap_json \
+          --arg lv "${lv}" --arg mounted_src "${mounted_src}" \
+          '{lv:$lv,mounted_src:$mounted_src}')"
+      v2k_linux_bootstrap_umount_robust "${mnt}" >/dev/null 2>&1 || true
+      continue
+    fi
+
+    has_identity=0
+    v2k_linux_guest_has_identity_markers "${mnt}" && has_identity=1
+    if [[ "${has_identity}" -eq 1 ]]; then
+      v2k_linux_bootstrap_umount_robust "${mnt}" >/dev/null 2>&1 || true
+      echo "${lv}"
+      return 0
+    fi
+    v2k_linux_bootstrap_umount_robust "${mnt}" >/dev/null 2>&1 || true
+  done < <(printf '%s\n' "${lvlist_raw}")
+
+  if [[ "${lvlist_raw}" == *"[unknown]"* || "${lvlist_raw}" == *"-wi-----p-"* ]]; then
+    v2k_event ERROR "linux_bootstrap" "" "root_vg_missing_pvs" \
+      "$(v2k_linux_bootstrap_json --arg note "LVM reported partial or unknown PVs while searching root LV" '{note:$note}')"
+  fi
+  return 1
+}
+
 v2k_linux_bootstrap_lvm_deactivate() {
   # Deactivate any VGs activated from this nbd device only.
   local nbd_dev="$1"
@@ -979,6 +1183,226 @@ v2k_linux_bootstrap_lvm_deactivate() {
   cfg="$(v2k_linux_bootstrap_lvm_cfg_for_nbd "${nbd_dev}")"
   lvm vgchange --config "${cfg}" -an >/dev/null 2>&1 || true
 }
+
+v2k_linux_bootstrap_resolve_default_kernel() {
+  local rootmnt="$1"
+  [[ -n "${rootmnt}" && -d "${rootmnt}" ]] || return 1
+
+  ROOTMNT="${rootmnt}" python3 - <<'PY'
+import json
+import os
+import re
+import subprocess
+from pathlib import Path
+
+root = Path(os.environ["ROOTMNT"])
+
+def rel(path):
+    try:
+        return str(path.relative_to(root))
+    except Exception:
+        return str(path)
+
+def version_key(value):
+    parts = re.split(r'([0-9]+)', value)
+    return tuple(int(p) if p.isdigit() else p for p in parts)
+
+modules = []
+modules_dir = root / "lib/modules"
+if modules_dir.is_dir():
+    modules = sorted([p.name for p in modules_dir.iterdir() if p.is_dir()], key=version_key)
+
+boot_kernels = {}
+for p in (root / "boot").glob("vmlinuz-*"):
+    k = p.name[len("vmlinuz-"):]
+    boot_kernels[k] = rel(p)
+
+def valid(k):
+    return k in modules and (not boot_kernels or k in boot_kernels)
+
+rejected = []
+candidates = []
+for k in modules:
+    reason = ""
+    if boot_kernels and k not in boot_kernels:
+        reason = "missing_boot_vmlinuz"
+    if reason:
+        rejected.append({"kver": k, "reason": reason})
+    else:
+        candidates.append(k)
+
+def emit(selected, source):
+    print(json.dumps({
+        "selected": selected,
+        "source": source,
+        "candidates": candidates or modules,
+        "rejected": rejected,
+    }))
+    raise SystemExit(0)
+
+try:
+    out = subprocess.check_output(
+        ["chroot", str(root), "/bin/bash", "-lc", "command -v grubby >/dev/null 2>&1 && grubby --default-kernel || true"],
+        stderr=subprocess.DEVNULL,
+        text=True,
+        timeout=5,
+    ).strip().splitlines()
+    if out:
+        default_kernel = Path(out[-1].strip()).name
+        if default_kernel.startswith("vmlinuz-"):
+            kver = default_kernel[len("vmlinuz-"):]
+            if kver in modules:
+                emit(kver, "grubby_default_kernel")
+except Exception:
+    pass
+
+for grubenv in (root / "boot/grub2/grubenv", root / "boot/efi/EFI/rocky/grubenv", root / "boot/efi/EFI/centos/grubenv", root / "boot/efi/EFI/redhat/grubenv"):
+    if grubenv.is_file():
+        text = grubenv.read_text(encoding="utf-8", errors="ignore")
+        m = re.search(r"saved_entry=([^\n]+)", text)
+        if m:
+            saved = m.group(1)
+            for k in modules:
+                if k in saved and valid(k):
+                    emit(k, "grubenv_saved_entry")
+
+for entries_dir in (root / "boot/loader/entries",):
+    if entries_dir.is_dir():
+        for entry in sorted(entries_dir.glob("*.conf")):
+            text = entry.read_text(encoding="utf-8", errors="ignore")
+            m = re.search(r"^linux\s+.*vmlinuz-([^\s]+)", text, re.M)
+            if m and m.group(1) in modules:
+                emit(m.group(1), "bls_entry")
+
+for grub_cfg in [root / "boot/grub2/grub.cfg", root / "boot/grub/grub.cfg"] + list((root / "boot/efi/EFI").glob("*/grub.cfg")) if (root / "boot/efi/EFI").is_dir() else [root / "boot/grub2/grub.cfg", root / "boot/grub/grub.cfg"]:
+    if grub_cfg.is_file():
+        text = grub_cfg.read_text(encoding="utf-8", errors="ignore")
+        m = re.search(r"vmlinuz-([A-Za-z0-9_.:+~=-]+)", text)
+        if m and m.group(1) in modules:
+            emit(m.group(1), "grub_cfg_first_linux")
+
+if candidates:
+    emit(candidates[-1], "boot_modules_version_sort")
+if modules:
+    emit(modules[-1], "modules_version_sort_fallback")
+
+print(json.dumps({"selected": "", "source": "none", "candidates": [], "rejected": rejected}))
+PY
+}
+
+v2k_linux_bootstrap_driver_state() {
+  local rootmnt="$1" kver="$2" driver="$3"
+  [[ -n "${rootmnt}" && -n "${kver}" && -n "${driver}" ]] || return 1
+  local moddir="${rootmnt}/lib/modules/${kver}"
+  [[ -d "${moddir}" ]] || { printf 'missing'; return 0; }
+
+  if find "${moddir}" -type f \( -name "${driver}.ko" -o -name "${driver}.ko.xz" -o -name "${driver}.ko.zst" \) 2>/dev/null | grep -q .; then
+    printf 'module_file'
+    return 0
+  fi
+  if grep -R -E "(^|/)${driver}\\.ko(\\.|$)" "${moddir}/modules.builtin" "${moddir}/modules.builtin.modinfo" >/dev/null 2>&1; then
+    printf 'builtin'
+    return 0
+  fi
+  if chroot "${rootmnt}" /bin/bash -lc "modinfo ${driver} 2>/dev/null | grep -q '^filename:[[:space:]]*(builtin)'" >/dev/null 2>&1; then
+    printf 'builtin'
+    return 0
+  fi
+  printf 'missing'
+}
+
+v2k_linux_bootstrap_virtio_transport_state() {
+  local rootmnt="$1" kver="$2"
+  local cfg="${rootmnt}/boot/config-${kver}"
+  local moddir="${rootmnt}/lib/modules/${kver}"
+  if [[ -f "${cfg}" ]]; then
+    if grep -qx 'CONFIG_VIRTIO_PCI=y' "${cfg}" 2>/dev/null; then
+      printf 'available_builtin:boot_config'
+      return 0
+    fi
+    if grep -qx 'CONFIG_VIRTIO_PCI=m' "${cfg}" 2>/dev/null; then
+      if [[ "$(v2k_linux_bootstrap_driver_state "${rootmnt}" "${kver}" virtio_pci)" == "module_file" ]] || \
+         grep -R -E 'virtio.*pci|virtio_pci|virtio-pci' "${moddir}/modules.alias" >/dev/null 2>&1; then
+        printf 'available_module:boot_config'
+        return 0
+      fi
+    fi
+  fi
+  if grep -R -E '(^|/)virtio_pci(_modern_dev|_legacy_dev)?\.ko(\.|$)' "${moddir}/modules.builtin" "${moddir}/modules.builtin.modinfo" >/dev/null 2>&1; then
+    printf 'available_builtin:modules_builtin'
+    return 0
+  fi
+  local st
+  st="$(v2k_linux_bootstrap_driver_state "${rootmnt}" "${kver}" virtio_pci)"
+  if [[ "${st}" == "module_file" ]]; then
+    printf 'available_module:module_file'
+    return 0
+  fi
+  if [[ "${st}" == "builtin" ]]; then
+    printf 'available_builtin:modinfo'
+    return 0
+  fi
+  if grep -R -E 'virtio.*pci|virtio_pci|virtio-pci' "${moddir}/modules.alias" >/dev/null 2>&1; then
+    printf 'available_alias:modules_alias'
+    return 0
+  fi
+  printf 'missing:none'
+}
+
+v2k_linux_bootstrap_collect_driver_inventory() {
+  local rootmnt="$1" kver="$2"
+  local drivers=(virtio virtio_ring virtio_pci virtio_blk virtio_scsi virtio_console virtio_net ahci libata scsi_mod sd_mod ata_piix ata_generic pata_acpi pata_legacy)
+  local json='{}' d st
+  for d in "${drivers[@]}"; do
+    st="$(v2k_linux_bootstrap_driver_state "${rootmnt}" "${kver}" "${d}")"
+    json="$(jq -nc --argjson cur "${json}" --arg d "${d}" --arg st "${st}" '$cur + {($d):$st}')"
+  done
+  local transport transport_state transport_source
+  transport="$(v2k_linux_bootstrap_virtio_transport_state "${rootmnt}" "${kver}")"
+  transport_state="${transport%%:*}"
+  transport_source="${transport#*:}"
+  jq -nc --arg kver "${kver}" --argjson drivers "${json}" \
+    --arg transport_state "${transport_state}" --arg transport_source "${transport_source}" \
+    '{kver:$kver,drivers:$drivers,capabilities:{virtio_pci_transport:$transport_state,virtio_pci_transport_source:$transport_source}}'
+}
+
+v2k_linux_bootstrap_driver_available() {
+  case "${1:-}" in
+    module_file|builtin) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+v2k_linux_bootstrap_resolve_controller_capability() {
+  local inventory_json="$1"
+  jq -nc --argjson inv "${inventory_json}" '
+    def avail($d): (($inv.drivers[$d] // "missing") == "module_file" or ($inv.drivers[$d] // "missing") == "builtin");
+    def transport: (($inv.capabilities.virtio_pci_transport // "missing") | startswith("available"));
+    {
+      virtio: (transport and (avail("virtio_scsi") or avail("virtio_blk"))),
+      qga: (transport and avail("virtio_console")),
+      sata: (avail("ahci") and avail("libata") and (avail("scsi_mod") or avail("sd_mod"))),
+      ide_rescue: ((avail("ata_piix") or avail("ata_generic") or avail("pata_acpi") or avail("pata_legacy")) and avail("libata"))
+    } as $c
+    | $c + {
+        recommended_controller:
+          (if $c.virtio then "virtio"
+           elif $c.sata then "sata"
+           elif $c.ide_rescue then "ide-rescue"
+           else "none" end),
+        reason:
+          (if $c.virtio then "virtio_available"
+           elif $c.sata then "virtio_unavailable_sata_available"
+           elif $c.ide_rescue then "ide_rescue_only"
+           else "no_storage_controller_capability" end)
+      }'
+}
+
+v2k_linux_bootstrap_module_file_drivers() {
+  local inventory_json="$1"
+  jq -r '.drivers | to_entries | map(select(.value=="module_file") | .key) | join(" ")' <<<"${inventory_json}" 2>/dev/null || true
+}
+
 
 v2k_linux_bootstrap_enabled_default() {
   # Default policy:
@@ -1014,20 +1438,39 @@ v2k_linux_bootstrap_initramfs() {
     return 76
   fi
 
-  local root_input="" root_cleanup_cmd=""
-  if ! v2k_linux_bootstrap_prepare_root_input "${manifest}" root_input root_cleanup_cmd; then
+  local prepared_entries=""
+  if ! prepared_entries="$(v2k_linux_bootstrap_prepare_inputs "${manifest}")"; then
+    [[ "${V2K_LINUX_BOOTSTRAP_BEST_EFFORT}" == "1" ]] && return 0
+    return 77
+  fi
+
+  local -a bootstrap_inputs=()
+  local -a bootstrap_cleanup_cmds=()
+  local entry prepared_path cleanup_cmd
+  while IFS=$'\t' read -r prepared_path cleanup_cmd; do
+    [[ -n "${prepared_path}" ]] || continue
+    bootstrap_inputs+=("${prepared_path}")
+    bootstrap_cleanup_cmds+=("${cleanup_cmd:-}")
+  done <<< "${prepared_entries}"
+  if [[ "${#bootstrap_inputs[@]}" -eq 0 ]]; then
+    v2k_event ERROR "linux_bootstrap" "" "root_image_missing" "{}"
     [[ "${V2K_LINUX_BOOTSTRAP_BEST_EFFORT}" == "1" ]] && return 0
     return 77
   fi
 
   v2k_event INFO "linux_bootstrap" "" "phase_start" \
-    "{\"disk0\":\"${root_input}\",\"format\":\"${fmt}\",\"storage\":\"${st}\"}"
+    "$(v2k_linux_bootstrap_json \
+      --arg disk0 "${bootstrap_inputs[0]}" \
+      --argjson disks "${#bootstrap_inputs[@]}" \
+      --arg format "${fmt}" \
+      --arg storage "${st}" \
+      '{disk0:$disk0,disks:$disks,format:$format,storage:$storage}')"
 
-  v2k_linux_bootstrap_one "${root_input}"
+  v2k_linux_bootstrap_one "${bootstrap_inputs[@]}"
   local rc=$?
-  if [[ -n "${root_cleanup_cmd}" ]]; then
-    eval "${root_cleanup_cmd}" >/dev/null 2>&1 || true
-  fi
+  for cleanup_cmd in "${bootstrap_cleanup_cmds[@]}"; do
+    [[ -n "${cleanup_cmd}" ]] && eval "${cleanup_cmd}" >/dev/null 2>&1 || true
+  done
   if [[ "${rc}" -eq 0 ]]; then
     v2k_event INFO "linux_bootstrap" "" "phase_done" "{}"
     return 0
@@ -1038,6 +1481,53 @@ v2k_linux_bootstrap_initramfs() {
   return "${rc}"
 }
 
+
+v2k_linux_bootstrap_prepare_inputs() {
+  local manifest="$1"
+  local st count i path size_bytes prepared_path cleanup_cmd
+  st="$(jq -r '.target.storage.type // "file"' "${manifest}" 2>/dev/null || echo "file")"
+  count="$(jq -r '.disks | length' "${manifest}" 2>/dev/null || echo 0)"
+  [[ "${count}" =~ ^[0-9]+$ && "${count}" -gt 0 ]] || {
+    v2k_event ERROR "linux_bootstrap" "" "root_image_missing" "{\"note\":\"manifest has no disks\"}"
+    return 1
+  }
+
+  for ((i=0; i<count; i++)); do
+    path="$(jq -r ".disks[${i}].transfer.target_path // empty" "${manifest}" 2>/dev/null || true)"
+    if [[ -z "${path}" || "${path}" == "null" ]]; then
+      v2k_event ERROR "linux_bootstrap" "" "disk_image_missing" \
+        "$(v2k_linux_bootstrap_json --argjson index "${i}" '{index:$index}')"
+      return 1
+    fi
+    case "${st}" in
+      file)
+        if [[ ! -f "${path}" ]]; then
+          v2k_event ERROR "linux_bootstrap" "" "disk_image_missing" \
+            "$(v2k_linux_bootstrap_json --argjson index "${i}" --arg path "${path}" '{index:$index,path:$path}')"
+          return 1
+        fi
+        printf '%s\t%s\n' "${path}" ""
+        ;;
+      rbd)
+        size_bytes="$(jq -r ".disks[${i}].size_bytes // 0" "${manifest}" 2>/dev/null || echo 0)"
+        prepare_target_device --kind rbd-mapped --path "${path}" --size-bytes "${size_bytes}" --no-register-cleanup >/dev/null
+        prepared_path="${V2K_TARGET_BLOCKDEV:-}"
+        cleanup_cmd="${V2K_TARGET_CLEANUP_CMD:-}"
+        if [[ -z "${prepared_path}" || ! -b "${prepared_path}" ]]; then
+          v2k_event ERROR "linux_bootstrap" "" "disk_blockdev_missing" \
+            "$(v2k_linux_bootstrap_json --argjson index "${i}" --arg path "${path}" --arg prepared "${prepared_path}" '{index:$index,path:$path,prepared:$prepared}')"
+          return 1
+        fi
+        printf '%s\t%s\n' "${prepared_path}" "${cleanup_cmd}"
+        ;;
+      *)
+        v2k_event WARN "linux_bootstrap" "" "unsupported_storage_type" \
+          "$(v2k_linux_bootstrap_json --arg storage_type "${st}" --arg note "current bootstrap supports file and rbd targets only" '{storage_type:$storage_type,note:$note}')"
+        return 1
+        ;;
+    esac
+  done
+}
 
 v2k_linux_bootstrap_prepare_root_input() {
   # Usage: v2k_linux_bootstrap_prepare_root_input <manifest> out_input out_cleanup_cmd
@@ -1084,7 +1574,8 @@ v2k_linux_bootstrap_prepare_root_input() {
   printf -v "${out_cleanup_name}" '%s' "${cleanup_cmd}"
 }
 v2k_linux_bootstrap_one() {
-  local img="$1"
+  local -a images=("$@")
+  [[ "${#images[@]}" -gt 0 ]] || return 77
 
   # [NEW] Ensure NBD module is loaded (Auto-recovery after reboot)
   if ! lsmod | grep -q "^nbd"; then
@@ -1094,6 +1585,7 @@ v2k_linux_bootstrap_one() {
   fi
 
   local nbd_dev=""
+  local -a nbd_devs=()
   local mnt=""
   local bootmnt=""
   local lvm_sysdir=""
@@ -1127,24 +1619,27 @@ v2k_linux_bootstrap_one() {
     fi
 
     # [STEP 2] Deactivate LVM & Targeted DM Cleanup
-    if [[ -n "${nbd_dev:-}" ]]; then
-      local bn cfg lvm_out lvm_rc
-      bn="${nbd_dev##*/}"
-      # Target ONLY this NBD for deactivation
-      cfg="$(v2k_linux_bootstrap_lvm_cfg_for_nbd "${nbd_dev}")"
+    if [[ "${#nbd_devs[@]}" -gt 0 ]]; then
+      local bn cfg lvm_out lvm_rc cleanup_nbd
+      cfg="$(v2k_linux_bootstrap_lvm_cfg_for_nbd_set "${nbd_devs[@]}" 2>/dev/null || true)"
 
       if v2k_has_lvm_tools; then
-        v2k_linux_bootstrap_run_event "cmd_lvm_vgchange_deactivate" lvm_out lvm_rc -- \
-          lvm vgchange --config "${cfg}" -an
+        if [[ -n "${cfg}" ]]; then
+          v2k_linux_bootstrap_run_event "cmd_lvm_vgchange_deactivate" lvm_out lvm_rc -- \
+            lvm vgchange --config "${cfg}" -an
+        fi
       fi
 
       # 1. Remove DM holders that still reference this NBD device.
-      for holder in /sys/block/${bn}/holders/*; do
+      for cleanup_nbd in "${nbd_devs[@]}"; do
+        bn="${cleanup_nbd##*/}"
+        for holder in /sys/block/${bn}/holders/*; do
           if [[ -e "${holder}" ]]; then
-              local dm_name
-              dm_name="$(basename "${holder}")"
-              dmsetup remove --force "${dm_name}" >/dev/null 2>&1 || true
+            local dm_name
+            dm_name="$(basename "${holder}")"
+            dmsetup remove --force "${dm_name}" >/dev/null 2>&1 || true
           fi
+        done
       done
 
       # 2. Do not sweep global rl-* mappings here; that can impact other concurrent VMs.
@@ -1153,22 +1648,26 @@ v2k_linux_bootstrap_one() {
     fi
 
     # [STEP 3] Remove Reservation Lock
-    if [[ -n "${nbd_dev:-}" ]]; then
-        local base lock_dir
-        base="${nbd_dev##*/}"
+    if [[ "${#nbd_devs[@]}" -gt 0 ]]; then
+      local cleanup_nbd base lock_dir
+      for cleanup_nbd in "${nbd_devs[@]}"; do
+        base="${cleanup_nbd##*/}"
         lock_dir="/var/lock/ablestack-v2k/reservations/${base}.lock.d"
         rm -rf "${lock_dir}" >/dev/null 2>&1 || true
+      done
     fi
 
     # [STEP 4] Disconnect NBD & WAIT for Removal
-    if [[ -n "${nbd_dev:-}" ]]; then
+    if [[ "${#nbd_devs[@]}" -gt 0 ]]; then
+      local cleanup_nbd
+      for cleanup_nbd in "${nbd_devs[@]}"; do
       local bn pid sys_pid attempt=0 max_attempts=5
-      bn="${nbd_dev##*/}"
+      bn="${cleanup_nbd##*/}"
       sys_pid="/sys/block/${bn}/pid"
 
       while [[ "${attempt}" -lt "${max_attempts}" ]]; do
         attempt=$((attempt+1))
-        qemu-nbd -d "${nbd_dev}" >/dev/null 2>&1 || true
+        qemu-nbd -d "${cleanup_nbd}" >/dev/null 2>&1 || true
         udevadm settle >/dev/null 2>&1 || true
         sleep 0.5
         pid="$(cat "${sys_pid}" 2>/dev/null || echo "")"
@@ -1180,10 +1679,10 @@ v2k_linux_bootstrap_one() {
       
       # Wait for nodes to disappear
       local wait_attempt=0
-      while ls "${nbd_dev}"p* >/dev/null 2>&1; do
+      while ls "${cleanup_nbd}"p* >/dev/null 2>&1; do
           wait_attempt=$((wait_attempt+1))
           if [[ "${wait_attempt}" -gt 20 ]]; then
-              udevadm trigger --action=remove "${nbd_dev}" >/dev/null 2>&1 || true
+              udevadm trigger --action=remove "${cleanup_nbd}" >/dev/null 2>&1 || true
               break
           fi
           sleep 0.5
@@ -1198,11 +1697,12 @@ v2k_linux_bootstrap_one() {
       # finds nothing, and updates the cache to "missing".
       # --------------------------------------------------------
       local refresh_cfg
-      refresh_cfg="$(v2k_linux_bootstrap_lvm_cfg_for_nbd "${nbd_dev}")"
+      refresh_cfg="$(v2k_linux_bootstrap_lvm_cfg_for_nbd "${cleanup_nbd}")"
       if v2k_has_lvm_tools; then
         lvm pvscan --config "${refresh_cfg}" --cache >/dev/null 2>&1 || true
       fi
       # --------------------------------------------------------
+      done
     fi
 
     if [[ -n "${lvm_sysdir:-}" ]]; then
@@ -1228,7 +1728,8 @@ v2k_linux_bootstrap_one() {
         --arg nbd "${nbd_dev:-}" \
         --arg mnt "${mnt:-}" \
         --arg bootmnt "${bootmnt:-}" \
-        '{nbd:$nbd,mnt:$mnt,bootmnt:$bootmnt}')"
+        --argjson nbd_count "${#nbd_devs[@]}" \
+        '{nbd:$nbd,nbd_count:$nbd_count,mnt:$mnt,bootmnt:$bootmnt}')"
   }
   trap cleanup EXIT INT TERM
 
@@ -1334,22 +1835,28 @@ v2k_linux_bootstrap_one() {
   sleep 0.5
   # ------------------------------------------------------------
  
-  nbd_dev="$(v2k_linux_bootstrap_pick_nbd || true)"
-  if [[ -z "${nbd_dev}" ]]; then
-    v2k_event ERROR "linux_bootstrap" "" "no_free_nbd" "{}"
-    finish 78
-    return $?
-  fi
+  local img qout qrc picked_nbd
+  for img in "${images[@]}"; do
+    picked_nbd="$(v2k_linux_bootstrap_pick_nbd || true)"
+    if [[ -z "${picked_nbd}" ]]; then
+      v2k_event ERROR "linux_bootstrap" "" "no_free_nbd" "{}"
+      finish 78
+      return $?
+    fi
+    v2k_linux_bootstrap_run_event "cmd_qemu_nbd_connect" qout qrc -- \
+      qemu-nbd --connect "${picked_nbd}" "${img}"
+    if [[ "${qrc}" -ne 0 ]]; then
+      v2k_event ERROR "linux_bootstrap" "" "qemu_nbd_connect_failed" \
+        "$(v2k_linux_bootstrap_json --arg nbd "${picked_nbd}" --arg img "${img}" --argjson rc "${qrc}" '{nbd:$nbd,img:$img,rc:$rc}')"
+      finish 79
+      return $?
+    fi
+    nbd_devs+=("${picked_nbd}")
+    [[ -z "${nbd_dev}" ]] && nbd_dev="${picked_nbd}"
+  done
 
-local qout qrc
-  v2k_linux_bootstrap_run_event "cmd_qemu_nbd_connect" qout qrc -- \
-    qemu-nbd --connect "${nbd_dev}" "${img}"
-  if [[ "${qrc}" -ne 0 ]]; then
-    v2k_event ERROR "linux_bootstrap" "" "qemu_nbd_connect_failed" \
-      "{\"nbd\":\"${nbd_dev}\",\"img\":\"${img}\",\"rc\":${qrc}}"
-    finish 79
-    return $?
-  fi
+  v2k_event INFO "linux_bootstrap" "" "bootstrap_nbd_map" \
+    "$(printf '%s\n' "${nbd_devs[@]}" | jq -R . | jq -s '{nbd:.}')"
 
   if v2k_has_lvm_tools; then
     if [[ -n "${LVM_SYSTEM_DIR-}" ]]; then
@@ -1359,14 +1866,14 @@ local qout qrc
       had_old_lvm_system_dir=0
       old_lvm_system_dir=""
     fi
-    v2k_linux_bootstrap_setup_lvm_system_dir "${nbd_dev}" lvm_sysdir
+    v2k_linux_bootstrap_setup_lvm_system_dir_for_nbd_set lvm_sysdir "${nbd_devs[@]}"
     export LVM_SYSTEM_DIR="${lvm_sysdir}"
     v2k_event INFO "linux_bootstrap" "" "lvm_system_dir_ready" \
       "$(v2k_linux_bootstrap_json \
-        --arg nbd "${nbd_dev}" \
+        --argjson nbd_set "$(v2k_linux_bootstrap_nbd_set_json "${nbd_devs[@]}")" \
         --arg lvm_system_dir "${lvm_sysdir}" \
         --arg note "private LVM_SYSTEM_DIR with use_devicesfile=0" \
-        '{nbd:$nbd,lvm_system_dir:$lvm_system_dir,note:$note}')"
+        '{nbd_set:$nbd_set.nbd,lvm_system_dir:$lvm_system_dir,note:$note}')"
   fi
 
   # -----------------------------------------------------------------------------
@@ -1375,7 +1882,7 @@ local qout qrc
   # -----------------------------------------------------------------------------
   udevadm settle >/dev/null 2>&1 || true
   local nbd_lvm_cfg
-  nbd_lvm_cfg="$(v2k_linux_bootstrap_lvm_cfg_for_nbd "${nbd_dev}")"
+  nbd_lvm_cfg="$(v2k_linux_bootstrap_lvm_cfg_for_nbd_set "${nbd_devs[@]}")"
   
   # 1. Immediately deactivate any VG activated from this NBD device.
   if v2k_has_lvm_tools; then
@@ -1384,15 +1891,17 @@ local qout qrc
 
   # 2. Force-remove Device Mapper holders created by accidental host-side activation.
   # This avoids conflicts such as duplicate /dev/mapper/rl-root names.
-  local bn_fix
-  bn_fix="${nbd_dev##*/}"
-  for holder in /sys/block/${bn_fix}/holders/*; do
-      if [[ -e "${holder}" ]]; then
-          local dm_name
-          dm_name="$(basename "${holder}")"
-          dmsetup remove --force "${dm_name}" >/dev/null 2>&1 || true
-      fi
-  done
+	  local fix_nbd bn_fix
+	  for fix_nbd in "${nbd_devs[@]}"; do
+	  bn_fix="${fix_nbd##*/}"
+	  for holder in /sys/block/${bn_fix}/holders/*; do
+	      if [[ -e "${holder}" ]]; then
+	          local dm_name
+	          dm_name="$(basename "${holder}")"
+	          dmsetup remove --force "${dm_name}" >/dev/null 2>&1 || true
+	      fi
+	  done
+	  done
 
   # 3. Refresh the LVM cache so the host stops treating the guest device as active.
   if v2k_has_lvm_tools; then
@@ -1400,14 +1909,16 @@ local qout qrc
   fi
   # -----------------------------------------------------------------------------
 
-  local pout prc
-  v2k_linux_bootstrap_run_event "cmd_partprobe" pout prc -- partprobe "${nbd_dev}"
+  local pout prc probe_nbd
+  for probe_nbd in "${nbd_devs[@]}"; do
+    v2k_linux_bootstrap_run_event "cmd_partprobe" pout prc -- partprobe "${probe_nbd}"
+  done
   
   # [Partition Wait Loop]
   local pt_attempt=0
   while [[ "${pt_attempt}" -lt 20 ]]; do
       udevadm settle >/dev/null 2>&1 || true
-      if ls "${nbd_dev}"p* >/dev/null 2>&1; then
+	      if ls "${nbd_dev}"p* >/dev/null 2>&1; then
           break
       fi
       if lsblk -rn "${nbd_dev}" 2>/dev/null | grep -q "part"; then
@@ -1419,9 +1930,9 @@ local qout qrc
   done
 
   local root_dev=""
-  root_dev="$(v2k_linux_bootstrap_try_mount_partitions "${nbd_dev}" "${mnt}" || true)"
+  root_dev="$(v2k_linux_bootstrap_try_mount_partitions_set "${mnt}" "${nbd_devs[@]}" || true)"
   if [[ -z "${root_dev}" ]]; then
-    root_dev="$(v2k_linux_bootstrap_try_mount_lvm "${nbd_dev}" "${mnt}" || true)"
+    root_dev="$(v2k_linux_bootstrap_try_mount_lvm_set "${mnt}" "${nbd_devs[@]}" || true)"
   fi
   if [[ -z "${root_dev}" ]]; then
     v2k_event ERROR "linux_bootstrap" "" "root_partition_not_found" "{\"nbd\":\"${nbd_dev}\",\"note\":\"no distro identity markers found on partitions or LVM LVs\"}"
@@ -1430,17 +1941,15 @@ local qout qrc
   fi
 
   local rout rrc
-  if [[ "${root_dev}" == "${nbd_dev}"p* ]]; then
-    :
-  elif v2k_linux_bootstrap_dev_under_nbd "${root_dev}" "${nbd_dev}"; then
+  if v2k_linux_bootstrap_dev_under_nbd_set "${root_dev}" "${nbd_devs[@]}"; then
     :
   else
     v2k_event ERROR "linux_bootstrap" "" "root_dev_not_on_nbd" \
       "$(v2k_linux_bootstrap_json \
         --arg root_dev "${root_dev}" \
-        --arg nbd "${nbd_dev}" \
+        --argjson nbd_set "$(v2k_linux_bootstrap_nbd_set_json "${nbd_devs[@]}")" \
         --arg note "refusing to mount root device outside current NBD" \
-        '{root_dev:$root_dev,nbd:$nbd,note:$note}')"
+        '{root_dev:$root_dev,nbd_set:$nbd_set.nbd,note:$note}')"
     finish 80
     return $?
   fi
@@ -1463,15 +1972,19 @@ local qout qrc
         local uuid="${boot_src#UUID=}"
         boot_src=""
         local p
-        for p in "${nbd_dev}"p*; do
-           [[ -b "$p" ]] || continue
-           local puuid
-           puuid="$(blkid -o value -s UUID "$p" 2>/dev/null || true)"
-           if [[ "${puuid}" == "${uuid}" ]]; then
-              boot_src="$p"
-              break
-           fi
-        done
+	        local search_nbd
+	        for search_nbd in "${nbd_devs[@]}"; do
+	        for p in "${search_nbd}"p*; do
+	           [[ -b "$p" ]] || continue
+	           local puuid
+	           puuid="$(blkid -o value -s UUID "$p" 2>/dev/null || true)"
+	           if [[ "${puuid}" == "${uuid}" ]]; then
+	              boot_src="$p"
+	              break
+	           fi
+	        done
+	        [[ -n "${boot_src}" ]] && break
+	        done
       fi
       if [[ -b "${boot_src}" ]]; then
         local bout brc
@@ -1486,7 +1999,7 @@ local qout qrc
 
   v2k_event INFO "linux_bootstrap" "" "root_mounted" "{\"root_part\":\"${root_dev}\"}"
 
-  v2k_linux_bootstrap_rebuild_initramfs "${mnt}" "${nbd_dev}"
+  v2k_linux_bootstrap_rebuild_initramfs "${mnt}" "${nbd_devs[@]}"
   local rc=$?
   if [[ "${rc}" -ne 0 ]]; then
     finish "${rc}"
@@ -1501,7 +2014,8 @@ local qout qrc
 
 v2k_linux_bootstrap_rebuild_initramfs() {
   local rootmnt="$1"
-  local nbd_dev="$2"
+  shift || true
+  local -a nbd_devs=("$@")
 
   # ------------------------------------------------------------
   # [Modified] bind mounts for chroot with ISOLATION
@@ -1521,10 +2035,12 @@ v2k_linux_bootstrap_rebuild_initramfs() {
     fi
   done
 
-  # 3. Copy specific NBD device nodes (Current VM's disk only)
-  if [[ -n "${nbd_dev}" ]]; then
-    cp -a "${nbd_dev}"* "${rootmnt}/dev/" 2>/dev/null || true
-  fi
+  # 3. Copy specific NBD device nodes for the current VM disk set only.
+  local copy_nbd
+  for copy_nbd in "${nbd_devs[@]}"; do
+    [[ -n "${copy_nbd}" ]] || continue
+    cp -a "${copy_nbd}"* "${rootmnt}/dev/" 2>/dev/null || true
+  done
 
   v2k_linux_bootstrap_mount_robust "/proc" "${rootmnt}/proc" "" || return 85
   v2k_linux_bootstrap_mount_robust "/sys"  "${rootmnt}/sys"  "" || return 85
@@ -1548,20 +2064,6 @@ v2k_linux_bootstrap_rebuild_initramfs() {
   bootloader="$(printf '%s' "${bootloader_json}" | jq -r '.bootloader // "unknown"' 2>/dev/null || true)"
   bootloader_source="$(printf '%s' "${bootloader_json}" | jq -r '.source // ""' 2>/dev/null || true)"
 
-  # Persist virtio module load hints (harmless if already present)
-  mkdir -p "${rootmnt}/etc/modules-load.d" "${rootmnt}/etc/dracut.conf.d"
-  cat > "${rootmnt}/etc/modules-load.d/ablestack-v2k-virtio.conf" <<'EOF'
-virtio_pci
-virtio_scsi
-virtio_blk
-scsi_mod
-EOF
-
-  # For dracut-based distros, force include drivers in initramfs
-  cat > "${rootmnt}/etc/dracut.conf.d/99-ablestack-v2k-virtio.conf" <<'EOF'
-add_drivers+=" virtio_pci virtio_scsi virtio_blk scsi_mod "
-EOF
-
   v2k_event INFO "linux_bootstrap" "" "initramfs_rebuild_start" \
     "$(v2k_linux_bootstrap_json \
       --arg id "${os_id}" \
@@ -1573,30 +2075,53 @@ EOF
       --arg bootloader_source "${bootloader_source}" \
       '{id:$id,like:$like,version_id:$version_id,pretty_name:$pretty_name,identity_source:$identity_source,bootloader:$bootloader,bootloader_source:$bootloader_source}')"
 
-  # ------------------------------------------------------------------
-  # Determine target kernel version (kver) deterministically
-  # Policy:
-  # - Use the kernel version(s) present under /lib/modules
-  # - If multiple exist, select the lexicographically last one
-  # ------------------------------------------------------------------
-  local kver
-  # Resolve the kernel version from the mounted guest filesystem on the host.
-  # Older guests can have a minimal or unusual chroot PATH, so avoid depending
-  # on guest utilities like sort before the bootstrap environment is repaired.
-  kver="$(find "${rootmnt}/lib/modules" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort | tail -n1 || true)"
+  local kernel_json kver kernel_source
+  kernel_json="$(v2k_linux_bootstrap_resolve_default_kernel "${rootmnt}" 2>/dev/null || echo '{"selected":"","source":"error","candidates":[],"rejected":[]}')"
+  kver="$(printf '%s' "${kernel_json}" | jq -r '.selected // ""' 2>/dev/null || true)"
+  kernel_source="$(printf '%s' "${kernel_json}" | jq -r '.source // ""' 2>/dev/null || true)"
+  v2k_event INFO "linux_bootstrap" "" "kernel_selected" "${kernel_json}"
   if [[ -z "${kver}" ]]; then
     v2k_event ERROR "linux_bootstrap" "" "kernel_version_not_found" \
       "{\"note\":\"/lib/modules empty or missing\"}"
     return 82
   fi
 
+  local driver_inventory controller_capability module_drivers module_load_drivers
+  driver_inventory="$(v2k_linux_bootstrap_collect_driver_inventory "${rootmnt}" "${kver}")"
+  controller_capability="$(v2k_linux_bootstrap_resolve_controller_capability "${driver_inventory}")"
+  module_drivers="$(v2k_linux_bootstrap_module_file_drivers "${driver_inventory}")"
+  module_load_drivers="$(printf '%s' "${module_drivers}" | tr ' ' '\n' | awk 'NF')"
+
+  v2k_event INFO "linux_bootstrap" "" "kernel_storage_driver_inventory" "${driver_inventory}"
+  v2k_event INFO "linux_bootstrap" "" "storage_controller_capability" "${controller_capability}"
+
+  mkdir -p "${rootmnt}/etc/modules-load.d" "${rootmnt}/etc/dracut.conf.d"
+  if [[ -n "${module_load_drivers}" ]]; then
+    printf '%s\n' "${module_load_drivers}" > "${rootmnt}/etc/modules-load.d/ablestack-v2k-virtio.conf"
+  else
+    : > "${rootmnt}/etc/modules-load.d/ablestack-v2k-virtio.conf"
+  fi
+
+  cat > "${rootmnt}/etc/dracut.conf.d/99-ablestack-v2k-virtio.conf" <<EOF
+hostonly="no"
+add_drivers+=" ${module_drivers} "
+force_drivers+=" ${module_drivers} "
+EOF
+  v2k_event INFO "linux_bootstrap" "" "dracut_driver_config_written" \
+    "$(v2k_linux_bootstrap_json \
+      --arg kver "${kver}" \
+      --arg module_drivers "${module_drivers}" \
+      --arg note "only loadable module_file drivers are written to dracut add_drivers/force_drivers" \
+      '{kver:$kver,module_drivers:$module_drivers,note:$note}')"
+
   # Function for final sync barrier
   flush_buffers() {
       v2k_event INFO "linux_bootstrap" "" "syncing_disks" "{}"
       sync
-      if [[ -n "${nbd_dev}" && -b "${nbd_dev}" ]]; then
-          blockdev --flushbufs "${nbd_dev}" >/dev/null 2>&1 || true
-      fi
+      local flush_nbd
+      for flush_nbd in "${nbd_devs[@]}"; do
+        [[ -n "${flush_nbd}" && -b "${flush_nbd}" ]] && blockdev --flushbufs "${flush_nbd}" >/dev/null 2>&1 || true
+      done
   }
 
   # Choose rebuild tool
@@ -1613,45 +2138,35 @@ EOF
     # [Added] Sync Barrier
     flush_buffers
 
-    # ------------------------------------------------------------------
-    # Verify that initramfs was actually updated and virtio drivers exist
-    # ------------------------------------------------------------------
     local vout vrc module_summary module_event_json
-    v2k_linux_bootstrap_run_event "verify_initramfs_virtio" vout vrc -- \
+    v2k_linux_bootstrap_run_event "verify_initramfs_storage_drivers" vout vrc -- \
       chroot "${rootmnt}" /bin/bash -lc \
-        "lsinitrd /boot/initramfs-${kver}.img | grep -E 'virtio_(pci|blk|scsi)|scsi_mod'"
-    if ! module_summary="$(jq -nc \
-        --arg output "${vout}" \
-        --argjson modules '["virtio_pci","virtio_scsi","virtio_blk","scsi_mod"]' \
-        '
-          reduce $modules[] as $mod (
-            {present:[],missing:[]};
-            if ($output | contains($mod)) then
-              .present += [$mod]
-            else
-              .missing += [$mod]
-            end
-          )
-        ' 2>/dev/null)"; then
-      module_summary='{"present":[],"missing":[],"error":"summary_failed"}'
-      v2k_event WARN "linux_bootstrap" "" "initramfs_virtio_summary_failed" \
-        "{\"kver\":\"${kver}\",\"note\":\"module summary generation failed; verify result still controls success\"}"
-    fi
+        "lsinitrd /boot/initramfs-${kver}.img | grep -E 'virtio|ahci|ata_|libata|scsi_mod|sd_mod' || true"
+    module_summary="$(jq -nc \
+      --arg output "${vout}" \
+      --argjson inv "${driver_inventory}" \
+      '
+        def init_state($mod):
+          if (($inv.drivers[$mod] // "missing") == "builtin") then "not_required_builtin"
+          elif ($output | contains($mod)) then "present"
+          elif (($inv.drivers[$mod] // "missing") == "missing") then "missing_all"
+          else "missing_from_initramfs" end;
+        ["virtio_pci","virtio_scsi","virtio_blk","scsi_mod","sd_mod","ahci","ata_piix","libata"]
+        | reduce .[] as $mod ({};
+            . + {($mod): {kernel:($inv.drivers[$mod] // "missing"), initramfs:init_state($mod)}})
+      ' 2>/dev/null || printf '{}')"
     module_event_json="$(jq -nc --arg kver "${kver}" --argjson modules "${module_summary}" \
-      '{kver:$kver,present:($modules.present // []),missing:($modules.missing // []),summary_error:($modules.error // null)}' \
-      2>/dev/null || printf '%s' "{\"kver\":\"${kver}\",\"present\":[],\"missing\":[],\"summary_error\":\"event_failed\"}")"
-    v2k_event INFO "linux_bootstrap" "" "initramfs_virtio_modules" \
-      "${module_event_json}"
+      '{kver:$kver,drivers:$modules}' \
+      2>/dev/null || printf '%s' "{\"kver\":\"${kver}\",\"drivers\":{}}")"
+    v2k_event INFO "linux_bootstrap" "" "initramfs_storage_driver_summary" "${module_event_json}"
     if [[ "${V2K_JSON_OUT:-0}" -ne 1 ]]; then
-      local present_modules missing_modules
-      present_modules="$(printf '%s' "${module_summary}" | jq -r '.present | if length > 0 then join(", ") else "none" end' 2>/dev/null || echo "unknown")"
-      missing_modules="$(printf '%s' "${module_summary}" | jq -r '.missing | if length > 0 then join(", ") else "none" end' 2>/dev/null || echo "unknown")"
-      echo "[v2k] Initramfs virtio modules present: ${present_modules}"
-      echo "[v2k] Initramfs virtio modules missing: ${missing_modules}"
+      echo "[v2k] Kernel selected for initramfs: ${kver} (${kernel_source})"
+      echo "[v2k] Storage controller capability: $(jq -rc . <<<"${controller_capability}" 2>/dev/null || echo unknown)"
+      echo "[v2k] Initramfs storage driver summary: $(jq -rc . <<<"${module_summary}" 2>/dev/null || echo unknown)"
     fi
-    if [[ "${vrc}" -ne 0 ]]; then
+    if ! jq -e '(.virtio or .sata or .ide_rescue)' <<<"${controller_capability}" >/dev/null 2>&1; then
       v2k_event ERROR "linux_bootstrap" "" "initramfs_verify_failed" \
-        "{\"kver\":\"${kver}\",\"note\":\"virtio drivers not found in initramfs\"}"
+        "{\"kver\":\"${kver}\",\"note\":\"no usable storage controller capability found\"}"
       return 82
     fi
 
