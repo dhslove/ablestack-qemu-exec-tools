@@ -604,6 +604,47 @@ v2k_linux_bootstrap_json() {
   jq -nc "$@"
 }
 
+v2k_linux_bootstrap_lvm_cfg_for_nbd() {
+  local nbd_dev="$1"
+  local bn
+  [[ -n "${nbd_dev}" ]] || return 1
+  bn="${nbd_dev##*/}"
+  printf '%s' "devices { use_devicesfile=0 global_filter=[ \"a|^/dev/${bn}$|\", \"a|^/dev/${bn}p[0-9]+$|\", \"r|.*|\" ] filter=[ \"a|^/dev/${bn}$|\", \"a|^/dev/${bn}p[0-9]+$|\", \"r|.*|\" ] }"
+}
+
+v2k_linux_bootstrap_lvm_range_cfg() {
+  local nbd_alt="$1"
+  [[ -n "${nbd_alt}" ]] || return 1
+  printf '%s' "devices { use_devicesfile=0 global_filter=[ \"a|^/dev/(${nbd_alt})(p[0-9]+)?$|\", \"r|.*|\" ] filter=[ \"a|^/dev/(${nbd_alt})(p[0-9]+)?$|\", \"r|.*|\" ] }"
+}
+
+v2k_linux_bootstrap_setup_lvm_system_dir() {
+  local nbd_dev="$1" out_dir_name="$2"
+  local bn private_lvm_dir
+  [[ -n "${nbd_dev}" && -n "${out_dir_name}" ]] || return 1
+  bn="${nbd_dev##*/}"
+  private_lvm_dir="$(mktemp -d /tmp/v2k_lvm.XXXXXX)"
+  chmod 700 "${private_lvm_dir}" >/dev/null 2>&1 || true
+  mkdir -p "${private_lvm_dir}/devices"
+  cat > "${private_lvm_dir}/lvm.conf" <<EOF
+devices {
+    use_devicesfile = 0
+    global_filter = [ "a|^/dev/${bn}$|", "a|^/dev/${bn}p[0-9]+$|", "r|.*|" ]
+    filter = [ "a|^/dev/${bn}$|", "a|^/dev/${bn}p[0-9]+$|", "r|.*|" ]
+}
+EOF
+  printf -v "${out_dir_name}" '%s' "${private_lvm_dir}"
+}
+
+v2k_linux_bootstrap_dev_under_nbd() {
+  local dev="$1" nbd_dev="$2"
+  local dev_mm
+  [[ -b "${dev}" && -b "${nbd_dev}" ]] || return 1
+  dev_mm="$(lsblk -dn -o MAJ:MIN "${dev}" 2>/dev/null | head -n1 || true)"
+  [[ -n "${dev_mm}" ]] || return 1
+  lsblk -rn -o MAJ:MIN "${nbd_dev}" 2>/dev/null | grep -Fx -- "${dev_mm}" >/dev/null
+}
+
 v2k_linux_bootstrap_lvm_pv_candidates() {
   # Echo PV partition paths on this nbd device (e.g. /dev/nbd8p3)
   local nbd_dev="$1"
@@ -625,7 +666,7 @@ v2k_linux_bootstrap_lvm_try_activate_by_pv() {
 
   local bn cfg
   bn="${nbd_dev##*/}"
-  cfg="devices { filter=[ \"a|^/dev/${bn}p[0-9]+$|\", \"a|^/dev/${bn}$|\", \"r|.*|\" ] }"
+  cfg="$(v2k_linux_bootstrap_lvm_cfg_for_nbd "${nbd_dev}")"
 
   udevadm settle >/dev/null 2>&1 || true
 
@@ -659,7 +700,7 @@ v2k_linux_bootstrap_lvm_try_activate_vg_name() {
 
   local bn cfg
   bn="${nbd_dev##*/}"
-  cfg="devices { filter=[ \"a|^/dev/${bn}p[0-9]+$|\", \"a|^/dev/${bn}$|\", \"r|.*|\" ] }"
+  cfg="$(v2k_linux_bootstrap_lvm_cfg_for_nbd "${nbd_dev}")"
 
   local out rc
   v2k_linux_bootstrap_run_event "cmd_vgchange_activate" out rc -- \
@@ -688,7 +729,7 @@ v2k_linux_bootstrap_lvm_find_vgs_on_nbd() {
   local bn cfg
   [[ -n "${nbd_dev}" ]] || return 1
   bn="${nbd_dev##*/}"
-  cfg="devices { filter=[ \"a|^/dev/${bn}p[0-9]+$|\", \"a|^/dev/${bn}$|\", \"r|.*|\" ] }"
+  cfg="$(v2k_linux_bootstrap_lvm_cfg_for_nbd "${nbd_dev}")"
 
   # PV -> VG mapping from this device only
   # pvs output example: /dev/nbd8p3 rl
@@ -704,7 +745,7 @@ v2k_linux_bootstrap_lvm_activate_vg() {
 
   local bn cfg
   bn="${nbd_dev##*/}"
-  cfg="devices { filter=[ \"a|^/dev/${bn}p[0-9]+$|\", \"a|^/dev/${bn}$|\", \"r|.*|\" ] }"
+  cfg="$(v2k_linux_bootstrap_lvm_cfg_for_nbd "${nbd_dev}")"
 
   # [CRITICAL ADDITION] VG Name Collision Locking
   # If multiple VMs have the same VG name (e.g. "rl"), we MUST serialize activation.
@@ -773,7 +814,7 @@ v2k_linux_bootstrap_try_mount_lvm() {
   [[ -n "${nbd_dev}" ]] || return 1
   bn="${nbd_dev##*/}"
   # [Isolation] global_filter ensures no PVID collisions during this serialized session
-  cfg="devices { global_filter=[ \"a|^/dev/${bn}|\", \"r|.*|\" ] filter=[ \"a|^/dev/${bn}|\", \"r|.*|\" ] }"
+  cfg="$(v2k_linux_bootstrap_lvm_cfg_for_nbd "${nbd_dev}")"
 
   v2k_event INFO "linux_bootstrap" "" "lvm_debug_pre" \
     "$(v2k_linux_bootstrap_json \
@@ -851,19 +892,43 @@ v2k_linux_bootstrap_try_mount_lvm() {
 
   # [Step 4] Mount Logic
   local lvlist_raw
-  lvlist_raw="$(lvm lvs --config "${cfg}" --noheadings -o vg_name,lv_name 2>/dev/null || true)"
+  lvlist_raw="$(lvm lvs --config "${cfg}" --noheadings --separator '|' -o vg_name,lv_name,lv_path,devices 2>/dev/null || true)"
 
-  while read -r vg lvname; do
+  while IFS='|' read -r vg lvname lvpath devices; do
     vg="$(printf '%s' "${vg}" | awk '{$1=$1};1')"
     lvname="$(printf '%s' "${lvname}" | awk '{$1=$1};1')"
+    lvpath="$(printf '%s' "${lvpath:-}" | awk '{$1=$1};1')"
+    devices="$(printf '%s' "${devices:-}" | awk '{$1=$1};1')"
     [[ -n "${vg}" && -n "${lvname}" ]] || continue
 
-    local lv="/dev/${vg}/${lvname}"
+    if [[ "${devices}" != *"/dev/${bn}"* && "${devices}" != *"/dev/${bn}p"* ]]; then
+      v2k_event WARN "linux_bootstrap" "" "lvm_lv_rejected_devices_not_on_nbd" \
+        "$(v2k_linux_bootstrap_json \
+          --arg vg "${vg}" \
+          --arg lv "${lvname}" \
+          --arg devices "${devices}" \
+          --arg nbd "${nbd_dev}" \
+          '{vg:$vg,lv:$lv,devices:$devices,nbd:$nbd}')"
+      continue
+    fi
+
+    local lv="${lvpath:-/dev/${vg}/${lvname}}"
     
     if ! v2k_linux_bootstrap_wait_blockdev "${lv}" 10; then
       continue
     fi
     udevadm settle >/dev/null 2>&1 || true
+
+    if ! v2k_linux_bootstrap_dev_under_nbd "${lv}" "${nbd_dev}"; then
+      v2k_event ERROR "linux_bootstrap" "" "lvm_lv_path_collision" \
+        "$(v2k_linux_bootstrap_json \
+          --arg lv "${lv}" \
+          --arg nbd "${nbd_dev}" \
+          --arg devices "${devices}" \
+          --arg note "LV path exists but is not under the current NBD" \
+          '{lv:$lv,nbd:$nbd,devices:$devices,note:$note}')"
+      continue
+    fi
 
     v2k_linux_bootstrap_umount_robust "${mnt}" --recursive >/dev/null 2>&1 || true
 
@@ -872,6 +937,19 @@ v2k_linux_bootstrap_try_mount_lvm() {
       v2k_linux_bootstrap_mount_robust "${lv}" "${mnt}" "ro"
 
     if [[ "${mrc}" -ne 0 ]]; then
+      continue
+    fi
+
+    local mounted_src
+    mounted_src="$(findmnt -rn -o SOURCE --target "${mnt}" 2>/dev/null || true)"
+    if [[ -z "${mounted_src}" ]] || ! v2k_linux_bootstrap_dev_under_nbd "${mounted_src}" "${nbd_dev}"; then
+      v2k_event ERROR "linux_bootstrap" "" "mounted_source_not_on_nbd" \
+        "$(v2k_linux_bootstrap_json \
+          --arg lv "${lv}" \
+          --arg mounted_src "${mounted_src}" \
+          --arg nbd "${nbd_dev}" \
+          '{lv:$lv,mounted_src:$mounted_src,nbd:$nbd}')"
+      v2k_linux_bootstrap_umount_robust "${mnt}" >/dev/null 2>&1 || true
       continue
     fi
 
@@ -886,7 +964,7 @@ v2k_linux_bootstrap_try_mount_lvm() {
       return 0
     fi
     v2k_linux_bootstrap_umount_robust "${mnt}" >/dev/null 2>&1 || true
-  done < <(printf '%s\n' "${lvlist_raw}" | awk '{$1=$1}; NF>=2 {print $1, $2}')
+  done < <(printf '%s\n' "${lvlist_raw}")
 
   return 1
 }
@@ -898,7 +976,7 @@ v2k_linux_bootstrap_lvm_deactivate() {
   local bn cfg
   [[ -n "${nbd_dev}" ]] || return 0
   bn="${nbd_dev##*/}"
-  cfg="devices { filter=[ \"a|^/dev/${bn}p[0-9]+$|\", \"a|^/dev/${bn}$|\", \"r|.*|\" ] }"
+  cfg="$(v2k_linux_bootstrap_lvm_cfg_for_nbd "${nbd_dev}")"
   lvm vgchange --config "${cfg}" -an >/dev/null 2>&1 || true
 }
 
@@ -1053,10 +1131,12 @@ v2k_linux_bootstrap_one() {
       local bn cfg lvm_out lvm_rc
       bn="${nbd_dev##*/}"
       # Target ONLY this NBD for deactivation
-      cfg="devices { global_filter=[ \"a|^/dev/${bn}|\", \"r|.*|\" ] filter=[ \"a|^/dev/${bn}|\", \"r|.*|\" ] }"
+      cfg="$(v2k_linux_bootstrap_lvm_cfg_for_nbd "${nbd_dev}")"
 
-      v2k_linux_bootstrap_run_event "cmd_lvm_vgchange_deactivate" lvm_out lvm_rc -- \
-        lvm vgchange --config "${cfg}" -an
+      if v2k_has_lvm_tools; then
+        v2k_linux_bootstrap_run_event "cmd_lvm_vgchange_deactivate" lvm_out lvm_rc -- \
+          lvm vgchange --config "${cfg}" -an
+      fi
 
       # 1. Remove DM holders that still reference this NBD device.
       for holder in /sys/block/${bn}/holders/*; do
@@ -1117,8 +1197,11 @@ v2k_linux_bootstrap_one() {
       # We use a filter that accepts NBDs so LVM *looks* for them,
       # finds nothing, and updates the cache to "missing".
       # --------------------------------------------------------
-      local refresh_cfg="devices { filter=[ \"a|^/dev/${bn}(p[0-9]+)?$|\", \"r|.*|\" ] }"
-      lvm pvscan --config "${refresh_cfg}" --cache >/dev/null 2>&1 || true
+      local refresh_cfg
+      refresh_cfg="$(v2k_linux_bootstrap_lvm_cfg_for_nbd "${nbd_dev}")"
+      if v2k_has_lvm_tools; then
+        lvm pvscan --config "${refresh_cfg}" --cache >/dev/null 2>&1 || true
+      fi
       # --------------------------------------------------------
     fi
 
@@ -1231,15 +1314,21 @@ v2k_linux_bootstrap_one() {
 
       # 3. Clean up the zombie NBD itself
       if ls "${z_dev}"p* >/dev/null 2>&1; then
-          local wipe_cfg="devices { global_filter=[ \"a|^/dev/${z_bn}|\", \"r|.*|\" ] filter=[ \"a|^/dev/${z_bn}|\", \"r|.*|\" ] }"
-          lvm vgchange --config "${wipe_cfg}" -an >/dev/null 2>&1 || true
+          local wipe_cfg
+          wipe_cfg="$(v2k_linux_bootstrap_lvm_cfg_for_nbd "${z_dev}")"
+          if v2k_has_lvm_tools; then
+            lvm vgchange --config "${wipe_cfg}" -an >/dev/null 2>&1 || true
+          fi
           qemu-nbd -d "${z_dev}" >/dev/null 2>&1 || true
       fi
   done
 
   # 4. Bootstrap-range cache refresh only.
-  local pre_refresh_cfg="devices { filter=[ \"a|^/dev/(${bootstrap_alt})(p[0-9]+)?$|\", \"r|.*|\" ] }"
-  lvm pvscan --config "${pre_refresh_cfg}" --cache >/dev/null 2>&1 || true
+  local pre_refresh_cfg
+  pre_refresh_cfg="$(v2k_linux_bootstrap_lvm_range_cfg "${bootstrap_alt}")"
+  if v2k_has_lvm_tools; then
+    lvm pvscan --config "${pre_refresh_cfg}" --cache >/dev/null 2>&1 || true
+  fi
   
   udevadm settle >/dev/null 2>&1 || true
   sleep 0.5
@@ -1262,14 +1351,36 @@ local qout qrc
     return $?
   fi
 
+  if v2k_has_lvm_tools; then
+    if [[ -n "${LVM_SYSTEM_DIR-}" ]]; then
+      had_old_lvm_system_dir=1
+      old_lvm_system_dir="${LVM_SYSTEM_DIR}"
+    else
+      had_old_lvm_system_dir=0
+      old_lvm_system_dir=""
+    fi
+    v2k_linux_bootstrap_setup_lvm_system_dir "${nbd_dev}" lvm_sysdir
+    export LVM_SYSTEM_DIR="${lvm_sysdir}"
+    v2k_event INFO "linux_bootstrap" "" "lvm_system_dir_ready" \
+      "$(v2k_linux_bootstrap_json \
+        --arg nbd "${nbd_dev}" \
+        --arg lvm_system_dir "${lvm_sysdir}" \
+        --arg note "private LVM_SYSTEM_DIR with use_devicesfile=0" \
+        '{nbd:$nbd,lvm_system_dir:$lvm_system_dir,note:$note}')"
+  fi
+
   # -----------------------------------------------------------------------------
   # [FIX] Host LVM/udev Interference Mitigation (Rocky Linux Fix)
   # Stop host udev/LVM from auto-activating the guest rl VG as soon as the NBD is connected.
   # -----------------------------------------------------------------------------
   udevadm settle >/dev/null 2>&1 || true
+  local nbd_lvm_cfg
+  nbd_lvm_cfg="$(v2k_linux_bootstrap_lvm_cfg_for_nbd "${nbd_dev}")"
   
   # 1. Immediately deactivate any VG activated from this NBD device.
-  lvm vgchange --config "devices { filter=[ \"a|^${nbd_dev}|\", \"r|.*|\" ] }" -an >/dev/null 2>&1 || true
+  if v2k_has_lvm_tools; then
+    lvm vgchange --config "${nbd_lvm_cfg}" -an >/dev/null 2>&1 || true
+  fi
 
   # 2. Force-remove Device Mapper holders created by accidental host-side activation.
   # This avoids conflicts such as duplicate /dev/mapper/rl-root names.
@@ -1284,7 +1395,9 @@ local qout qrc
   done
 
   # 3. Refresh the LVM cache so the host stops treating the guest device as active.
-  lvm pvscan --config "devices { filter=[ \"a|^${nbd_dev}|\", \"r|.*|\" ] }" --cache >/dev/null 2>&1 || true
+  if v2k_has_lvm_tools; then
+    lvm pvscan --config "${nbd_lvm_cfg}" --cache >/dev/null 2>&1 || true
+  fi
   # -----------------------------------------------------------------------------
 
   local pout prc
@@ -1305,19 +1418,6 @@ local qout qrc
       pt_attempt=$((pt_attempt+1))
   done
 
-  if v2k_has_lvm_tools; then
-    if [[ -n "${LVM_SYSTEM_DIR-}" ]]; then
-      had_old_lvm_system_dir=1
-      old_lvm_system_dir="${LVM_SYSTEM_DIR}"
-    else
-      had_old_lvm_system_dir=0
-      old_lvm_system_dir=""
-    fi
-    lvm_sysdir="$(mktemp -d /tmp/v2k_lvm.XXXXXX)"
-    chmod 700 "${lvm_sysdir}" >/dev/null 2>&1 || true
-    export LVM_SYSTEM_DIR="${lvm_sysdir}"
-  fi
-
   local root_dev=""
   root_dev="$(v2k_linux_bootstrap_try_mount_partitions "${nbd_dev}" "${mnt}" || true)"
   if [[ -z "${root_dev}" ]]; then
@@ -1330,6 +1430,20 @@ local qout qrc
   fi
 
   local rout rrc
+  if [[ "${root_dev}" == "${nbd_dev}"p* ]]; then
+    :
+  elif v2k_linux_bootstrap_dev_under_nbd "${root_dev}" "${nbd_dev}"; then
+    :
+  else
+    v2k_event ERROR "linux_bootstrap" "" "root_dev_not_on_nbd" \
+      "$(v2k_linux_bootstrap_json \
+        --arg root_dev "${root_dev}" \
+        --arg nbd "${nbd_dev}" \
+        --arg note "refusing to mount root device outside current NBD" \
+        '{root_dev:$root_dev,nbd:$nbd,note:$note}')"
+    finish 80
+    return $?
+  fi
   v2k_linux_bootstrap_wait_blockdev "${root_dev}" 5 || true
   v2k_linux_bootstrap_run_event "mount_root_rw" rout rrc -- \
     v2k_linux_bootstrap_mount_robust "${root_dev}" "${mnt}" "rw"
