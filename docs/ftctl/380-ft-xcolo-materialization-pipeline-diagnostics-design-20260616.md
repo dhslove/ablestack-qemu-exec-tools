@@ -457,3 +457,25 @@ cloud_runtime_restore_needs_reconcile=yes
 
 The qemu-side code must not update Cloud DB directly. It records the runtime
 truth and leaves Cloud-managed lifecycle reconciliation to Cloud/Mold service.
+
+## Run 124 Addendum: Post-Migrate Secondary Crash Safe-Fail
+
+Run 123 intentionally allowed `generated=True,argv=True,qtree=True,pci=False`
+before primary migration because an incoming-deferred secondary may not have
+complete PCI resource materialization until the incoming stream is accepted.
+
+That does not make a post-migrate secondary crash acceptable. If primary
+`query-migrate` reaches `colo` and the secondary QMP path disappears or the
+secondary QEMU log contains `memory_region_add_subregion_common`, FTCTL must
+fail fast as a post-migrate secondary crash and preserve evidence for the next
+runtime topology-equality fix.
+
+The detailed design is recorded in:
+
+```text
+docs/ftctl/400-ft-xcolo-post-migrate-secondary-crash-safe-fail-design-20260618.md
+```
+
+This addendum does not change the generated manifest contract. It adds a
+safe-fail guard and evidence capture for the runtime materialization gap that
+remains after primary migration begins.

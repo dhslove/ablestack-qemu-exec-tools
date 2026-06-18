@@ -3446,6 +3446,64 @@ ftctl_xcolo_secondary_qemu_assert_memory_region_container_observed() {
   return 1
 }
 
+ftctl_xcolo_post_migrate_secondary_failure_detected() {
+  local vm="${1-}"
+  local secondary_vm="${2-}"
+  local phase="${3:-role_transition}"
+  local primary_migrate="" secondary_migrate="" primary_status="" secondary_status=""
+  local primary_colo="" query_state="" query_transient="" reason=""
+
+  [[ -n "${vm}" && -n "${secondary_vm}" ]] || return 1
+
+  primary_migrate="$(ftctl_state_get "${vm}" "xcolo_post_migrate_${phase}_primary_migrate_status" 2>/dev/null || true)"
+  secondary_migrate="$(ftctl_state_get "${vm}" "xcolo_post_migrate_${phase}_secondary_migrate_status" 2>/dev/null || true)"
+  primary_status="$(ftctl_state_get "${vm}" "xcolo_post_migrate_${phase}_primary_status" 2>/dev/null || true)"
+  secondary_status="$(ftctl_state_get "${vm}" "xcolo_post_migrate_${phase}_secondary_status" 2>/dev/null || true)"
+  primary_colo="$(ftctl_state_get "${vm}" "xcolo_post_migrate_${phase}_primary_colo_mode" 2>/dev/null || true)"
+  query_state="$(ftctl_state_get "${vm}" "xcolo_post_migrate_${phase}_chardev_contract_query_state" 2>/dev/null || true)"
+  query_transient="$(ftctl_state_get "${vm}" "xcolo_post_migrate_${phase}_chardev_contract_query_transient" 2>/dev/null || true)"
+
+  case "${primary_migrate}:${primary_colo}:${primary_status}" in
+    colo:*|*:primary:*) ;;
+    *) return 1 ;;
+  esac
+
+  if [[ -n "${secondary_migrate}" && -n "${secondary_status}" &&
+        "${query_state}" != *"secondary_query_failed"* &&
+        "${query_transient}" != "yes" ]]; then
+    return 1
+  fi
+
+  ftctl_xcolo_capture_post_migrate_secondary_failure_evidence "${vm}" "${secondary_vm}" "post_migrate_${phase}_secondary_failure" || true
+  if ftctl_xcolo_secondary_qemu_assert_memory_region_container_observed "${vm}" "${secondary_vm}"; then
+    reason="secondary_qemu_assert_memory_region_container"
+    ftctl_state_set "${vm}" \
+      "xcolo_secondary_qemu_assert=memory_region_add_subregion_common" \
+      "xcolo_repeated_failure_signature=memory_region_add_subregion_common" \
+      "last_error=xcolo_secondary_qemu_assert_memory_region_container"
+  else
+    reason="secondary_runtime_missing_after_migrate"
+    ftctl_state_set "${vm}" \
+      "last_error=xcolo_post_migrate_secondary_runtime_missing"
+  fi
+
+  ftctl_state_set "${vm}" \
+    "xcolo_post_migrate_secondary_failure_detected=yes" \
+    "xcolo_post_migrate_secondary_failure_phase=${phase}" \
+    "xcolo_post_migrate_secondary_failure_reason=${reason}" \
+    "xcolo_post_migrate_secondary_failure_primary_migrate=${primary_migrate}" \
+    "xcolo_post_migrate_secondary_failure_primary_status=${primary_status}" \
+    "xcolo_post_migrate_secondary_failure_primary_colo=${primary_colo}" \
+    "xcolo_post_migrate_secondary_failure_secondary_migrate=${secondary_migrate}" \
+    "xcolo_post_migrate_secondary_failure_secondary_status=${secondary_status}" \
+    "xcolo_post_migrate_secondary_failure_query_state=${query_state}" \
+    "xcolo_post_migrate_secondary_failure_query_transient=${query_transient}" \
+    "xcolo_primary_safe_fail_recovery_required=yes"
+  ftctl_log_event "colo" "xcolo.post_migrate_secondary_failure" "fail" "${vm}" "" \
+    "phase=${phase} reason=${reason} primary_migrate=${primary_migrate} primary_status=${primary_status} secondary_migrate=${secondary_migrate} secondary_status=${secondary_status} query_state=${query_state}"
+  return 0
+}
+
 ftctl_xcolo_analyze_runtime_topology_diff() {
   local vm="${1-}"
   local phase="${2:-post_migrate_secondary_crash}"
@@ -5310,10 +5368,9 @@ ftctl_xcolo_validate_pair_runtime() {
     secondary_block_graph="$(ftctl_state_get "${vm}" "xcolo_secondary_block_graph_ready" 2>/dev/null || true)"
     secondary_block_graph_reason="$(ftctl_state_get "${vm}" "xcolo_secondary_block_graph_reason" 2>/dev/null || true)"
 
-    if [[ ( "${primary_migrate}" == "active" || "${primary_migrate}" == "colo" ||
+    if [[ ( "${primary_migrate}" == "colo" ||
             "${primary_colo}" == "primary" || "${primary_status}" == "finish-migrate" ) &&
-          ( "${secondary_running}" != "true" || "${secondary_xml}" != "ok" ||
-            -z "${secondary_migrate}" || -z "${secondary_status}" ) ]]; then
+          ( -z "${secondary_migrate}" || -z "${secondary_status}" ) ]]; then
       ftctl_xcolo_capture_post_migrate_secondary_failure_evidence "${vm}" "${secondary_vm}" "post_migrate_secondary_crash" || true
       if ftctl_xcolo_secondary_qemu_assert_memory_region_container_observed "${vm}" "${secondary_vm}"; then
         reason="secondary_qemu_assert_memory_region_container"
@@ -5700,6 +5757,9 @@ ftctl_xcolo_recover_runtime_convergence_failure() {
     "transport_state=failed" \
     "active_side=primary" \
     "standby_state=stopped" \
+    "xcolo_primary_safe_fail_recovery=restored_from_backup" \
+    "xcolo_primary_safe_fail_recovery_cause=${reason}" \
+    "cloud_runtime_restore_needs_reconcile=yes" \
     "xcolo_last_runtime_error=${reason}" \
     "last_error=${reason}"
   ftctl_log_event "colo" "xcolo.runtime_recover" "ok" "${vm}" "" \
@@ -9444,6 +9504,19 @@ ftctl_xcolo_wait_post_migrate_role_transition() {
       "xcolo_post_migrate_role_transition_secondary_status=${secondary_status}" \
       "xcolo_post_migrate_role_transition_chardev_query_state=${query_state}" \
       "xcolo_post_migrate_role_transition_chardev_query_transient=${query_transient}"
+
+    if ftctl_xcolo_post_migrate_secondary_failure_detected "${vm}" "${secondary_vm}" "role_transition"; then
+      failure_reason="$(ftctl_state_get "${vm}" "xcolo_post_migrate_secondary_failure_reason" 2>/dev/null || true)"
+      [[ -n "${failure_reason}" ]] || failure_reason="secondary_runtime_missing_after_migrate"
+      ftctl_state_set "${vm}" \
+        "xcolo_post_migrate_role_transition_gate=failed" \
+        "xcolo_post_migrate_role_transition_reason=${failure_reason}" \
+        "xcolo_protocol_failure_phase=post_migrate_secondary_crash" \
+        "xcolo_primary_filter_activation_failed_reason=${failure_reason}"
+      ftctl_log_event "colo" "xcolo.post_migrate_role_transition_gate" "fail" "${vm}" "" \
+        "reason=${failure_reason} attempts=$((i + 1)) primary_migrate=${primary_migrate} secondary_migrate=${secondary_migrate} query_state=${query_state}"
+      return 1
+    fi
 
     if [[ "${invalid_message}" == "yes" ]]; then
       failure_reason="invalid_message_after_migrate"

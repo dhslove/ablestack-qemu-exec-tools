@@ -7976,3 +7976,80 @@ xcolo_pre_migrate_secondary_pci_resource_unmaterialized
 
 If `memory_region_add_subregion_common` appears again, this change failed to
 contain the unsafe migration entry point and must be treated as a regression.
+
+## Run 124 - Post-Migrate Secondary Crash After Receiver Gate Split
+
+After deploying the receiver-gate split, the user started another FT protection
+test for `r97-link-01`.
+
+### Result
+
+The run progressed further than the previous pre-migrate failures:
+
+```text
+ftctl_protection.id=121
+secondary_vm_id=186
+primary_vm=i-2-54-VM
+secondary_vm=i-2-186-VM
+primary query-migrate=status: colo
+xcolo_secondary_migrate_incoming=ok
+xcolo_secondary_incoming_materialization=deferred_expected
+xcolo_pre_migrate_receiver_ready=ok
+```
+
+However, the final result was still failure:
+
+```text
+protection_state=pairing
+transport_state=planned
+active_side=secondary
+last_error=xcolo_live_pci_identity_unmaterialized
+```
+
+The primary VM remained paused in COLO while the secondary runtime disappeared.
+The secondary libvirt log showed:
+
+```text
+qemu-kvm: ../system/memory.c:2666: memory_region_add_subregion_common:
+Assertion `!subregion->container' failed.
+shutting down, reason=crashed
+```
+
+### Repetition Check
+
+This is a repeated post-migrate secondary QEMU assertion, not a new network
+issue. The useful progress is that the system reached the actual post-migrate
+COLO phase instead of stopping before `migrate-incoming`.
+
+The remaining blocker is still runtime materialization equality. Static
+generated manifest equality and startup intent are not enough; the secondary
+runtime must materialize the same migration ABI after the primary migration
+stream is applied.
+
+### Required Fix
+
+The next implementation must not claim topology equality is solved. It must:
+
+1. detect secondary post-migrate crash during the role-transition loop instead
+   of waiting for the whole timeout;
+2. record the repeated failure signature:
+
+   ```text
+   xcolo_repeated_failure_signature=memory_region_add_subregion_common
+   ```
+
+3. mark primary recovery requirement:
+
+   ```text
+   xcolo_primary_safe_fail_recovery_required=yes
+   ```
+
+4. leave evidence for the next topology-equality fix:
+   generated manifest, live argv, qtree, `info pci`, mtree, chardev, socket,
+   and secondary QEMU log tail.
+
+The design for this safe-fail improvement is:
+
+```text
+docs/ftctl/400-ft-xcolo-post-migrate-secondary-crash-safe-fail-design-20260618.md
+```

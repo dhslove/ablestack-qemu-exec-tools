@@ -154,7 +154,26 @@ selftest_mock_xcolo_primary_channels_ready() {
       "xcolo_primary_filter_qom_comp0_path=/objects/comp0"
   }
   # shellcheck disable=SC2317
+  ftctl_xcolo_collect_primary_filter_qom_state() {
+    local vm="${1-}"
+    ftctl_state_set "${vm}" \
+      "xcolo_primary_filter_qom_ready=yes" \
+      "xcolo_primary_filter_qom_reason=" \
+      "xcolo_primary_filter_qom_m0_path=/objects/m0" \
+      "xcolo_primary_filter_qom_redire0_path=/objects/redire0" \
+      "xcolo_primary_filter_qom_redire1_path=/objects/redire1" \
+      "xcolo_primary_filter_qom_comp0_path=/objects/comp0"
+  }
+  # shellcheck disable=SC2317
   ftctl_xcolo_require_primary_filter_cmdline_ready() {
+    local vm="${1-}"
+    ftctl_state_set "${vm}" \
+      "xcolo_primary_filter_cmdline_ready=yes" \
+      "xcolo_primary_filter_cmdline_reason=" \
+      "xcolo_primary_filter_cmdline_expected_netdev=hostnet0"
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_collect_primary_filter_cmdline_state() {
     local vm="${1-}"
     ftctl_state_set "${vm}" \
       "xcolo_primary_filter_cmdline_ready=yes" \
@@ -4819,6 +4838,72 @@ selftest_case_xcolo_live_pci_incoming_fails_after_migrate() (
     "post-migrate incoming PCI identity error"
 )
 
+selftest_case_xcolo_post_migrate_secondary_crash_fails_fast() (
+  selftest_reset_env
+  selftest_info "x-colo post-migrate secondary crash fails fast"
+
+  local vm="xcolo-post-migrate-secondary-crash"
+  local secondary_vm="${vm}-standby"
+  local rc=0
+
+  ftctl_state_init_vm "${vm}"
+  FTCTL_DRY_RUN="0"
+  FTCTL_XCOLO_POST_MIGRATE_ROLE_TRANSITION_WAIT_SEC="5"
+  FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
+  FTCTL_PROFILE_SECONDARY_URI="qemu:///system"
+
+  # shellcheck disable=SC2317
+  ftctl_xcolo_capture_post_migrate_transition_state() {
+    local _vm="${1}" _secondary_vm="${2}" phase="${3}"
+    : "${_secondary_vm}"
+    ftctl_state_set "${_vm}" \
+      "xcolo_post_migrate_${phase}_primary_migrate_status=colo" \
+      "xcolo_post_migrate_${phase}_secondary_migrate_status=" \
+      "xcolo_post_migrate_${phase}_primary_status=paused" \
+      "xcolo_post_migrate_${phase}_secondary_status=" \
+      "xcolo_post_migrate_${phase}_primary_colo_mode=primary" \
+      "xcolo_post_migrate_${phase}_secondary_colo_mode=" \
+      "xcolo_post_migrate_${phase}_invalid_message=no" \
+      "xcolo_post_migrate_${phase}_chardev_contract_ready=no" \
+      "xcolo_post_migrate_${phase}_chardev_contract_reason=mirror_path_secondary_red0=query_failed" \
+      "xcolo_post_migrate_${phase}_chardev_contract_query_state=secondary_query_failed" \
+      "xcolo_post_migrate_${phase}_chardev_contract_query_transient=yes"
+  }
+
+  # shellcheck disable=SC2317
+  ftctl_xcolo_capture_post_migrate_secondary_failure_evidence() {
+    local _vm="${1}" _secondary_vm="${2}" phase="${3}"
+    : "${_secondary_vm}"
+    ftctl_state_set "${_vm}" \
+      "xcolo_post_migrate_failure_evidence_phase=${phase}" \
+      "xcolo_post_migrate_failure_evidence_captured=yes"
+  }
+
+  # shellcheck disable=SC2317
+  ftctl_xcolo_secondary_qemu_assert_memory_region_container_observed() {
+    local _vm="${1}" _secondary_vm="${2}"
+    : "${_secondary_vm}"
+    ftctl_state_set "${_vm}" \
+      "xcolo_secondary_qemu_assert=memory_region_add_subregion_common" \
+      "xcolo_secondary_crash_detected=yes"
+    return 0
+  }
+
+  ftctl_xcolo_wait_post_migrate_role_transition "${vm}" "${secondary_vm}" || rc=$?
+
+  selftest_assert_eq "${rc}" "1" "secondary crash must fail role transition"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_post_migrate_role_transition_attempts")" \
+    "1" "secondary crash should fail fast"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_post_migrate_role_transition_reason")" \
+    "secondary_qemu_assert_memory_region_container" "secondary assertion reason recorded"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_protocol_failure_phase")" \
+    "post_migrate_secondary_crash" "post-migrate secondary crash phase recorded"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_primary_safe_fail_recovery_required")" \
+    "yes" "primary safe-fail recovery marker recorded"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_repeated_failure_signature")" \
+    "memory_region_add_subregion_common" "repeated failure signature recorded"
+)
+
 selftest_write_xcolo_generated_manifest_xml() {
   local path="${1-}"
   local vm_name="${2-}"
@@ -5167,6 +5252,7 @@ selftest_main() {
   selftest_case_xcolo_mtree_zero_alias_fails_after_migrate
   selftest_case_xcolo_live_pci_incoming_fails_before_migrate
   selftest_case_xcolo_live_pci_incoming_fails_after_migrate
+  selftest_case_xcolo_post_migrate_secondary_crash_fails_fast
   selftest_case_xcolo_generated_pci_manifest_pair_ok
   selftest_case_xcolo_generated_pci_manifest_pair_mismatch
   selftest_case_xcolo_materialization_pipeline_reports_argv_missing
