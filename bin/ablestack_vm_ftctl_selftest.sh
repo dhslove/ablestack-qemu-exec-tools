@@ -4765,7 +4765,7 @@ EOF
 
 selftest_case_xcolo_live_pci_incoming_fails_before_migrate() (
   selftest_reset_env
-  selftest_info "x-colo incoming secondary PCI identity defers before migrate"
+  selftest_info "x-colo incoming secondary PCI identity fails before migrate"
 
   local vm="xcolo-live-pci-pre-fail"
   local phase="before_migrate"
@@ -4792,15 +4792,18 @@ selftest_case_xcolo_live_pci_incoming_fails_before_migrate() (
   }
 
   ftctl_xcolo_verify_live_runtime_topology_pair "${vm}" "${vm}-standby" "${phase}" || rc=$?
-  selftest_assert_eq "${rc}" "0" "incoming PCI identity must defer before migrate"
+  selftest_assert_eq "${rc}" "1" "incoming PCI identity must fail before migrate"
   selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_live_runtime_topology")" \
-    "deferred" "pre-migrate incoming PCI identity deferred"
+    "failed" "pre-migrate incoming PCI identity failed"
   selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_live_pci_identity")" \
-    "deferred" "pre-migrate live PCI identity deferred"
+    "failed" "pre-migrate live PCI identity failed"
   selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_pre_migrate_pci_materialization_deferred")" \
-    "yes" "pre-migrate materialization deferred marker enabled"
+    "no" "pre-migrate materialization deferred marker disabled"
   selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_protocol_failure_phase")" \
-    "" "pre-migrate deferred materialization is not a failure phase"
+    "pre_migrate_materialization" "pre-migrate materialization is a failure phase"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" \
+    "xcolo_pre_migrate_secondary_pci_resource_unmaterialized" \
+    "pre-migrate unmaterialized PCI resource error recorded"
 )
 
 selftest_case_xcolo_live_pci_incoming_fails_after_migrate() (

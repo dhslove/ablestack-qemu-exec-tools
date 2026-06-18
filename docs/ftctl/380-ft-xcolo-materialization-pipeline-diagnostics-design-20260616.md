@@ -401,21 +401,22 @@ The observed secondary state is valid for an incoming-deferred domain:
 - `info pci` still reports bridges with `secondary bus 0`, IRQ `0`, and unmapped
   BARs.
 
-This must not be treated as a pre-migrate hard failure. It means the secondary
-has startup intent, but PCI resource materialization is deferred until incoming
-migration is started.
+Run 125 supersedes the following Run 123 assumption. The observed secondary
+state was initially treated as startup intent, but later tests proved that this
+condition is not safe for QEMU 9.2.4 in the FTCTL cold-conversion path.
 
 ### Revised Gate Model
 
 1. **Startup intent gate**
    - Hard-require generated/argv/qtree/block graph/chardev presence.
-   - Accept `generated:True,argv:True,qtree:True,pci:False` as expected
-     deferred PCI materialization.
-   - Record:
+   - Do not accept `generated:True,argv:True,qtree:True,pci:False` as expected
+     deferred PCI materialization. It means the secondary runtime is not yet
+     migration-ABI materialized enough for `primary.migrate`.
+   - Record failure instead of intent success:
 
    ```text
-   xcolo_secondary_startup_intent=ok
-   xcolo_secondary_startup_deferred_pci=yes
+   xcolo_secondary_startup_materialization=failed
+   last_error=xcolo_pre_migrate_secondary_pci_resource_unmaterialized
    ```
 
 2. **Secondary receiver gate**
@@ -429,10 +430,11 @@ migration is started.
    ```
 
 3. **Pre-migrate topology gate**
-   - Treat PCI/mtree resource unmaterialized evidence as a deferred condition
+   - Treat PCI/mtree resource unmaterialized evidence as a hard failure even
      when generated/argv/qtree all agree.
-   - Continue only if qtree/block/chardev intent is present.
-   - Do not assert final migration ABI from `info pci` at this point.
+   - Continue only if qtree/block/chardev intent is present and the live
+     `info pci`/mtree materialization is already migration-compatible.
+   - Assert the migration ABI before `primary.migrate`.
 
 4. **Post-migrate materialization gate**
    - After `primary.migrate`, enforce the full materialization contract:
@@ -479,3 +481,35 @@ docs/ftctl/400-ft-xcolo-post-migrate-secondary-crash-safe-fail-design-20260618.m
 This addendum does not change the generated manifest contract. It adds a
 safe-fail guard and evidence capture for the runtime materialization gap that
 remains after primary migration begins.
+
+## Run 125 Addendum: Pre-Migrate PCI Materialization Is A Hard Gate
+
+Run 124 showed that allowing `generated=True,argv=True,qtree=True,pci=False`
+past the pre-migrate checks still lets QEMU reach a post-migrate crash path:
+
+```text
+memory_region_add_subregion_common: Assertion `!subregion->container' failed
+Can't receive COLO message: Input/output error
+```
+
+The safe-fail marker added in Run 124 worked, but it is only a last-resort
+guard. It does not make the topology safe. The corrected rule is:
+
+```text
+generated=True, argv=True, qtree=True, pci=False -> hard fail before primary.migrate
+```
+
+The failure must be recorded as:
+
+```text
+xcolo_live_runtime_topology=failed
+xcolo_live_pci_identity=failed
+xcolo_pre_migrate_pci_materialization_deferred=no
+xcolo_protocol_failure_phase=pre_migrate_materialization
+last_error=xcolo_pre_migrate_secondary_pci_resource_unmaterialized
+```
+
+This is intentionally not a full topology-equality fix. It prevents unsafe
+migration while preserving the evidence required to continue the real fix:
+making the secondary live QEMU runtime materialize the same PCI/mtree ABI as
+the primary before migration begins.

@@ -8053,3 +8053,64 @@ The design for this safe-fail improvement is:
 ```text
 docs/ftctl/400-ft-xcolo-post-migrate-secondary-crash-safe-fail-design-20260618.md
 ```
+
+## Run 125 - Reclassify Pre-Migrate PCI Materialization Gap As Hard Failure
+
+After deploying the Run 124 safe-fail guard, the user started another FT
+protection test for `r97-link-01`.
+
+### Result
+
+The new safe-fail path worked: FTCTL recorded a specific failure instead of a
+generic timeout.
+
+```text
+ftctl_protection.id=122
+primary_vm=i-2-54-VM
+secondary_vm=i-2-187-VM
+last_error=xcolo_secondary_qemu_assert_memory_region_container
+```
+
+The preserved pre-migrate evidence showed the same materialization family:
+
+```text
+xcolo_guest_abi_manifest=ok
+xcolo_generated_pci_manifest=ok
+xcolo_materialization_failure_layer=pci_missing
+xcolo_materialization_first_missing_id=scsi0-0-0-0
+xcolo_materialization_first_missing_path=generated:True,argv:True,qtree:True,pci:False
+```
+
+### Repetition Check
+
+This is a repeated issue. It is not a new disk, firewall, or command-line
+generation problem. The code was still allowing a secondary runtime whose live
+PCI resources were not materialized to pass into `primary.migrate`.
+
+### Corrected Rule
+
+The prior defer hypothesis is now rejected for this QEMU 9.2.4 FTCTL path:
+
+```text
+generated=True, argv=True, qtree=True, pci=False -> hard fail before primary.migrate
+```
+
+Expected safe failure when topology is still incomplete:
+
+```text
+conversion_stage=pre_migrate_live_topology_failed
+last_error=xcolo_pre_migrate_secondary_pci_resource_unmaterialized
+```
+
+Unexpected regression:
+
+```text
+memory_region_add_subregion_common
+Can't receive COLO message: Input/output error
+```
+
+The design for this hard-gate correction is:
+
+```text
+docs/ftctl/401-ft-xcolo-pre-migrate-pci-materialization-hard-gate-design-20260618.md
+```
