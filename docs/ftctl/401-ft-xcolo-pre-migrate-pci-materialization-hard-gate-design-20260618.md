@@ -31,10 +31,11 @@ materialized PCI resource state. Treating that condition as deferred allowed
 
 ## Design Decision
 
-`generated=True,argv=True,qtree=True,pci=False` is not a safe defer condition in
-the QEMU 9.2.4 FTCTL cold-conversion path.
+`generated=True,argv=True,qtree=True,pci=False` is not a safe defer condition
+for a real PCI endpoint, bridge, or controller in the QEMU 9.2.4 FTCTL
+cold-conversion path.
 
-It is a hard pre-migrate failure:
+For that device class it is a hard pre-migrate failure:
 
 ```text
 xcolo_pre_migrate_secondary_pci_resource_unmaterialized
@@ -50,13 +51,19 @@ Before `primary.migrate`, all of the following must pass:
 1. generated primary/secondary manifest equality;
 2. command-line device presence for both QEMU processes;
 3. qtree device presence for both QEMU processes;
-4. PCI resource materialization for the secondary;
+4. PCI resource materialization for the secondary for PCI endpoints, bridges,
+   and controllers;
 5. mtree PCI bridge/resource materialization for the secondary;
 6. COLO channel and firewall readiness;
 7. secondary `migrate-incoming` readiness.
 
 If any PCI/mtree materialization gate fails, FTCTL must not run
 `primary.migrate`.
+
+Bus child devices such as `scsi-hd` are not direct PCI endpoints. They are
+covered by [403. FT XCOLO Bus Child Materialization Classification Design](403-ft-xcolo-bus-child-materialization-classification-design-20260619.md):
+they must exist in `qtree` with their parent controller, but they must not be
+required to appear directly in `info pci`.
 
 ## Implementation Plan
 

@@ -8232,3 +8232,58 @@ manual cleanup is required
 
 The intended next failure mode, if the operator selects an existing q35 VM, is
 an immediate Cloud API validation error with no new standby garbage.
+
+## Run 128 - COLO Reached, False PCI Failure On SCSI Bus Child
+
+After deploying the Cloud KVM machine override jar to the 32.x cluster agents
+and restarting `mold-agent`, the user recreated `r97-link-01` with an explicit
+FT-compatible machine contract:
+
+```text
+kvm.guest.os.machine.type=pc-i440fx-9.2
+primary_vm=i-2-193-VM
+secondary_vm=i-2-194-VM
+ftctl_protection.id=125
+```
+
+### Result
+
+This run improved beyond the previous repeated failures:
+
+- primary and secondary both used `pc-i440fx-9.2`;
+- COLO channels were established;
+- secondary `migrate-incoming` succeeded;
+- both migration states reached `colo`;
+- the older `Received invalid message 0x0000` / `Can't receive COLO message`
+  pair did not recur.
+
+The final state was still failed:
+
+```text
+protection_state=error
+transport_state=failed
+last_error=xcolo_post_migrate_pci_materialization_failed
+xcolo_materialization_failure_layer=pci_missing
+xcolo_materialization_first_missing_id=scsi0-0-0-0
+xcolo_materialization_first_missing_driver=scsi-hd
+xcolo_materialization_first_missing_path=generated:True,argv:True,qtree:True,pci:False
+```
+
+### Repetition Check
+
+This is not the older socket/protocol loop. It is a materialization classifier
+bug: `scsi-hd` is a SCSI bus child, not a direct PCI endpoint. It should be
+validated through generated manifest, qemu argv, qtree, and parent SCSI
+controller evidence, not direct `info pci` membership.
+
+### Design Update
+
+The corrective design is:
+
+```text
+docs/ftctl/403-ft-xcolo-bus-child-materialization-classification-design-20260619.md
+```
+
+The key rule is that the hard PCI gate from design 401 remains valid for real
+PCI endpoints/controllers/bridges, but bus child devices must not be failed
+solely because they do not appear as direct `info pci` rows.

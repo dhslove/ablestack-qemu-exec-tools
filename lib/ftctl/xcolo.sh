@@ -2722,6 +2722,76 @@ def zero_pci_aliases(raw):
 def path_string(parts):
     return ",".join(f"{key}:{value}" for key, value in parts)
 
+PCI_DRIVER_HINTS = (
+    "-pci",
+    "pci-bridge",
+    "pcie-root-port",
+    "pcie-pci-bridge",
+    "pcie-root",
+    "qemu-xhci",
+    "ich9-intel-hda",
+    "cirrus-vga",
+    "VGA",
+)
+BUS_CHILD_PARENT_PREFIXES = {
+    "scsi-hd": "scsi",
+    "scsi-cd": "scsi",
+    "scsi-generic": "scsi",
+    "virtserialport": "virtio-serial",
+    "virtconsole": "virtio-serial",
+}
+BUS_CHILD_DRIVERS = {
+    "ide-cd",
+    "ide-hd",
+    "isa-serial",
+    "usb-tablet",
+    "usb-kbd",
+    "usb-mouse",
+    "hda-duplex",
+    "hda-micro",
+    "hda-output",
+}
+
+def device_class(dev_id, driver, primary_pci, secondary_pci):
+    driver = str(driver or "")
+    if dev_id in primary_pci or dev_id in secondary_pci:
+        return "pci"
+    if any(hint in driver for hint in PCI_DRIVER_HINTS):
+        return "pci"
+    if driver in BUS_CHILD_PARENT_PREFIXES or driver in BUS_CHILD_DRIVERS:
+        return "bus_child"
+    if driver.startswith(("scsi-", "ide-", "usb-", "isa-")):
+        return "bus_child"
+    return "non_pci"
+
+def required_bus_parent(driver, dev_id, qtree):
+    prefix = BUS_CHILD_PARENT_PREFIXES.get(driver)
+    if not prefix:
+        return ""
+    if driver.startswith("scsi-"):
+        match = re.match(r"^(scsi\d+)-", dev_id)
+        if match:
+            parent = match.group(1)
+            if parent in qtree:
+                return parent
+        for candidate, item in qtree.items():
+            item_driver = str(item.get("driver", ""))
+            if candidate.startswith(prefix) or item_driver in {"virtio-scsi-pci", "virtio-scsi"}:
+                return candidate
+        return f"{prefix}*"
+    for candidate in qtree:
+        if candidate.startswith(prefix):
+            return candidate
+    return f"{prefix}*"
+
+def bus_parent_missing(driver, dev_id, qtree):
+    parent = required_bus_parent(driver, dev_id, qtree)
+    if not parent:
+        return False, ""
+    if parent.endswith("*"):
+        return True, parent
+    return parent not in qtree, parent
+
 primary_manifest_path, primary_manifest = load_manifest("primary")
 secondary_manifest_path, secondary_manifest = load_manifest("secondary")
 primary_generated, primary_generated_ordered = manifest_devices(primary_manifest)
@@ -2751,11 +2821,14 @@ failure = None
 for dev_id in expected_ids:
     base = primary_generated.get(dev_id) or primary_argv.get(dev_id) or {"id": dev_id, "driver": "unknown"}
     driver = base.get("driver", "unknown")
+    dev_class = device_class(dev_id, driver, primary_pci, secondary_pci)
+    primary_parent_missing, primary_parent = bus_parent_missing(driver, dev_id, primary_qtree)
+    secondary_parent_missing, secondary_parent = bus_parent_missing(driver, dev_id, secondary_qtree)
     checks = [
         ("generated", dev_id in primary_generated and dev_id in secondary_generated),
         ("argv", dev_id in primary_argv and dev_id in secondary_argv),
         ("qtree", dev_id in primary_qtree and dev_id in secondary_qtree),
-        ("pci", dev_id in primary_pci and dev_id in secondary_pci),
+        ("pci", dev_class != "pci" or (dev_id in primary_pci and dev_id in secondary_pci)),
     ]
     layer = ""
     reason = ""
@@ -2768,16 +2841,22 @@ for dev_id in expected_ids:
     elif dev_id not in primary_qtree or dev_id not in secondary_qtree:
         layer = "qtree_missing"
         reason = "qtree_missing_device"
-    elif dev_id not in primary_pci or dev_id not in secondary_pci:
+    elif primary_parent_missing or secondary_parent_missing:
+        layer = "qtree_parent_missing"
+        reason = f"bus_child_parent_missing primary={primary_parent} secondary={secondary_parent}"
+    elif dev_class == "pci" and (dev_id not in primary_pci or dev_id not in secondary_pci):
         layer = "pci_missing"
         reason = "info_pci_missing_device"
-    elif secondary_pci.get(dev_id, {}).get("resource_unassigned"):
+    elif dev_class == "pci" and secondary_pci.get(dev_id, {}).get("resource_unassigned"):
         layer = "pci_unassigned"
         reason = "secondary_pci_resource_unassigned"
     record = {
         "id": dev_id,
         "driver": driver,
+        "device_class": dev_class,
         "checks": dict(checks),
+        "primary_bus_parent": primary_parent,
+        "secondary_bus_parent": secondary_parent,
         "primary_pci": primary_pci.get(dev_id, {}),
         "secondary_pci": secondary_pci.get(dev_id, {}),
         "failure_layer": layer,
@@ -3193,7 +3272,8 @@ PY
       && "${materialization_path}" == *"generated:True"* \
       && "${materialization_path}" == *"argv:True"* \
       && "${materialization_path}" == *"qtree:True"* \
-      && ( "${materialization_layer}" == "pci_missing" \
+      && ( "${materialization_layer}" == "qtree_parent_missing" \
+        || "${materialization_layer}" == "pci_missing" \
         || "${materialization_layer}" == "pci_unassigned" \
         || "${materialization_layer}" == "mtree_unmapped" ) ]]; then
       error_name="xcolo_pre_migrate_secondary_pci_resource_unmaterialized"
@@ -4095,7 +4175,8 @@ ftctl_xcolo_require_post_migrate_materialization_gate() {
   materialization_path="$(ftctl_state_get "${vm}" "xcolo_materialization_first_missing_path" 2>/dev/null || true)"
   materialization_reason="$(ftctl_state_get "${vm}" "xcolo_materialization_first_reason" 2>/dev/null || true)"
   if [[ "${materialization_state}" == "failed" \
-    && ( "${materialization_layer}" == "pci_missing" \
+    && ( "${materialization_layer}" == "qtree_parent_missing" \
+      || "${materialization_layer}" == "pci_missing" \
       || "${materialization_layer}" == "pci_unassigned" \
       || "${materialization_layer}" == "mtree_unmapped" ) ]]; then
     gate_error="xcolo_post_migrate_pci_materialization_failed"

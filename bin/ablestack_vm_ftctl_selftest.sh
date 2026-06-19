@@ -5068,6 +5068,26 @@ selftest_write_xcolo_materialization_pipeline_base() {
   selftest_write_xcolo_generated_manifest_xml "${secondary_xml}" "${vm}-standby" "0x2"
   ftctl_xcolo_verify_generated_pci_manifest_pair "${vm}" "${primary_xml}" "${secondary_xml}" "startup_disk_graph"
 
+  if [[ "${mode}" == "scsi_child" ]]; then
+    DEBUG_DIR="${debug_dir}" python3 - <<'PY'
+import json
+import os
+
+debug_dir = os.environ["DEBUG_DIR"]
+for role in ("primary", "secondary"):
+    path = os.path.join(debug_dir, f"{role}-generated-pci-manifest-startup_disk_graph.json")
+    with open(path, "r", encoding="utf-8") as handle:
+        data = json.load(handle)
+    data.setdefault("qemu_guest_devices", []).extend([
+        {"driver": "virtio-scsi-pci", "opts": {"id": "scsi0", "bus": "pci.6", "addr": "0x1"}},
+        {"driver": "scsi-hd", "opts": {"id": "scsi0-0-0-0", "drive": "drive-scsi0-0-0-0", "bus": "scsi0.0"}},
+    ])
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(data, handle, sort_keys=True, indent=2)
+        handle.write("\n")
+PY
+  fi
+
   cat > "${debug_dir}/primary-live-qemu-argv-${phase}.txt" <<'EOF'
 -device
 pcie-root-port,id=pci.1,bus=pcie.0,addr=0x2,chassis=1,port=0x10
@@ -5086,12 +5106,27 @@ EOF
   else
     cp "${debug_dir}/primary-live-qemu-argv-${phase}.txt" "${debug_dir}/secondary-live-qemu-argv-${phase}.txt"
   fi
+  if [[ "${mode}" == "scsi_child" ]]; then
+    cat >> "${debug_dir}/primary-live-qemu-argv-${phase}.txt" <<'EOF'
+-device
+virtio-scsi-pci,id=scsi0,bus=pci.6,addr=0x1
+-device
+scsi-hd,drive=drive-scsi0-0-0-0,id=scsi0-0-0-0,bus=scsi0.0,channel=0,scsi-id=0,lun=0
+EOF
+    cp "${debug_dir}/primary-live-qemu-argv-${phase}.txt" "${debug_dir}/secondary-live-qemu-argv-${phase}.txt"
+  fi
 
   cat > "${debug_dir}/primary-info-qtree-${phase}.txt" <<'EOF'
 dev: pcie-root-port, id "pci.1"
 dev: pcie-pci-bridge, id "pci.6"
 dev: virtio-net-pci, id "net0"
 EOF
+  if [[ "${mode}" == "scsi_child" ]]; then
+    cat >> "${debug_dir}/primary-info-qtree-${phase}.txt" <<'EOF'
+dev: virtio-scsi-pci, id "scsi0"
+dev: scsi-hd, id "scsi0-0-0-0"
+EOF
+  fi
   cp "${debug_dir}/primary-info-qtree-${phase}.txt" "${debug_dir}/secondary-info-qtree-${phase}.txt"
 
   cat > "${debug_dir}/primary-info-pci-${phase}.txt" <<'EOF'
@@ -5112,6 +5147,14 @@ EOF
       BAR0: I/O at 0x6040 [0x607f]
       id "net0"
 EOF
+  if [[ "${mode}" == "scsi_child" ]]; then
+    cat >> "${debug_dir}/primary-info-pci-${phase}.txt" <<'EOF'
+  Bus  2, device   1, function 0:
+    SCSI storage controller: PCI device 1af4:1004
+      BAR0: I/O at 0x6080 [0x60bf]
+      id "scsi0"
+EOF
+  fi
   if [[ "${mode}" == "pci_unassigned" ]]; then
     cat > "${debug_dir}/secondary-info-pci-${phase}.txt" <<'EOF'
   Bus  0, device   2, function 0:
@@ -5160,6 +5203,25 @@ selftest_case_xcolo_materialization_pipeline_reports_argv_missing() (
     "pci.6" "argv missing device id"
   selftest_assert_file_contains "$(ftctl_xcolo_debug_dir "${vm}")/materialization-pipeline-diff-${phase}.txt" \
     "failure_layer=argv_missing"
+)
+
+selftest_case_xcolo_materialization_pipeline_allows_scsi_bus_child_without_pci_endpoint() (
+  selftest_reset_env
+  selftest_info "x-colo materialization pipeline allows SCSI disk bus child without direct PCI endpoint"
+
+  local vm="xcolo-materialization-scsi-child"
+  local phase="after_migrate_materialization"
+  ftctl_state_init_vm "${vm}"
+  selftest_write_xcolo_materialization_pipeline_base "${vm}" "${phase}" "scsi_child"
+
+  ftctl_xcolo_analyze_materialization_pipeline "${vm}" "${phase}" "selftest"
+
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_materialization_pipeline")" \
+    "ok" "SCSI child materialization should not require info pci endpoint"
+  selftest_assert_file_contains "$(ftctl_xcolo_debug_dir "${vm}")/materialization-pipeline-${phase}.json" \
+    '"device_class": "bus_child"'
+  selftest_assert_file_contains "$(ftctl_xcolo_debug_dir "${vm}")/materialization-pipeline-${phase}.json" \
+    '"id": "scsi0-0-0-0"'
 )
 
 selftest_case_xcolo_materialization_pipeline_reports_pci_unassigned() (
@@ -5316,6 +5378,7 @@ selftest_main() {
   selftest_case_xcolo_generated_pci_manifest_pair_mismatch
   selftest_case_xcolo_materialization_pipeline_reports_argv_missing
   selftest_case_xcolo_materialization_pipeline_reports_pci_unassigned
+  selftest_case_xcolo_materialization_pipeline_allows_scsi_bus_child_without_pci_endpoint
   selftest_case_xcolo_primary_restore_detects_generated_graph
   selftest_case_events_json
   selftest_info "all checks passed"
