@@ -11,7 +11,8 @@ attempt q35 conversion hides the real contract problem and repeats the same
 failure loop.
 
 Cloud-managed FT must therefore make the machine type an explicit contract
-between Cloud and FTCTL.
+between Cloud and FTCTL. The contract starts when the source/primary VM is
+created; FTCTL must not convert an existing running VM between q35 and i440fx.
 
 ## Current Cloud Behavior
 
@@ -19,13 +20,16 @@ Cloud KVM VM creation currently selects the machine type in
 `LibvirtComputingResource.createGuestFromSpec()`:
 
 - x86 BIOS VMs default to `machine='pc'`.
-- UEFI VMs force `machine='q35'`.
-- `kvm.guest.os.machine.type` is exposed as a VM detail option and copied by
-  the FTCTL provisioning service, but the KVM agent does not currently consume
-  it when generating libvirt XML.
+- UEFI VMs force `machine='q35'` when no explicit machine override is present.
+- `kvm.guest.os.machine.type` is exposed as a VM detail option.
+- The KVM agent consumes that explicit override before the UEFI branch can
+  select q35.
+- The UI still lacks a normal operator-facing selector for the machine type.
 
-That means an FT standby VM can carry a machine type detail while still being
-created as q35 if UEFI is enabled.
+That means FT standby VM creation can be corrected by details, but an existing
+source VM that was already created and started as `pc-q35-*` remains q35. The
+source VM cannot be made FT-compatible by creating only the standby as
+`pc-i440fx-*`.
 
 ## Design Decision
 
@@ -43,6 +47,16 @@ is present. In other words:
 - FT VM or standby with override: use the explicit `pc-i440fx-*` value even for
   UEFI.
 
+For user-operated FT, Cloud must expose this as a first-class creation-time UI
+choice:
+
+- General compatibility: keep the existing Cloud default behavior.
+- FT compatibility: persist `kvm.guest.os.machine.type=pc-i440fx-9.2` on the
+  primary VM at deploy time.
+
+Existing q35 VMs are not converted in place. They must be recreated or cloned
+through an FT-compatible creation path.
+
 ## Cloud Changes
 
 | Item | As-Is | To-Be |
@@ -52,6 +66,8 @@ is present. In other words:
 | FT standby creation | Standby details copy the source VM detail set, but effective machine type is not guaranteed. | FT standby details include an explicit FT-compatible `pc-i440fx-*` machine type. |
 | Current/remote Mold | Remote Mold standby creation can inherit the same q35 problem. | Current and remote Mold provisioning use the same explicit machine detail contract. |
 | Validation | q35 may be attempted and fail later in QEMU. | FT registration/preflight rejects q35 before conversion. |
+| User choice | No UI path for creating an FT-compatible source VM. | VM deploy advanced settings expose an FT compatibility selector that writes the machine type detail. |
+| Existing q35 source | Standby may be allocated before FTCTL rejects the source runtime. | FT registration rejects the source before standby VM/volume/protection allocation when the source lacks an explicit `pc-i440fx-*` contract. |
 
 ### Cloud Implementation Plan
 
@@ -91,6 +107,20 @@ is present. In other words:
      version. Current machine type: q35."
    - missing effective machine: "Unable to determine the source VM effective
      machine type before FT registration."
+
+6. Add deploy UI support.
+   - Add an advanced KVM field named FT compatibility.
+   - Default value: General compatibility.
+   - FT-compatible value: `pc-i440fx-9.2`.
+   - Submit the value through `details[0].kvm.guest.os.machine.type` only when
+     FT compatibility is selected.
+
+7. Add Cloud-side registration guard before provisioning.
+   - For `mode=ft`, the source VM must already have
+     `kvm.guest.os.machine.type=pc-i440fx-*`.
+   - Missing, q35, pc-q35, or unknown values fail before standby resources are
+     created.
+   - HA/DR registrations are not blocked by this FT-only machine contract.
 
 ## FTCTL Changes
 
@@ -157,6 +187,19 @@ Cloud owns VM and volume lifecycle. FTCTL owns COLO runtime conversion,
 handshake, migration, and runtime evidence. Neither side should silently
 reinterpret q35 as an FT-compatible runtime.
 
+## UI Contract
+
+The VM deploy UI exposes:
+
+| UI value | Stored detail | Behavior |
+| --- | --- | --- |
+| General compatibility | none | Existing Cloud behavior; UEFI can still become q35. |
+| FT compatibility | `kvm.guest.os.machine.type=pc-i440fx-9.2` | Source VM is created with the FT-supported machine family. |
+
+The FT protection dialog consumes the protection response machine fields and
+blocks only `mode=ft` submission when the source VM is not FT-compatible. It
+does not block HA/DR protection setup for q35 VMs.
+
 ## Implementation Order
 
 1. Cloud KVM agent machine override support.
@@ -164,7 +207,9 @@ reinterpret q35 as an FT-compatible runtime.
 3. FTCTL effective machine resolver and q35 fail-fast gate.
 4. FTCTL runtime profile persistence and generated runtime use.
 5. Cloud/API/UI error message cleanup.
-6. Tests and deployment validation.
+6. Deploy UI FT compatibility selector.
+7. Cloud registration guard before provisioning.
+8. Tests and deployment validation.
 
 ## Test Plan
 

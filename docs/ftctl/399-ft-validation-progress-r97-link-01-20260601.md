@@ -8114,3 +8114,121 @@ The design for this hard-gate correction is:
 ```text
 docs/ftctl/401-ft-xcolo-pre-migrate-pci-materialization-hard-gate-design-20260618.md
 ```
+
+## Run 126 - Machine Type Contract Gate Blocks Existing Q35 Primary
+
+After deploying the Cloud/FTCTL machine type contract from:
+
+```text
+docs/ftctl/402-ft-cloud-machine-type-contract-design-20260619.md
+```
+
+the user started another FT protection test for `r97-link-01`.
+
+### Result
+
+The new fail-fast guard worked. FTCTL stopped before the previous COLO
+materialization and migration path:
+
+```text
+ftctl_protection.id=124
+primary_vm=i-2-54-VM
+secondary_vm=i-2-189-VM
+protection_state=error
+transport_state=failed
+last_error=ft_unsupported_machine_type
+conversion_stage=machine_contract_failed
+xcolo_protocol_failure_phase=machine_contract
+ft_machine_type_effective=pc-q35-9.2
+ft_machine_type_contract_source=process-argv
+```
+
+Primary runtime evidence from host `10.10.32.3`:
+
+```text
+virsh dumpxml i-2-54-VM:
+<type arch='x86_64' machine='pc-q35-9.2'>hvm</type>
+
+qemu process:
+-machine pc-q35-9.2,usb=off,dump-guest-core=off,...
+```
+
+Cloud did apply the new standby contract to the replica VM:
+
+```text
+secondary_vm=i-2-189-VM
+vm_instance_details:
+kvm.guest.os.machine.type=pc-i440fx-9.2
+UEFI=LEGACY
+```
+
+### Repetition Check
+
+This is not the previous repeated COLO runtime failure family:
+
+```text
+memory_region_add_subregion_common
+xcolo_pre_migrate_secondary_pci_resource_unmaterialized
+Received invalid message 0x0000 length 0x0000
+Can't receive COLO message: Input/output error
+```
+
+The previous repeated path was avoided. The current failure happens earlier,
+at the machine contract gate, because the existing primary VM is still running
+with `pc-q35-9.2`.
+
+### Gap Found
+
+The current implementation prevents unsafe Q35 migration in FTCTL, but Cloud
+still creates the cloud-managed standby VM before the host-side machine
+contract failure is returned. That leaves a stopped standby VM and active
+Cloud DB protection row that require cleanup before the next retry.
+
+### Corrected Rule
+
+FT registration must be rejected before cloud-managed standby creation when
+the source primary VM effective machine type is not `pc-i440fx-*`.
+
+The Cloud-side preflight must check the source VM effective runtime machine
+type through the KVM host/Mold agent path, because DB details alone are not
+reliable for already-running VMs.
+
+## Run 127 - Cloud/UI Creation-Time FT Machine Contract
+
+The previous run proved that preventing unsafe q35 COLO conversion in FTCTL is
+necessary but not sufficient. Operators also need a way to create the primary
+VM with the supported machine family before protection registration.
+
+### Change Direction
+
+Cloud and FTCTL now treat FT compatibility as a creation-time contract:
+
+```text
+FT-compatible source VM detail:
+kvm.guest.os.machine.type=pc-i440fx-9.2
+```
+
+The Cloud deploy UI exposes an FT compatibility selector for KVM VM creation.
+The default remains general compatibility, so normal UEFI VMs still follow the
+existing q35 default unless the operator explicitly selects FT compatibility.
+
+### Registration Guard
+
+Cloud rejects `mode=ft` registration before cloud-managed standby VM, volume,
+or protection-row allocation when the source VM does not already have an
+explicit `pc-i440fx-*` machine type contract. HA and DR registration flows are
+not blocked by this FT-only guard.
+
+### Repetition Check
+
+This change avoids repeating the previous late-failure loop:
+
+```text
+Cloud creates standby resources
+FTCTL converts runtime
+QEMU migration fails because primary is q35
+manual cleanup is required
+```
+
+The intended next failure mode, if the operator selects an existing q35 VM, is
+an immediate Cloud API validation error with no new standby garbage.
