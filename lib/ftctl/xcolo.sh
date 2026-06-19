@@ -53,6 +53,180 @@ ftctl_xcolo_parse_tcp_endpoint() {
   printf -v "${port_var}" '%s' "${port}"
 }
 
+ftctl_xcolo_machine_value_normalize() {
+  local value="${1-}"
+  value="${value%%,*}"
+  value="${value//\"/}"
+  value="${value//\'/}"
+  printf '%s\n' "${value}"
+}
+
+ftctl_xcolo_machine_from_xml_text() {
+  local xml_text="${1-}"
+  [[ -n "${xml_text}" ]] || return 1
+  XML_TEXT="${xml_text}" python3 - <<'PY'
+import os
+import sys
+import xml.etree.ElementTree as ET
+
+text = os.environ.get("XML_TEXT", "")
+try:
+    root = ET.fromstring(text)
+except Exception:
+    sys.exit(1)
+os_type = root.find("./os/type")
+machine = os_type.get("machine", "") if os_type is not None else ""
+if not machine:
+    sys.exit(1)
+print(machine.split(",", 1)[0])
+PY
+}
+
+ftctl_xcolo_machine_from_qemu_args_text() {
+  local args_text="${1-}"
+  [[ -n "${args_text}" ]] || return 1
+  ARGS_TEXT="${args_text}" python3 - <<'PY'
+import os
+import re
+import shlex
+import sys
+
+text = os.environ.get("ARGS_TEXT", "")
+try:
+    tokens = shlex.split(text)
+except Exception:
+    tokens = text.split()
+
+for index, token in enumerate(tokens):
+    if token == "-machine" and index + 1 < len(tokens):
+        print(tokens[index + 1].split(",", 1)[0])
+        sys.exit(0)
+    if token.startswith("-machine="):
+        print(token.split("=", 1)[1].split(",", 1)[0])
+        sys.exit(0)
+
+match = re.search(r"(?:^|\s)-machine\s+([^\s]+)", text)
+if match:
+    print(match.group(1).split(",", 1)[0].strip("'\""))
+    sys.exit(0)
+sys.exit(1)
+PY
+}
+
+ftctl_xcolo_primary_qemu_log_path() {
+  local vm="${1-}"
+  printf '/var/log/libvirt/qemu/%s.log\n' "${vm}"
+}
+
+ftctl_xcolo_resolve_primary_machine_type() {
+  local vm="${1-}"
+  local machine_var="${2}"
+  local source_var="${3}"
+  local out err rc xml_machine="" log_machine="" proc_machine="" log_path log_text proc_line
+
+  printf -v "${machine_var}" '%s' ""
+  printf -v "${source_var}" '%s' ""
+
+  out=""
+  err=""
+  rc=0
+  ftctl_virsh "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC}" out err rc -- -c "${FTCTL_PROFILE_PRIMARY_URI}" dumpxml "${vm}" || true
+  : "${err}"
+  if [[ "${rc}" == "0" ]]; then
+    xml_machine="$(ftctl_xcolo_machine_from_xml_text "${out}" 2>/dev/null || true)"
+    xml_machine="$(ftctl_xcolo_machine_value_normalize "${xml_machine}")"
+  fi
+
+  log_path="$(ftctl_xcolo_primary_qemu_log_path "${vm}")"
+  if [[ -r "${log_path}" ]]; then
+    log_text="$(tail -n 80 "${log_path}" 2>/dev/null || true)"
+    log_machine="$(ftctl_xcolo_machine_from_qemu_args_text "${log_text}" 2>/dev/null || true)"
+    log_machine="$(ftctl_xcolo_machine_value_normalize "${log_machine}")"
+  fi
+
+  proc_line="$(pgrep -af "qemu.*guest=${vm}" 2>/dev/null | tail -n 1 || true)"
+  if [[ -n "${proc_line}" ]]; then
+    proc_machine="$(ftctl_xcolo_machine_from_qemu_args_text "${proc_line}" 2>/dev/null || true)"
+    proc_machine="$(ftctl_xcolo_machine_value_normalize "${proc_machine}")"
+  fi
+
+  if [[ "${proc_machine}" == pc-i440fx-* ]]; then
+    printf -v "${machine_var}" '%s' "${proc_machine}"
+    printf -v "${source_var}" '%s' "process-argv"
+    return 0
+  fi
+  if [[ "${log_machine}" == pc-i440fx-* ]]; then
+    printf -v "${machine_var}" '%s' "${log_machine}"
+    printf -v "${source_var}" '%s' "qemu-log"
+    return 0
+  fi
+  if [[ "${xml_machine}" == pc-i440fx-* ]]; then
+    printf -v "${machine_var}" '%s' "${xml_machine}"
+    printf -v "${source_var}" '%s' "libvirt-xml"
+    return 0
+  fi
+
+  if [[ -n "${proc_machine}" ]]; then
+    printf -v "${machine_var}" '%s' "${proc_machine}"
+    printf -v "${source_var}" '%s' "process-argv"
+    return 0
+  fi
+  if [[ -n "${log_machine}" ]]; then
+    printf -v "${machine_var}" '%s' "${log_machine}"
+    printf -v "${source_var}" '%s' "qemu-log"
+    return 0
+  fi
+  if [[ -n "${xml_machine}" ]]; then
+    printf -v "${machine_var}" '%s' "${xml_machine}"
+    printf -v "${source_var}" '%s' "libvirt-xml"
+    return 0
+  fi
+
+  return 1
+}
+
+ftctl_xcolo_require_supported_machine_contract() {
+  local vm="${1-}"
+  local machine="" source="" reason=""
+
+  ftctl_xcolo_resolve_primary_machine_type "${vm}" machine source || true
+  machine="$(ftctl_xcolo_machine_value_normalize "${machine}")"
+  [[ -n "${source}" ]] || source="unknown"
+
+  if [[ "${machine}" == pc-i440fx-* ]]; then
+    ftctl_state_set "${vm}" \
+      "ft_machine_type_supported=yes" \
+      "ft_machine_type_effective=${machine}" \
+      "ft_machine_type_contract_source=${source}" \
+      "ft_colo_return_path=false"
+    ftctl_log_event "colo" "xcolo.machine_contract" "ok" "${vm}" "" \
+      "machine=${machine} source=${source} return_path=false"
+    return 0
+  fi
+
+  if [[ -z "${machine}" ]]; then
+    reason="unknown"
+  elif [[ "${machine}" == q35 || "${machine}" == pc-q35-* ]]; then
+    reason="q35"
+  else
+    reason="unsupported"
+  fi
+
+  ftctl_state_set "${vm}" \
+    "conversion_stage=machine_contract_failed" \
+    "conversion_state=error" \
+    "protection_state=error" \
+    "transport_state=failed" \
+    "ft_machine_type_supported=no" \
+    "ft_machine_type_effective=${machine}" \
+    "ft_machine_type_contract_source=${source}" \
+    "xcolo_protocol_failure_phase=machine_contract" \
+    "last_error=ft_unsupported_machine_type"
+  ftctl_log_event "colo" "xcolo.machine_contract" "fail" "${vm}" "" \
+    "machine=${machine} source=${source} reason=${reason} supported=pc-i440fx-*"
+  return 1
+}
+
 ftctl_xcolo_qmp() {
   local uri="${1-}"
   local vm="${2-}"
@@ -11821,6 +11995,8 @@ ftctl_xcolo_plan_protect_block_cold_conversion() {
 ftctl_xcolo_plan_protect() {
   local vm="${1-}"
   local disk_kind primary_target primary_source primary_format
+
+  ftctl_xcolo_require_supported_machine_contract "${vm}" || return 1
 
   if ftctl_xcolo_detect_block_backed_ft "${vm}" disk_kind primary_target primary_source primary_format; then
     ftctl_xcolo_plan_protect_block_cold_conversion "${vm}"

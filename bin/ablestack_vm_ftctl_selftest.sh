@@ -2012,6 +2012,61 @@ selftest_case_xcolo_storage_mismatch_gate() (
   selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_storage_compatibility")" "blocked" "storage mismatch compatibility"
 )
 
+selftest_case_xcolo_machine_contract_gate() (
+  selftest_reset_env
+  selftest_info "x-colo rejects q35 and accepts pc-i440fx machine contracts"
+
+  local vm="ft-machine-contract"
+  FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
+
+  # shellcheck disable=SC2317
+  ftctl_virsh() {
+    local out_var="${2}" err_var="${3}" rc_var="${4}"
+    shift 4
+    [[ "${1-}" == "--" ]] && shift
+    printf -v "${err_var}" '%s' ""
+    printf -v "${rc_var}" '%s' "0"
+    case "$*" in
+      *"dumpxml ${vm}"*)
+        printf -v "${out_var}" '%s' "<domain type='kvm'><os><type arch='x86_64' machine='q35'>hvm</type></os></domain>"
+        ;;
+      *)
+        printf -v "${out_var}" '%s' ""
+        ;;
+    esac
+  }
+
+  local rc=0
+  ftctl_xcolo_require_supported_machine_contract "${vm}" || rc=$?
+  selftest_assert_eq "${rc}" "1" "q35 machine contract should fail"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "ft_machine_type_supported")" "no" "q35 machine supported state"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" "ft_unsupported_machine_type" "q35 machine error"
+
+  ftctl_state_init_vm "${vm}"
+  # shellcheck disable=SC2317
+  ftctl_virsh() {
+    local out_var="${2}" err_var="${3}" rc_var="${4}"
+    shift 4
+    [[ "${1-}" == "--" ]] && shift
+    printf -v "${err_var}" '%s' ""
+    printf -v "${rc_var}" '%s' "0"
+    case "$*" in
+      *"dumpxml ${vm}"*)
+        printf -v "${out_var}" '%s' "<domain type='kvm'><os><type arch='x86_64' machine='pc-i440fx-9.2'>hvm</type></os></domain>"
+        ;;
+      *)
+        printf -v "${out_var}" '%s' ""
+        ;;
+    esac
+  }
+
+  rc=0
+  ftctl_xcolo_require_supported_machine_contract "${vm}" || rc=$?
+  selftest_assert_eq "${rc}" "0" "pc-i440fx machine contract should pass"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "ft_machine_type_supported")" "yes" "pc-i440fx machine supported state"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "ft_machine_type_effective")" "pc-i440fx-9.2" "pc-i440fx effective machine"
+)
+
 selftest_case_xcolo_filter_qom_hard_gate() (
   selftest_reset_env
   selftest_info "x-colo primary filter QOM topology is a hard pre-migrate gate"
@@ -5201,6 +5256,7 @@ selftest_main() {
   selftest_case_xcolo_strict_chardev_binding_rejects_closed_frontends
   selftest_case_xcolo_virtio_vnet_hdr_support
   selftest_case_xcolo_storage_mismatch_gate
+  selftest_case_xcolo_machine_contract_gate
   selftest_case_xcolo_filter_qom_hard_gate
   selftest_case_xcolo_primary_filter_qmp_order_matches_qemu_doc
   selftest_case_xcolo_primary_netdev_vhost_guard
