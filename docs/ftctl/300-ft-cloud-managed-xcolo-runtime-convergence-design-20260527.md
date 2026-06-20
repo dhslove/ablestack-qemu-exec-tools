@@ -84,7 +84,7 @@ Validation loop:
 6. Also succeed when QEMU explicitly reports COLO role state:
    - primary runtime XML markers are present
    - secondary runtime XML markers are present
-   - primary `query-migrate.status=active`
+   - primary `query-migrate.status=active` or `query-migrate.status=colo`
    - secondary `query-migrate.status=colo`
    - primary and secondary `query-colo-status.mode` are non-empty and not `none`
 7. Fail immediately on terminal migration failure:
@@ -184,8 +184,9 @@ New selftest coverage:
 - Runtime validation blocks false-positive success when the primary is not running.
 - Runtime validation reports terminal primary migration failure as `primary_migrate_failed`.
 - Runtime validation times out a stuck `finish-migrate` / `inmigrate` convergence as `runtime_convergence_timeout`.
-- Runtime validation reports migration `active/colo` with `query-colo-status.mode=none` as `colo_role_not_entered`.
+- Runtime validation reports migration `active|colo / colo` with `query-colo-status.mode=none` as `colo_role_not_entered`.
 - Runtime validation accepts explicit non-`none` COLO role state only when migration status and runtime XML markers also match.
+- Runtime validation must not publish `colo_running/mirroring` until the primary storage and guest health gates described in [404. FT X-COLO Primary Storage And Guest Health Gate Design](404-ft-xcolo-primary-storage-and-guest-health-gate-design-20260620.md) pass.
 - Generated primary XML defaults `mirror0` to `wait=off` and `compare1` to `wait=on`.
 - Channel attach is verified before primary QMP migration starts.
 - Primary network filter objects are attached by QMP after block graph preparation.

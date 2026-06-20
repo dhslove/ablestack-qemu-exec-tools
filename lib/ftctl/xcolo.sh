@@ -836,6 +836,179 @@ ftctl_xcolo_query_guest_ping() {
   return 1
 }
 
+ftctl_xcolo_primary_migrate_state_ok() {
+  local status="${1-}"
+  [[ "${status}" == "active" || "${status}" == "colo" ]]
+}
+
+ftctl_xcolo_primary_qemu_log_path() {
+  local vm="${1-}"
+  printf '%s\n' "/var/log/libvirt/qemu/${vm}.log"
+}
+
+ftctl_xcolo_primary_qemu_log_tail() {
+  local vm="${1-}"
+  local out_var="${2}"
+  local log_path out=""
+
+  log_path="$(ftctl_xcolo_primary_qemu_log_path "${vm}")"
+  if [[ -r "${log_path}" ]]; then
+    out="$(tail -n "${FTCTL_XCOLO_PRIMARY_HEALTH_LOG_TAIL_LINES:-500}" "${log_path}" 2>/dev/null || true)"
+  fi
+  printf -v "${out_var}" '%s' "${out}"
+}
+
+ftctl_xcolo_primary_storage_failure_reason_from_text() {
+  local text="${1-}"
+  local reason_var="${2}"
+  local reason=""
+
+  if printf '%s\n' "${text}" | grep -Eiq 'Input/output error|I/O error'; then
+    reason="qemu_log_io_error"
+  elif printf '%s\n' "${text}" | grep -Eiq 'Operation not permitted|Permission denied'; then
+    reason="qemu_log_permission_error"
+  elif printf '%s\n' "${text}" | grep -Eiq 'blk_update_request'; then
+    reason="qemu_log_block_request_error"
+  elif printf '%s\n' "${text}" | grep -Eiq 'rbd.*(error|failed|denied|not permitted)|((error|failed|denied|not permitted).*)rbd'; then
+    reason="qemu_log_rbd_error"
+  fi
+
+  printf -v "${reason_var}" '%s' "${reason}"
+  [[ -z "${reason}" ]]
+}
+
+ftctl_xcolo_primary_guest_failure_reason_from_text() {
+  local text="${1-}"
+  local reason_var="${2}"
+  local reason=""
+
+  if printf '%s\n' "${text}" | grep -Eiq 'Failed to mount /sysroot'; then
+    reason="sysroot_mount_failed"
+  elif printf '%s\n' "${text}" | grep -Eiq 'Entering emergency mode'; then
+    reason="guest_entered_emergency_mode"
+  elif printf '%s\n' "${text}" | grep -Eiq 'XFS .*metadata I/O error|Uncorrected metadata errors'; then
+    reason="guest_filesystem_metadata_io_error"
+  elif printf '%s\n' "${text}" | grep -Eiq 'dracut-initqueue.*timeout'; then
+    reason="guest_dracut_initqueue_timeout"
+  fi
+
+  printf -v "${reason_var}" '%s' "${reason}"
+  [[ -z "${reason}" ]]
+}
+
+ftctl_xcolo_validate_primary_storage_health() {
+  local vm="${1-}"
+  local reason_var="${2}"
+  local out="" rc=0 log_tail="" reason=""
+
+  ftctl_xcolo_qmp "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" '{"execute":"query-block"}' out rc
+  ftctl_xcolo_write_debug_file "${vm}" "primary-health-query-block.stdout.json" "${out}" || true
+  ftctl_xcolo_write_debug_file "${vm}" "primary-health-query-block.rc" "${rc}" || true
+  if [[ "${rc}" != "0" ]]; then
+    reason="query_block_failed"
+  elif printf '%s\n' "${out}" | grep -Eiq '"io-status"[[:space:]]*:[[:space:]]*"failed"'; then
+    reason="primary_block_io_status_failed"
+  fi
+
+  out=""
+  rc=0
+  ftctl_xcolo_qmp "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" '{"execute":"query-named-block-nodes"}' out rc
+  ftctl_xcolo_write_debug_file "${vm}" "primary-health-query-named-block-nodes.stdout.json" "${out}" || true
+  ftctl_xcolo_write_debug_file "${vm}" "primary-health-query-named-block-nodes.rc" "${rc}" || true
+  if [[ -z "${reason}" && "${rc}" != "0" ]]; then
+    reason="query_named_block_nodes_failed"
+  fi
+
+  out=""
+  rc=0
+  ftctl_xcolo_qmp "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" '{"execute":"query-blockstats"}' out rc
+  ftctl_xcolo_write_debug_file "${vm}" "primary-health-query-blockstats.stdout.json" "${out}" || true
+  ftctl_xcolo_write_debug_file "${vm}" "primary-health-query-blockstats.rc" "${rc}" || true
+  if [[ -z "${reason}" && "${rc}" != "0" ]]; then
+    reason="query_blockstats_failed"
+  fi
+
+  ftctl_xcolo_primary_qemu_log_tail "${vm}" log_tail || true
+  ftctl_xcolo_write_debug_file "${vm}" "primary-health-qemu-log-tail.txt" "${log_tail}" || true
+  if [[ -z "${reason}" && -n "${log_tail}" ]]; then
+    ftctl_xcolo_primary_storage_failure_reason_from_text "${log_tail}" reason || true
+  fi
+
+  if [[ -n "${reason}" ]]; then
+    ftctl_state_set "${vm}" \
+      "xcolo_primary_storage_health_gate=failed" \
+      "xcolo_primary_storage_health_reason=${reason}"
+    ftctl_log_event "colo" "xcolo.primary_storage_health" "fail" "${vm}" "" \
+      "reason=${reason}"
+    printf -v "${reason_var}" '%s' "xcolo_primary_storage_unhealthy:${reason}"
+    return 1
+  fi
+
+  ftctl_state_set "${vm}" \
+    "xcolo_primary_storage_health_gate=ok" \
+    "xcolo_primary_storage_health_reason=ok"
+  ftctl_log_event "colo" "xcolo.primary_storage_health" "ok" "${vm}" "" ""
+  printf -v "${reason_var}" '%s' ""
+  return 0
+}
+
+ftctl_xcolo_validate_primary_guest_health() {
+  local vm="${1-}"
+  local primary_qga="${2-}"
+  local reason_var="${3}"
+  local policy="${FTCTL_XCOLO_PRIMARY_GUEST_HEALTH_POLICY:-required}"
+  local log_tail="" reason="" gate="ok"
+
+  case "${policy}" in
+    required|observe|off) ;;
+    *) policy="required" ;;
+  esac
+
+  if [[ "${policy}" == "off" ]]; then
+    ftctl_state_set "${vm}" \
+      "xcolo_primary_guest_health_gate=off" \
+      "xcolo_primary_guest_health_reason=policy_off"
+    printf -v "${reason_var}" '%s' ""
+    return 0
+  fi
+
+  ftctl_xcolo_primary_qemu_log_tail "${vm}" log_tail || true
+  if [[ -n "${log_tail}" ]]; then
+    ftctl_xcolo_primary_guest_failure_reason_from_text "${log_tail}" reason || true
+  fi
+
+  if [[ -z "${reason}" && "${policy}" == "required" && "${primary_qga}" != "yes" ]]; then
+    reason="qga_unavailable"
+  fi
+
+  if [[ -n "${reason}" ]]; then
+    ftctl_state_set "${vm}" \
+      "xcolo_primary_guest_health_gate=failed" \
+      "xcolo_primary_guest_health_policy=${policy}" \
+      "xcolo_primary_guest_health_reason=${reason}"
+    ftctl_log_event "colo" "xcolo.primary_guest_health" "fail" "${vm}" "" \
+      "policy=${policy} qga=${primary_qga} reason=${reason}"
+    printf -v "${reason_var}" '%s' "xcolo_primary_guest_boot_unhealthy:${reason}"
+    return 1
+  fi
+
+  if [[ "${policy}" == "observe" && "${primary_qga}" != "yes" ]]; then
+    gate="observe"
+    reason="qga_unavailable_observed"
+  else
+    gate="ok"
+    reason="ok"
+  fi
+  ftctl_state_set "${vm}" \
+    "xcolo_primary_guest_health_gate=${gate}" \
+    "xcolo_primary_guest_health_policy=${policy}" \
+    "xcolo_primary_guest_health_reason=${reason}"
+  ftctl_log_event "colo" "xcolo.primary_guest_health" "ok" "${vm}" "" \
+    "policy=${policy} qga=${primary_qga} gate=${gate} reason=${reason}"
+  printf -v "${reason_var}" '%s' ""
+  return 0
+}
+
 ftctl_xcolo_preserve_runtime_error() {
   local vm="${1-}"
   local last_error sticky_error protection_state conversion_state transport_state
@@ -5480,7 +5653,8 @@ ftctl_xcolo_validate_pair_runtime() {
   local primary_colo="" secondary_colo=""
   local primary_migrate="" secondary_migrate=""
   local primary_migrate_error_desc="" secondary_migrate_error_desc=""
-  local primary_qga="" secondary_qga="" qga_policy
+  local primary_migrate_ok="no"
+  local primary_qga="" secondary_qga="" qga_policy health_reason=""
   local primary_xml="missing" secondary_xml="missing"
   local channel_mirror="" channel_compare="" channel_compare_local="" channel_compare_out=""
   local primary_filter_qom="unknown" primary_filter_qom_reason=""
@@ -5510,6 +5684,7 @@ ftctl_xcolo_validate_pair_runtime() {
     secondary_colo=""
     primary_migrate=""
     secondary_migrate=""
+    primary_migrate_ok="no"
     primary_migrate_error_desc=""
     secondary_migrate_error_desc=""
     primary_qga=""
@@ -5537,6 +5712,11 @@ ftctl_xcolo_validate_pair_runtime() {
     ftctl_xcolo_query_colo_mode "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" secondary_colo || true
     ftctl_xcolo_query_migrate_status "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" primary_migrate || true
     ftctl_xcolo_query_migrate_status "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" secondary_migrate || true
+    if ftctl_xcolo_primary_migrate_state_ok "${primary_migrate}"; then
+      primary_migrate_ok="yes"
+    else
+      primary_migrate_ok="no"
+    fi
     if [[ "${primary_migrate}" == "failed" ]]; then
       ftctl_xcolo_query_migrate_error_desc "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" primary_migrate_error_desc || true
     fi
@@ -5636,7 +5816,9 @@ ftctl_xcolo_validate_pair_runtime() {
       break
     elif [[ "${primary_xml}" == "ok" &&
             "${secondary_xml}" == "ok" &&
-            "${primary_migrate}" == "active" &&
+            "${primary_running}" == "true" &&
+            "${secondary_running}" == "true" &&
+            "${primary_migrate_ok}" == "yes" &&
             "${secondary_migrate}" == "colo" &&
             "${primary_colo}" == "primary" &&
             "${secondary_colo}" == "secondary" &&
@@ -5646,6 +5828,16 @@ ftctl_xcolo_validate_pair_runtime() {
             "${disk_plan}" "${secondary_block_graph}" &&
           ftctl_xcolo_colo_mode_active "${primary_colo}" &&
           ftctl_xcolo_colo_mode_active "${secondary_colo}"; then
+      health_reason=""
+      if ! ftctl_xcolo_validate_primary_storage_health "${vm}" health_reason; then
+        reason="${health_reason}"
+        break
+      fi
+      health_reason=""
+      if ! ftctl_xcolo_validate_primary_guest_health "${vm}" "${primary_qga}" health_reason; then
+        reason="${health_reason}"
+        break
+      fi
       ftctl_state_set "${vm}" \
         "xcolo_primary_running=${primary_running}" \
         "xcolo_secondary_running=${secondary_running}" \
@@ -5672,7 +5864,7 @@ ftctl_xcolo_validate_pair_runtime() {
         "xcolo_secondary_block_graph_ready=${secondary_block_graph}" \
         "xcolo_secondary_block_graph_reason=${secondary_block_graph_reason}"
       ftctl_log_event "colo" "xcolo.runtime_validate" "ok" "${vm}" "" \
-        "reason=colo_role_active primary_running=${primary_running} secondary_running=${secondary_running} primary_status=${primary_status} secondary_status=${secondary_status} primary_colo=${primary_colo} secondary_colo=${secondary_colo} primary_migrate=${primary_migrate} secondary_migrate=${secondary_migrate} primary_qga=${primary_qga} secondary_qga=${secondary_qga} filter_qom=${primary_filter_qom} filter_cmdline=${primary_filter_cmdline} chardev=${primary_chardev} mirror=${channel_mirror} compare=${channel_compare} compare_local=${channel_compare_local} compare_out=${channel_compare_out} secondary_block_graph=${secondary_block_graph} attempts=$((i + 1))"
+        "reason=colo_role_active primary_running=${primary_running} secondary_running=${secondary_running} primary_status=${primary_status} secondary_status=${secondary_status} primary_colo=${primary_colo} secondary_colo=${secondary_colo} primary_migrate=${primary_migrate} secondary_migrate=${secondary_migrate} primary_qga=${primary_qga} secondary_qga=${secondary_qga} primary_storage_health=$(ftctl_state_get "${vm}" "xcolo_primary_storage_health_gate" 2>/dev/null || true) primary_guest_health=$(ftctl_state_get "${vm}" "xcolo_primary_guest_health_gate" 2>/dev/null || true) filter_qom=${primary_filter_qom} filter_cmdline=${primary_filter_cmdline} chardev=${primary_chardev} mirror=${channel_mirror} compare=${channel_compare} compare_local=${channel_compare_local} compare_out=${channel_compare_out} secondary_block_graph=${secondary_block_graph} attempts=$((i + 1))"
       return 0
     fi
 
@@ -5682,7 +5874,7 @@ ftctl_xcolo_validate_pair_runtime() {
   if [[ -z "${reason}" ]]; then
     if [[ "${primary_xml}" == "ok" &&
           "${secondary_xml}" == "ok" &&
-          "${primary_migrate}" == "active" &&
+          "${primary_migrate_ok}" == "yes" &&
           "${secondary_migrate}" == "colo" ]]; then
       ftctl_xcolo_colo_role_pending_reason "${primary_colo}" "${secondary_colo}" pending_reason
       pending_max="${FTCTL_XCOLO_RUNTIME_PENDING_MAX_SEC:-180}"
@@ -5795,7 +5987,7 @@ ftctl_xcolo_validate_pair_runtime() {
   if [[ -z "${reason}" ]]; then
     if [[ "${primary_xml}" == "ok" &&
           "${secondary_xml}" == "ok" &&
-          "${primary_migrate}" == "active" &&
+          "${primary_migrate_ok}" == "yes" &&
           "${secondary_migrate}" == "colo" ]]; then
       ftctl_state_set "${vm}" \
         "xcolo_primary_running=${primary_running}" \
@@ -5850,6 +6042,8 @@ ftctl_xcolo_validate_pair_runtime() {
       reason="primary_runtime_xml_missing_colo_markers"
     elif [[ "${secondary_xml}" != "ok" ]]; then
       reason="secondary_runtime_xml_missing_colo_markers"
+    elif [[ "${primary_migrate_ok}" != "yes" ]]; then
+      reason="primary_not_in_colo_migration"
     elif [[ "${secondary_migrate}" != "colo" ]]; then
       reason="secondary_not_in_colo_migration"
     fi
@@ -5861,7 +6055,13 @@ ftctl_xcolo_validate_pair_runtime() {
       reason="$(ftctl_xcolo_refine_primary_role_failure_reason "${vm}" "${reason}")"
     fi
     last_error_value="xcolo_runtime_validation_failed:${reason}"
-    if [[ "${reason}" == "repeated_protocol_invalid_message" ]]; then
+    if [[ "${reason}" == xcolo_primary_storage_unhealthy:* ]]; then
+      last_error_value="${reason}"
+      protocol_reason="primary_storage_health_gate_failed"
+    elif [[ "${reason}" == xcolo_primary_guest_boot_unhealthy:* ]]; then
+      last_error_value="${reason}"
+      protocol_reason="primary_guest_health_gate_failed"
+    elif [[ "${reason}" == "repeated_protocol_invalid_message" ]]; then
       last_error_value="xcolo_repeated_protocol_invalid_message"
       protocol_reason="$(ftctl_state_get "${vm}" "xcolo_protocol_invalid_message_reason" 2>/dev/null || true)"
       [[ -n "${protocol_reason}" ]] || protocol_reason="qemu_colo_protocol_invalid_message"

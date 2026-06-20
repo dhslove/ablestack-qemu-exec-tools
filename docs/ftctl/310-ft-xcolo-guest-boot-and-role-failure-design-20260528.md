@@ -20,14 +20,14 @@ A follow-up retest confirmed that the source image itself was not permanently da
 ## Design Principles
 
 1. FT success still means a clone-level secondary that preserves VM identity, network identity, disk state, and memory checkpoint state.
-2. Disk baseline completion, NBD graph creation, or migration `active/colo` alone is not FT success.
+2. Disk baseline completion, NBD graph creation, or migration `active|colo / colo` alone is not FT success.
 3. COLO role state is first-class runtime evidence. One-sided role entry must not be collapsed into generic convergence.
-4. Guest boot health is observable by default and policy-enforced only when configured as required.
+4. Guest boot health is a success gate for cloud-managed FT unless explicitly relaxed for diagnostics.
 5. Runtime failure causes must survive recovery. If qemu FTCTL restores the original primary, `last_error` and `xcolo_last_runtime_error` must still explain why FT failed.
 
 ## Runtime Role Classification
 
-When both runtime XML markers are present and migration reports primary `active` plus secondary `colo`, qemu FTCTL classifies COLO role state as follows:
+When both runtime XML markers are present and migration reports primary `active` or `colo` plus secondary `colo`, qemu FTCTL classifies COLO role state as follows:
 
 - both primary and secondary `query-colo-status.mode` are non-empty and not `none`: role-active runtime state
 - primary inactive or `none`, secondary active: `primary_colo_role_not_entered`
@@ -43,11 +43,11 @@ qemu FTCTL records QGA guest-ping status for runtime validation:
 - `xcolo_primary_qga=yes|no|off`
 - `xcolo_secondary_qga=yes|no|off`
 
-The profile already has `FTCTL_PROFILE_QGA_POLICY`:
+The runtime validator records the existing `FTCTL_PROFILE_QGA_POLICY` signal and also applies the FT-specific primary guest health policy from [404. FT X-COLO Primary Storage And Guest Health Gate Design](404-ft-xcolo-primary-storage-and-guest-health-gate-design-20260620.md):
 
-- `optional`: record QGA health, but do not fail solely because guest-ping is unavailable
-- `required`: do not declare runtime success unless the generated primary answers guest-ping
-- `off`: skip the probe and record `off`
+- `FTCTL_XCOLO_PRIMARY_GUEST_HEALTH_POLICY=required`: default; do not declare runtime success unless the generated primary answers guest-ping and no explicit boot/storage failure evidence is found
+- `observe`: record QGA absence but fail only on explicit boot/storage failure evidence
+- `off`: skip the primary guest health gate
 
 Only the generated primary is used as a hard QGA gate. The secondary may be in `inmigrate` or COLO receiver state where QGA is not a reliable readiness signal.
 

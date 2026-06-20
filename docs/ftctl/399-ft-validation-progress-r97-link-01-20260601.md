@@ -8287,3 +8287,64 @@ docs/ftctl/403-ft-xcolo-bus-child-materialization-classification-design-20260619
 The key rule is that the hard PCI gate from design 401 remains valid for real
 PCI endpoints/controllers/bridges, but bus child devices must not be failed
 solely because they do not appear as direct `info pci` rows.
+
+## Run 129 - COLO Pair Reached, Primary Guest Health Gate Missing
+
+After the bus-child materialization classifier fix, the next run advanced
+beyond the previous false `scsi-hd` PCI failure.
+
+### Result
+
+QEMU runtime evidence showed the COLO pair was formed:
+
+```text
+primary query-migrate.status=colo
+primary query-colo-status.mode=primary
+secondary query-migrate.status=colo
+secondary query-colo-status.mode=secondary
+```
+
+The older repeated failures did not recur:
+
+```text
+Received invalid message 0x0000 length 0x0000
+Can't receive COLO message: Input/output error
+memory_region_add_subregion_common assertion
+xcolo_post_migrate_pci_materialization_failed on scsi-hd
+```
+
+However, the guest console showed a root filesystem failure:
+
+```text
+Failed to mount /sysroot
+Entering emergency mode
+```
+
+### Repetition Check
+
+This is not a return to the Q35/i440fx, socket protocol, or PCI
+materialization loop. The COLO transport path reached the intended role state.
+The missing contract is that qemu FTCTL still allowed a COLO runtime candidate
+to become a success candidate without proving that the primary guest storage
+path remained healthy.
+
+### Design Update
+
+The corrective design is:
+
+```text
+docs/ftctl/404-ft-xcolo-primary-storage-and-guest-health-gate-design-20260620.md
+```
+
+The new success rule is:
+
+```text
+COLO runtime gate ok
+primary storage health gate ok
+primary guest health gate ok
+=> colo_running/mirroring
+```
+
+If QEMU reaches COLO but the primary block path or guest boot health is bad,
+the run must fail with a specific health reason instead of publishing a false
+FT success.
