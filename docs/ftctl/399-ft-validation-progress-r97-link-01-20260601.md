@@ -8392,3 +8392,119 @@ docs/ftctl/407-ft-xcolo-secondary-baseline-format-contract-design-20260625.md
 The new rule is that baseline seed output is authoritative. Generated
 secondary startup disk args must use the detected baseline graph format, and a
 missing or mismatched format must fail before QEMU startup or migrate.
+
+## Run 132 - Secondary Baseline Format Fixed, Guest Health Gate Failed
+
+The `r97-link-02` retest after the secondary baseline format contract fix
+created protection row `132`:
+
+```text
+primary VM: i-2-197-VM
+standby VM: i-2-202-VM
+remote NBD: 10.10.32.1:11809
+```
+
+### Confirmed Progress
+
+The previous Run 131 failure did not recur. Both secondary baseline files were
+seeded as qcow2 and the generated secondary QEMU block graph used qcow2 for
+the parent, active, and hidden nodes:
+
+```text
+target=sda format=qcow2 graph_format=qcow2 virtual=53687091200
+target=sdb format=qcow2 graph_format=qcow2 virtual=53687091200
+secondary_baseline_format=qcow2
+```
+
+The run then advanced through:
+
+```text
+xcolo.startup_disk_graph=ok
+guest_abi_manifest=ok
+generated_pci_manifest=ok
+pre_migrate_contract=ok
+primary.filter_qom_topology=ok
+primary.filter_chardev_binding=ok
+primary.pre_migrate_evidence=ok
+xcolo.topology_audit=ok
+xcolo.pre_migrate_topology_gate=ok
+primary.migrate=ok
+post_migrate_role_transition_gate=ok
+post_migrate_materialization_gate=ok
+primary_storage_health=ok
+```
+
+At role transition, both sides reached COLO mode:
+
+```text
+primary_migrate=colo
+secondary_migrate=colo
+primary_colo=primary
+secondary_colo=secondary
+invalid_message=no
+```
+
+### Final Failure
+
+The final state was still failed:
+
+```text
+protection_state=error
+transport_state=failed
+last_error=xcolo_primary_guest_boot_unhealthy:qga_unavailable
+```
+
+The runtime validator failed at the primary guest health gate:
+
+```text
+xcolo.primary_storage_health=ok
+xcolo.primary_guest_health=fail
+reason=qga_unavailable
+```
+
+Immediately after runtime recovery, `virsh qemu-agent-command i-2-197-VM
+guest-ping` succeeded, so the failure is not currently proven to be a
+persistent guest boot failure. The more likely next investigation point is
+health-gate timing/classification around the post-COLO transition.
+
+Primary QEMU logged:
+
+```text
+Can't receive COLO message: Input/output error
+```
+
+This line appeared after the runtime validator had already failed and cleanup
+had begun, so it is currently classified as a likely teardown side effect until
+new evidence proves it occurred before the guest health failure.
+
+### Repetition Check
+
+This is not a repeat of:
+
+- Run 131 baseline qcow2 opened as raw;
+- q35/i440fx machine-type incompatibility;
+- PCI topology/materialization mismatch;
+- pre-migrate chardev/socket contract failure;
+- the older immediate `Received invalid message 0x0000` loop.
+
+The failure moved forward to the final health gate after a successful COLO role
+transition. The next improvement must focus on making the primary guest health
+gate distinguish transient QGA startup latency from real guest boot failure
+without accepting a broken guest as success.
+
+### Follow-up Design
+
+The corrective design is:
+
+```text
+docs/ftctl/408-ft-xcolo-primary-guest-health-qga-grace-design-20260625.md
+```
+
+The new rule is that QGA-only unavailability after successful COLO role
+transition and storage health must become a bounded pending state, not an
+immediate runtime failure. Hard guest boot evidence remains fail-fast.
+
+Implementation smoke also found and fixed a Bash local-scope issue in the
+log-reason helpers: helper-local `reason` variables could shadow the caller's
+`reason` output variable. Without that fix, hard guest/storage log evidence
+could be missed even when the log pattern was present.

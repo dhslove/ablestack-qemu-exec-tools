@@ -836,6 +836,34 @@ ftctl_xcolo_query_guest_ping() {
   return 1
 }
 
+ftctl_xcolo_capture_primary_qga_baseline() {
+  local vm="${1-}"
+  local qga_policy="${FTCTL_PROFILE_QGA_POLICY:-optional}"
+  local baseline="unavailable" qga="" now
+
+  now="$(ftctl_now_iso8601)"
+  if [[ "${qga_policy}" == "off" ]]; then
+    baseline="off"
+  else
+    ftctl_xcolo_query_guest_ping "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" qga || true
+    if [[ "${qga}" == "yes" ]]; then
+      baseline="available"
+    fi
+  fi
+
+  ftctl_state_set "${vm}" \
+    "xcolo_primary_qga_baseline=${baseline}" \
+    "xcolo_primary_qga_baseline_policy=${qga_policy}" \
+    "xcolo_primary_qga_baseline_ts=${now}" \
+    "xcolo_primary_guest_health_qga_success_count=0" \
+    "xcolo_primary_guest_health_pending_since=" \
+    "xcolo_primary_guest_health_elapsed=0" \
+    "xcolo_primary_guest_health_reason=baseline_${baseline}"
+  ftctl_log_event "colo" "xcolo.primary_qga_baseline" "ok" "${vm}" "" \
+    "baseline=${baseline} policy=${qga_policy}"
+  return 0
+}
+
 ftctl_xcolo_primary_migrate_state_ok() {
   local status="${1-}"
   [[ "${status}" == "active" || "${status}" == "colo" ]]
@@ -861,39 +889,39 @@ ftctl_xcolo_primary_qemu_log_tail() {
 ftctl_xcolo_primary_storage_failure_reason_from_text() {
   local text="${1-}"
   local reason_var="${2}"
-  local reason=""
+  local detected_reason=""
 
   if printf '%s\n' "${text}" | grep -Eiq 'Input/output error|I/O error'; then
-    reason="qemu_log_io_error"
+    detected_reason="qemu_log_io_error"
   elif printf '%s\n' "${text}" | grep -Eiq 'Operation not permitted|Permission denied'; then
-    reason="qemu_log_permission_error"
+    detected_reason="qemu_log_permission_error"
   elif printf '%s\n' "${text}" | grep -Eiq 'blk_update_request'; then
-    reason="qemu_log_block_request_error"
+    detected_reason="qemu_log_block_request_error"
   elif printf '%s\n' "${text}" | grep -Eiq 'rbd.*(error|failed|denied|not permitted)|((error|failed|denied|not permitted).*)rbd'; then
-    reason="qemu_log_rbd_error"
+    detected_reason="qemu_log_rbd_error"
   fi
 
-  printf -v "${reason_var}" '%s' "${reason}"
-  [[ -z "${reason}" ]]
+  printf -v "${reason_var}" '%s' "${detected_reason}"
+  [[ -z "${detected_reason}" ]]
 }
 
 ftctl_xcolo_primary_guest_failure_reason_from_text() {
   local text="${1-}"
   local reason_var="${2}"
-  local reason=""
+  local detected_reason=""
 
   if printf '%s\n' "${text}" | grep -Eiq 'Failed to mount /sysroot'; then
-    reason="sysroot_mount_failed"
+    detected_reason="sysroot_mount_failed"
   elif printf '%s\n' "${text}" | grep -Eiq 'Entering emergency mode'; then
-    reason="guest_entered_emergency_mode"
+    detected_reason="guest_entered_emergency_mode"
   elif printf '%s\n' "${text}" | grep -Eiq 'XFS .*metadata I/O error|Uncorrected metadata errors'; then
-    reason="guest_filesystem_metadata_io_error"
+    detected_reason="guest_filesystem_metadata_io_error"
   elif printf '%s\n' "${text}" | grep -Eiq 'dracut-initqueue.*timeout'; then
-    reason="guest_dracut_initqueue_timeout"
+    detected_reason="guest_dracut_initqueue_timeout"
   fi
 
-  printf -v "${reason_var}" '%s' "${reason}"
-  [[ -z "${reason}" ]]
+  printf -v "${reason_var}" '%s' "${detected_reason}"
+  [[ -z "${detected_reason}" ]]
 }
 
 ftctl_xcolo_validate_primary_storage_health() {
@@ -958,16 +986,27 @@ ftctl_xcolo_validate_primary_guest_health() {
   local reason_var="${3}"
   local policy="${FTCTL_XCOLO_PRIMARY_GUEST_HEALTH_POLICY:-required}"
   local log_tail="" reason="" gate="ok"
+  local pending_since="" pending_elapsed="0" pending_timeout
+  local stable_required success_count now baseline
 
   case "${policy}" in
     required|observe|off) ;;
     *) policy="required" ;;
   esac
 
+  pending_timeout="${FTCTL_XCOLO_PRIMARY_GUEST_HEALTH_TIMEOUT_SEC:-180}"
+  [[ "${pending_timeout}" =~ ^[0-9]+$ && "${pending_timeout}" -gt 0 ]] || pending_timeout="180"
+  stable_required="${FTCTL_XCOLO_PRIMARY_GUEST_HEALTH_STABLE_COUNT:-2}"
+  [[ "${stable_required}" =~ ^[0-9]+$ && "${stable_required}" -gt 0 ]] || stable_required="2"
+  baseline="$(ftctl_state_get "${vm}" "xcolo_primary_qga_baseline" 2>/dev/null || true)"
+  [[ -n "${baseline}" ]] || baseline="unknown"
+
   if [[ "${policy}" == "off" ]]; then
     ftctl_state_set "${vm}" \
       "xcolo_primary_guest_health_gate=off" \
-      "xcolo_primary_guest_health_reason=policy_off"
+      "xcolo_primary_guest_health_policy=${policy}" \
+      "xcolo_primary_guest_health_reason=policy_off" \
+      "xcolo_primary_guest_health_timeout=${pending_timeout}"
     printf -v "${reason_var}" '%s' ""
     return 0
   fi
@@ -977,17 +1016,15 @@ ftctl_xcolo_validate_primary_guest_health() {
     ftctl_xcolo_primary_guest_failure_reason_from_text "${log_tail}" reason || true
   fi
 
-  if [[ -z "${reason}" && "${policy}" == "required" && "${primary_qga}" != "yes" ]]; then
-    reason="qga_unavailable"
-  fi
-
   if [[ -n "${reason}" ]]; then
     ftctl_state_set "${vm}" \
       "xcolo_primary_guest_health_gate=failed" \
       "xcolo_primary_guest_health_policy=${policy}" \
-      "xcolo_primary_guest_health_reason=${reason}"
+      "xcolo_primary_guest_health_reason=${reason}" \
+      "xcolo_primary_guest_health_timeout=${pending_timeout}" \
+      "xcolo_primary_guest_health_qga_success_count=0"
     ftctl_log_event "colo" "xcolo.primary_guest_health" "fail" "${vm}" "" \
-      "policy=${policy} qga=${primary_qga} reason=${reason}"
+      "policy=${policy} qga=${primary_qga} baseline=${baseline} reason=${reason}"
     printf -v "${reason_var}" '%s' "xcolo_primary_guest_boot_unhealthy:${reason}"
     return 1
   fi
@@ -995,16 +1032,100 @@ ftctl_xcolo_validate_primary_guest_health() {
   if [[ "${policy}" == "observe" && "${primary_qga}" != "yes" ]]; then
     gate="observe"
     reason="qga_unavailable_observed"
-  else
-    gate="ok"
-    reason="ok"
+    ftctl_state_set "${vm}" \
+      "xcolo_primary_guest_health_gate=${gate}" \
+      "xcolo_primary_guest_health_policy=${policy}" \
+      "xcolo_primary_guest_health_reason=${reason}" \
+      "xcolo_primary_guest_health_timeout=${pending_timeout}" \
+      "xcolo_primary_guest_health_qga_success_count=0"
+    ftctl_log_event "colo" "xcolo.primary_guest_health" "ok" "${vm}" "" \
+      "policy=${policy} qga=${primary_qga} baseline=${baseline} gate=${gate} reason=${reason}"
+    printf -v "${reason_var}" '%s' ""
+    return 0
   fi
+
+  if [[ "${primary_qga}" == "yes" ]]; then
+    success_count="$(ftctl_state_get "${vm}" "xcolo_primary_guest_health_qga_success_count" 2>/dev/null || true)"
+    [[ "${success_count}" =~ ^[0-9]+$ ]] || success_count="0"
+    success_count=$((success_count + 1))
+    if (( success_count < stable_required )); then
+      ftctl_state_set "${vm}" \
+        "xcolo_primary_guest_health_gate=pending" \
+        "xcolo_primary_guest_health_policy=${policy}" \
+        "xcolo_primary_guest_health_reason=qga_stabilizing" \
+        "xcolo_primary_guest_health_timeout=${pending_timeout}" \
+        "xcolo_primary_guest_health_stable_required=${stable_required}" \
+        "xcolo_primary_guest_health_qga_success_count=${success_count}" \
+        "xcolo_pending_reason=primary_guest_health_pending:qga_stabilizing"
+      ftctl_log_event "colo" "xcolo.primary_guest_health" "pending" "${vm}" "" \
+        "policy=${policy} qga=${primary_qga} baseline=${baseline} reason=qga_stabilizing success_count=${success_count} stable_required=${stable_required}"
+      printf -v "${reason_var}" '%s' "xcolo_primary_guest_health_pending:qga_stabilizing"
+      return 10
+    fi
+
+    ftctl_state_set "${vm}" \
+      "xcolo_primary_guest_health_gate=ok" \
+      "xcolo_primary_guest_health_policy=${policy}" \
+      "xcolo_primary_guest_health_reason=ok" \
+      "xcolo_primary_guest_health_timeout=${pending_timeout}" \
+      "xcolo_primary_guest_health_stable_required=${stable_required}" \
+      "xcolo_primary_guest_health_qga_success_count=${success_count}" \
+      "xcolo_primary_guest_health_pending_since=" \
+      "xcolo_primary_guest_health_elapsed=0"
+    ftctl_log_event "colo" "xcolo.primary_guest_health" "ok" "${vm}" "" \
+      "policy=${policy} qga=${primary_qga} baseline=${baseline} gate=ok reason=ok success_count=${success_count} stable_required=${stable_required}"
+    printf -v "${reason_var}" '%s' ""
+    return 0
+  fi
+
+  if [[ "${policy}" == "required" ]]; then
+    pending_since="$(ftctl_state_get "${vm}" "xcolo_primary_guest_health_pending_since" 2>/dev/null || true)"
+    now="$(ftctl_now_iso8601)"
+    [[ -n "${pending_since}" ]] || pending_since="${now}"
+    pending_elapsed="$(ftctl_elapsed_since_iso "${pending_since}" 2>/dev/null || echo "0")"
+    [[ "${pending_elapsed}" =~ ^[0-9]+$ ]] || pending_elapsed="0"
+
+    if (( pending_elapsed < pending_timeout )); then
+      ftctl_state_set "${vm}" \
+        "xcolo_primary_guest_health_gate=pending" \
+        "xcolo_primary_guest_health_policy=${policy}" \
+        "xcolo_primary_guest_health_reason=qga_transient_wait" \
+        "xcolo_primary_guest_health_pending_since=${pending_since}" \
+        "xcolo_primary_guest_health_elapsed=${pending_elapsed}" \
+        "xcolo_primary_guest_health_timeout=${pending_timeout}" \
+        "xcolo_primary_guest_health_stable_required=${stable_required}" \
+        "xcolo_primary_guest_health_qga_success_count=0" \
+        "xcolo_pending_reason=primary_guest_health_pending:qga_transient_wait"
+      ftctl_log_event "colo" "xcolo.primary_guest_health" "pending" "${vm}" "" \
+        "policy=${policy} qga=${primary_qga} baseline=${baseline} reason=qga_transient_wait elapsed=${pending_elapsed} timeout=${pending_timeout}"
+      printf -v "${reason_var}" '%s' "xcolo_primary_guest_health_pending:qga_transient_wait"
+      return 10
+    fi
+
+    reason="qga_timeout"
+    ftctl_state_set "${vm}" \
+      "xcolo_primary_guest_health_gate=failed" \
+      "xcolo_primary_guest_health_policy=${policy}" \
+      "xcolo_primary_guest_health_reason=${reason}" \
+      "xcolo_primary_guest_health_pending_since=${pending_since}" \
+      "xcolo_primary_guest_health_elapsed=${pending_elapsed}" \
+      "xcolo_primary_guest_health_timeout=${pending_timeout}" \
+      "xcolo_primary_guest_health_qga_success_count=0"
+    ftctl_log_event "colo" "xcolo.primary_guest_health" "fail" "${vm}" "" \
+      "policy=${policy} qga=${primary_qga} baseline=${baseline} reason=${reason} elapsed=${pending_elapsed} timeout=${pending_timeout}"
+    printf -v "${reason_var}" '%s' "xcolo_primary_guest_boot_unhealthy:${reason}"
+    return 1
+  fi
+
+  gate="ok"
+  reason="ok"
   ftctl_state_set "${vm}" \
     "xcolo_primary_guest_health_gate=${gate}" \
     "xcolo_primary_guest_health_policy=${policy}" \
-    "xcolo_primary_guest_health_reason=${reason}"
+    "xcolo_primary_guest_health_reason=${reason}" \
+    "xcolo_primary_guest_health_timeout=${pending_timeout}"
   ftctl_log_event "colo" "xcolo.primary_guest_health" "ok" "${vm}" "" \
-    "policy=${policy} qga=${primary_qga} gate=${gate} reason=${reason}"
+    "policy=${policy} qga=${primary_qga} baseline=${baseline} gate=${gate} reason=${reason}"
   printf -v "${reason_var}" '%s' ""
   return 0
 }
@@ -5654,7 +5775,7 @@ ftctl_xcolo_validate_pair_runtime() {
   local primary_migrate="" secondary_migrate=""
   local primary_migrate_error_desc="" secondary_migrate_error_desc=""
   local primary_migrate_ok="no"
-  local primary_qga="" secondary_qga="" qga_policy health_reason=""
+  local primary_qga="" secondary_qga="" qga_policy health_reason="" health_rc=0
   local primary_xml="missing" secondary_xml="missing"
   local channel_mirror="" channel_compare="" channel_compare_local="" channel_compare_out=""
   local primary_filter_qom="unknown" primary_filter_qom_reason=""
@@ -5821,8 +5942,7 @@ ftctl_xcolo_validate_pair_runtime() {
             "${primary_migrate_ok}" == "yes" &&
             "${secondary_migrate}" == "colo" &&
             "${primary_colo}" == "primary" &&
-            "${secondary_colo}" == "secondary" &&
-            ( "${qga_policy}" != "required" || "${primary_qga}" == "yes" ) ]] &&
+            "${secondary_colo}" == "secondary" ]] &&
           ftctl_xcolo_runtime_primary_topology_ready "${primary_xml}" "${primary_filter_qom}" "${primary_filter_cmdline}" \
             "${channel_mirror}" "${channel_compare}" "${channel_compare_local}" "${channel_compare_out}" \
             "${disk_plan}" "${secondary_block_graph}" &&
@@ -5834,10 +5954,54 @@ ftctl_xcolo_validate_pair_runtime() {
         break
       fi
       health_reason=""
-      if ! ftctl_xcolo_validate_primary_guest_health "${vm}" "${primary_qga}" health_reason; then
-        reason="${health_reason}"
-        break
-      fi
+      health_rc=0
+      ftctl_xcolo_validate_primary_guest_health "${vm}" "${primary_qga}" health_reason || health_rc=$?
+      case "${health_rc}" in
+        0)
+          ;;
+        10)
+          pending_reason="${health_reason}"
+          [[ -n "${pending_reason}" ]] || pending_reason="$(ftctl_state_get "${vm}" "xcolo_pending_reason" 2>/dev/null || true)"
+          [[ -n "${pending_reason}" ]] || pending_reason="primary_guest_health_pending"
+          pending_since="$(ftctl_state_get "${vm}" "xcolo_runtime_pending_since" 2>/dev/null || true)"
+          [[ -n "${pending_since}" ]] || pending_since="$(ftctl_now_iso8601)"
+          ftctl_state_set "${vm}" \
+            "xcolo_primary_running=${primary_running}" \
+            "xcolo_secondary_running=${secondary_running}" \
+            "xcolo_primary_status=${primary_status}" \
+            "xcolo_secondary_status=${secondary_status}" \
+            "xcolo_primary_colo_mode=${primary_colo}" \
+            "xcolo_secondary_colo_mode=${secondary_colo}" \
+            "xcolo_primary_migrate_status=${primary_migrate}" \
+            "xcolo_secondary_migrate_status=${secondary_migrate}" \
+            "xcolo_primary_qga=${primary_qga}" \
+            "xcolo_secondary_qga=${secondary_qga}" \
+            "xcolo_primary_runtime_xml=${primary_xml}" \
+            "xcolo_secondary_runtime_xml=${secondary_xml}" \
+            "xcolo_primary_filter_qom_ready=${primary_filter_qom}" \
+            "xcolo_primary_filter_qom_reason=${primary_filter_qom_reason}" \
+            "xcolo_primary_filter_cmdline_ready=${primary_filter_cmdline}" \
+            "xcolo_primary_filter_cmdline_reason=${primary_filter_cmdline_reason}" \
+            "xcolo_primary_filter_chardev_ready=${primary_chardev}" \
+            "xcolo_primary_filter_chardev_reason=${primary_chardev_reason}" \
+            "xcolo_channel_mirror_established=${channel_mirror}" \
+            "xcolo_channel_compare_established=${channel_compare}" \
+            "xcolo_channel_compare_local_established=${channel_compare_local}" \
+            "xcolo_channel_compare_out_established=${channel_compare_out}" \
+            "xcolo_secondary_block_graph_ready=${secondary_block_graph}" \
+            "xcolo_secondary_block_graph_reason=${secondary_block_graph_reason}" \
+            "xcolo_runtime_pending_since=${pending_since}" \
+            "xcolo_pending_reason=${pending_reason}" \
+            "last_error="
+          ftctl_log_event "colo" "xcolo.runtime_validate" "pending" "${vm}" "" \
+            "reason=${pending_reason} primary_running=${primary_running} secondary_running=${secondary_running} primary_status=${primary_status} secondary_status=${secondary_status} primary_colo=${primary_colo} secondary_colo=${secondary_colo} primary_migrate=${primary_migrate} secondary_migrate=${secondary_migrate} primary_qga=${primary_qga} secondary_qga=${secondary_qga} primary_storage_health=$(ftctl_state_get "${vm}" "xcolo_primary_storage_health_gate" 2>/dev/null || true) primary_guest_health=$(ftctl_state_get "${vm}" "xcolo_primary_guest_health_gate" 2>/dev/null || true) filter_qom=${primary_filter_qom} filter_cmdline=${primary_filter_cmdline} chardev=${primary_chardev} mirror=${channel_mirror} compare=${channel_compare} compare_local=${channel_compare_local} compare_out=${channel_compare_out} secondary_block_graph=${secondary_block_graph} attempts=$((i + 1))"
+          return 10
+          ;;
+        *)
+          reason="${health_reason}"
+          break
+          ;;
+      esac
       ftctl_state_set "${vm}" \
         "xcolo_primary_running=${primary_running}" \
         "xcolo_secondary_running=${secondary_running}" \
@@ -12082,6 +12246,8 @@ ftctl_xcolo_plan_protect_prebuilt() {
     "xcolo_protect_stage=secondary-stage" \
     "last_error="
 
+  ftctl_xcolo_capture_primary_qga_baseline "${vm}" || true
+
   if [[ "${FTCTL_DRY_RUN}" != "1" ]] && ! ftctl_xcolo_validate_prebuilt_file_pair_sizes "${vm}"; then
     ftctl_state_set "${vm}" \
       "protection_state=error" \
@@ -12331,6 +12497,8 @@ ftctl_xcolo_plan_protect_block_cold_conversion() {
     "conversion_state=shutdown_required" \
     "primary_domain_state=${primary_state}" \
     "last_error="
+
+  ftctl_xcolo_capture_primary_qga_baseline "${vm}" || true
 
   if [[ "${FTCTL_DRY_RUN}" == "1" ]]; then
     ftctl_state_set "${vm}" "last_error=xcolo_block_cold_conversion_handshake_not_implemented"
