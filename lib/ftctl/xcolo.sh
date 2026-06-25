@@ -1201,6 +1201,170 @@ ftctl_xcolo_validate_primary_guest_health() {
   return 0
 }
 
+ftctl_xcolo_primary_premigrate_boot_timeout_sec() {
+  local timeout_sec="${FTCTL_XCOLO_PRIMARY_PREMIGRATE_BOOT_TIMEOUT_SEC:-${FTCTL_XCOLO_PRIMARY_GUEST_HEALTH_TIMEOUT_SEC:-180}}"
+  if [[ -z "${timeout_sec}" || ! "${timeout_sec}" =~ ^[0-9]+$ || "${timeout_sec}" -lt 30 ]]; then
+    timeout_sec=180
+  fi
+  printf '%s\n' "${timeout_sec}"
+}
+
+ftctl_xcolo_capture_primary_premigrate_boot_evidence() {
+  local vm="${1-}"
+  local disk_plan="${2-}"
+  local phase="${3:-premigrate_boot}"
+  local out="" rc=0 log_tail=""
+
+  ftctl_xcolo_qmp "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" '{"execute":"query-status"}' out rc
+  ftctl_xcolo_write_debug_file "${vm}" "primary-${phase}-query-status.json" "${out}" || true
+  ftctl_xcolo_write_debug_file "${vm}" "primary-${phase}-query-status.rc" "${rc}" || true
+
+  out=""; rc=0
+  ftctl_xcolo_qmp "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" '{"execute":"query-block"}' out rc
+  ftctl_xcolo_write_debug_file "${vm}" "primary-${phase}-query-block.json" "${out}" || true
+  ftctl_xcolo_write_debug_file "${vm}" "primary-${phase}-query-block.rc" "${rc}" || true
+
+  out=""; rc=0
+  ftctl_xcolo_qmp "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" '{"execute":"query-named-block-nodes"}' out rc
+  ftctl_xcolo_write_debug_file "${vm}" "primary-${phase}-query-named-block-nodes.json" "${out}" || true
+  ftctl_xcolo_write_debug_file "${vm}" "primary-${phase}-query-named-block-nodes.rc" "${rc}" || true
+
+  ftctl_xcolo_collect_primary_block_graph_state "${vm}" "${disk_plan}" || true
+  ftctl_xcolo_primary_qemu_log_tail "${vm}" log_tail || true
+  ftctl_xcolo_write_debug_file "${vm}" "primary-${phase}-qemu-log-tail.txt" "${log_tail}" || true
+}
+
+ftctl_xcolo_wait_primary_premigrate_boot_ready() {
+  local vm="${1-}"
+  local secondary_vm="${2-}"
+  local disk_plan="${3-}"
+  local timeout_sec interval start_ts elapsed qga="" storage_reason="" guest_reason="" log_tail=""
+  local baseline policy block_ready block_reason
+
+  [[ -n "${vm}" ]] || return 1
+  if [[ "${FTCTL_DRY_RUN}" == "1" ]]; then
+    ftctl_log_event "colo" "xcolo.primary_premigrate_boot" "skip" "${vm}" "" "reason=dry_run"
+    return 0
+  fi
+
+  timeout_sec="$(ftctl_xcolo_primary_premigrate_boot_timeout_sec)"
+  interval="${FTCTL_XCOLO_PRIMARY_PREMIGRATE_BOOT_INTERVAL_SEC:-5}"
+  [[ "${interval}" =~ ^[0-9]+$ && "${interval}" -gt 0 ]] || interval=5
+  baseline="$(ftctl_state_get "${vm}" "xcolo_primary_qga_baseline" 2>/dev/null || true)"
+  [[ -n "${baseline}" ]] || baseline="unknown"
+  policy="${FTCTL_XCOLO_PRIMARY_PREMIGRATE_BOOT_POLICY:-required}"
+  case "${policy}" in
+    required|observe|off) ;;
+    *) policy="required" ;;
+  esac
+
+  start_ts="$(ftctl_now_iso8601)"
+  ftctl_state_set "${vm}" \
+    "xcolo_primary_premigrate_boot_gate=pending" \
+    "xcolo_primary_premigrate_boot_started_at=${start_ts}" \
+    "xcolo_primary_premigrate_boot_timeout=${timeout_sec}" \
+    "xcolo_primary_premigrate_boot_policy=${policy}" \
+    "xcolo_primary_premigrate_boot_qga_baseline=${baseline}" \
+    "xcolo_primary_premigrate_boot_secondary=${secondary_vm}"
+
+  while :; do
+    elapsed="$(ftctl_elapsed_since_iso "${start_ts}" 2>/dev/null || echo 0)"
+    [[ "${elapsed}" =~ ^[0-9]+$ ]] || elapsed=0
+
+    ftctl_xcolo_capture_primary_premigrate_boot_evidence "${vm}" "${disk_plan}" "premigrate_boot" || true
+    block_ready="$(ftctl_state_get "${vm}" "xcolo_primary_block_graph_ready" 2>/dev/null || true)"
+    block_reason="$(ftctl_state_get "${vm}" "xcolo_primary_block_graph_reason" 2>/dev/null || true)"
+    if [[ "${block_ready}" != "yes" && "${block_ready}" != "not_applicable" ]]; then
+      ftctl_state_set "${vm}" \
+        "xcolo_primary_premigrate_boot_gate=failed" \
+        "xcolo_primary_premigrate_boot_reason=primary_block_graph_not_ready" \
+        "xcolo_primary_premigrate_boot_elapsed=${elapsed}" \
+        "xcolo_protocol_failure_phase=primary_premigrate_boot" \
+        "last_error=xcolo_primary_colo_boot_graph_invalid"
+      ftctl_log_event "colo" "xcolo.primary_premigrate_boot" "fail" "${vm}" "" \
+        "reason=primary_block_graph_not_ready block_ready=${block_ready:-unknown} block_reason=${block_reason:-unknown} elapsed=${elapsed}"
+      return 1
+    fi
+
+    storage_reason=""
+    if ! ftctl_xcolo_validate_primary_storage_health "${vm}" storage_reason; then
+      ftctl_state_set "${vm}" \
+        "xcolo_primary_premigrate_boot_gate=failed" \
+        "xcolo_primary_premigrate_boot_reason=${storage_reason}" \
+        "xcolo_primary_premigrate_boot_elapsed=${elapsed}" \
+        "xcolo_protocol_failure_phase=primary_premigrate_boot" \
+        "last_error=${storage_reason}"
+      ftctl_log_event "colo" "xcolo.primary_premigrate_boot" "fail" "${vm}" "" \
+        "reason=${storage_reason} elapsed=${elapsed}"
+      return 1
+    fi
+
+    ftctl_xcolo_query_guest_ping "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" qga || true
+    if [[ "${qga}" == "yes" ]]; then
+      ftctl_state_set "${vm}" \
+        "xcolo_primary_premigrate_boot_gate=ok" \
+        "xcolo_primary_premigrate_boot_reason=ok" \
+        "xcolo_primary_premigrate_boot_elapsed=${elapsed}" \
+        "xcolo_primary_premigrate_boot_qga=yes"
+      ftctl_log_event "colo" "xcolo.primary_premigrate_boot" "ok" "${vm}" "" \
+        "qga=yes elapsed=${elapsed} block_ready=${block_ready} baseline=${baseline}"
+      return 0
+    fi
+
+    ftctl_xcolo_primary_qemu_log_tail "${vm}" log_tail || true
+    guest_reason=""
+    if [[ -n "${log_tail}" ]]; then
+      ftctl_xcolo_primary_guest_failure_reason_from_text "${log_tail}" guest_reason || true
+    fi
+    if [[ -n "${guest_reason}" ]]; then
+      ftctl_state_set "${vm}" \
+        "xcolo_primary_premigrate_boot_gate=failed" \
+        "xcolo_primary_premigrate_boot_reason=${guest_reason}" \
+        "xcolo_primary_premigrate_boot_elapsed=${elapsed}" \
+        "xcolo_primary_premigrate_boot_qga=no" \
+        "xcolo_protocol_failure_phase=primary_premigrate_boot" \
+        "last_error=xcolo_primary_colo_boot_unhealthy:${guest_reason}"
+      ftctl_log_event "colo" "xcolo.primary_premigrate_boot" "fail" "${vm}" "" \
+        "reason=${guest_reason} qga=no elapsed=${elapsed} baseline=${baseline}"
+      return 1
+    fi
+
+    if [[ "${policy}" == "off" || "${policy}" == "observe" || "${baseline}" != "available" ]]; then
+      ftctl_state_set "${vm}" \
+        "xcolo_primary_premigrate_boot_gate=observe" \
+        "xcolo_primary_premigrate_boot_reason=qga_unavailable_observed" \
+        "xcolo_primary_premigrate_boot_elapsed=${elapsed}" \
+        "xcolo_primary_premigrate_boot_qga=no"
+      ftctl_log_event "colo" "xcolo.primary_premigrate_boot" "ok" "${vm}" "" \
+        "policy=${policy} baseline=${baseline} qga=no elapsed=${elapsed} block_ready=${block_ready}"
+      return 0
+    fi
+
+    if (( elapsed >= timeout_sec )); then
+      ftctl_state_set "${vm}" \
+        "xcolo_primary_premigrate_boot_gate=failed" \
+        "xcolo_primary_premigrate_boot_reason=qga_timeout" \
+        "xcolo_primary_premigrate_boot_elapsed=${elapsed}" \
+        "xcolo_primary_premigrate_boot_qga=no" \
+        "xcolo_protocol_failure_phase=primary_premigrate_boot" \
+        "last_error=xcolo_primary_colo_boot_unhealthy:qga_timeout"
+      ftctl_log_event "colo" "xcolo.primary_premigrate_boot" "fail" "${vm}" "" \
+        "reason=qga_timeout qga=no elapsed=${elapsed} timeout=${timeout_sec} baseline=${baseline} block_ready=${block_ready}"
+      return 1
+    fi
+
+    ftctl_state_set "${vm}" \
+      "xcolo_primary_premigrate_boot_gate=pending" \
+      "xcolo_primary_premigrate_boot_reason=qga_wait" \
+      "xcolo_primary_premigrate_boot_elapsed=${elapsed}" \
+      "xcolo_primary_premigrate_boot_qga=no" \
+      "xcolo_pending_reason=primary_premigrate_boot_pending:qga_wait"
+    ftctl_log_event "colo" "xcolo.primary_premigrate_boot" "pending" "${vm}" "" \
+      "qga=no elapsed=${elapsed} timeout=${timeout_sec} baseline=${baseline} block_ready=${block_ready}"
+    sleep "${interval}"
+  done
+}
+
 ftctl_xcolo_preserve_runtime_error() {
   local vm="${1-}"
   local last_error sticky_error protection_state conversion_state transport_state
@@ -2154,26 +2318,43 @@ ftctl_xcolo_require_primary_filter_qom_ready() {
 ftctl_xcolo_collect_primary_block_graph_state() {
   local vm="${1-}"
   local plan="${2-}"
-  local out rc payload state_args=()
+  local nodes_out nodes_rc block_out block_rc payload state_args=()
 
-  out=""
-  rc=0
-  ftctl_xcolo_qmp "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" '{"execute":"query-named-block-nodes"}' out rc
-  if [[ "${rc}" != "0" || -z "${out}" ]]; then
+  if [[ -z "${plan}" ]]; then
+    ftctl_state_set "${vm}" \
+      "xcolo_primary_block_graph_ready=not_applicable" \
+      "xcolo_primary_block_graph_reason=no_disk_plan"
+    return 0
+  fi
+
+  nodes_out=""
+  nodes_rc=0
+  ftctl_xcolo_qmp "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" '{"execute":"query-named-block-nodes"}' nodes_out nodes_rc
+  ftctl_xcolo_write_debug_file "${vm}" "primary-premigrate-query-named-block-nodes.json" "${nodes_out}" || true
+  ftctl_xcolo_write_debug_file "${vm}" "primary-premigrate-query-named-block-nodes.rc" "${nodes_rc}" || true
+
+  block_out=""
+  block_rc=0
+  ftctl_xcolo_qmp "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" '{"execute":"query-block"}' block_out block_rc
+  ftctl_xcolo_write_debug_file "${vm}" "primary-premigrate-query-block.json" "${block_out}" || true
+  ftctl_xcolo_write_debug_file "${vm}" "primary-premigrate-query-block.rc" "${block_rc}" || true
+
+  if [[ "${nodes_rc}" != "0" || -z "${nodes_out}" || "${block_rc}" != "0" || -z "${block_out}" ]]; then
     ftctl_state_set "${vm}" \
       "xcolo_primary_block_graph_ready=unknown" \
-      "xcolo_primary_block_graph_reason=query_named_block_nodes_failed"
+      "xcolo_primary_block_graph_reason=query_block_graph_failed"
     return 1
   fi
 
-  payload="$(python3 - <<'PY' "${plan}" "${FTCTL_PROFILE_XCOLO_NBD_NODE:-ftctl-nbd}" "${out}"
+  payload="$(python3 - <<'PY' "${plan}" "${FTCTL_PROFILE_XCOLO_NBD_NODE:-ftctl-nbd}" "${nodes_out}" "${block_out}"
 import json
 import re
 import sys
 
 plan = sys.argv[1]
 nbd_base = sys.argv[2] or "ftctl-nbd"
-raw = sys.argv[3]
+nodes_raw = sys.argv[3]
+block_raw = sys.argv[4]
 targets = []
 for entry in plan.split(";"):
     if not entry:
@@ -2181,38 +2362,71 @@ for entry in plan.split(";"):
     target = entry.split("|", 1)[0]
     if target:
         targets.append(target)
-if not targets:
-    targets = ["root"]
 
 def suffix(target):
     return re.sub(r"[^A-Za-z0-9_.-]", "_", target or "root")
 
 try:
-    data = json.loads(raw)
+    nodes_data = json.loads(nodes_raw)
+    block_data = json.loads(block_raw)
 except Exception:
     print("ready=unknown")
-    print("reason=query_named_block_nodes_parse_failed")
+    print("reason=query_block_graph_parse_failed")
     raise SystemExit(0)
 
-nodes = {item.get("node-name") for item in data.get("return", []) if item.get("node-name")}
+node_items = {}
+for item in nodes_data.get("return", []):
+    name = item.get("node-name")
+    if name:
+        node_items[name] = item
+
+qdev_nodes = {}
+for item in block_data.get("return", []):
+    inserted = item.get("inserted") if isinstance(item, dict) else None
+    node = inserted.get("node-name") if isinstance(inserted, dict) else ""
+    qdev = item.get("qdev") or item.get("device") or ""
+    if node:
+        qdev_nodes[node] = qdev
+
 ready = True
 reasons = []
 for target in targets:
     s = suffix(target)
-    required = [f"ftctl-colo-{s}", f"ftctl-primary-active-{s}", f"{nbd_base}-{s}"]
-    for node in required:
+    colo = f"ftctl-colo-{s}"
+    active = f"ftctl-primary-active-{s}"
+    nbd = f"{nbd_base}-{s}"
+    expected_drivers = {
+        colo: "quorum",
+        active: "qcow2",
+        nbd: "nbd",
+    }
+    for node, expected in expected_drivers.items():
         key = re.sub(r"[^A-Za-z0-9_.-]", "_", node)
-        if node in nodes:
-            print(f"{key}=yes")
-        else:
+        item = node_items.get(node)
+        if not item:
             ready = False
             reasons.append(f"{node}:missing")
             print(f"{key}=missing")
+            continue
+        drv = item.get("drv") or item.get("driver") or ""
+        print(f"{key}=yes")
+        print(f"{key}_driver={drv}")
+        if expected and drv and drv != expected:
+            ready = False
+            reasons.append(f"{node}:driver:{drv}")
+    qdev = qdev_nodes.get(colo, "")
+    qkey = re.sub(r"[^A-Za-z0-9_.-]", "_", f"{colo}_qdev")
+    if qdev:
+        print(f"{qkey}={qdev}")
+    else:
+        ready = False
+        reasons.append(f"{colo}:qdev_missing")
+        print(f"{qkey}=missing")
 
 print(f"ready={'yes' if ready else 'no'}")
 print("reason=" + (",".join(reasons) if reasons else ""))
 PY
-)" || payload="ready=unknown"$'\n'"reason=query_named_block_nodes_parse_failed"
+)" || payload="ready=unknown"$'\n'"reason=query_block_graph_parse_failed"
 
   while IFS= read -r line; do
     [[ -n "${line}" ]] || continue
@@ -2231,7 +2445,6 @@ PY
   ftctl_state_set "${vm}" "${state_args[@]}"
   [[ "$(ftctl_state_get "${vm}" "xcolo_primary_block_graph_ready" 2>/dev/null || true)" == "yes" ]]
 }
-
 ftctl_xcolo_collect_secondary_block_graph_state() {
   local vm="${1-}"
   local secondary_vm="${2:-$vm}"
@@ -7243,6 +7456,9 @@ def qemu_driver(fmt):
     return fmt if fmt in {"raw", "qcow2"} else "raw"
 
 def qemu_source_options(path):
+    # ABLESTACK manages RBD mapping through stable krbd paths. Do not turn
+    # /dev/rbd/rbd/<image> into userspace librbd URIs here; doing so makes the
+    # FT runtime disk backend differ from the Cloud/libvirt boot backend.
     if path.startswith("/dev/rbd/"):
         spec = path[len("/dev/rbd/"):]
         if "/" not in spec:
@@ -7252,7 +7468,7 @@ def qemu_source_options(path):
             raise SystemExit(f"invalid krbd path: {path}")
         if any(ch in pool + image for ch in ",;"):
             raise SystemExit(f"unsupported krbd pool/image characters: {path}")
-        return f"file=rbd:{pool}/{image}"
+        return f"file.filename={path}"
     return f"file.filename={path}"
 
 def parse_runtime(raw):
@@ -10408,6 +10624,8 @@ ftctl_xcolo_execute_handshake_with_nodes() {
   ftctl_xcolo_record_pre_migrate_materialization_result "${vm}"
   ftctl_xcolo_assert_no_premigrate_filter_mirror_send "${vm}" "before_migrate" || return 1
   ftctl_xcolo_gate_before_guest_traffic "${vm}" "${secondary_vm}" || return 1
+  ftctl_xcolo_resume_primary_before_migrate "${vm}" || return 1
+  ftctl_xcolo_wait_primary_premigrate_boot_ready "${vm}" "${secondary_vm}" "" || return 1
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
     "{\"execute\":\"migrate\",\"arguments\":{\"uri\":\"${FTCTL_PROFILE_XCOLO_MIGRATE_URI}\"}}" \
     "colo" "primary.migrate" || return 1
@@ -10485,6 +10703,8 @@ ftctl_xcolo_execute_handshake_with_disk_plan() {
   ftctl_xcolo_record_pre_migrate_materialization_result "${vm}"
   ftctl_xcolo_assert_no_premigrate_filter_mirror_send "${vm}" "before_migrate" || return 1
   ftctl_xcolo_gate_before_guest_traffic "${vm}" "${secondary_vm}" || return 1
+  ftctl_xcolo_resume_primary_before_migrate "${vm}" || return 1
+  ftctl_xcolo_wait_primary_premigrate_boot_ready "${vm}" "${secondary_vm}" "${disk_plan}" || return 1
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
     "{\"execute\":\"migrate\",\"arguments\":{\"uri\":\"${FTCTL_PROFILE_XCOLO_MIGRATE_URI}\"}}" \
     "colo" "primary.migrate" || return 1
