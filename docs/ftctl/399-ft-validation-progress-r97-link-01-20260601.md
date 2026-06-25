@@ -8348,3 +8348,47 @@ primary guest health gate ok
 If QEMU reaches COLO but the primary block path or guest boot health is bad,
 the run must fail with a specific health reason instead of publishing a false
 FT success.
+
+## Run 131 - Automatic Port Allocation Passed, Secondary Baseline Format Contract Failed
+
+The `r97-link-02` retest after automatic port allocation cleanup created a new
+protection row with:
+
+```text
+xcolo_port_allocation_mode=auto
+xcolo_port_slot=0
+remote NBD=10.10.32.1:11809
+```
+
+Cloud registration, standby VM creation, and baseline seed copy all advanced
+beyond the previous UI/backend deployment issue. The new failure was:
+
+```text
+xcolo_primary_block_replication_contract_incomplete
+```
+
+Evidence showed that secondary baseline files were created as `qcow2`, but the
+generated secondary QEMU block graph opened the same files as `raw`. That made
+QEMU interpret the qcow2 file length as the guest disk size and led to:
+
+```text
+bdrv_co_write_req_prepare assertion
+```
+
+### Repetition Check
+
+This is not the previous automatic-port, q35/i440fx, PCI topology, or XCOLO
+socket-protocol loop. It is a block graph contract bug: the secondary baseline
+file's detected format was not carried into generated QEMU args.
+
+### Design Update
+
+The corrective design is:
+
+```text
+docs/ftctl/407-ft-xcolo-secondary-baseline-format-contract-design-20260625.md
+```
+
+The new rule is that baseline seed output is authoritative. Generated
+secondary startup disk args must use the detected baseline graph format, and a
+missing or mismatched format must fail before QEMU startup or migrate.

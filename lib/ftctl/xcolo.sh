@@ -7026,8 +7026,9 @@ def parse_runtime(raw):
         if not entry:
             continue
         parts = entry.split("|")
-        if len(parts) != 7:
+        if len(parts) not in (7, 8):
             raise SystemExit(f"invalid xcolo disk runtime entry: {entry}")
+        secondary_format = parts[7] if len(parts) == 8 else parts[2]
         entries.append({
             "target": parts[0],
             "source": parts[1],
@@ -7036,6 +7037,7 @@ def parse_runtime(raw):
             "secondary_dest": parts[4],
             "secondary_hidden": parts[5],
             "secondary_active": parts[6],
+            "secondary_format": secondary_format or "raw",
         })
     return entries
 
@@ -7274,7 +7276,8 @@ for order, item in enumerate(entries):
     colo_dev = f"{colo}-dev"
     hidden = f"ftctl-hidden-{s}"
     source = item["secondary_dest"] if role == "secondary" else item["source"]
-    source_driver = qemu_driver(item["format"])
+    source_format = item["secondary_format"] if role == "secondary" else item["format"]
+    source_driver = qemu_driver(source_format)
     source_options = qemu_source_options(source)
     guest_opts = (
         f"scsi-hd,bus={topo['bus']},channel={topo['channel']},"
@@ -8510,6 +8513,33 @@ print(data.get("virtual-size", ""))
 PY
 }
 
+ftctl_xcolo_seed_graph_format_from_info() {
+  local detected_format="${1-}"
+  local target_format="${2-raw}"
+  local out_var="${3}"
+  local graph_format=""
+
+  [[ -n "${target_format}" ]] || target_format="raw"
+  case "${target_format}" in
+    qcow2)
+      [[ "${detected_format}" == "qcow2" ]] || return 1
+      graph_format="qcow2"
+      ;;
+    raw)
+      case "${detected_format}" in
+        raw|host_device|file|"") graph_format="raw" ;;
+        *) return 1 ;;
+      esac
+      ;;
+    *)
+      [[ "${detected_format}" == "${target_format}" ]] || return 1
+      graph_format="${target_format}"
+      ;;
+  esac
+
+  printf -v "${out_var}" '%s' "${graph_format}"
+}
+
 ftctl_xcolo_collect_block_disk_plan() {
   local vm="${1-}"
   local plan_var="${2}"
@@ -8838,6 +8868,7 @@ ftctl_xcolo_seed_secondary_baseline_disk() {
   local q_target q_cloud_managed
   local timeout_sec saved_timeout firewall_added="0" bind_host
   local attempts attempt detail retry_delay last_failure_class
+  local seed_info seed_format seed_virtual seed_actual seed_graph_format
 
   [[ -n "${vm}" && -n "${target}" && -n "${source}" && -n "${secondary_dest}" ]] || return 1
   [[ -n "${source_format}" ]] || source_format="raw"
@@ -9072,9 +9103,38 @@ EOF
     return 1
   fi
 
-  ftctl_state_set "${vm}" "xcolo_disk_${suffix}_baseline_seeded=true"
+  seed_info="$(printf '%s\n' "${out}" | tail -n1 | tr -d '\r')"
+  seed_format="$(printf '%s\n' "${seed_info}" | sed -n 's/.*format=\([^[:space:]]*\).*/\1/p')"
+  seed_virtual="$(printf '%s\n' "${seed_info}" | sed -n 's/.*virtual=\([^[:space:]]*\).*/\1/p')"
+  seed_actual="$(printf '%s\n' "${seed_info}" | sed -n 's/.*actual=\([^[:space:]]*\).*/\1/p')"
+  if [[ -z "${seed_format}" || -z "${seed_virtual}" ]]; then
+    ftctl_log_event "colo" "block_conversion.baseline_seed.info" "fail" "${vm}" "" \
+      "target=${target} secondary_dest=${secondary_dest} info=$(ftctl_xcolo_compact_log_value "${seed_info}")"
+    ftctl_state_set "${vm}" "last_error=xcolo_baseline_seed_info_missing:${target}"
+    return 1
+  fi
+  if ! ftctl_xcolo_seed_graph_format_from_info "${seed_format}" "${target_format}" seed_graph_format; then
+    ftctl_log_event "colo" "block_conversion.baseline_seed.format" "fail" "${vm}" "" \
+      "target=${target} secondary_dest=${secondary_dest} expected=${target_format} detected=${seed_format} info=$(ftctl_xcolo_compact_log_value "${seed_info}")"
+    ftctl_state_set "${vm}" "last_error=xcolo_secondary_baseline_format_mismatch:${target}"
+    return 1
+  fi
+  if [[ -n "${expected_size}" && "${seed_virtual}" != "${expected_size}" ]]; then
+    ftctl_log_event "colo" "block_conversion.baseline_seed.virtual_size" "fail" "${vm}" "" \
+      "target=${target} secondary_dest=${secondary_dest} expected=${expected_size} detected=${seed_virtual} format=${seed_format}"
+    ftctl_state_set "${vm}" "last_error=xcolo_secondary_baseline_virtual_size_mismatch:${target}"
+    return 1
+  fi
+
+  ftctl_state_set "${vm}" \
+    "xcolo_disk_${suffix}_baseline_seeded=true" \
+    "xcolo_disk_${suffix}_secondary_baseline_format=${seed_format}" \
+    "xcolo_disk_${suffix}_secondary_baseline_graph_format=${seed_graph_format}" \
+    "xcolo_disk_${suffix}_secondary_baseline_virtual_size=${seed_virtual}" \
+    "xcolo_disk_${suffix}_secondary_baseline_actual_size=${seed_actual}" \
+    "xcolo_disk_${suffix}_secondary_baseline_target_format=${target_format}"
   ftctl_log_event "colo" "block_conversion.baseline_seed.copy" "ok" "${vm}" "" \
-    "target=${target} secondary_dest=${secondary_dest} attempt=${attempt}/${attempts} info=$(printf '%s' "${out}" | tail -n1 | tr ' ' '_')"
+    "target=${target} secondary_dest=${secondary_dest} attempt=${attempt}/${attempts} format=${seed_format} graph_format=${seed_graph_format} virtual=${seed_virtual} actual=${seed_actual}"
 }
 
 ftctl_xcolo_collect_disk_binding_on_uri() {
@@ -11512,7 +11572,7 @@ ftctl_xcolo_execute_block_cold_conversion() {
   local primary_base_node primary_qdev secondary_base_node secondary_qdev
   local secondary_vm primary_size secondary_size host user out err rc primary_create_handle
   local disk_plan entry rest target primary_format primary_dtype suffix seed_error runtime_prepare_error
-  local secondary_runtime_source disk_runtime startup_error
+  local secondary_runtime_source secondary_baseline_format disk_runtime startup_error
   local -a disk_entries=()
 
   primary_generated_xml="$(ftctl_state_get "${vm}" "primary_xml_generated" 2>/dev/null || true)"
@@ -11621,6 +11681,14 @@ ftctl_xcolo_execute_block_cold_conversion() {
     secondary_runtime_source="${secondary_dest}"
     : "${primary_dtype}${secondary_runtime_source}"
     suffix="$(ftctl_xcolo_disk_suffix "${target}")"
+    secondary_baseline_format="$(ftctl_state_get "${vm}" "xcolo_disk_${suffix}_secondary_baseline_graph_format" 2>/dev/null || true)"
+    if [[ -z "${secondary_baseline_format}" ]]; then
+      ftctl_log_event "colo" "block_conversion.baseline_seed.format" "fail" "${vm}" "" \
+        "target=${target} secondary_dest=${secondary_dest} reason=missing_seed_graph_format"
+      ftctl_state_set "${vm}" "last_error=xcolo_secondary_baseline_format_missing:${target}"
+      ftctl_xcolo_rollback_block_primary_create_failure "${vm}" "xcolo_secondary_baseline_format_missing:${target}" || true
+      return 1
+    fi
 
     primary_size="$(ftctl_xcolo_disk_virtual_size_bytes "${primary_source}" 2>/dev/null || true)"
     secondary_size=""
@@ -11704,9 +11772,9 @@ ftctl_xcolo_execute_block_cold_conversion() {
       "xcolo_disk_${suffix}_primary_overlay=${primary_overlay}" \
       "xcolo_disk_${suffix}_secondary_hidden=${secondary_hidden}" \
       "xcolo_disk_${suffix}_secondary_active=${secondary_active}"
-    disk_runtime+="${disk_runtime:+;}${target}|${primary_source}|${primary_format}|${primary_overlay}|${secondary_dest}|${secondary_hidden}|${secondary_active}"
+    disk_runtime+="${disk_runtime:+;}${target}|${primary_source}|${primary_format}|${primary_overlay}|${secondary_dest}|${secondary_hidden}|${secondary_active}|${secondary_baseline_format}"
     ftctl_log_event "colo" "block_conversion.startup_overlay_prepare" "ok" "${vm}" "" \
-      "target=${target} primary_overlay=${primary_overlay} secondary_hidden=${secondary_hidden} secondary_active=${secondary_active}"
+      "target=${target} primary_overlay=${primary_overlay} secondary_hidden=${secondary_hidden} secondary_active=${secondary_active} secondary_baseline_format=${secondary_baseline_format}"
   done
 
   ftctl_xcolo_apply_startup_disk_graphs "${vm}" "${primary_generated_xml}" "${standby_generated_xml}" "${disk_runtime}" "${primary_qemu_args}" "${secondary_qemu_args}" || {
