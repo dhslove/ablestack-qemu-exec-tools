@@ -10772,7 +10772,7 @@ ftctl_xcolo_create_primary_generated() {
     ftctl_log_event "colo" "primary.create_generated.iothread-contract" "fail" "${vm}" "" "path=${generated_xml}"
     return 1
   }
-  ftctl_primary_map_local_krbd_paths_from_xml "${vm}" "${generated_xml}" || {
+  ftctl_xcolo_prepare_primary_krbd_runtime_paths_from_xml "${vm}" "${generated_xml}" "primary_create" || {
     ftctl_log_event "colo" "primary.create_generated.rbd-map" "fail" "${vm}" "" "path=${generated_xml}"
     return 1
   }
@@ -10794,6 +10794,163 @@ ftctl_xcolo_domain_create_timeout_sec() {
     timeout_sec=45
   fi
   printf '%s\n' "${timeout_sec}"
+}
+
+ftctl_xcolo_primary_krbd_hold_dir() {
+  local vm="${1-}"
+  printf '%s\n' "${FTCTL_RUN_DIR:-/run/ablestack-vm-ftctl}/krbd-hold/${vm}"
+}
+
+ftctl_xcolo_extract_krbd_paths_from_generated_xml() {
+  local xml_path="${1-}"
+  local out_array_name="${2}"
+  local payload line
+  local -n _out_array="${out_array_name}"
+
+  _out_array=()
+  [[ -n "${xml_path}" && -f "${xml_path}" ]] || return 1
+  command -v python3 >/dev/null 2>&1 || return 2
+
+  payload="$(XML_PATH="${xml_path}" python3 - <<'PY'
+import os
+import re
+import xml.etree.ElementTree as ET
+
+xml_path = os.environ["XML_PATH"]
+root = ET.parse(xml_path).getroot()
+seen = set()
+
+def emit(value):
+    if not value:
+        return
+    if value.startswith("/dev/rbd/") and value not in seen:
+        seen.add(value)
+        print(value)
+
+devices = root.find("devices")
+if devices is not None:
+    for disk in devices.findall("disk"):
+        source = disk.find("source")
+        if source is None:
+            continue
+        for attr in ("dev", "file", "name"):
+            emit(source.get(attr, ""))
+
+pattern = re.compile(r"(/dev/rbd/[^,;\s'\"]+)")
+for elem in root.iter():
+    if not elem.tag.endswith("arg"):
+        continue
+    value = elem.get("value", "")
+    for match in pattern.findall(value):
+        emit(match)
+PY
+)" || return $?
+
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] || continue
+    _out_array+=("${line}")
+  done <<< "${payload}"
+}
+
+ftctl_xcolo_prepare_primary_krbd_runtime_path() {
+  local vm="${1-}"
+  local path="${2-}"
+  local phase="${3:-primary_create}"
+  local hold_dir hold_file safe real qemu_user="qemu" access_out="" access_err="" access_rc=0
+
+  [[ -n "${vm}" && -n "${path}" ]] || return 1
+  ftctl_blockcopy_is_krbd_path "${path}" || return 0
+
+  ftctl_blockcopy_krbd_map_local "${path}" || {
+    ftctl_state_set "${vm}" "last_error=xcolo_primary_krbd_map_failed"
+    ftctl_log_event "colo" "xcolo.primary_krbd_runtime_path" "fail" "${vm}" "" \
+      "phase=${phase} path=${path} reason=map_failed"
+    return 1
+  }
+  udevadm settle >/dev/null 2>&1 || true
+  [[ -b "${path}" ]] || {
+    ftctl_state_set "${vm}" "last_error=xcolo_primary_krbd_path_lost_before_create"
+    ftctl_log_event "colo" "xcolo.primary_krbd_runtime_path" "fail" "${vm}" "" \
+      "phase=${phase} path=${path} reason=stable_path_missing_after_map"
+    return 1
+  }
+
+  real="$(readlink -f "${path}" 2>/dev/null || true)"
+  [[ -n "${real}" && -b "${real}" ]] || real="${path}"
+
+  hold_dir="$(ftctl_xcolo_primary_krbd_hold_dir "${vm}")"
+  mkdir -p "${hold_dir}" 2>/dev/null || true
+  safe="$(printf '%s' "${path}" | sed 's#[^A-Za-z0-9_.-]#_#g')"
+  hold_file="${hold_dir}/${safe}.hold"
+  {
+    printf 'vm=%s\n' "${vm}"
+    printf 'phase=%s\n' "${phase}"
+    printf 'path=%s\n' "${path}"
+    printf 'resolved=%s\n' "${real}"
+    printf 'created=%s\n' "$(date -Is 2>/dev/null || true)"
+  } > "${hold_file}" 2>/dev/null || true
+
+  if getent passwd "${qemu_user}" >/dev/null 2>&1; then
+    if command -v setfacl >/dev/null 2>&1; then
+      setfacl -m "u:${qemu_user}:rw" "${real}" >/dev/null 2>&1 || true
+    elif getent group "${qemu_user}" >/dev/null 2>&1; then
+      chgrp "${qemu_user}" "${real}" >/dev/null 2>&1 || true
+      chmod g+rw "${real}" >/dev/null 2>&1 || true
+    fi
+    ftctl_cmd_run "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC:-15}" access_out access_err access_rc -- \
+      runuser -u "${qemu_user}" -- bash -c 'test -r "$1" && test -w "$1"' _ "${path}" || true
+    : "${access_out}"
+    if [[ "${access_rc}" != "0" ]]; then
+      ftctl_state_set "${vm}" "last_error=xcolo_primary_krbd_access_denied_before_create"
+      ftctl_log_event "colo" "xcolo.primary_krbd_runtime_path" "fail" "${vm}" "${access_rc}" \
+        "phase=${phase} path=${path} resolved=${real} reason=qemu_user_access_failed error=$(ftctl_xcolo_compact_log_value "${access_err}")"
+      return 1
+    fi
+  fi
+
+  ftctl_log_event "colo" "xcolo.primary_krbd_runtime_path" "ok" "${vm}" "" \
+    "phase=${phase} path=${path} resolved=${real} hold=${hold_file}"
+}
+
+ftctl_xcolo_prepare_primary_krbd_runtime_paths_from_xml() {
+  local vm="${1-}"
+  local generated_xml="${2-}"
+  local phase="${3:-primary_create}"
+  local paths=()
+  local path
+
+  ftctl_xcolo_extract_krbd_paths_from_generated_xml "${generated_xml}" paths || return $?
+  ((${#paths[@]} > 0)) || {
+    ftctl_log_event "colo" "xcolo.primary_krbd_runtime_paths" "skip" "${vm}" "" \
+      "phase=${phase} path=${generated_xml} reason=no_krbd_paths"
+    return 0
+  }
+
+  for path in "${paths[@]}"; do
+    ftctl_xcolo_prepare_primary_krbd_runtime_path "${vm}" "${path}" "${phase}" || return $?
+  done
+  ftctl_state_set "${vm}" "xcolo_primary_krbd_runtime_hold_count=${#paths[@]}"
+  ftctl_log_event "colo" "xcolo.primary_krbd_runtime_paths" "ok" "${vm}" "" \
+    "phase=${phase} count=${#paths[@]} path=${generated_xml}"
+}
+
+ftctl_xcolo_classify_primary_create_error() {
+  local err_summary="${1-}"
+  local out_var="${2}"
+  local create_error="xcolo_primary_create_failed_before_listener"
+
+  if [[ "${err_summary}" == *"/dev/rbd/"* && "${err_summary}" == *"No such file or directory"* ]]; then
+    create_error="xcolo_primary_krbd_path_lost_at_create"
+  elif [[ "${err_summary}" == *"/dev/rbd/"* && ( "${err_summary}" == *"Permission denied"* || "${err_summary}" == *"Operation not permitted"* ) ]]; then
+    create_error="xcolo_primary_krbd_access_denied_at_create"
+  elif [[ "${err_summary}" == *"Bus '"*" not found"* ||
+          "${err_summary}" == *"PCI:"*" not available"* ||
+          "${err_summary}" == *"slot "*" not available"* ]]; then
+    create_error="xcolo_startup_pci_topology_failed"
+  elif [[ "${err_summary}" == *"qemu-kvm:"* ]]; then
+    create_error="xcolo_primary_create_qemu_parse_failed"
+  fi
+  printf -v "${out_var}" '%s' "${create_error}"
 }
 
 ftctl_xcolo_local_tcp_listen_port_ready() {
@@ -11165,7 +11322,7 @@ ftctl_xcolo_start_primary_generated_async() {
     ftctl_log_event "colo" "primary.create_generated.iothread-contract" "fail" "${vm}" "" "path=${generated_xml}"
     return 1
   }
-  ftctl_primary_map_local_krbd_paths_from_xml "${vm}" "${generated_xml}" || {
+  ftctl_xcolo_prepare_primary_krbd_runtime_paths_from_xml "${vm}" "${generated_xml}" "primary_create" || {
     ftctl_log_event "colo" "primary.create_generated.rbd-map" "fail" "${vm}" "" "path=${generated_xml}"
     return 1
   }
@@ -11252,14 +11409,7 @@ ftctl_xcolo_wait_primary_generated_listeners() {
       create_rc="$(cat "${rc_file}" 2>/dev/null || printf '1')"
       if [[ "${create_rc}" != "0" ]]; then
         err_summary="$(tr '\n' ' ' < "${err_file}" 2>/dev/null | cut -c1-220 || true)"
-        create_error="xcolo_primary_create_failed_before_listener"
-        if [[ "${err_summary}" == *"Bus '"*" not found"* ||
-              "${err_summary}" == *"PCI:"*" not available"* ||
-              "${err_summary}" == *"slot "*" not available"* ]]; then
-          create_error="xcolo_startup_pci_topology_failed"
-        elif [[ "${err_summary}" == *"qemu-kvm:"* ]]; then
-          create_error="xcolo_primary_create_qemu_parse_failed"
-        fi
+        ftctl_xcolo_classify_primary_create_error "${err_summary}" create_error
         ftctl_state_set "${vm}" \
           "xcolo_protocol_failure_phase=primary_create" \
           "xcolo_primary_create_error_summary=$(ftctl_xcolo_compact_log_value "${err_summary}")" \
@@ -11310,8 +11460,15 @@ ftctl_xcolo_wait_primary_peer_connections() {
     if ftctl_xcolo_primary_create_async_done "${handle}"; then
       create_rc="$(cat "${rc_file}" 2>/dev/null || printf '1')"
       if [[ "${create_rc}" != "0" ]]; then
+        local err_summary create_error
+        err_summary="$(tr '\n' ' ' < "${err_file}" 2>/dev/null | cut -c1-220 || true)"
+        ftctl_xcolo_classify_primary_create_error "${err_summary}" create_error
+        ftctl_state_set "${vm}" \
+          "xcolo_protocol_failure_phase=primary_create" \
+          "xcolo_primary_create_error_summary=$(ftctl_xcolo_compact_log_value "${err_summary}")" \
+          "last_error=${create_error}"
         ftctl_log_event "colo" "primary.create_generated.channel_attach" "fail" "${vm}" "${create_rc}" \
-          "reason=create_exited_before_channel_attach mirror_port=${mirror_port} compare_port=${compare_port} log_dir=${tmp_dir}"
+          "reason=create_exited_before_channel_attach classified=${create_error} mirror_port=${mirror_port} compare_port=${compare_port} log_dir=${tmp_dir} error=$(ftctl_xcolo_compact_log_value "${err_summary}")"
         return 1
       fi
     fi
@@ -12309,16 +12466,19 @@ ftctl_xcolo_execute_block_cold_conversion() {
     "vm=${secondary_vm}"
 
   ftctl_xcolo_wait_primary_peer_connections "${vm}" "${primary_create_handle}" || {
+    local channel_error
+    channel_error="$(ftctl_state_get "${vm}" "last_error" 2>/dev/null || true)"
+    [[ -n "${channel_error}" ]] || channel_error="xcolo_channel_attach_timeout"
     ftctl_xcolo_abort_primary_generated_async "${vm}" "${primary_create_handle}"
     ftctl_log_event "colo" "block_conversion.channel_attach" "fail" "${vm}" "" \
-      "primary=${vm} secondary=${secondary_vm}"
+      "primary=${vm} secondary=${secondary_vm} reason=${channel_error}"
     ftctl_state_set "${vm}" \
       "conversion_stage=channel_attach_failed" \
       "conversion_state=error" \
       "protection_state=error" \
       "transport_state=failed" \
-      "last_error=xcolo_channel_attach_timeout"
-    ftctl_xcolo_rollback_block_primary_create_failure "${vm}" "xcolo_channel_attach_timeout" || true
+      "last_error=${channel_error}"
+    ftctl_xcolo_rollback_block_primary_create_failure "${vm}" "${channel_error}" || true
     return 1
   }
   ftctl_state_set "${vm}" "conversion_stage=channels_attached"
