@@ -8508,3 +8508,63 @@ Implementation smoke also found and fixed a Bash local-scope issue in the
 log-reason helpers: helper-local `reason` variables could shadow the caller's
 `reason` output variable. Without that fix, hard guest/storage log evidence
 could be missed even when the log pattern was present.
+
+## Run 133 - COLO Reached, Storage Health Log Classifier False Positive
+
+The `r97-link-02` retest after QGA grace implementation created protection row
+`133`:
+
+```text
+primary VM: i-2-197-VM
+standby VM: i-2-203-VM
+```
+
+### Confirmed Progress
+
+- QGA baseline capture worked: `xcolo_primary_qga_baseline=available`.
+- Baseline seed and startup disk graph passed.
+- Primary and secondary both reached COLO mode:
+
+```text
+primary_migrate=colo
+secondary_migrate=colo
+primary_colo=primary
+secondary_colo=secondary
+```
+
+### Final Failure
+
+The run failed with:
+
+```text
+xcolo_primary_storage_unhealthy:qemu_log_io_error
+```
+
+The log line that triggered the storage classifier was:
+
+```text
+qemu-kvm: Can't receive COLO message: Input/output error
+```
+
+This is a COLO channel/protocol message, not proof of block storage failure.
+The storage health classifier was too broad because it treated generic
+`Input/output error` in the QEMU log as storage failure and read the generic
+QEMU log tail without a current-run baseline.
+
+### Repetition Check
+
+This is not a repeat of the QGA immediate-failure issue. The QGA baseline was
+recorded and QGA later responded successfully. The failure moved to a health
+classifier boundary problem.
+
+### Follow-up Design
+
+The corrective design is:
+
+```text
+docs/ftctl/409-ft-xcolo-health-log-classifier-design-20260625.md
+```
+
+The new rule is that storage health must fail only on QMP block evidence or
+block/rbd-scoped log evidence. COLO channel messages must be stored as
+protocol/channel notices, not as storage failures.

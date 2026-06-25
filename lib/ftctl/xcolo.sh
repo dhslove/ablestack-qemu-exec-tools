@@ -874,14 +874,49 @@ ftctl_xcolo_primary_qemu_log_path() {
   printf '%s\n' "/var/log/libvirt/qemu/${vm}.log"
 }
 
+ftctl_xcolo_capture_primary_qemu_log_baseline() {
+  local vm="${1-}"
+  local log_path offset="0" now
+
+  log_path="$(ftctl_xcolo_primary_qemu_log_path "${vm}")"
+  if [[ -e "${log_path}" ]]; then
+    offset="$(stat -c '%s' "${log_path}" 2>/dev/null || echo "0")"
+  fi
+  [[ "${offset}" =~ ^[0-9]+$ ]] || offset="0"
+  now="$(ftctl_now_iso8601)"
+  ftctl_state_set "${vm}" \
+    "xcolo_primary_qemu_log_health_path=${log_path}" \
+    "xcolo_primary_qemu_log_health_offset=${offset}" \
+    "xcolo_primary_qemu_log_health_baseline_ts=${now}" \
+    "xcolo_primary_qemu_log_health_window=baseline"
+  ftctl_log_event "colo" "xcolo.primary_qemu_log_baseline" "ok" "${vm}" "" \
+    "path=${log_path} offset=${offset}"
+  return 0
+}
+
 ftctl_xcolo_primary_qemu_log_tail() {
   local vm="${1-}"
   local out_var="${2}"
-  local log_path out=""
+  local log_path out="" offset="" size="" start_byte lines
 
   log_path="$(ftctl_xcolo_primary_qemu_log_path "${vm}")"
+  lines="${FTCTL_XCOLO_PRIMARY_HEALTH_LOG_TAIL_LINES:-500}"
+  [[ "${lines}" =~ ^[0-9]+$ && "${lines}" -gt 0 ]] || lines="500"
   if [[ -r "${log_path}" ]]; then
-    out="$(tail -n "${FTCTL_XCOLO_PRIMARY_HEALTH_LOG_TAIL_LINES:-500}" "${log_path}" 2>/dev/null || true)"
+    offset="$(ftctl_state_get "${vm}" "xcolo_primary_qemu_log_health_offset" 2>/dev/null || true)"
+    size="$(stat -c '%s' "${log_path}" 2>/dev/null || echo "")"
+    if [[ "${offset}" =~ ^[0-9]+$ && "${size}" =~ ^[0-9]+$ && "${size}" -ge "${offset}" ]]; then
+      start_byte=$((offset + 1))
+      out="$(tail -c +"${start_byte}" "${log_path}" 2>/dev/null | tail -n "${lines}" 2>/dev/null || true)"
+      ftctl_state_set "${vm}" \
+        "xcolo_primary_qemu_log_health_window=offset" \
+        "xcolo_primary_qemu_log_health_size=${size}"
+    else
+      out="$(tail -n "${lines}" "${log_path}" 2>/dev/null || true)"
+      ftctl_state_set "${vm}" \
+        "xcolo_primary_qemu_log_health_window=fallback_tail" \
+        "xcolo_primary_qemu_log_health_size=${size:-unknown}"
+    fi
   fi
   printf -v "${out_var}" '%s' "${out}"
 }
@@ -891,18 +926,33 @@ ftctl_xcolo_primary_storage_failure_reason_from_text() {
   local reason_var="${2}"
   local detected_reason=""
 
-  if printf '%s\n' "${text}" | grep -Eiq 'Input/output error|I/O error'; then
-    detected_reason="qemu_log_io_error"
-  elif printf '%s\n' "${text}" | grep -Eiq 'Operation not permitted|Permission denied'; then
-    detected_reason="qemu_log_permission_error"
-  elif printf '%s\n' "${text}" | grep -Eiq 'blk_update_request'; then
+  if printf '%s\n' "${text}" | grep -Eiq 'blk_update_request'; then
     detected_reason="qemu_log_block_request_error"
+  elif printf '%s\n' "${text}" | grep -Eiq 'Buffer I/O error|end_request.*I/O error|block.*(Input/output error|I/O error)|No space left on device'; then
+    detected_reason="qemu_log_block_io_error"
   elif printf '%s\n' "${text}" | grep -Eiq 'rbd.*(error|failed|denied|not permitted)|((error|failed|denied|not permitted).*)rbd'; then
     detected_reason="qemu_log_rbd_error"
   fi
 
   printf -v "${reason_var}" '%s' "${detected_reason}"
   [[ -z "${detected_reason}" ]]
+}
+
+ftctl_xcolo_primary_protocol_notice_from_text() {
+  local text="${1-}"
+  local notice_var="${2}"
+  local detected_notice=""
+
+  if printf '%s\n' "${text}" | grep -Eiq "Can't receive COLO message"; then
+    detected_notice="colo_message_io_error"
+  elif printf '%s\n' "${text}" | grep -Eiq 'Received invalid message'; then
+    detected_notice="colo_invalid_message"
+  elif printf '%s\n' "${text}" | grep -Eiq 'filter mirror send failed'; then
+    detected_notice="filter_mirror_send_failed"
+  fi
+
+  printf -v "${notice_var}" '%s' "${detected_notice}"
+  [[ -z "${detected_notice}" ]]
 }
 
 ftctl_xcolo_primary_guest_failure_reason_from_text() {
@@ -927,7 +977,7 @@ ftctl_xcolo_primary_guest_failure_reason_from_text() {
 ftctl_xcolo_validate_primary_storage_health() {
   local vm="${1-}"
   local reason_var="${2}"
-  local out="" rc=0 log_tail="" reason=""
+  local out="" rc=0 log_tail="" reason="" protocol_notice=""
 
   ftctl_xcolo_qmp "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" '{"execute":"query-block"}' out rc
   ftctl_xcolo_write_debug_file "${vm}" "primary-health-query-block.stdout.json" "${out}" || true
@@ -958,6 +1008,24 @@ ftctl_xcolo_validate_primary_storage_health() {
 
   ftctl_xcolo_primary_qemu_log_tail "${vm}" log_tail || true
   ftctl_xcolo_write_debug_file "${vm}" "primary-health-qemu-log-tail.txt" "${log_tail}" || true
+  if [[ -n "${log_tail}" ]]; then
+    ftctl_xcolo_primary_protocol_notice_from_text "${log_tail}" protocol_notice || true
+    if [[ -n "${protocol_notice}" ]]; then
+      ftctl_state_set "${vm}" \
+        "xcolo_primary_protocol_log_notice=${protocol_notice}" \
+        "xcolo_primary_protocol_log_notice_window=$(ftctl_state_get "${vm}" "xcolo_primary_qemu_log_health_window" 2>/dev/null || true)"
+      ftctl_log_event "colo" "xcolo.primary_protocol_log_notice" "warn" "${vm}" "" \
+        "notice=${protocol_notice} window=$(ftctl_state_get "${vm}" "xcolo_primary_qemu_log_health_window" 2>/dev/null || true)"
+    else
+      ftctl_state_set "${vm}" \
+        "xcolo_primary_protocol_log_notice=" \
+        "xcolo_primary_protocol_log_notice_window=$(ftctl_state_get "${vm}" "xcolo_primary_qemu_log_health_window" 2>/dev/null || true)"
+    fi
+  else
+    ftctl_state_set "${vm}" \
+      "xcolo_primary_protocol_log_notice=" \
+      "xcolo_primary_protocol_log_notice_window=$(ftctl_state_get "${vm}" "xcolo_primary_qemu_log_health_window" 2>/dev/null || true)"
+  fi
   if [[ -z "${reason}" && -n "${log_tail}" ]]; then
     ftctl_xcolo_primary_storage_failure_reason_from_text "${log_tail}" reason || true
   fi
@@ -965,17 +1033,20 @@ ftctl_xcolo_validate_primary_storage_health() {
   if [[ -n "${reason}" ]]; then
     ftctl_state_set "${vm}" \
       "xcolo_primary_storage_health_gate=failed" \
-      "xcolo_primary_storage_health_reason=${reason}"
+      "xcolo_primary_storage_health_reason=${reason}" \
+      "xcolo_primary_storage_health_log_window=$(ftctl_state_get "${vm}" "xcolo_primary_qemu_log_health_window" 2>/dev/null || true)"
     ftctl_log_event "colo" "xcolo.primary_storage_health" "fail" "${vm}" "" \
-      "reason=${reason}"
+      "reason=${reason} window=$(ftctl_state_get "${vm}" "xcolo_primary_qemu_log_health_window" 2>/dev/null || true)"
     printf -v "${reason_var}" '%s' "xcolo_primary_storage_unhealthy:${reason}"
     return 1
   fi
 
   ftctl_state_set "${vm}" \
     "xcolo_primary_storage_health_gate=ok" \
-    "xcolo_primary_storage_health_reason=ok"
-  ftctl_log_event "colo" "xcolo.primary_storage_health" "ok" "${vm}" "" ""
+    "xcolo_primary_storage_health_reason=ok" \
+    "xcolo_primary_storage_health_log_window=$(ftctl_state_get "${vm}" "xcolo_primary_qemu_log_health_window" 2>/dev/null || true)"
+  ftctl_log_event "colo" "xcolo.primary_storage_health" "ok" "${vm}" "" \
+    "window=$(ftctl_state_get "${vm}" "xcolo_primary_qemu_log_health_window" 2>/dev/null || true) protocol_notice=${protocol_notice}"
   printf -v "${reason_var}" '%s' ""
   return 0
 }
@@ -12247,6 +12318,7 @@ ftctl_xcolo_plan_protect_prebuilt() {
     "last_error="
 
   ftctl_xcolo_capture_primary_qga_baseline "${vm}" || true
+  ftctl_xcolo_capture_primary_qemu_log_baseline "${vm}" || true
 
   if [[ "${FTCTL_DRY_RUN}" != "1" ]] && ! ftctl_xcolo_validate_prebuilt_file_pair_sizes "${vm}"; then
     ftctl_state_set "${vm}" \
@@ -12499,6 +12571,7 @@ ftctl_xcolo_plan_protect_block_cold_conversion() {
     "last_error="
 
   ftctl_xcolo_capture_primary_qga_baseline "${vm}" || true
+  ftctl_xcolo_capture_primary_qemu_log_baseline "${vm}" || true
 
   if [[ "${FTCTL_DRY_RUN}" == "1" ]]; then
     ftctl_state_set "${vm}" "last_error=xcolo_block_cold_conversion_handshake_not_implemented"
