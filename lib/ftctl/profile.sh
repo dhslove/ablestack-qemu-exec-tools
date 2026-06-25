@@ -55,6 +55,11 @@ FTCTL_PROFILE_FAILBACK_DISK_MAP=""
 FTCTL_PROFILE_XCOLO_PROXY_ENDPOINT=""
 FTCTL_PROFILE_XCOLO_NBD_ENDPOINT=""
 FTCTL_PROFILE_XCOLO_MIGRATE_URI=""
+FTCTL_PROFILE_XCOLO_MIRROR_PORT=""
+FTCTL_PROFILE_XCOLO_COMPARE_PORT=""
+FTCTL_PROFILE_XCOLO_COMPARE_LOCAL_PORT=""
+FTCTL_PROFILE_XCOLO_COMPARE_OUT_PORT=""
+FTCTL_PROFILE_XCOLO_CONTROL_PORT=""
 FTCTL_PROFILE_XCOLO_PRIMARY_DISK_NODE=""
 FTCTL_PROFILE_XCOLO_PARENT_BLOCK_NODE=""
 FTCTL_PROFILE_XCOLO_NBD_NODE=""
@@ -103,6 +108,11 @@ ftctl_profile_reset() {
   FTCTL_PROFILE_XCOLO_PROXY_ENDPOINT=""
   FTCTL_PROFILE_XCOLO_NBD_ENDPOINT=""
   FTCTL_PROFILE_XCOLO_MIGRATE_URI=""
+  FTCTL_PROFILE_XCOLO_MIRROR_PORT=""
+  FTCTL_PROFILE_XCOLO_COMPARE_PORT=""
+  FTCTL_PROFILE_XCOLO_COMPARE_LOCAL_PORT=""
+  FTCTL_PROFILE_XCOLO_COMPARE_OUT_PORT=""
+  FTCTL_PROFILE_XCOLO_CONTROL_PORT=""
   FTCTL_PROFILE_XCOLO_PRIMARY_DISK_NODE="parent0"
   FTCTL_PROFILE_XCOLO_PARENT_BLOCK_NODE="colo-disk0"
   FTCTL_PROFILE_XCOLO_NBD_NODE="nbd0"
@@ -160,6 +170,11 @@ ftctl_profile_load_vm() {
     FTCTL_PROFILE_XCOLO_PROXY_ENDPOINT="${FTCTL_PROFILE_XCOLO_PROXY_ENDPOINT:-}"
     FTCTL_PROFILE_XCOLO_NBD_ENDPOINT="${FTCTL_PROFILE_XCOLO_NBD_ENDPOINT:-}"
     FTCTL_PROFILE_XCOLO_MIGRATE_URI="${FTCTL_PROFILE_XCOLO_MIGRATE_URI:-}"
+    FTCTL_PROFILE_XCOLO_MIRROR_PORT="${FTCTL_PROFILE_XCOLO_MIRROR_PORT:-}"
+    FTCTL_PROFILE_XCOLO_COMPARE_PORT="${FTCTL_PROFILE_XCOLO_COMPARE_PORT:-}"
+    FTCTL_PROFILE_XCOLO_COMPARE_LOCAL_PORT="${FTCTL_PROFILE_XCOLO_COMPARE_LOCAL_PORT:-}"
+    FTCTL_PROFILE_XCOLO_COMPARE_OUT_PORT="${FTCTL_PROFILE_XCOLO_COMPARE_OUT_PORT:-}"
+    FTCTL_PROFILE_XCOLO_CONTROL_PORT="${FTCTL_PROFILE_XCOLO_CONTROL_PORT:-}"
     FTCTL_PROFILE_XCOLO_PRIMARY_DISK_NODE="${FTCTL_PROFILE_XCOLO_PRIMARY_DISK_NODE:-parent0}"
     FTCTL_PROFILE_XCOLO_PARENT_BLOCK_NODE="${FTCTL_PROFILE_XCOLO_PARENT_BLOCK_NODE:-colo-disk0}"
     FTCTL_PROFILE_XCOLO_NBD_NODE="${FTCTL_PROFILE_XCOLO_NBD_NODE:-nbd0}"
@@ -229,17 +244,22 @@ ftctl_profile_write_vm() {
   local xcolo_proxy_endpoint="${14-}"
   local xcolo_nbd_endpoint="${15-}"
   local xcolo_migrate_uri="${16-}"
-  local fencing_ipmi_primary_host="${17-}"
-  local fencing_ipmi_primary_port="${18-}"
-  local fencing_ipmi_primary_user="${19-}"
-  local fencing_ipmi_primary_password="${20-}"
-  local fencing_ipmi_primary_interface="${21-}"
-  local fencing_ipmi_secondary_host="${22-}"
-  local fencing_ipmi_secondary_port="${23-}"
-  local fencing_ipmi_secondary_user="${24-}"
-  local fencing_ipmi_secondary_password="${25-}"
-  local fencing_ipmi_secondary_interface="${26-}"
-  local secondary_ssh_key_file="${27-}"
+  local xcolo_mirror_port="${17-}"
+  local xcolo_compare_port="${18-}"
+  local xcolo_compare_local_port="${19-}"
+  local xcolo_compare_out_port="${20-}"
+  local xcolo_control_port="${21-}"
+  local fencing_ipmi_primary_host="${22-}"
+  local fencing_ipmi_primary_port="${23-}"
+  local fencing_ipmi_primary_user="${24-}"
+  local fencing_ipmi_primary_password="${25-}"
+  local fencing_ipmi_primary_interface="${26-}"
+  local fencing_ipmi_secondary_host="${27-}"
+  local fencing_ipmi_secondary_port="${28-}"
+  local fencing_ipmi_secondary_user="${29-}"
+  local fencing_ipmi_secondary_password="${30-}"
+  local fencing_ipmi_secondary_interface="${31-}"
+  local secondary_ssh_key_file="${32-}"
   local path tmp
 
   [[ -n "${vm}" ]] || {
@@ -273,6 +293,11 @@ ftctl_profile_write_vm() {
   [[ -n "${xcolo_proxy_endpoint}" ]] && FTCTL_PROFILE_XCOLO_PROXY_ENDPOINT="${xcolo_proxy_endpoint}"
   [[ -n "${xcolo_nbd_endpoint}" ]] && FTCTL_PROFILE_XCOLO_NBD_ENDPOINT="${xcolo_nbd_endpoint}"
   [[ -n "${xcolo_migrate_uri}" ]] && FTCTL_PROFILE_XCOLO_MIGRATE_URI="${xcolo_migrate_uri}"
+  [[ -n "${xcolo_mirror_port}" ]] && FTCTL_PROFILE_XCOLO_MIRROR_PORT="${xcolo_mirror_port}"
+  [[ -n "${xcolo_compare_port}" ]] && FTCTL_PROFILE_XCOLO_COMPARE_PORT="${xcolo_compare_port}"
+  [[ -n "${xcolo_compare_local_port}" ]] && FTCTL_PROFILE_XCOLO_COMPARE_LOCAL_PORT="${xcolo_compare_local_port}"
+  [[ -n "${xcolo_compare_out_port}" ]] && FTCTL_PROFILE_XCOLO_COMPARE_OUT_PORT="${xcolo_compare_out_port}"
+  [[ -n "${xcolo_control_port}" ]] && FTCTL_PROFILE_XCOLO_CONTROL_PORT="${xcolo_control_port}"
   [[ -n "${fencing_ipmi_primary_host}" ]] && FTCTL_PROFILE_FENCING_IPMI_PRIMARY_HOST="${fencing_ipmi_primary_host}"
   [[ -n "${fencing_ipmi_primary_port}" ]] && FTCTL_PROFILE_FENCING_IPMI_PRIMARY_PORT="${fencing_ipmi_primary_port}"
   [[ -n "${fencing_ipmi_primary_user}" ]] && FTCTL_PROFILE_FENCING_IPMI_PRIMARY_USER="${fencing_ipmi_primary_user}"
@@ -362,6 +387,26 @@ ftctl_profile_write_vm() {
     fi
     if [[ -n "${xcolo_migrate_uri}" ]]; then
       printf 'FTCTL_PROFILE_XCOLO_MIGRATE_URI="%s"\n' "${FTCTL_PROFILE_XCOLO_MIGRATE_URI}"
+    fi
+    if [[ -n "${xcolo_mirror_port}" ]]; then
+      printf 'FTCTL_PROFILE_XCOLO_MIRROR_PORT="%s"\n' "${FTCTL_PROFILE_XCOLO_MIRROR_PORT}"
+      printf 'FTCTL_XCOLO_MIRROR_PORT="%s"\n' "${FTCTL_PROFILE_XCOLO_MIRROR_PORT}"
+    fi
+    if [[ -n "${xcolo_compare_port}" ]]; then
+      printf 'FTCTL_PROFILE_XCOLO_COMPARE_PORT="%s"\n' "${FTCTL_PROFILE_XCOLO_COMPARE_PORT}"
+      printf 'FTCTL_XCOLO_COMPARE_PORT="%s"\n' "${FTCTL_PROFILE_XCOLO_COMPARE_PORT}"
+    fi
+    if [[ -n "${xcolo_compare_local_port}" ]]; then
+      printf 'FTCTL_PROFILE_XCOLO_COMPARE_LOCAL_PORT="%s"\n' "${FTCTL_PROFILE_XCOLO_COMPARE_LOCAL_PORT}"
+      printf 'FTCTL_XCOLO_COMPARE_LOCAL_PORT="%s"\n' "${FTCTL_PROFILE_XCOLO_COMPARE_LOCAL_PORT}"
+    fi
+    if [[ -n "${xcolo_compare_out_port}" ]]; then
+      printf 'FTCTL_PROFILE_XCOLO_COMPARE_OUT_PORT="%s"\n' "${FTCTL_PROFILE_XCOLO_COMPARE_OUT_PORT}"
+      printf 'FTCTL_XCOLO_COMPARE_OUT_PORT="%s"\n' "${FTCTL_PROFILE_XCOLO_COMPARE_OUT_PORT}"
+    fi
+    if [[ -n "${xcolo_control_port}" ]]; then
+      printf 'FTCTL_PROFILE_XCOLO_CONTROL_PORT="%s"\n' "${FTCTL_PROFILE_XCOLO_CONTROL_PORT}"
+      printf 'FTCTL_XCOLO_CTRL_PORT="%s"\n' "${FTCTL_PROFILE_XCOLO_CONTROL_PORT}"
     fi
   } > "${tmp}"
   mv -f "${tmp}" "${path}"
@@ -523,6 +568,38 @@ ftctl_profile__validate_network_map() {
   return 2
 }
 
+ftctl_profile__split_host_port() {
+  local value="${1-}"
+  local host_var="${2-}"
+  local port_var="${3-}"
+  local endpoint host port
+  endpoint="${value#tcp:}"
+  [[ "${endpoint}" == *:* ]] || return 1
+  host="${endpoint%:*}"
+  port="${endpoint##*:}"
+  [[ -n "${host}" && -n "${port}" ]] || return 1
+  ftctl_profile__is_uint "${port}" || return 1
+  printf -v "${host_var}" '%s' "${host}"
+  printf -v "${port_var}" '%s' "${port}"
+}
+
+ftctl_profile__validate_xcolo_nbd_consistency() {
+  local remote_host="" remote_port="" xcolo_host="" xcolo_port=""
+  [[ "${FTCTL_PROFILE_MODE}" == "ft" && "${FTCTL_PROFILE_BACKEND_MODE}" == "remote-nbd" ]] || return 0
+  ftctl_profile__split_host_port "${FTCTL_PROFILE_REMOTE_NBD_EXPORT_ADDR}" remote_host remote_port || {
+    echo "ERROR: FTCTL_PROFILE_REMOTE_NBD_EXPORT_ADDR must be <host>:<port>" >&2
+    return 2
+  }
+  ftctl_profile__split_host_port "${FTCTL_PROFILE_XCOLO_NBD_ENDPOINT}" xcolo_host xcolo_port || {
+    echo "ERROR: FTCTL_PROFILE_XCOLO_NBD_ENDPOINT must be tcp:<host>:<port>" >&2
+    return 2
+  }
+  if [[ "${remote_host}" != "${xcolo_host}" || "${remote_port}" != "${xcolo_port}" ]]; then
+    echo "ERROR: FTCTL_PROFILE_REMOTE_NBD_EXPORT_ADDR must match FTCTL_PROFILE_XCOLO_NBD_ENDPOINT" >&2
+    return 2
+  fi
+}
+
 ftctl_profile_validate() {
   local vm="${1-}"
 
@@ -616,6 +693,20 @@ ftctl_profile_validate() {
       ftctl_profile__validate_nonempty "FTCTL_PROFILE_XCOLO_PROXY_ENDPOINT" "${FTCTL_PROFILE_XCOLO_PROXY_ENDPOINT}" || return 2
       ftctl_profile__validate_nonempty "FTCTL_PROFILE_XCOLO_NBD_ENDPOINT" "${FTCTL_PROFILE_XCOLO_NBD_ENDPOINT}" || return 2
       ftctl_profile__validate_nonempty "FTCTL_PROFILE_XCOLO_MIGRATE_URI" "${FTCTL_PROFILE_XCOLO_MIGRATE_URI}" || return 2
+      for port_value in \
+        "${FTCTL_PROFILE_XCOLO_MIRROR_PORT}" \
+        "${FTCTL_PROFILE_XCOLO_COMPARE_PORT}" \
+        "${FTCTL_PROFILE_XCOLO_COMPARE_LOCAL_PORT}" \
+        "${FTCTL_PROFILE_XCOLO_COMPARE_OUT_PORT}" \
+        "${FTCTL_PROFILE_XCOLO_CONTROL_PORT}"; do
+        if [[ -n "${port_value}" ]]; then
+          ftctl_profile__is_uint "${port_value}" || {
+            echo "ERROR: FTCTL_PROFILE_XCOLO_* port values must be unsigned integers" >&2
+            return 2
+          }
+        fi
+      done
+      ftctl_profile__validate_xcolo_nbd_consistency || return 2
       ftctl_profile__validate_nonempty "FTCTL_PROFILE_XCOLO_PRIMARY_DISK_NODE" "${FTCTL_PROFILE_XCOLO_PRIMARY_DISK_NODE}" || return 2
       ftctl_profile__validate_nonempty "FTCTL_PROFILE_XCOLO_PARENT_BLOCK_NODE" "${FTCTL_PROFILE_XCOLO_PARENT_BLOCK_NODE}" || return 2
       ftctl_profile__validate_nonempty "FTCTL_PROFILE_XCOLO_NBD_NODE" "${FTCTL_PROFILE_XCOLO_NBD_NODE}" || return 2

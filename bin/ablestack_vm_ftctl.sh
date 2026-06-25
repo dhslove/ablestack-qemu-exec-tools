@@ -78,6 +78,11 @@ CLI_REMOTE_NBD_EXPORT_ADDR=""
 CLI_XCOLO_PROXY_ENDPOINT=""
 CLI_XCOLO_NBD_ENDPOINT=""
 CLI_XCOLO_MIGRATE_URI=""
+CLI_XCOLO_MIRROR_PORT=""
+CLI_XCOLO_COMPARE_PORT=""
+CLI_XCOLO_COMPARE_LOCAL_PORT=""
+CLI_XCOLO_COMPARE_OUT_PORT=""
+CLI_XCOLO_CONTROL_PORT=""
 CLI_LIMIT=""
 CLI_PUBLIC_KEY=""
 CLI_KEY_COMMENT=""
@@ -251,7 +256,9 @@ Config actions:
     [--fencing-ipmi-secondary-interface <interface>] \
     [--secondary-target-dir <dir>] [--remote-nbd-export-addr <addr>] \
     [--xcolo-proxy-endpoint <endpoint>] [--xcolo-nbd-endpoint <endpoint>] \
-    [--xcolo-migrate-uri <uri>]
+    [--xcolo-migrate-uri <uri>] [--xcolo-mirror-port <port>] \
+    [--xcolo-compare-port <port>] [--xcolo-compare-local-port <port>] \
+    [--xcolo-compare-out-port <port>] [--xcolo-control-port <port>]
   ablestack_vm_ftctl config profile-remove --vm <name>
   ablestack_vm_ftctl config profile-show --vm <name> [--json]
 EOF
@@ -461,6 +468,26 @@ parse_args() {
         CLI_XCOLO_MIGRATE_URI="${2-}"
         shift 2
         ;;
+      --xcolo-mirror-port)
+        CLI_XCOLO_MIRROR_PORT="${2-}"
+        shift 2
+        ;;
+      --xcolo-compare-port)
+        CLI_XCOLO_COMPARE_PORT="${2-}"
+        shift 2
+        ;;
+      --xcolo-compare-local-port)
+        CLI_XCOLO_COMPARE_LOCAL_PORT="${2-}"
+        shift 2
+        ;;
+      --xcolo-compare-out-port)
+        CLI_XCOLO_COMPARE_OUT_PORT="${2-}"
+        shift 2
+        ;;
+      --xcolo-control-port)
+        CLI_XCOLO_CONTROL_PORT="${2-}"
+        shift 2
+        ;;
       --public-key)
         CLI_PUBLIC_KEY="${2-}"
         shift 2
@@ -619,6 +646,8 @@ dispatch() {
             "${CLI_TARGET_STORAGE_SCOPE}" "${CLI_SECONDARY_VM_NAME}" "${CLI_FENCING_POLICY}" \
             "${CLI_SECONDARY_TARGET_DIR}" "${CLI_REMOTE_NBD_EXPORT_ADDR}" \
             "${CLI_XCOLO_PROXY_ENDPOINT}" "${CLI_XCOLO_NBD_ENDPOINT}" "${CLI_XCOLO_MIGRATE_URI}" \
+            "${CLI_XCOLO_MIRROR_PORT}" "${CLI_XCOLO_COMPARE_PORT}" "${CLI_XCOLO_COMPARE_LOCAL_PORT}" \
+            "${CLI_XCOLO_COMPARE_OUT_PORT}" "${CLI_XCOLO_CONTROL_PORT}" \
             "${CLI_FENCING_IPMI_PRIMARY_HOST}" "${CLI_FENCING_IPMI_PRIMARY_PORT}" \
             "${CLI_FENCING_IPMI_PRIMARY_USER}" "${CLI_FENCING_IPMI_PRIMARY_PASSWORD}" "${CLI_FENCING_IPMI_PRIMARY_INTERFACE}" \
             "${CLI_FENCING_IPMI_SECONDARY_HOST}" "${CLI_FENCING_IPMI_SECONDARY_PORT}" \

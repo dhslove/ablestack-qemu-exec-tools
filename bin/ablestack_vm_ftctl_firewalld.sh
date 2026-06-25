@@ -29,6 +29,12 @@ FTCTL_XCOLO_PROXY_PORT="9000"
 FTCTL_XCOLO_MIGRATE_PORT="9998"
 FTCTL_XCOLO_MIRROR_PORT="9003"
 FTCTL_XCOLO_COMPARE_PORT="9004"
+FTCTL_XCOLO_AUTO_PORT_BASE="9100"
+FTCTL_XCOLO_AUTO_PORT_COUNT="160"
+FTCTL_XCOLO_AUTO_MIGRATE_PORT_BASE="9198"
+FTCTL_XCOLO_AUTO_MIGRATE_PORT_COUNT="16"
+FTCTL_REMOTE_NBD_AUTO_PORT_BASE="11809"
+FTCTL_REMOTE_NBD_AUTO_PORT_COUNT="16"
 
 if [[ -f "${CONFIG_PATH}" ]]; then
   set -a
@@ -38,6 +44,9 @@ if [[ -f "${CONFIG_PATH}" ]]; then
 fi
 
 range_end=$((FTCTL_REMOTE_NBD_PORT_BASE + FTCTL_REMOTE_NBD_PORT_COUNT - 1))
+xcolo_auto_range_end=$((FTCTL_XCOLO_AUTO_PORT_BASE + FTCTL_XCOLO_AUTO_PORT_COUNT - 1))
+xcolo_auto_migrate_range_end=$((FTCTL_XCOLO_AUTO_MIGRATE_PORT_BASE + FTCTL_XCOLO_AUTO_MIGRATE_PORT_COUNT - 1))
+remote_nbd_auto_range_end=$((FTCTL_REMOTE_NBD_AUTO_PORT_BASE + FTCTL_REMOTE_NBD_AUTO_PORT_COUNT - 1))
 
 write_service_file() {
   mkdir -p "${SERVICE_DIR}"
@@ -51,6 +60,9 @@ write_service_file() {
   <port protocol="tcp" port="${FTCTL_XCOLO_MIRROR_PORT}"/>
   <port protocol="tcp" port="${FTCTL_XCOLO_COMPARE_PORT}"/>
   <port protocol="tcp" port="${FTCTL_REMOTE_NBD_PORT_BASE}-${range_end}"/>
+  <port protocol="tcp" port="${FTCTL_XCOLO_AUTO_PORT_BASE}-${xcolo_auto_range_end}"/>
+  <port protocol="tcp" port="${FTCTL_XCOLO_AUTO_MIGRATE_PORT_BASE}-${xcolo_auto_migrate_range_end}"/>
+  <port protocol="tcp" port="${FTCTL_REMOTE_NBD_AUTO_PORT_BASE}-${remote_nbd_auto_range_end}"/>
 </service>
 EOF
   chmod 0644 "${SERVICE_PATH}"
@@ -90,7 +102,7 @@ apply_service() {
     done < <(firewalld_target_zones)
     firewall-cmd --reload >/dev/null 2>&1 || true
   fi
-  echo "[INFO] Firewalld service ensured: ${SERVICE_NAME} (x-colo proxy ${FTCTL_XCOLO_PROXY_PORT}/tcp, migrate ${FTCTL_XCOLO_MIGRATE_PORT}/tcp, mirror ${FTCTL_XCOLO_MIRROR_PORT}/tcp, compare ${FTCTL_XCOLO_COMPARE_PORT}/tcp; remote-nbd ${FTCTL_REMOTE_NBD_PORT_BASE}-${range_end}/tcp)"
+  echo "[INFO] Firewalld service ensured: ${SERVICE_NAME} (legacy x-colo ${FTCTL_XCOLO_PROXY_PORT},${FTCTL_XCOLO_MIGRATE_PORT},${FTCTL_XCOLO_MIRROR_PORT},${FTCTL_XCOLO_COMPARE_PORT}/tcp; auto x-colo ${FTCTL_XCOLO_AUTO_PORT_BASE}-${xcolo_auto_range_end}/tcp; auto migrate ${FTCTL_XCOLO_AUTO_MIGRATE_PORT_BASE}-${xcolo_auto_migrate_range_end}/tcp; remote-nbd ${FTCTL_REMOTE_NBD_PORT_BASE}-${range_end},${FTCTL_REMOTE_NBD_AUTO_PORT_BASE}-${remote_nbd_auto_range_end}/tcp)"
 }
 
 remove_service() {
