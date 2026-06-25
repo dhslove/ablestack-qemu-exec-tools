@@ -8517,13 +8517,13 @@ ftctl_xcolo_apply_startup_disk_graphs() {
   ftctl_xcolo_build_startup_disk_args "${secondary_xml}" "secondary" "${disk_runtime}" secondary_disk_args "${reference_qemu_log}" || return 1
   primary_args="$(ftctl_xcolo_qemu_args_append "${primary_net_args}" "${primary_disk_args}")"
   secondary_args="$(ftctl_xcolo_secondary_args_with_disk_graph "${secondary_net_args}" "${secondary_disk_args}")"
-  if [[ "${primary_args};${secondary_args}" == *"/dev/rbd/"* ]]; then
+  if [[ "${primary_args};${secondary_args}" == *"rbd:rbd/"* || "${primary_args};${secondary_args}" == *"file=rbd:"* ]]; then
     ftctl_state_set "${vm}" \
       "xcolo_startup_disk_backend=invalid" \
       "xcolo_protocol_failure_phase=startup_disk_graph" \
-      "last_error=xcolo_startup_krbd_path_leaked"
+      "last_error=xcolo_startup_krbd_uri_leaked_preflight"
     ftctl_log_event "colo" "xcolo.startup_disk_graph" "fail" "${vm}" "" \
-      "reason=krbd_path_leaked_into_qemu_commandline"
+      "reason=krbd_uri_leaked_into_qemu_commandline"
     return 1
   fi
   ftctl_xcolo_validate_startup_disk_topology_xml "${vm}" "${primary_xml}" "${disk_runtime}" "primary" || return 1
@@ -8535,6 +8535,15 @@ ftctl_xcolo_apply_startup_disk_graphs() {
   ftctl_xcolo_xml_remove_disk_targets "${secondary_xml}" "${disk_runtime}" || return 1
   ftctl_xml_apply_qemu_commandline "${primary_xml}" "${primary_args}" || return 1
   ftctl_xml_apply_qemu_commandline "${secondary_xml}" "${secondary_args}" || return 1
+  if grep -Eq 'rbd:rbd/|file=rbd:' "${primary_xml}" "${secondary_xml}"; then
+    ftctl_state_set "${vm}" \
+      "xcolo_startup_disk_backend=invalid" \
+      "xcolo_protocol_failure_phase=startup_disk_graph" \
+      "last_error=xcolo_startup_krbd_uri_leaked_preflight"
+    ftctl_log_event "colo" "xcolo.startup_disk_graph" "fail" "${vm}" "" \
+      "reason=krbd_uri_leaked_into_generated_xml primary_xml=${primary_xml} secondary_xml=${secondary_xml}"
+    return 1
+  fi
   ftctl_xcolo_validate_generated_commandline_contract "${vm}" "${primary_xml}" "primary" || return 1
   ftctl_xcolo_validate_generated_commandline_contract "${vm}" "${secondary_xml}" "secondary" || return 1
   ftctl_xcolo_verify_generated_guest_abi_pair "${vm}" "${primary_xml}" "${secondary_xml}" "startup_disk_graph" || return 1
@@ -11721,44 +11730,32 @@ ftctl_xcolo_prepare_secondary_runtime_rbd() {
   done
 }
 
-ftctl_xcolo_qemu_rbd_uri_from_path() {
-  local path="${1-}"
-  local out_var="${2}"
-  local spec
-
-  ftctl_blockcopy_krbd_spec_from_path "${path}" spec || return 1
-  [[ "${spec}" == */* ]] || return 1
-  case "${spec}" in
-    *","*|*";"*)
-      return 2
-      ;;
-  esac
-  printf -v "${out_var}" 'rbd:%s' "${spec}"
-}
-
 ftctl_xcolo_verify_qemu_rbd_backend_local() {
   local path="${1-}"
-  local uri="" spec="" out="" err="" rc=0
+  local spec="" out="" err="" rc=0
 
   ftctl_blockcopy_krbd_spec_from_path "${path}" spec || return 1
-  ftctl_xcolo_qemu_rbd_uri_from_path "${path}" uri || return 1
   command -v rbd >/dev/null 2>&1 || {
-    echo "ERROR: rbd CLI not found for native RBD startup backend ${path}" >&2
+    echo "ERROR: rbd CLI not found for stable KRBD startup backend ${path}" >&2
     return 2
   }
   command -v qemu-img >/dev/null 2>&1 || {
-    echo "ERROR: qemu-img not found for native RBD startup backend ${path}" >&2
+    echo "ERROR: qemu-img not found for stable KRBD startup backend ${path}" >&2
+    return 2
+  }
+  [[ -e "${path}" ]] || {
+    echo "ERROR: stable KRBD startup backend path does not exist: ${path}" >&2
     return 2
   }
   rbd info "${spec}" >/dev/null || {
-    echo "ERROR: rbd info failed for native RBD startup backend ${spec}" >&2
+    echo "ERROR: rbd info failed for stable KRBD startup backend ${spec}" >&2
     return 2
   }
   ftctl_cmd_run "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC}" out err rc -- \
-    qemu-img info --force-share --output=json "${uri}" || true
+    qemu-img info --force-share --output=json "${path}" || true
   : "${out}"
   if [[ "${rc}" != "0" ]]; then
-    echo "ERROR: qemu-img cannot open native RBD startup backend ${uri}: ${err}" >&2
+    echo "ERROR: qemu-img cannot open stable KRBD startup backend ${path}: ${err}" >&2
     return "${rc}"
   fi
 }
@@ -11767,24 +11764,24 @@ ftctl_xcolo_verify_qemu_rbd_backend_remote() {
   local host="${1-}"
   local user="${2-}"
   local path="${3-}"
-  local spec="" uri="" q_spec="" q_uri="" remote_cmd="" out="" err="" rc=0
+  local spec="" q_spec="" q_path="" remote_cmd="" out="" err="" rc=0
 
   ftctl_blockcopy_krbd_spec_from_path "${path}" spec || return 1
-  ftctl_xcolo_qemu_rbd_uri_from_path "${path}" uri || return 1
   printf -v q_spec '%q' "${spec}"
-  printf -v q_uri '%q' "${uri}"
+  printf -v q_path '%q' "${path}"
   remote_cmd="$(cat <<EOF
 set -euo pipefail
 command -v rbd >/dev/null 2>&1
 command -v qemu-img >/dev/null 2>&1
+test -e ${q_path}
 rbd info ${q_spec} >/dev/null
-qemu-img info --force-share --output=json ${q_uri} >/dev/null
+qemu-img info --force-share --output=json ${q_path} >/dev/null
 EOF
 )"
   ftctl_blockcopy_remote_exec "${host}" "${user}" out err rc "${remote_cmd}" || true
   : "${out}"
   if [[ "${rc}" != "0" ]]; then
-    echo "ERROR: remote qemu-img cannot open native RBD startup backend ${path}: ${err}" >&2
+    echo "ERROR: remote qemu-img cannot open stable KRBD startup backend ${path}: ${err}" >&2
     return "${rc}"
   fi
 }
@@ -11794,7 +11791,7 @@ ftctl_xcolo_verify_stable_rbd_contract() {
   local disk_plan="${2-}"
   local phase="${3:-runtime}"
   local phase_key entry rest target primary_source primary_format primary_dtype secondary_dest
-  local host="" user="" map_msg="" backend_msg="" ready="yes" reason="" suffix uri=""
+  local host="" user="" map_msg="" backend_msg="" ready="yes" reason="" suffix=""
   local -a entries=() state_args=()
 
   [[ -n "${vm}" && -n "${disk_plan}" ]] || return 0
@@ -11825,16 +11822,15 @@ ftctl_xcolo_verify_stable_rbd_contract() {
         continue
       }
       state_args+=("xcolo_${phase_key}_rbd_primary_${suffix}=ok:${primary_source}")
-      ftctl_xcolo_qemu_rbd_uri_from_path "${primary_source}" uri || uri=""
       backend_msg="$(ftctl_xcolo_verify_qemu_rbd_backend_local "${primary_source}" 2>&1)" || {
         ready="no"
-        reason="${reason:+${reason},}primary_${target}_native_rbd_backend_unavailable"
-        state_args+=("xcolo_${phase_key}_rbd_primary_backend_${suffix}=fail:${uri:-${primary_source}}")
+        reason="${reason:+${reason},}primary_${target}_stable_krbd_backend_unavailable"
+        state_args+=("xcolo_${phase_key}_rbd_primary_backend_${suffix}=fail:${primary_source}")
         ftctl_log_event "colo" "xcolo.rbd_backend.primary" "fail" "${vm}" "" \
           "phase=${phase} target=${target} path=${primary_source} error=$(ftctl_xcolo_compact_log_value "${backend_msg}")"
         continue
       }
-      state_args+=("xcolo_${phase_key}_rbd_primary_backend_${suffix}=ok:${uri:-${primary_source}}")
+      state_args+=("xcolo_${phase_key}_rbd_primary_backend_${suffix}=ok:${primary_source}")
     fi
 
     if ftctl_blockcopy_is_krbd_path "${secondary_dest}"; then
@@ -11855,16 +11851,15 @@ ftctl_xcolo_verify_stable_rbd_contract() {
         continue
       }
       state_args+=("xcolo_${phase_key}_rbd_secondary_${suffix}=ok:${secondary_dest}")
-      ftctl_xcolo_qemu_rbd_uri_from_path "${secondary_dest}" uri || uri=""
       backend_msg="$(ftctl_xcolo_verify_qemu_rbd_backend_remote "${host}" "${user}" "${secondary_dest}" 2>&1)" || {
         ready="no"
-        reason="${reason:+${reason},}secondary_${target}_native_rbd_backend_unavailable"
-        state_args+=("xcolo_${phase_key}_rbd_secondary_backend_${suffix}=fail:${uri:-${secondary_dest}}")
+        reason="${reason:+${reason},}secondary_${target}_stable_krbd_backend_unavailable"
+        state_args+=("xcolo_${phase_key}_rbd_secondary_backend_${suffix}=fail:${secondary_dest}")
         ftctl_log_event "colo" "xcolo.rbd_backend.secondary" "fail" "${vm}" "" \
           "phase=${phase} target=${target} path=${secondary_dest} error=$(ftctl_xcolo_compact_log_value "${backend_msg}")"
         continue
       }
-      state_args+=("xcolo_${phase_key}_rbd_secondary_backend_${suffix}=ok:${uri:-${secondary_dest}}")
+      state_args+=("xcolo_${phase_key}_rbd_secondary_backend_${suffix}=ok:${secondary_dest}")
     fi
   done
 
