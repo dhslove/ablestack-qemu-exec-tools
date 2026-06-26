@@ -10859,9 +10859,9 @@ ftctl_xcolo_create_primary_generated() {
 }
 
 ftctl_xcolo_domain_create_timeout_sec() {
-  local timeout_sec="${FTCTL_XCOLO_DOMAIN_CREATE_TIMEOUT_SEC:-45}"
+  local timeout_sec="${FTCTL_XCOLO_DOMAIN_CREATE_TIMEOUT_SEC:-180}"
   if [[ -z "${timeout_sec}" || ! "${timeout_sec}" =~ ^[0-9]+$ || "${timeout_sec}" -lt 15 ]]; then
-    timeout_sec=45
+    timeout_sec=180
   fi
   printf '%s\n' "${timeout_sec}"
 }
@@ -11590,6 +11590,8 @@ ftctl_xcolo_wait_primary_generated_listeners() {
       if ftctl_xcolo_local_tcp_listen_port_ready "${mirror_port}" &&
           ftctl_xcolo_local_tcp_listen_port_ready "${compare_port}"; then
         ready_reason="listener_pair"
+      elif ftctl_xcolo_local_tcp_listen_port_ready "${compare_port}"; then
+        ready_reason="compare_bootstrap"
       fi
     elif [[ "${mirror_wait}" == "on" ]]; then
       if ftctl_xcolo_local_tcp_listen_port_ready "${mirror_port}"; then
@@ -11605,6 +11607,7 @@ ftctl_xcolo_wait_primary_generated_listeners() {
     fi
     if [[ -n "${ready_reason}" ]]; then
       ftctl_state_set "${vm}" \
+        "xcolo_bootstrap_phase=primary_listener" \
         "xcolo_primary_listener_bootstrap=${ready_reason}" \
         "xcolo_primary_listener_bootstrap_mirror_wait=${mirror_wait}" \
         "xcolo_primary_listener_bootstrap_compare_wait=${compare_wait}"
@@ -11615,6 +11618,7 @@ ftctl_xcolo_wait_primary_generated_listeners() {
     if ftctl_xcolo_primary_create_async_done "${handle}"; then
       create_rc="$(cat "${rc_file}" 2>/dev/null || printf '1')"
       if [[ "${create_rc}" != "0" ]]; then
+        create_error="xcolo_primary_create_failed_before_listener"
         err_summary="$(tr '\n' ' ' < "${err_file}" 2>/dev/null | cut -c1-220 || true)"
         ftctl_xcolo_classify_primary_create_error "${err_summary}" create_error "${vm}" "${generated_xml}" "primary_create_listener"
         ftctl_state_set "${vm}" \
@@ -11631,6 +11635,7 @@ ftctl_xcolo_wait_primary_generated_listeners() {
   if ftctl_xcolo_primary_create_async_done "${handle}"; then
     create_rc="$(cat "${rc_file}" 2>/dev/null || printf '1')"
     if [[ "${create_rc}" != "0" ]]; then
+      create_error="xcolo_primary_create_failed_after_listener_timeout"
       err_summary="$(tr '\n' ' ' < "${err_file}" 2>/dev/null | cut -c1-220 || true)"
       ftctl_xcolo_classify_primary_create_error "${err_summary}" create_error "${vm}" "${generated_xml}" "primary_create_listener_final"
       ftctl_state_set "${vm}" \
@@ -11642,8 +11647,13 @@ ftctl_xcolo_wait_primary_generated_listeners() {
       return 1
     fi
   fi
+  ftctl_xcolo_capture_socket_snapshot "${vm}" "listener_timeout" || true
   ftctl_log_event "colo" "primary.create_generated.listeners" "fail" "${vm}" "" \
     "reason=timeout mirror_port=${mirror_port} compare_port=${compare_port} compare_local_port=${compare_local_port} compare_out_port=${compare_out_port} mirror_wait=${mirror_wait} compare_wait=${compare_wait} log_dir=${tmp_dir}"
+  ftctl_state_set "${vm}" \
+    "xcolo_protocol_failure_phase=primary_listener" \
+    "xcolo_listener_timeout_evidence_captured=yes" \
+    "last_error=xcolo_primary_listener_timeout"
   return 1
 
 }
@@ -11662,6 +11672,7 @@ ftctl_xcolo_wait_primary_peer_connections() {
   local timeout_sec mirror_port compare_port i
   local pid="" rc_file="" out_file="" err_file="" tmp_dir=""
   local create_rc generated_xml
+  local mirror_established compare_established mirror_listen compare_listen
 
   IFS='|' read -r pid rc_file out_file err_file tmp_dir <<< "${handle}"
   : "${pid}${out_file}${err_file}${tmp_dir}"
@@ -11676,6 +11687,7 @@ ftctl_xcolo_wait_primary_peer_connections() {
   for ((i=0; i<timeout_sec; i++)); do
     if ftctl_xcolo_local_tcp_established_port_ready "${mirror_port}" &&
        ftctl_xcolo_local_tcp_established_port_ready "${compare_port}"; then
+      ftctl_xcolo_capture_primary_channel_state "${vm}" || true
       ftctl_log_event "colo" "primary.create_generated.channel_attach" "ok" "${vm}" "" \
         "mirror_port=${mirror_port} compare_port=${compare_port} attempts=$((i + 1))"
       return 0
@@ -11684,6 +11696,7 @@ ftctl_xcolo_wait_primary_peer_connections() {
       create_rc="$(cat "${rc_file}" 2>/dev/null || printf '1')"
       if [[ "${create_rc}" != "0" ]]; then
         local err_summary create_error
+        create_error="xcolo_primary_create_failed_before_channel_attach"
         err_summary="$(tr '\n' ' ' < "${err_file}" 2>/dev/null | cut -c1-220 || true)"
         ftctl_xcolo_classify_primary_create_error "${err_summary}" create_error "${vm}" "${generated_xml}" "primary_create_channel_attach"
         ftctl_state_set "${vm}" \
@@ -11700,17 +11713,27 @@ ftctl_xcolo_wait_primary_peer_connections() {
 
   local secondary_vm
   secondary_vm="$(ftctl_state_get "${vm}" "secondary_vm_name" 2>/dev/null || ftctl_profile_secondary_vm_name_resolved "${vm}")"
+  ftctl_xcolo_capture_primary_channel_state "${vm}" || true
+  mirror_established="$(ftctl_state_get "${vm}" "xcolo_channel_mirror_established" 2>/dev/null || true)"
+  compare_established="$(ftctl_state_get "${vm}" "xcolo_channel_compare_established" 2>/dev/null || true)"
+  mirror_listen="$(ftctl_state_get "${vm}" "xcolo_channel_mirror_listen" 2>/dev/null || true)"
+  compare_listen="$(ftctl_state_get "${vm}" "xcolo_channel_compare_listen" 2>/dev/null || true)"
   ftctl_xcolo_capture_socket_snapshot "${vm}" "channel_attach_timeout" || true
   ftctl_xcolo_capture_qemu_log_tails "${vm}" "${secondary_vm}" || true
   ftctl_state_set "${vm}" \
     "xcolo_protocol_failure_phase=channel_attach" \
     "xcolo_channel_attach_timeout_evidence_captured=yes" \
     "xcolo_channel_attach_timeout_mirror_port=${mirror_port}" \
-    "xcolo_channel_attach_timeout_compare_port=${compare_port}"
+    "xcolo_channel_attach_timeout_compare_port=${compare_port}" \
+    "xcolo_channel_attach_timeout_mirror_established=${mirror_established}" \
+    "xcolo_channel_attach_timeout_compare_established=${compare_established}" \
+    "xcolo_channel_attach_timeout_mirror_listen=${mirror_listen}" \
+    "xcolo_channel_attach_timeout_compare_listen=${compare_listen}"
   if ftctl_xcolo_primary_create_async_done "${handle}"; then
     create_rc="$(cat "${rc_file}" 2>/dev/null || printf '1')"
     if [[ "${create_rc}" != "0" ]]; then
       local err_summary create_error
+      create_error="xcolo_primary_create_failed_after_channel_attach_timeout"
       err_summary="$(tr '\n' ' ' < "${err_file}" 2>/dev/null | cut -c1-220 || true)"
       ftctl_xcolo_classify_primary_create_error "${err_summary}" create_error "${vm}" "${generated_xml}" "primary_create_channel_attach_final"
       ftctl_state_set "${vm}" \
@@ -11723,7 +11746,7 @@ ftctl_xcolo_wait_primary_peer_connections() {
     fi
   fi
   ftctl_log_event "colo" "primary.create_generated.channel_attach" "fail" "${vm}" "" \
-    "reason=timeout mirror_port=${mirror_port} compare_port=${compare_port} log_dir=${tmp_dir}"
+    "reason=timeout mirror_port=${mirror_port} compare_port=${compare_port} mirror_established=${mirror_established} compare_established=${compare_established} mirror_listen=${mirror_listen} compare_listen=${compare_listen} log_dir=${tmp_dir}"
   ftctl_state_set "${vm}" "last_error=xcolo_channel_attach_timeout"
   return 1
 
@@ -11767,6 +11790,7 @@ ftctl_xcolo_finish_primary_generated_async() {
   wait "${pid}" >/dev/null 2>&1 || true
   rc="$(cat "${rc_file}" 2>/dev/null || printf '1')"
   if [[ "${rc}" != "0" ]]; then
+    create_error="xcolo_primary_create_failed"
     err_summary="$(tr '\n' ' ' < "${err_file}" 2>/dev/null | cut -c1-220 || true)"
     ftctl_xcolo_classify_primary_create_error "${err_summary}" create_error "${vm}" "${generated_xml}" "primary_create_finish"
     ftctl_state_set "${vm}" \

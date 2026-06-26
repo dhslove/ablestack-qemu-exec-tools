@@ -133,7 +133,7 @@ For Cloud-managed cold conversion, qemu FTCTL starts the generated primary domai
 
 After the primary listeners are visible, qemu FTCTL starts the generated secondary domain. The secondary then connects its redirector chardevs to the waiting primary sockets and allows the primary `virsh create` call to complete.
 
-This startup path uses a separate domain-create timeout, `FTCTL_XCOLO_DOMAIN_CREATE_TIMEOUT_SEC`, default 45 seconds. `FTCTL_XCOLO_QMP_TIMEOUT_SEC` remains a short QMP command timeout and must not be reused for `virsh create` calls that intentionally block during COLO socket attachment.
+This startup path uses a separate domain-create timeout, `FTCTL_XCOLO_DOMAIN_CREATE_TIMEOUT_SEC`, default 180 seconds. `FTCTL_XCOLO_QMP_TIMEOUT_SEC` remains a short QMP command timeout and must not be reused for `virsh create` calls that intentionally block during COLO socket attachment.
 
 The primary generated XML must allow QEMU startup to complete before the secondary exists. The service is still kept paused with `-S`, so guest execution and packet flow are not released before the subsequent QMP/migration sequence.
 

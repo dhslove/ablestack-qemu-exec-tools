@@ -5386,9 +5386,9 @@ selftest_case_xcolo_primary_restore_detects_generated_graph() (
   selftest_assert_contains "${graph}" "ftctl-colo-sda" "graph evidence contains ftctl node"
 )
 
-selftest_case_xcolo_primary_listener_requires_pair() (
+selftest_case_xcolo_primary_listener_accepts_compare_bootstrap() (
   selftest_reset_env
-  selftest_info "x-colo primary listener gate requires mirror and compare listener pair"
+  selftest_info "x-colo primary listener gate accepts compare bootstrap before mirror exists"
 
   local vm="xcolo-listener-pair"
   local handle rc=0
@@ -5414,9 +5414,11 @@ selftest_case_xcolo_primary_listener_requires_pair() (
   sleep() { :; }
 
   ftctl_xcolo_wait_primary_generated_listeners "${vm}" "${handle}" || rc=$?
-  selftest_assert_eq "${rc}" "1" "partial listener bootstrap must fail"
+  selftest_assert_eq "${rc}" "0" "compare listener bootstrap must pass"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_primary_listener_bootstrap")" "compare_bootstrap" "bootstrap reason"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_bootstrap_phase")" "primary_listener" "bootstrap phase"
   selftest_assert_file_contains "${FTCTL_EVENTS_LOG}" "primary.create_generated.listeners"
-  selftest_assert_file_contains "${FTCTL_EVENTS_LOG}" '"reason":"timeout"'
+  selftest_assert_file_contains "${FTCTL_EVENTS_LOG}" '"reason":"compare_bootstrap"'
 )
 
 selftest_case_cloud_managed_rollback_cleanup_does_not_restart_secondary() (
@@ -5571,7 +5573,7 @@ selftest_main() {
   selftest_case_xcolo_materialization_pipeline_reports_pci_unassigned
   selftest_case_xcolo_materialization_pipeline_allows_scsi_bus_child_without_pci_endpoint
   selftest_case_xcolo_primary_restore_detects_generated_graph
-  selftest_case_xcolo_primary_listener_requires_pair
+  selftest_case_xcolo_primary_listener_accepts_compare_bootstrap
   selftest_case_cloud_managed_rollback_cleanup_does_not_restart_secondary
   selftest_case_events_json
   selftest_info "all checks passed"
