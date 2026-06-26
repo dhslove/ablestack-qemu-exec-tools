@@ -10934,13 +10934,64 @@ ftctl_xcolo_prepare_primary_krbd_runtime_paths_from_xml() {
     "phase=${phase} count=${#paths[@]} path=${generated_xml}"
 }
 
+ftctl_xcolo_record_primary_krbd_create_visibility() {
+  local vm="${1-}"
+  local generated_xml="${2-}"
+  local phase="${3:-primary_create}"
+  local visible_var="${4-}"
+  local missing_var="${5-}"
+  local paths=()
+  local path real visible="" missing="" count=0
+
+  [[ -n "${vm}" && -n "${generated_xml}" && -f "${generated_xml}" ]] || return 1
+  ftctl_xcolo_extract_krbd_paths_from_generated_xml "${generated_xml}" paths || return $?
+  ((${#paths[@]} > 0)) || {
+    [[ -n "${visible_var}" ]] && printf -v "${visible_var}" '%s' ""
+    [[ -n "${missing_var}" ]] && printf -v "${missing_var}" '%s' ""
+    return 0
+  }
+
+  for path in "${paths[@]}"; do
+    [[ -n "${path}" ]] || continue
+    count=$((count + 1))
+    real="$(readlink -f "${path}" 2>/dev/null || true)"
+    [[ -n "${real}" ]] || real="-"
+    if [[ -b "${path}" ]]; then
+      visible="${visible}${visible:+,}${path}->${real}"
+    else
+      missing="${missing}${missing:+,}${path}->${real}"
+    fi
+  done
+
+  ftctl_state_set "${vm}" \
+    "xcolo_primary_krbd_create_visibility_phase=${phase}" \
+    "xcolo_primary_krbd_create_visibility_count=${count}" \
+    "xcolo_primary_krbd_create_visible_paths=$(ftctl_xcolo_compact_log_value "${visible}")" \
+    "xcolo_primary_krbd_create_missing_paths=$(ftctl_xcolo_compact_log_value "${missing}")"
+  ftctl_log_event "colo" "xcolo.primary_krbd_create_visibility" "$( [[ -z "${missing}" ]] && printf ok || printf fail )" "${vm}" "" \
+    "phase=${phase} visible=$(ftctl_xcolo_compact_log_value "${visible}") missing=$(ftctl_xcolo_compact_log_value "${missing}")"
+
+  [[ -n "${visible_var}" ]] && printf -v "${visible_var}" '%s' "${visible}"
+  [[ -n "${missing_var}" ]] && printf -v "${missing_var}" '%s' "${missing}"
+}
+
 ftctl_xcolo_classify_primary_create_error() {
   local err_summary="${1-}"
   local out_var="${2}"
+  local vm="${3-}"
+  local generated_xml="${4-}"
+  local phase="${5:-primary_create}"
   local create_error="xcolo_primary_create_failed_before_listener"
+  local visible_paths="" missing_paths=""
 
   if [[ "${err_summary}" == *"/dev/rbd/"* && "${err_summary}" == *"No such file or directory"* ]]; then
     create_error="xcolo_primary_krbd_path_lost_at_create"
+    if [[ -n "${vm}" && -n "${generated_xml}" && -f "${generated_xml}" ]]; then
+      ftctl_xcolo_record_primary_krbd_create_visibility "${vm}" "${generated_xml}" "${phase}" visible_paths missing_paths || true
+      if [[ -n "${visible_paths}" ]]; then
+        create_error="xcolo_primary_krbd_libvirt_runtime_visibility_failed"
+      fi
+    fi
   elif [[ "${err_summary}" == *"/dev/rbd/"* && ( "${err_summary}" == *"Permission denied"* || "${err_summary}" == *"Operation not permitted"* ) ]]; then
     create_error="xcolo_primary_krbd_access_denied_at_create"
   elif [[ "${err_summary}" == *"Bus '"*" not found"* ||
@@ -10952,6 +11003,73 @@ ftctl_xcolo_classify_primary_create_error() {
   fi
   printf -v "${out_var}" '%s' "${create_error}"
 }
+
+ftctl_xcolo_run_primary_generated_create_with_retry() {
+  local vm="${1-}"
+  local generated_xml="${2-}"
+  local out_file="${3-}"
+  local err_file="${4-}"
+  local timeout_sec="${5-}"
+  local create_rc=0 retry_rc=0 retry_out retry_err retry_reason=""
+
+  [[ -n "${generated_xml}" && -f "${generated_xml}" && -n "${out_file}" && -n "${err_file}" ]] || return 1
+  : > "${out_file}"
+  : > "${err_file}"
+
+  if command -v timeout >/dev/null 2>&1; then
+    timeout --preserve-status "${timeout_sec}" env LC_ALL=C LANG=C \
+      virsh -c "${FTCTL_PROFILE_PRIMARY_URI}" create "${generated_xml}" \
+      >"${out_file}" 2>"${err_file}" || create_rc=$?
+  else
+    env LC_ALL=C LANG=C virsh -c "${FTCTL_PROFILE_PRIMARY_URI}" create "${generated_xml}" \
+      >"${out_file}" 2>"${err_file}" || create_rc=$?
+  fi
+
+  if [[ "${create_rc}" != "0" ]] &&
+     grep -q "/dev/rbd/" "${err_file}" 2>/dev/null &&
+     grep -q "No such file or directory" "${err_file}" 2>/dev/null; then
+    retry_reason="krbd_enoent_after_prepare"
+    ftctl_log_event "colo" "primary.create_generated.retry" "warn" "${vm}" "${create_rc}" \
+      "reason=${retry_reason} path=${generated_xml}"
+    ftctl_xcolo_prepare_primary_krbd_runtime_paths_from_xml "${vm}" "${generated_xml}" "primary_create_retry" || {
+      ftctl_log_event "colo" "primary.create_generated.retry" "fail" "${vm}" "" \
+        "reason=krbd_reprepare_failed path=${generated_xml}"
+      return "${create_rc}"
+    }
+    ftctl_xcolo_record_primary_krbd_create_visibility "${vm}" "${generated_xml}" "primary_create_retry_before_virsh" || true
+    sleep 1
+    retry_out="${out_file}.retry"
+    retry_err="${err_file}.retry"
+    : > "${retry_out}"
+    : > "${retry_err}"
+    if command -v timeout >/dev/null 2>&1; then
+      timeout --preserve-status "${timeout_sec}" env LC_ALL=C LANG=C \
+        virsh -c "${FTCTL_PROFILE_PRIMARY_URI}" create "${generated_xml}" \
+        >"${retry_out}" 2>"${retry_err}" || retry_rc=$?
+    else
+      env LC_ALL=C LANG=C virsh -c "${FTCTL_PROFILE_PRIMARY_URI}" create "${generated_xml}" \
+        >"${retry_out}" 2>"${retry_err}" || retry_rc=$?
+    fi
+    {
+      printf '\n--- ftctl retry stdout ---\n'
+      cat "${retry_out}" 2>/dev/null || true
+    } >> "${out_file}"
+    {
+      printf '\n--- ftctl retry stderr ---\n'
+      cat "${retry_err}" 2>/dev/null || true
+    } >> "${err_file}"
+    ftctl_state_set "${vm}" \
+      "xcolo_primary_create_retry=1" \
+      "xcolo_primary_create_retry_reason=${retry_reason}" \
+      "xcolo_primary_create_retry_rc=${retry_rc}"
+    ftctl_log_event "colo" "primary.create_generated.retry" "$(ftctl_result_from_rc "${retry_rc}")" "${vm}" "${retry_rc}" \
+      "reason=${retry_reason} path=${generated_xml}"
+    return "${retry_rc}"
+  fi
+
+  return "${create_rc}"
+}
+
 
 ftctl_xcolo_local_tcp_listen_port_ready() {
   local port="${1-}"
@@ -11337,14 +11455,7 @@ ftctl_xcolo_start_primary_generated_async() {
   rc_file="${tmp_dir}/rc"
   (
     local create_rc=0
-    if command -v timeout >/dev/null 2>&1; then
-      timeout --preserve-status "${timeout_sec}" env LC_ALL=C LANG=C \
-        virsh -c "${FTCTL_PROFILE_PRIMARY_URI}" create "${generated_xml}" \
-        >"${out_file}" 2>"${err_file}" || create_rc=$?
-    else
-      env LC_ALL=C LANG=C virsh -c "${FTCTL_PROFILE_PRIMARY_URI}" create "${generated_xml}" \
-        >"${out_file}" 2>"${err_file}" || create_rc=$?
-    fi
+    ftctl_xcolo_run_primary_generated_create_with_retry "${vm}" "${generated_xml}" "${out_file}" "${err_file}" "${timeout_sec}" || create_rc=$?
     printf '%s\n' "${create_rc}" > "${rc_file}"
     exit "${create_rc}"
   ) &
@@ -11359,7 +11470,7 @@ ftctl_xcolo_wait_primary_generated_listeners() {
   local handle="${2-}"
   local timeout_sec mirror_port compare_port compare_local_port compare_out_port mirror_wait compare_wait i
   local pid="" rc_file="" out_file="" err_file="" tmp_dir=""
-  local create_rc ready_reason err_summary create_error
+  local create_rc ready_reason err_summary create_error generated_xml
 
   IFS='|' read -r pid rc_file out_file err_file tmp_dir <<< "${handle}"
   : "${pid}${out_file}${err_file}${tmp_dir}"
@@ -11367,6 +11478,7 @@ ftctl_xcolo_wait_primary_generated_listeners() {
     return 0
   fi
 
+  generated_xml="$(ftctl_state_get "${vm}" "primary_xml_generated" 2>/dev/null || true)"
   timeout_sec="$(ftctl_xcolo_domain_create_timeout_sec)"
   mirror_port="${FTCTL_XCOLO_MIRROR_PORT:-9003}"
   compare_port="${FTCTL_XCOLO_COMPARE_PORT:-9004}"
@@ -11409,7 +11521,7 @@ ftctl_xcolo_wait_primary_generated_listeners() {
       create_rc="$(cat "${rc_file}" 2>/dev/null || printf '1')"
       if [[ "${create_rc}" != "0" ]]; then
         err_summary="$(tr '\n' ' ' < "${err_file}" 2>/dev/null | cut -c1-220 || true)"
-        ftctl_xcolo_classify_primary_create_error "${err_summary}" create_error
+        ftctl_xcolo_classify_primary_create_error "${err_summary}" create_error "${vm}" "${generated_xml}" "primary_create_listener"
         ftctl_state_set "${vm}" \
           "xcolo_protocol_failure_phase=primary_create" \
           "xcolo_primary_create_error_summary=$(ftctl_xcolo_compact_log_value "${err_summary}")" \
@@ -11421,9 +11533,24 @@ ftctl_xcolo_wait_primary_generated_listeners() {
     fi
     sleep 1
   done
+  if ftctl_xcolo_primary_create_async_done "${handle}"; then
+    create_rc="$(cat "${rc_file}" 2>/dev/null || printf '1')"
+    if [[ "${create_rc}" != "0" ]]; then
+      err_summary="$(tr '\n' ' ' < "${err_file}" 2>/dev/null | cut -c1-220 || true)"
+      ftctl_xcolo_classify_primary_create_error "${err_summary}" create_error "${vm}" "${generated_xml}" "primary_create_listener_final"
+      ftctl_state_set "${vm}" \
+        "xcolo_protocol_failure_phase=primary_create" \
+        "xcolo_primary_create_error_summary=$(ftctl_xcolo_compact_log_value "${err_summary}")" \
+        "last_error=${create_error}"
+      ftctl_log_event "colo" "primary.create_generated.listeners" "fail" "${vm}" "${create_rc}" \
+        "reason=create_exited_after_listener_timeout classified=${create_error} mirror_port=${mirror_port} compare_port=${compare_port} log_dir=${tmp_dir} error=$(ftctl_xcolo_compact_log_value "${err_summary}")"
+      return 1
+    fi
+  fi
   ftctl_log_event "colo" "primary.create_generated.listeners" "fail" "${vm}" "" \
     "reason=timeout mirror_port=${mirror_port} compare_port=${compare_port} compare_local_port=${compare_local_port} compare_out_port=${compare_out_port} mirror_wait=${mirror_wait} compare_wait=${compare_wait} log_dir=${tmp_dir}"
   return 1
+
 }
 
 ftctl_xcolo_channel_connect_timeout_sec() {
@@ -11439,7 +11566,7 @@ ftctl_xcolo_wait_primary_peer_connections() {
   local handle="${2-}"
   local timeout_sec mirror_port compare_port i
   local pid="" rc_file="" out_file="" err_file="" tmp_dir=""
-  local create_rc
+  local create_rc generated_xml
 
   IFS='|' read -r pid rc_file out_file err_file tmp_dir <<< "${handle}"
   : "${pid}${out_file}${err_file}${tmp_dir}"
@@ -11447,6 +11574,7 @@ ftctl_xcolo_wait_primary_peer_connections() {
     return 0
   fi
 
+  generated_xml="$(ftctl_state_get "${vm}" "primary_xml_generated" 2>/dev/null || true)"
   timeout_sec="$(ftctl_xcolo_channel_connect_timeout_sec)"
   mirror_port="${FTCTL_XCOLO_MIRROR_PORT:-9003}"
   compare_port="${FTCTL_XCOLO_COMPARE_PORT:-9004}"
@@ -11462,7 +11590,7 @@ ftctl_xcolo_wait_primary_peer_connections() {
       if [[ "${create_rc}" != "0" ]]; then
         local err_summary create_error
         err_summary="$(tr '\n' ' ' < "${err_file}" 2>/dev/null | cut -c1-220 || true)"
-        ftctl_xcolo_classify_primary_create_error "${err_summary}" create_error
+        ftctl_xcolo_classify_primary_create_error "${err_summary}" create_error "${vm}" "${generated_xml}" "primary_create_channel_attach"
         ftctl_state_set "${vm}" \
           "xcolo_protocol_failure_phase=primary_create" \
           "xcolo_primary_create_error_summary=$(ftctl_xcolo_compact_log_value "${err_summary}")" \
@@ -11475,10 +11603,26 @@ ftctl_xcolo_wait_primary_peer_connections() {
     sleep 1
   done
 
+  if ftctl_xcolo_primary_create_async_done "${handle}"; then
+    create_rc="$(cat "${rc_file}" 2>/dev/null || printf '1')"
+    if [[ "${create_rc}" != "0" ]]; then
+      local err_summary create_error
+      err_summary="$(tr '\n' ' ' < "${err_file}" 2>/dev/null | cut -c1-220 || true)"
+      ftctl_xcolo_classify_primary_create_error "${err_summary}" create_error "${vm}" "${generated_xml}" "primary_create_channel_attach_final"
+      ftctl_state_set "${vm}" \
+        "xcolo_protocol_failure_phase=primary_create" \
+        "xcolo_primary_create_error_summary=$(ftctl_xcolo_compact_log_value "${err_summary}")" \
+        "last_error=${create_error}"
+      ftctl_log_event "colo" "primary.create_generated.channel_attach" "fail" "${vm}" "${create_rc}" \
+        "reason=create_exited_after_channel_attach_timeout classified=${create_error} mirror_port=${mirror_port} compare_port=${compare_port} log_dir=${tmp_dir} error=$(ftctl_xcolo_compact_log_value "${err_summary}")"
+      return 1
+    fi
+  fi
   ftctl_log_event "colo" "primary.create_generated.channel_attach" "fail" "${vm}" "" \
     "reason=timeout mirror_port=${mirror_port} compare_port=${compare_port} log_dir=${tmp_dir}"
   ftctl_state_set "${vm}" "last_error=xcolo_channel_attach_timeout"
   return 1
+
 }
 
 ftctl_xcolo_abort_primary_generated_async() {
@@ -11507,7 +11651,7 @@ ftctl_xcolo_finish_primary_generated_async() {
   local generated_xml="${2-}"
   local handle="${3-}"
   local pid="" rc_file="" out_file="" err_file="" tmp_dir=""
-  local rc err_summary
+  local rc err_summary create_error
 
   IFS='|' read -r pid rc_file out_file err_file tmp_dir <<< "${handle}"
   : "${out_file}"
@@ -11519,14 +11663,20 @@ ftctl_xcolo_finish_primary_generated_async() {
   wait "${pid}" >/dev/null 2>&1 || true
   rc="$(cat "${rc_file}" 2>/dev/null || printf '1')"
   if [[ "${rc}" != "0" ]]; then
-    err_summary="$(tr '\n' ' ' < "${err_file}" 2>/dev/null | cut -c1-180 || true)"
+    err_summary="$(tr '\n' ' ' < "${err_file}" 2>/dev/null | cut -c1-220 || true)"
+    ftctl_xcolo_classify_primary_create_error "${err_summary}" create_error "${vm}" "${generated_xml}" "primary_create_finish"
+    ftctl_state_set "${vm}" \
+      "xcolo_protocol_failure_phase=primary_create" \
+      "xcolo_primary_create_error_summary=$(ftctl_xcolo_compact_log_value "${err_summary}")" \
+      "last_error=${create_error}"
     ftctl_log_event "colo" "primary.create_generated" "fail" "${vm}" "${rc}" \
-      "path=${generated_xml} log_dir=${tmp_dir} error=${err_summary}"
+      "path=${generated_xml} log_dir=${tmp_dir} classified=${create_error} error=$(ftctl_xcolo_compact_log_value "${err_summary}")"
     return "${rc}"
   fi
   ftctl_log_event "colo" "primary.create_generated" "ok" "${vm}" "" \
     "path=${generated_xml} log_dir=${tmp_dir}"
 }
+
 
 ftctl_xcolo_primary_has_generated_block_graph() {
   local vm="${1-}"
