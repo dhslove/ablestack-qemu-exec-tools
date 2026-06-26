@@ -3,9 +3,9 @@
 > Note: generated qemu commandline RBD backend rules in this document are
 > superseded by
 > [414. FT XCOLO RBD commandline backend contract](414-ft-xcolo-rbd-commandline-backend-contract-design-20260626.md).
-> Cloud/profile disk identity remains the stable KRBD path, but the default
-> generated XCOLO qemu commandline backend is the preserved `librbd` URI path.
-> Pure generated-commandline KRBD is an explicit experimental mode.
+> Cloud/profile disk identity and the default generated XCOLO qemu commandline
+> backend are both the stable KRBD path.  Native `librbd` commandline mode is
+> explicit experimental mode only.
 
 ## 배경
 

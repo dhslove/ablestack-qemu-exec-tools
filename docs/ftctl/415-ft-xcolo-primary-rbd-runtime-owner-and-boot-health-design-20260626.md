@@ -1,89 +1,111 @@
-# 415. FT X-COLO Primary RBD Runtime Owner And Boot Health Design
+# 415. FT XCOLO Primary KRBD Owner And Boot Health Design
 
 ## Problem
 
-The `r97-link-02` RBD to qcow2 experimental FT run reached the pre-migrate X-COLO startup path:
+The latest `r97-link-02` RBD to qcow2 experimental FT run reached the
+pre-migrate XCOLO startup path, but the generated primary used native QEMU RBD
+URI form:
 
-- baseline seed completed;
-- generated primary XML used native QEMU RBD command line, `file=rbd:<pool>/<image>`;
-- generated secondary XML used qcow2 replication/quorum graph;
-- channel, topology, firewall, and pre-migrate contract checks passed;
-- primary was resumed before migration.
+```text
+file=rbd:rbd/<image>
+```
 
-The run then failed before the `migrate` command:
+The run then failed before `migrate`:
 
 ```text
 last_error=xcolo_primary_colo_boot_unhealthy:qga_timeout
 ```
 
-This does not prove that X-COLO migration failed. It proves that the generated primary did not reach the required guest health state after the X-COLO disk graph was started.
+That result is not a valid KRBD-path result.  It was produced after FTCTL
+changed the RBD runtime backend away from ABLESTACK's stable KRBD path.  Before
+continuing RBD to qcow2 validation, the primary startup graph must be restored
+to the same RBD identity Cloud/libvirt uses:
 
-Earlier RBD to RBD validation had a similar symptom where the guest appeared to fail boot while a RBD path/lock was still held by the wrong runtime owner. Therefore the primary boot gate must distinguish a true guest boot timeout from a RBD runtime owner conflict.
+```text
+/dev/rbd/rbd/<image>
+```
 
 ## Design Principles
 
-- Do not change the already validated `r97-link-01` RBD to RBD success path.
-- Do not mix `krbd` and native `librbd` ownership for the same primary runtime disk graph.
-- Stable Cloud disk paths may still be `/dev/rbd/<pool>/<image>`, but that path is not always the runtime owner.
-- In `librbd` command-line mode, QEMU must own the RBD image through `file=rbd:<pool>/<image>`.
-- In `krbd` command-line mode, QEMU may own the image through `/dev/rbd/<pool>/<image>`.
-- A primary boot failure must record RBD ownership evidence before it is reported as a generic QGA timeout.
+- The default RBD-backed FT/XCOLO path is KRBD, not native `librbd`.
+- `/dev/rbd/rbd/<image>` is the stable path in Cloud/libvirt/profile/disk-plan
+  and generated XCOLO qemu commandline.
+- `/dev/rbdN` is diagnostic only and must not become durable configuration.
+- `file=rbd:` and `rbd:rbd/` are forbidden in default generated XCOLO args/XML.
+- A primary boot failure must record RBD mapping, watcher, and lock evidence,
+  but KRBD mappings are expected in KRBD mode and must not be reported as
+  runtime owner conflicts.
+- Explicit `librbd` remains only a guarded experiment.  In that mode, KRBD
+  mappings are conflicts because native QEMU RBD owns the image.
 
 ## AS-IS
 
 | Area | Current behavior | Risk |
 |---|---|---|
-| Stable RBD contract | Any primary `/dev/rbd/...` source is mapped with `ftctl_blockcopy_krbd_map_local`. | A `librbd` generated primary can later open the same image while KRBD mapping remains. |
-| Primary generated XML | Default command line uses `file=rbd:<pool>/<image>`. | Correct for native RBD, but unsafe if KRBD still owns the image. |
-| Boot health gate | Checks QMP block health, QEMU log tail, and QGA. | `qga_timeout` hides whether a RBD owner/lock conflict blocked guest boot. |
-| Failure evidence | Debug includes QMP/log evidence. | No mandatory `rbd status`, `rbd lock list`, or `rbd showmapped` evidence tied to the boot gate. |
+| Backend default | Defaults to `librbd` | Violates ABLESTACK KRBD storage policy |
+| Generated primary XML | Uses `file=rbd:<pool>/<image>` for RBD parents | Primary runtime path differs from Cloud/libvirt path |
+| RBD owner evidence | Treats mapped KRBD as conflict only in librbd-gated paths | Default path can hide or misclassify storage evidence |
+| Stable RBD contract | Backend-aware, but default selects native RBD | Correct KRBD contract is not exercised by default |
+| Selftest | Default startup graph expects native RBD URI | Regression tests protect the wrong behavior |
 
 ## TO-BE
 
 | Area | New behavior | Result |
 |---|---|---|
-| Stable RBD contract | Backend-aware. `krbd` maps stable paths; `librbd` verifies native RBD backend without creating KRBD ownership. | The selected command-line backend owns the image consistently. |
-| Primary create preflight | In `librbd` mode, release local KRBD mappings for primary RBD sources before generated primary create. | Prevents KRBD plus librbd dual ownership. |
-| Boot health evidence | Each premigrate boot loop captures RBD status, lock list, and showmapped evidence. | A boot failure includes storage ownership context. |
-| Failure classification | Remaining KRBD mapping in `librbd` mode fails as `xcolo_primary_rbd_runtime_owner_conflict`. | Avoids misleading generic `qga_timeout`. |
+| Backend default | Defaults to `krbd` | Default FT follows ABLESTACK RBD policy |
+| Generated primary XML | Emits `file.filename=/dev/rbd/rbd/<image>` | Primary QEMU uses the stable KRBD path |
+| Generated secondary XML | Uses stable KRBD for RBD destinations and file paths for qcow2 destinations | RBD to RBD and RBD to qcow2 are both explicit and inspectable |
+| RBD owner evidence | Captured for every boot loop | Boot failures include `showmapped`, `status`, and `lock list` evidence |
+| Failure classification | KRBD mapped is normal in KRBD mode; mapped KRBD is conflict only in explicit librbd mode | Avoids false storage-owner failures |
+| Selftest | Default test asserts KRBD and rejects native RBD URI | CI prevents default backend regression |
 
 ## Implementation Plan
 
 ### qemu FTCTL
 
-1. Add normalized backend helper:
-   - `ftctl_xcolo_rbd_commandline_backend`
-
-2. Add primary RBD evidence helpers:
-   - `ftctl_xcolo_local_rbd_showmapped_devices`
-   - `ftctl_xcolo_capture_primary_rbd_owner_evidence`
-
-3. Add primary ownership preparation:
-   - `ftctl_xcolo_release_primary_krbd_maps_for_librbd`
-
-4. Change `ftctl_xcolo_verify_stable_rbd_contract`:
-   - `krbd`: keep existing KRBD mapping and `qemu-img info /dev/rbd/...` validation.
-   - `librbd`: do not map; validate `qemu-img info rbd:<pool>/<image>`.
-
-5. Change premigrate boot gate:
-   - collect RBD owner evidence on each loop;
-   - if KRBD mapping remains in `librbd` mode, fail with `xcolo_primary_rbd_runtime_owner_conflict`;
-   - otherwise keep the existing guest/QGA timeout behavior.
+1. Change the normalized backend helper:
+   - default: `krbd`;
+   - supported explicit values: `krbd`, `librbd`;
+   - invalid values fall back to `krbd`.
+2. Change startup disk arg generation:
+   - default RBD source: `file.filename=/dev/rbd/<pool>/<image>`;
+   - explicit `librbd`: `file=rbd:<pool>/<image>`.
+3. Change startup graph guards:
+   - KRBD mode fails if generated args/XML contain `file=rbd:` or `rbd:rbd/`;
+   - explicit librbd mode fails if generated args/XML contain `/dev/rbd/`.
+4. Keep stable RBD contract KRBD-aware:
+   - map local primary stable path before generated primary create;
+   - map remote secondary stable path before secondary/incoming use;
+   - verify both sides with `qemu-img info --force-share` against the stable
+     KRBD path.
+5. Record RBD evidence at storage/boot gates for all backends.
+6. Classify remaining KRBD mapping as conflict only when the active backend is
+   explicit `librbd`.
 
 ### Tests
 
-Add selftest coverage:
+- Default startup disk graph emits `file.filename=/dev/rbd/...`.
+- Default startup disk graph does not emit `file=rbd:`.
+- Explicit KRBD still emits stable KRBD.
+- Explicit librbd remains available but opt-in.
+- KRBD stable contract maps primary and secondary paths.
+- Explicit librbd stable contract does not map primary KRBD.
 
-- `krbd` stable contract still maps primary and secondary paths.
-- `librbd` stable contract does not call primary KRBD map.
+## Retest Criteria
 
-## Expected Retest Outcome
+The next `r97-link-02` test is valid only if evidence shows:
 
-If the previous boot failure was caused by a stale KRBD runtime owner, the next run should pass the primary boot gate and move to migration.
+```text
+xcolo_rbd_commandline_backend=krbd
+xcolo_startup_disk_backend=krbd-rbd-or-file
+primary_qemu_args contains file.filename=/dev/rbd/rbd/<primary-image>
+primary_qemu_args does not contain file=rbd:
+```
 
-If the failure remains, the evidence will identify whether:
+If the primary still fails to boot, the new evidence must identify whether the
+failure is:
 
-- KRBD mapping still exists unexpectedly;
-- RBD lock/watchers are abnormal;
-- QEMU block graph is healthy but the guest still does not boot;
-- the remaining issue is specific to the RBD to qcow2 X-COLO graph rather than RBD ownership.
+- a missing KRBD map/path;
+- an RBD lock/watcher issue;
+- a QEMU block graph problem;
+- a guest filesystem/boot issue unrelated to the backend selector.

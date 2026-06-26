@@ -1,85 +1,105 @@
-# FT XCOLO RBD commandline backend contract - 2026-06-26
+# FT XCOLO KRBD commandline backend contract - 2026-06-26
 
 ## Background
 
-`r97-link-01` preserved the first successful cloud-managed RBD to RBD FT/XCOLO
-path.  Read-only verification of that preserved state showed two different
-layers:
+ABLESTACK manages RBD-backed VM disks through the stable KRBD path:
 
-| Layer | Observed path form |
-|---|---|
-| Cloud/libvirt source XML, FTCTL profile, disk plan | `/dev/rbd/rbd/<image>` stable KRBD path |
-| Generated XCOLO qemu commandline and live QEMU argv | `file=rbd:rbd/<image>` librbd URI |
+```text
+/dev/rbd/<pool>/<image>
+```
 
-Therefore the existing RBD to RBD success path is not a pure generated-commandline
-KRBD runtime.  It is a KRBD-managed Cloud/profile path that is translated to the
-QEMU native librbd URI form for the generated XCOLO startup graph.
+The generated FT/XCOLO runtime must preserve that identity.  A transient
+`/dev/rbdN` device may be useful for diagnostics, but it is not a durable
+contract.  Native QEMU RBD URI forms such as `rbd:<pool>/<image>` or
+`file=rbd:<pool>/<image>` are not the default ABLESTACK FT path.
 
 ## Problem
 
-Recent KRBD visibility changes tried to keep `/dev/rbd/rbd/<image>` all the way
-into the generated XCOLO qemu commandline.  That created a different runtime
-path from the preserved `r97-link-01` success and exposed primary-create
-visibility and timeout failures before the RBD to QCOW2 protocol experiment
-could be evaluated.
+Recent FT work changed the generated XCOLO qemu commandline default to native
+`librbd`:
 
-The test program now needs two separate validations:
-
-1. preserve the existing KRBD-managed RBD to RBD success path;
-2. continue explicit experiments for generated-commandline KRBD, including RBD
-   to QCOW2, without changing the default path.
-
-## Design
-
-Add an explicit runtime backend selector:
-
-```bash
-FTCTL_XCOLO_RBD_COMMANDLINE_BACKEND=librbd|krbd
+```text
+file=rbd:rbd/<image>
 ```
 
-Default:
+That violated the ABLESTACK KRBD path principle and made RBD to qcow2 testing
+ambiguous.  When the primary guest failed its pre-migrate boot gate, the run no
+longer proved whether the failure belonged to COLO, qcow2, or the unintended
+RBD backend change.
 
-```bash
-FTCTL_XCOLO_RBD_COMMANDLINE_BACKEND=librbd
-```
+## Design Principles
 
-The names are intentionally explicit:
+- Keep Cloud/libvirt/profile/disk-plan/generate-commandline identity aligned on
+  `/dev/rbd/<pool>/<image>` for default RBD-backed FT.
+- Do not use `/dev/rbdN` in generated XML, generated qemu args, state profiles,
+  or durable runtime records.
+- Do not emit `file=rbd:` or `rbd:rbd/` in the default FT XCOLO RBD path.
+- Keep explicit `FTCTL_XCOLO_RBD_COMMANDLINE_BACKEND=librbd` only as a guarded
+  experiment path.  It is not the default and it must not be used silently.
+- Preserve RBD owner evidence (`rbd showmapped`, `rbd status`, `rbd lock list`)
+  at boot gates, but treat KRBD mappings as expected in KRBD mode.
 
-| Mode | Input identity | Generated qemu commandline | Purpose |
-|---|---|---|---|
-| `librbd` | stable KRBD path from Cloud/profile/disk plan | `file=rbd:<pool>/<image>` | Preserve the known RBD to RBD success path |
-| `krbd` | stable KRBD path from Cloud/profile/disk plan | `file.filename=/dev/rbd/<pool>/<image>` | Explicit experimental runtime validation |
+## AS-IS
 
-## Guard Rules
+| Area | Current behavior | Issue |
+|---|---|---|
+| Backend default | `FTCTL_XCOLO_RBD_COMMANDLINE_BACKEND` defaults to `librbd` | Default path violates ABLESTACK KRBD policy |
+| Generated commandline | `/dev/rbd/rbd/<image>` is converted to `file=rbd:rbd/<image>` | Cloud/libvirt disk identity and FT runtime disk identity diverge |
+| Guard rules | KRBD mode rejects native URI, but default mode is native URI | Guard protects only an opt-in mode |
+| Boot evidence | RBD owner evidence is captured mainly for `librbd` conflict detection | KRBD-mode failures can miss useful RBD evidence |
+| Selftest | Default test expects `file=rbd:rbd/<image>` | Tests preserve the wrong contract |
 
-| Mode | Must reject |
-|---|---|
-| `librbd` | `/dev/rbd/` leaked into generated qemu commandline/XML |
-| `krbd` | `file=rbd:` / `rbd:rbd/` leaked into generated qemu commandline/XML |
+## TO-BE
 
-The stable KRBD contract remains separate from the generated commandline
-backend.  FTCTL still maps/verifies stable KRBD paths before startup and records
-stable path readiness in state.  The commandline backend selector controls only
-how those verified RBD identities are materialized in the generated XCOLO graph.
+| Area | New behavior | Result |
+|---|---|---|
+| Backend default | `FTCTL_XCOLO_RBD_COMMANDLINE_BACKEND` defaults to `krbd` | Default FT path follows ABLESTACK storage policy |
+| Generated commandline | RBD source is emitted as `file.filename=/dev/rbd/<pool>/<image>` | QEMU runtime uses the same stable KRBD identity as Cloud/libvirt |
+| Guard rules | Default KRBD mode rejects `file=rbd:` and `rbd:rbd/` in generated args/XML | Backend drift is caught before VM create/migrate |
+| Stable RBD contract | KRBD mode maps/verifies `/dev/rbd/<pool>/<image>` locally and remotely | Missing map/path issues fail before COLO handoff |
+| Boot evidence | RBD owner evidence is captured for all backend modes | Boot failures include storage evidence without misclassifying KRBD mappings |
+| Selftest | Default tests assert `file.filename=/dev/rbd/...` and reject `file=rbd:` | Regression tests enforce the correct default |
 
-## Test Expectations
+## Implementation
 
-- RBD to RBD default tests must continue to produce `file=rbd:rbd/<image>` in
-  generated XCOLO qemu args.
-- Explicit KRBD runtime tests must produce
-  `file.filename=/dev/rbd/rbd/<image>` and must not emit `file=rbd:`.
-- RBD to QCOW2 experiments must use the default preserved backend unless the
-  experiment explicitly sets `FTCTL_XCOLO_RBD_COMMANDLINE_BACKEND=krbd`.
-- Existing `r97-link-01` preserved state must not be modified by this change.
+1. Normalize `ftctl_xcolo_rbd_commandline_backend` to return `krbd` unless an
+   explicit supported value is supplied.
+2. Pass `XCOLO_RBD_COMMANDLINE_BACKEND=krbd` into the qemu-arg generation
+   helper by default.
+3. Keep qemu-arg generation backend-aware:
+   - `krbd`: `file.filename=/dev/rbd/<pool>/<image>`;
+   - explicit `librbd`: `file=rbd:<pool>/<image>`.
+4. Validate generated commandline and generated XML:
+   - KRBD mode must not contain `file=rbd:` or `rbd:rbd/`;
+   - explicit librbd mode must not contain `/dev/rbd/`.
+5. Capture primary RBD evidence in every pre-migrate boot loop.  In KRBD mode,
+   a mapped KRBD device is normal.  In explicit librbd mode, remaining KRBD
+   ownership is a conflict.
+6. Update selftests so the default startup disk graph proves KRBD and the
+   explicit librbd path remains opt-in only.
 
 ## Deployment Verification
 
-After deployment, verify:
+On every deployed host, verify:
 
 ```bash
-grep -R "FTCTL_XCOLO_RBD_COMMANDLINE_BACKEND" /usr/local/lib/ablestack-qemu-exec-tools/ftctl /etc/ablestack/ablestack-vm-ftctl.conf
+grep -R "FTCTL_XCOLO_RBD_COMMANDLINE_BACKEND:-krbd" \
+  /usr/local/lib/ablestack-qemu-exec-tools/ftctl/xcolo.sh
+grep -R "xcolo_startup_krbd_uri_leaked" \
+  /usr/local/lib/ablestack-qemu-exec-tools/ftctl/xcolo.sh
 ```
 
-For default mode, generated XCOLO XML for RBD-backed FT must contain
-`file=rbd:rbd/<image>` and must not contain `/dev/rbd/rbd/<image>` inside the
-qemu commandline args.
+During the next RBD-backed FT test, generated XCOLO XML and state must show:
+
+```text
+xcolo_rbd_commandline_backend=krbd
+file.filename=/dev/rbd/rbd/<image>
+```
+
+They must not show:
+
+```text
+file=rbd:
+rbd:rbd/
+/dev/rbdN
+```

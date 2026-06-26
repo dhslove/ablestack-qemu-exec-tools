@@ -3,10 +3,10 @@
 > Note: generated qemu commandline RBD backend rules in this document are
 > superseded by
 > [414. FT XCOLO RBD commandline backend contract](414-ft-xcolo-rbd-commandline-backend-contract-design-20260626.md).
-> Stable KRBD verification still applies to Cloud/profile/disk-plan paths.
-> However, `rbd:rbd/...` is allowed and is the default for the generated XCOLO
-> qemu commandline in `librbd` mode.  Generated-commandline KRBD is now an
-> explicit experimental mode.
+> Stable KRBD verification applies to Cloud/profile/disk-plan paths and to the
+> default generated XCOLO qemu commandline.  `rbd:rbd/...` and `file=rbd:` are
+> forbidden in default FT startup args/XML; native `librbd` is explicit
+> experimental mode only.
 
 ## Background
 

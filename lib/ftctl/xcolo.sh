@@ -1031,7 +1031,7 @@ ftctl_xcolo_validate_primary_storage_health() {
   if [[ -z "${reason}" && -n "${log_tail}" ]]; then
     ftctl_xcolo_primary_storage_failure_reason_from_text "${log_tail}" reason || true
   fi
-  if [[ -z "${reason}" && -n "${disk_plan}" && "$(ftctl_xcolo_rbd_commandline_backend)" == "librbd" ]]; then
+  if [[ -z "${reason}" && -n "${disk_plan}" ]]; then
     ftctl_xcolo_capture_primary_rbd_owner_evidence "${vm}" "${disk_plan}" "storage_health" || true
     rbd_conflict="$(ftctl_state_get "${vm}" "xcolo_primary_storage_health_rbd_runtime_owner_conflict" 2>/dev/null || true)"
     rbd_targets="$(ftctl_state_get "${vm}" "xcolo_primary_storage_health_rbd_runtime_owner_conflict_targets" 2>/dev/null || true)"
@@ -1240,9 +1240,7 @@ ftctl_xcolo_capture_primary_premigrate_boot_evidence() {
   ftctl_xcolo_write_debug_file "${vm}" "primary-${phase}-query-named-block-nodes.rc" "${rc}" || true
 
   ftctl_xcolo_collect_primary_block_graph_state "${vm}" "${disk_plan}" || true
-  if [[ -n "${disk_plan}" && "$(ftctl_xcolo_rbd_commandline_backend)" == "librbd" ]]; then
-    ftctl_xcolo_capture_primary_rbd_owner_evidence "${vm}" "${disk_plan}" "${phase}" || true
-  fi
+  ftctl_xcolo_capture_primary_rbd_owner_evidence "${vm}" "${disk_plan}" "${phase}" || true
   ftctl_xcolo_primary_qemu_log_tail "${vm}" log_tail || true
   ftctl_xcolo_write_debug_file "${vm}" "primary-${phase}-qemu-log-tail.txt" "${log_tail}" || true
 }
@@ -1354,7 +1352,7 @@ ftctl_xcolo_wait_primary_premigrate_boot_ready() {
     fi
 
     if (( elapsed >= timeout_sec )); then
-      if [[ -n "${disk_plan}" && "$(ftctl_xcolo_rbd_commandline_backend)" == "librbd" ]]; then
+      if [[ -n "${disk_plan}" ]]; then
         ftctl_xcolo_capture_primary_rbd_owner_evidence "${vm}" "${disk_plan}" "premigrate_boot_timeout" || true
         if [[ "$(ftctl_state_get "${vm}" "xcolo_primary_premigrate_boot_timeout_rbd_runtime_owner_conflict" 2>/dev/null || true)" == "yes" ]]; then
           guest_reason="primary_rbd_runtime_owner_conflict:$(ftctl_state_get "${vm}" "xcolo_primary_premigrate_boot_timeout_rbd_runtime_owner_conflict_targets" 2>/dev/null || true)"
@@ -7464,7 +7462,7 @@ ftctl_xcolo_build_startup_disk_args() {
     return 2
   }
 
-  payload="$(XML_PATH="${xml_path}" ROLE="${role}" DISK_RUNTIME="${disk_runtime}" REFERENCE_QEMU_LOG="${reference_qemu_log}" XCOLO_RBD_COMMANDLINE_BACKEND="${FTCTL_XCOLO_RBD_COMMANDLINE_BACKEND:-librbd}" python3 - <<'PY'
+  payload="$(XML_PATH="${xml_path}" ROLE="${role}" DISK_RUNTIME="${disk_runtime}" REFERENCE_QEMU_LOG="${reference_qemu_log}" XCOLO_RBD_COMMANDLINE_BACKEND="${FTCTL_XCOLO_RBD_COMMANDLINE_BACKEND:-krbd}" python3 - <<'PY'
 import json
 import os
 import re
@@ -7476,7 +7474,7 @@ xml_path = os.environ["XML_PATH"]
 role = os.environ["ROLE"]
 runtime_raw = os.environ.get("DISK_RUNTIME", "")
 reference_qemu_log = os.environ.get("REFERENCE_QEMU_LOG", "")
-rbd_commandline_backend = (os.environ.get("XCOLO_RBD_COMMANDLINE_BACKEND") or "librbd").strip().lower()
+rbd_commandline_backend = (os.environ.get("XCOLO_RBD_COMMANDLINE_BACKEND") or "krbd").strip().lower()
 if rbd_commandline_backend not in {"librbd", "krbd"}:
     raise SystemExit(f"unsupported x-colo RBD commandline backend: {rbd_commandline_backend}")
 
@@ -8530,7 +8528,7 @@ ftctl_xcolo_apply_startup_disk_graphs() {
   local primary_net_args="${5-}"
   local secondary_net_args="${6-}"
   local primary_disk_args secondary_disk_args reference_qemu_log
-  local primary_args secondary_args
+  local primary_args secondary_args rbd_backend
 
   [[ -n "${vm}" && -f "${primary_xml}" && -f "${secondary_xml}" && -n "${disk_runtime}" ]] || return 1
 
@@ -8548,7 +8546,8 @@ ftctl_xcolo_apply_startup_disk_graphs() {
   ftctl_xcolo_build_startup_disk_args "${secondary_xml}" "secondary" "${disk_runtime}" secondary_disk_args "${reference_qemu_log}" || return 1
   primary_args="$(ftctl_xcolo_qemu_args_append "${primary_net_args}" "${primary_disk_args}")"
   secondary_args="$(ftctl_xcolo_secondary_args_with_disk_graph "${secondary_net_args}" "${secondary_disk_args}")"
-  case "${FTCTL_XCOLO_RBD_COMMANDLINE_BACKEND:-librbd}" in
+  rbd_backend="$(ftctl_xcolo_rbd_commandline_backend)"
+  case "${rbd_backend}" in
     krbd)
       if [[ "${primary_args};${secondary_args}" == *"rbd:rbd/"* || "${primary_args};${secondary_args}" == *"file=rbd:"* ]]; then
         ftctl_state_set "${vm}" \
@@ -8560,7 +8559,7 @@ ftctl_xcolo_apply_startup_disk_graphs() {
         return 1
       fi
       ;;
-    librbd|"")
+    librbd)
       if [[ "${primary_args};${secondary_args}" == *"/dev/rbd/"* ]]; then
         ftctl_state_set "${vm}" \
           "xcolo_startup_disk_backend=invalid" \
@@ -8590,7 +8589,7 @@ ftctl_xcolo_apply_startup_disk_graphs() {
   ftctl_xcolo_xml_remove_disk_targets "${secondary_xml}" "${disk_runtime}" || return 1
   ftctl_xml_apply_qemu_commandline "${primary_xml}" "${primary_args}" || return 1
   ftctl_xml_apply_qemu_commandline "${secondary_xml}" "${secondary_args}" || return 1
-  case "${FTCTL_XCOLO_RBD_COMMANDLINE_BACKEND:-librbd}" in
+  case "${rbd_backend}" in
     krbd)
       if grep -Eq 'rbd:rbd/|file=rbd:' "${primary_xml}" "${secondary_xml}"; then
         ftctl_state_set "${vm}" \
@@ -8602,7 +8601,7 @@ ftctl_xcolo_apply_startup_disk_graphs() {
         return 1
       fi
       ;;
-    librbd|"")
+    librbd)
       if grep -Eq '/dev/rbd/' "${primary_xml}" "${secondary_xml}"; then
         ftctl_state_set "${vm}" \
           "xcolo_startup_disk_backend=invalid" \
@@ -8621,8 +8620,8 @@ ftctl_xcolo_apply_startup_disk_graphs() {
 
   ftctl_state_set "${vm}" \
     "xcolo_startup_disk_graph=enabled" \
-    "xcolo_startup_disk_backend=${FTCTL_XCOLO_RBD_COMMANDLINE_BACKEND:-librbd}-rbd-or-file" \
-    "xcolo_rbd_commandline_backend=${FTCTL_XCOLO_RBD_COMMANDLINE_BACKEND:-librbd}" \
+    "xcolo_startup_disk_backend=${rbd_backend}-rbd-or-file" \
+    "xcolo_rbd_commandline_backend=${rbd_backend}" \
     "xcolo_startup_disk_graph_runtime=${disk_runtime}" \
     "primary_qemu_args=${primary_args}" \
     "secondary_qemu_args=${secondary_args}"
@@ -12192,11 +12191,11 @@ EOF
 }
 
 ftctl_xcolo_rbd_commandline_backend() {
-  local backend="${FTCTL_XCOLO_RBD_COMMANDLINE_BACKEND:-librbd}"
+  local backend="${FTCTL_XCOLO_RBD_COMMANDLINE_BACKEND:-krbd}"
   backend="$(printf '%s' "${backend}" | tr '[:upper:]' '[:lower:]')"
   case "${backend}" in
     krbd|librbd) ;;
-    *) backend="librbd" ;;
+    *) backend="krbd" ;;
   esac
   printf '%s\n' "${backend}"
 }
@@ -12221,12 +12220,13 @@ ftctl_xcolo_capture_primary_rbd_owner_evidence() {
   local disk_plan="${2-}"
   local phase="${3:-runtime}"
   local phase_key entry rest target primary_source primary_format primary_dtype secondary_dest suffix
-  local spec="" mapped="" status_out="" lock_out="" map_file status_file lock_file conflict="no" conflict_targets=""
+  local spec="" mapped="" status_out="" lock_out="" map_file status_file lock_file conflict="no" conflict_targets="" backend=""
   local -a entries=() state_args=()
 
   [[ -n "${vm}" && -n "${disk_plan}" ]] || return 0
   phase_key="$(printf '%s' "${phase}" | tr -c 'A-Za-z0-9_' '_' | sed 's/_*$//')"
   [[ -n "${phase_key}" ]] || phase_key="runtime"
+  backend="$(ftctl_xcolo_rbd_commandline_backend)"
 
   IFS=';' read -r -a entries <<< "${disk_plan}"
   for entry in "${entries[@]}"; do
@@ -12248,8 +12248,10 @@ ftctl_xcolo_capture_primary_rbd_owner_evidence() {
     map_file="primary-${phase_key}-rbd-${suffix}-showmapped.txt"
     ftctl_xcolo_write_debug_file "${vm}" "${map_file}" "${mapped}" || true
     if [[ -n "${mapped}" ]]; then
-      conflict="yes"
-      conflict_targets="${conflict_targets:+${conflict_targets},}${target}"
+      if [[ "${backend}" == "librbd" ]]; then
+        conflict="yes"
+        conflict_targets="${conflict_targets:+${conflict_targets},}${target}"
+      fi
       state_args+=("xcolo_primary_${phase_key}_rbd_${suffix}_krbd_mapped=yes")
     else
       state_args+=("xcolo_primary_${phase_key}_rbd_${suffix}_krbd_mapped=no")
@@ -12276,7 +12278,7 @@ ftctl_xcolo_capture_primary_rbd_owner_evidence() {
   )
   ftctl_state_set "${vm}" "${state_args[@]}"
   ftctl_log_event "colo" "xcolo.primary_rbd_owner_evidence" "$( [[ "${conflict}" == "yes" ]] && printf warn || printf ok )" "${vm}" "" \
-    "phase=${phase} backend=$(ftctl_xcolo_rbd_commandline_backend) krbd_mapped=${conflict} targets=${conflict_targets}"
+    "phase=${phase} backend=${backend} librbd_conflict=${conflict} targets=${conflict_targets}"
 }
 
 ftctl_xcolo_release_primary_krbd_maps_for_librbd() {

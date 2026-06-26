@@ -3,10 +3,9 @@
 > Note: generated qemu commandline RBD backend rules in this document are
 > superseded by
 > [414. FT XCOLO RBD commandline backend contract](414-ft-xcolo-rbd-commandline-backend-contract-design-20260626.md).
-> The access guard remains useful only for explicit
-> `FTCTL_XCOLO_RBD_COMMANDLINE_BACKEND=krbd` experiments.  The default preserved
-> RBD to RBD path uses `librbd` commandline URIs after stable KRBD path
-> verification.
+> The access guard is part of the default KRBD path.  Default generated XCOLO
+> args/XML must keep `/dev/rbd/rbd/<image>` and must reject `rbd:rbd/...` or
+> `file=rbd:` URI leakage.
 
 ## Background
 
