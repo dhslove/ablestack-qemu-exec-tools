@@ -5386,6 +5386,77 @@ selftest_case_xcolo_primary_restore_detects_generated_graph() (
   selftest_assert_contains "${graph}" "ftctl-colo-sda" "graph evidence contains ftctl node"
 )
 
+selftest_case_xcolo_primary_listener_requires_pair() (
+  selftest_reset_env
+  selftest_info "x-colo primary listener gate requires mirror and compare listener pair"
+
+  local vm="xcolo-listener-pair"
+  local handle rc=0
+  local tmp_dir="${SELFTEST_ROOT}/listener-pair"
+  mkdir -p "${tmp_dir}"
+  handle="999999|${tmp_dir}/rc|${tmp_dir}/stdout|${tmp_dir}/stderr|${tmp_dir}"
+  : > "${tmp_dir}/stdout"
+  : > "${tmp_dir}/stderr"
+
+  FTCTL_XCOLO_MIRROR_PORT="9003"
+  FTCTL_XCOLO_COMPARE_PORT="9004"
+  FTCTL_XCOLO_COMPARE_LOCAL_PORT="9001"
+  FTCTL_XCOLO_COMPARE_OUT_PORT="9005"
+  FTCTL_XCOLO_MIRROR_WAIT="on"
+  FTCTL_XCOLO_COMPARE_WAIT="on"
+  ftctl_state_init_vm "${vm}"
+
+  ftctl_xcolo_domain_create_timeout_sec() { printf '%s\n' "1"; }
+  ftctl_xcolo_primary_create_async_done() { return 1; }
+  ftctl_xcolo_local_tcp_listen_port_ready() {
+    [[ "${1-}" == "9004" ]]
+  }
+  sleep() { :; }
+
+  ftctl_xcolo_wait_primary_generated_listeners "${vm}" "${handle}" || rc=$?
+  selftest_assert_eq "${rc}" "1" "partial listener bootstrap must fail"
+  selftest_assert_file_contains "${FTCTL_EVENTS_LOG}" "primary.create_generated.listeners"
+  selftest_assert_file_contains "${FTCTL_EVENTS_LOG}" '"reason":"timeout"'
+)
+
+selftest_case_cloud_managed_rollback_cleanup_does_not_restart_secondary() (
+  selftest_reset_env
+  selftest_info "cloud-managed FT rollback cleanup does not recreate secondary runtime"
+
+  local vm="xcolo-cloud-cleanup"
+  local call_log="${SELFTEST_ROOT}/cloud-cleanup-calls.log"
+  ftctl_state_init_vm "${vm}"
+  ftctl_state_set "${vm}" "secondary_vm_name=${vm}-standby"
+  FTCTL_PROFILE_SECONDARY_URI="qemu+ssh://peer/system"
+
+  ftctl_virsh() {
+    local _timeout="$1" out_var="$2" err_var="$3" rc_var="$4"
+    shift 4
+    : "${_timeout}"
+    printf '%s\n' "$*" >> "${call_log}"
+    case "$*" in
+      *" domstate "*)
+        printf -v "${out_var}" '%s' ""
+        printf -v "${err_var}" '%s' "error: failed to get domain"
+        printf -v "${rc_var}" '%s' "1"
+        ;;
+      *)
+        printf -v "${out_var}" '%s' ""
+        printf -v "${err_var}" '%s' ""
+        printf -v "${rc_var}" '%s' "0"
+        ;;
+    esac
+  }
+
+  ftctl_standby_cleanup_cloud_managed_runtime "${vm}" "${vm}-standby"
+
+  selftest_assert_file_contains "${call_log}" "destroy ${vm}-standby"
+  selftest_assert_file_contains "${call_log}" "domstate ${vm}-standby"
+  selftest_assert_file_not_contains "${call_log}" "create"
+  selftest_assert_file_not_contains "${call_log}" "start ${vm}-standby"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "standby_state")" "stopped" "secondary runtime marked stopped"
+)
+
 selftest_case_events_json() {
   selftest_reset_env
   selftest_info "events json output"
@@ -5500,6 +5571,8 @@ selftest_main() {
   selftest_case_xcolo_materialization_pipeline_reports_pci_unassigned
   selftest_case_xcolo_materialization_pipeline_allows_scsi_bus_child_without_pci_endpoint
   selftest_case_xcolo_primary_restore_detects_generated_graph
+  selftest_case_xcolo_primary_listener_requires_pair
+  selftest_case_cloud_managed_rollback_cleanup_does_not_restart_secondary
   selftest_case_events_json
   selftest_info "all checks passed"
 }

@@ -10937,11 +10937,31 @@ ftctl_xcolo_prepare_primary_krbd_runtime_path() {
       "phase=${phase} path=${path} reason=map_failed"
     return 1
   }
-  udevadm settle >/dev/null 2>&1 || true
-  [[ -b "${path}" ]] || {
-    ftctl_state_set "${vm}" "last_error=xcolo_primary_krbd_path_lost_before_create"
+  local settle_attempts="${FTCTL_XCOLO_KRBD_SETTLE_ATTEMPTS:-8}"
+  local settle_sleep="${FTCTL_XCOLO_KRBD_SETTLE_SLEEP_SEC:-1}"
+  local settle_i stable_count=0
+  [[ "${settle_attempts}" =~ ^[0-9]+$ && "${settle_attempts}" -gt 0 ]] || settle_attempts=8
+  [[ "${settle_sleep}" =~ ^[0-9]+$ ]] || settle_sleep=1
+
+  for ((settle_i=0; settle_i<settle_attempts; settle_i++)); do
+    udevadm settle >/dev/null 2>&1 || true
+    if [[ -b "${path}" ]]; then
+      stable_count=$((stable_count + 1))
+      if [[ "${stable_count}" -ge 2 ]]; then
+        break
+      fi
+    else
+      stable_count=0
+    fi
+    sleep "${settle_sleep}"
+  done
+  [[ -b "${path}" && "${stable_count}" -ge 2 ]] || {
+    ftctl_state_set "${vm}" \
+      "xcolo_primary_krbd_settle_attempts=${settle_attempts}" \
+      "xcolo_primary_krbd_settle_stable_count=${stable_count}" \
+      "last_error=xcolo_primary_krbd_path_lost_before_create"
     ftctl_log_event "colo" "xcolo.primary_krbd_runtime_path" "fail" "${vm}" "" \
-      "phase=${phase} path=${path} reason=stable_path_missing_after_map"
+      "phase=${phase} path=${path} reason=stable_path_missing_after_map attempts=${settle_attempts} stable_count=${stable_count}"
     return 1
   }
 
@@ -11567,16 +11587,21 @@ ftctl_xcolo_wait_primary_generated_listeners() {
   for ((i=0; i<timeout_sec; i++)); do
     ready_reason=""
     if [[ "${compare_wait}" == "on" && "${mirror_wait}" == "on" ]]; then
-      if ftctl_xcolo_local_tcp_listen_port_ready "${compare_port}"; then
-        ready_reason="compare_bootstrap"
+      if ftctl_xcolo_local_tcp_listen_port_ready "${mirror_port}" &&
+          ftctl_xcolo_local_tcp_listen_port_ready "${compare_port}"; then
+        ready_reason="listener_pair"
       fi
     elif [[ "${mirror_wait}" == "on" ]]; then
       if ftctl_xcolo_local_tcp_listen_port_ready "${mirror_port}"; then
         ready_reason="mirror_bootstrap"
       fi
+    elif [[ "${compare_wait}" == "on" ]]; then
+      if ftctl_xcolo_local_tcp_listen_port_ready "${compare_port}"; then
+        ready_reason="compare_bootstrap"
+      fi
     elif ftctl_xcolo_local_tcp_listen_port_ready "${mirror_port}" &&
-         { [[ "${compare_wait}" == "on" ]] || ftctl_xcolo_local_tcp_listen_port_ready "${compare_port}"; }; then
-      ready_reason="mirror_listener"
+         ftctl_xcolo_local_tcp_listen_port_ready "${compare_port}"; then
+      ready_reason="listener_pair_nowait"
     fi
     if [[ -n "${ready_reason}" ]]; then
       ftctl_state_set "${vm}" \
@@ -11673,6 +11698,15 @@ ftctl_xcolo_wait_primary_peer_connections() {
     sleep 1
   done
 
+  local secondary_vm
+  secondary_vm="$(ftctl_state_get "${vm}" "secondary_vm_name" 2>/dev/null || ftctl_profile_secondary_vm_name_resolved "${vm}")"
+  ftctl_xcolo_capture_socket_snapshot "${vm}" "channel_attach_timeout" || true
+  ftctl_xcolo_capture_qemu_log_tails "${vm}" "${secondary_vm}" || true
+  ftctl_state_set "${vm}" \
+    "xcolo_protocol_failure_phase=channel_attach" \
+    "xcolo_channel_attach_timeout_evidence_captured=yes" \
+    "xcolo_channel_attach_timeout_mirror_port=${mirror_port}" \
+    "xcolo_channel_attach_timeout_compare_port=${compare_port}"
   if ftctl_xcolo_primary_create_async_done "${handle}"; then
     create_rc="$(cat "${rc_file}" 2>/dev/null || printf '1')"
     if [[ "${create_rc}" != "0" ]]; then
@@ -11853,9 +11887,16 @@ ftctl_xcolo_force_primary_restore_from_backup() {
       ;;
     *)
       ftctl_state_set "${vm}" \
-        "cloud_runtime_restore=verified_cloud_runtime" \
+        "cloud_runtime_restore=primary_domain_missing" \
+        "cloud_runtime_restore_verified=missing_cloud_runtime" \
+        "cloud_runtime_state_mismatch=true" \
         "cloud_runtime_restore_libvirt_state=${restored_state}" \
-        "xcolo_primary_restore_graph=clean"
+        "xcolo_primary_restore_graph=clean" \
+        "xcolo_protocol_failure_phase=rollback_primary_restore" \
+        "last_error=${reason}:primary_domain_missing"
+      ftctl_log_event "colo" "block_conversion.rollback.primary_restore_graph" "fail" "${vm}" "" \
+        "cause=${reason} libvirt_state=${restored_state} reason=primary_domain_missing"
+      return 1
       ;;
   esac
   ftctl_log_event "colo" "block_conversion.rollback.primary_restore_graph" "ok" "${vm}" "" \
@@ -11880,9 +11921,17 @@ ftctl_xcolo_rollback_block_primary_create_failure() {
       ;;
   esac
 
-  ftctl_standby_deactivate "${vm}" || {
-    ftctl_log_event "colo" "block_conversion.rollback.secondary_stop" "warn" "${vm}" "" "cause=${reason}"
-  }
+  if [[ "${FTCTL_PROFILE_PROVISIONING_BACKEND:-libvirt-managed}" == "cloud-managed" &&
+        "${FTCTL_PROFILE_MODE:-}" == "ft" ]] &&
+      declare -F ftctl_standby_cleanup_cloud_managed_runtime >/dev/null 2>&1; then
+    ftctl_standby_cleanup_cloud_managed_runtime "${vm}" || {
+      ftctl_log_event "colo" "block_conversion.rollback.secondary_cleanup" "warn" "${vm}" "" "cause=${reason}"
+    }
+  else
+    ftctl_standby_deactivate "${vm}" || {
+      ftctl_log_event "colo" "block_conversion.rollback.secondary_stop" "warn" "${vm}" "" "cause=${reason}"
+    }
+  fi
   ftctl_xcolo_unmap_secondary_runtime_rbd "${vm}" || {
     ftctl_log_event "colo" "block_conversion.rollback.secondary_rbd_unmap" "warn" "${vm}" "" "cause=${reason}"
   }

@@ -1340,6 +1340,72 @@ ftctl_standby_deactivate_cloud_managed() {
     "secondary_uri=${FTCTL_PROFILE_SECONDARY_URI} domain=${secondary_vm_name} path=${generated}"
 }
 
+ftctl_standby_cleanup_cloud_managed_runtime() {
+  local vm="${1-}"
+  shift || true
+  local candidates=("$@")
+  local secondary_vm_name seen candidate out err rc state active_found="0"
+
+  secondary_vm_name="$(ftctl_state_get "${vm}" "secondary_vm_name" 2>/dev/null || ftctl_profile_secondary_vm_name_resolved "${vm}")"
+  candidates+=("${secondary_vm_name}")
+  candidates+=("$(ftctl_profile_secondary_vm_name_resolved "${vm}")")
+
+  seen=" "
+  for candidate in "${candidates[@]}"; do
+    [[ -n "${candidate}" ]] || continue
+    [[ "${seen}" == *" ${candidate} "* ]] && continue
+    seen="${seen}${candidate} "
+
+    out=""
+    err=""
+    rc=0
+    ftctl_virsh "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC}" out err rc -- -c "${FTCTL_PROFILE_SECONDARY_URI}" destroy "${candidate}" || true
+    : "${out}${err}"
+    if [[ "${rc}" != "0" ]]; then
+      case "${err}" in
+        *"failed to get domain"*|*"domain is not running"*|*"Domain not found"*)
+          rc=0
+          ;;
+      esac
+    fi
+    ftctl_log_event "standby" "standby.cleanup.cloud_runtime.destroy" "$(ftctl_result_from_rc "${rc}")" "${vm}" "${rc}" \
+      "secondary_uri=${FTCTL_PROFILE_SECONDARY_URI} domain=${candidate}"
+  done
+
+  seen=" "
+  for candidate in "${candidates[@]}"; do
+    [[ -n "${candidate}" ]] || continue
+    [[ "${seen}" == *" ${candidate} "* ]] && continue
+    seen="${seen}${candidate} "
+    out=""
+    err=""
+    rc=0
+    ftctl_virsh "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC}" out err rc -- -c "${FTCTL_PROFILE_SECONDARY_URI}" domstate "${candidate}" || true
+    state="$(printf '%s' "${out}" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | head -n1)"
+    if [[ "${rc}" == "0" && -n "${state}" && "${state}" != "shut off" && "${state}" != "shutoff" ]]; then
+      active_found="1"
+      ftctl_log_event "standby" "standby.cleanup.cloud_runtime.verify" "fail" "${vm}" "" \
+        "secondary_uri=${FTCTL_PROFILE_SECONDARY_URI} domain=${candidate} state=${state}"
+    fi
+  done
+
+  if [[ "${active_found}" == "1" ]]; then
+    ftctl_state_set "${vm}" \
+      "standby_state=cleanup_failed" \
+      "cloud_runtime_state_mismatch=true" \
+      "cloud_runtime_restore=secondary_runtime_still_active"
+    return 1
+  fi
+
+  ftctl_state_set "${vm}" \
+    "standby_state=stopped" \
+    "peer_domain_expected=false" \
+    "cloud_runtime_restore=secondary_runtime_cleaned" \
+    "cloud_runtime_state_mismatch=false"
+  ftctl_log_event "standby" "standby.cleanup.cloud_runtime" "ok" "${vm}" "" \
+    "secondary_uri=${FTCTL_PROFILE_SECONDARY_URI}"
+}
+
 ftctl_standby_deactivate() {
   local vm="${1-}"
   local secondary_vm_name out err rc state
