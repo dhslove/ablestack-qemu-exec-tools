@@ -5386,6 +5386,139 @@ selftest_case_xcolo_primary_restore_detects_generated_graph() (
   selftest_assert_contains "${graph}" "ftctl-colo-sda" "graph evidence contains ftctl node"
 )
 
+selftest_case_xcolo_primary_internal_retry_disabled_by_default() (
+  selftest_reset_env
+  selftest_info "x-colo primary create does not retry internally by default"
+
+  local vm="xcolo-primary-no-internal-retry"
+  local tmp_dir="${SELFTEST_ROOT}/primary-no-internal-retry"
+  local bin_dir="${tmp_dir}/bin"
+  local xml="${tmp_dir}/primary.generated.xml"
+  local out_file="${tmp_dir}/stdout"
+  local err_file="${tmp_dir}/stderr"
+  local count_file="${tmp_dir}/virsh.count"
+  local rc=0
+  mkdir -p "${bin_dir}"
+  : > "${xml}"
+  : > "${out_file}"
+  : > "${err_file}"
+  : > "${count_file}"
+
+  cat > "${bin_dir}/virsh" <<'SH'
+#!/usr/bin/env bash
+count_file="${FTCTL_SELFTEST_VIRSH_COUNT_FILE}"
+count="$(cat "${count_file}" 2>/dev/null || printf '0')"
+count=$((count + 1))
+printf '%s\n' "${count}" > "${count_file}"
+printf "qemu-kvm: Could not open '/dev/rbd/rbd/test': No such file or directory\n" >&2
+exit 1
+SH
+  chmod +x "${bin_dir}/virsh"
+
+  ftctl_state_init_vm "${vm}"
+  PATH="${bin_dir}:${PATH}"
+  FTCTL_SELFTEST_VIRSH_COUNT_FILE="${count_file}"
+  export FTCTL_SELFTEST_VIRSH_COUNT_FILE
+  FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
+  FTCTL_XCOLO_PRIMARY_INTERNAL_CREATE_RETRY=""
+
+  # shellcheck disable=SC2317
+  ftctl_xcolo_prepare_primary_krbd_runtime_paths_from_xml() { return 0; }
+
+  ftctl_xcolo_run_primary_generated_create_with_retry "${vm}" "${xml}" "${out_file}" "${err_file}" "1" || rc=$?
+  selftest_assert_eq "${rc}" "1" "primary create should fail without internal retry"
+  selftest_assert_eq "$(cat "${count_file}")" "1" "virsh create should run once"
+)
+
+selftest_case_xcolo_channel_timeout_records_failure_reason() (
+  selftest_reset_env
+  selftest_info "x-colo channel attach timeout records classified reason"
+
+  local vm="xcolo-channel-timeout-reason"
+  local tmp_dir="${SELFTEST_ROOT}/channel-timeout"
+  local handle rc=0
+  mkdir -p "${tmp_dir}"
+  handle="999999|${tmp_dir}/rc|${tmp_dir}/stdout|${tmp_dir}/stderr|${tmp_dir}"
+  : > "${tmp_dir}/stdout"
+  : > "${tmp_dir}/stderr"
+
+  ftctl_state_init_vm "${vm}"
+  FTCTL_XCOLO_MIRROR_PORT="9003"
+  FTCTL_XCOLO_COMPARE_PORT="9004"
+
+  # shellcheck disable=SC2317
+  ftctl_xcolo_channel_connect_timeout_sec() { printf '%s\n' "1"; }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_primary_create_async_done() { return 1; }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_local_tcp_established_port_ready() { return 1; }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_capture_socket_snapshot() { return 0; }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_capture_qemu_log_tails() { return 0; }
+  # shellcheck disable=SC2317
+  ftctl_profile_secondary_vm_name_resolved() { printf '%s\n' "${1}-standby"; }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_capture_primary_channel_state() {
+    local target_vm="${1-}"
+    ftctl_state_set "${target_vm}" \
+      "xcolo_channel_mirror_established=no" \
+      "xcolo_channel_compare_established=no" \
+      "xcolo_channel_mirror_listen=no" \
+      "xcolo_channel_compare_listen=yes"
+  }
+  # shellcheck disable=SC2317
+  sleep() { :; }
+
+  ftctl_xcolo_wait_primary_peer_connections "${vm}" "${handle}" || rc=$?
+  selftest_assert_eq "${rc}" "1" "channel attach should fail"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_channel_attach_failure_reason")" \
+    "mirror_listener_absent" "channel timeout reason"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" \
+    "xcolo_channel_attach_timeout" "channel timeout keeps stable last_error"
+)
+
+selftest_case_xcolo_primary_restore_ignores_domain_missing_destroy() (
+  selftest_reset_env
+  selftest_info "x-colo primary restore continues when generated domain is already missing"
+
+  local vm="xcolo-primary-restore-missing-domain"
+  local rc=0
+  ftctl_state_init_vm "${vm}"
+  FTCTL_DRY_RUN="0"
+  FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
+
+  # shellcheck disable=SC2317
+  ftctl_virsh() {
+    local _timeout="$1" out_var="$2" err_var="$3" rc_var="$4"
+    shift 4
+    : "${_timeout}"
+    case "$*" in
+      *" destroy "*)
+        printf -v "${out_var}" '%s' "error: failed to get domain '${vm}'"
+        printf -v "${err_var}" '%s' ""
+        printf -v "${rc_var}" '%s' "1"
+        ;;
+      *)
+        printf -v "${out_var}" '%s' ""
+        printf -v "${err_var}" '%s' ""
+        printf -v "${rc_var}" '%s' "0"
+        ;;
+    esac
+  }
+  # shellcheck disable=SC2317
+  ftctl_primary_activate_from_backup() { return 0; }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_primary_has_generated_block_graph() { return 1; }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_primary_domain_state() { printf '%s\n' "running"; }
+
+  ftctl_xcolo_force_primary_restore_from_backup "${vm}" "xcolo_channel_attach_timeout" || rc=$?
+  selftest_assert_eq "${rc}" "0" "missing generated primary should not block restore"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "cloud_runtime_restore")" \
+    "primary_running" "primary restore verified"
+)
+
 selftest_case_xcolo_primary_listener_accepts_compare_bootstrap() (
   selftest_reset_env
   selftest_info "x-colo primary listener gate accepts compare bootstrap before mirror exists"
@@ -5573,6 +5706,9 @@ selftest_main() {
   selftest_case_xcolo_materialization_pipeline_reports_pci_unassigned
   selftest_case_xcolo_materialization_pipeline_allows_scsi_bus_child_without_pci_endpoint
   selftest_case_xcolo_primary_restore_detects_generated_graph
+  selftest_case_xcolo_primary_internal_retry_disabled_by_default
+  selftest_case_xcolo_channel_timeout_records_failure_reason
+  selftest_case_xcolo_primary_restore_ignores_domain_missing_destroy
   selftest_case_xcolo_primary_listener_accepts_compare_bootstrap
   selftest_case_cloud_managed_rollback_cleanup_does_not_restart_secondary
   selftest_case_events_json
