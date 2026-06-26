@@ -1309,14 +1309,16 @@ selftest_case_xcolo_runtime_disk_device_replace_is_forbidden() (
 
 selftest_case_xcolo_startup_disk_graph_uses_native_rbd_backend() (
   selftest_reset_env
-  selftest_info "x-colo startup disk graph uses native RBD backend"
+  selftest_info "x-colo startup disk graph defaults RBD commandline to librbd backend"
 
   local xml_path="${SELFTEST_ROOT}/xcolo-startup-rbd.xml"
   local primary_args="" secondary_args=""
   cat > "${xml_path}" <<'EOF'
 <domain type='kvm'>
   <devices>
-    <controller type='scsi' index='0'/>
+    <controller type='scsi' index='0' model='virtio-scsi'>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x05' function='0x0'/>
+    </controller>
     <disk type='block' device='disk'>
       <source dev='/dev/rbd/rbd/root'/>
       <target dev='sda' bus='scsi'/>
@@ -1343,11 +1345,46 @@ EOF
   selftest_assert_contains "${secondary_args}" "file=rbd:rbd/secondary-root" "secondary root native RBD backend"
   selftest_assert_contains "${secondary_args}" "file=rbd:rbd/secondary-data" "secondary data native RBD backend"
   selftest_assert_contains "${primary_args}" "id=ftctl-primary-parent-sda-bb,node-name=ftctl-primary-parent-sda" "primary parent backend/node split"
-  selftest_assert_contains "${primary_args}" "drive=ftctl-colo-sda-bb,id=ftctl-colo-sda-dev" "primary guest drive uses backend id"
+  selftest_assert_contains "${primary_args}" "drive=ftctl-colo-sda-bb,id=scsi0-0-0-0" "primary guest drive keeps source topology id"
   selftest_assert_contains "${secondary_args}" "id=ftctl-parent-sda-bb,node-name=ftctl-parent-sda" "secondary parent backend/node split"
-  selftest_assert_contains "${secondary_args}" "drive=ftctl-colo-sda-bb,id=ftctl-colo-sda-dev" "secondary guest drive uses backend id"
+  selftest_assert_contains "${secondary_args}" "drive=ftctl-colo-sda-bb,id=scsi0-0-0-0" "secondary guest drive keeps source topology id"
   selftest_assert_not_contains "${primary_args}" "/dev/rbd/" "primary qemu args must not leak KRBD path"
   selftest_assert_not_contains "${secondary_args}" "/dev/rbd/" "secondary qemu args must not leak KRBD path"
+)
+
+selftest_case_xcolo_startup_disk_graph_allows_explicit_krbd_backend() (
+  selftest_reset_env
+  selftest_info "x-colo startup disk graph allows explicit KRBD commandline backend"
+
+  local xml_path="${SELFTEST_ROOT}/xcolo-startup-explicit-krbd.xml"
+  local primary_args="" secondary_args=""
+  FTCTL_XCOLO_RBD_COMMANDLINE_BACKEND="krbd"
+  cat > "${xml_path}" <<'EOF'
+<domain type='kvm'>
+  <devices>
+    <controller type='scsi' index='0' model='virtio-scsi'>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x05' function='0x0'/>
+    </controller>
+    <disk type='block' device='disk'>
+      <source dev='/dev/rbd/rbd/root'/>
+      <target dev='sda' bus='scsi'/>
+      <address type='drive' controller='0' bus='0' target='0' unit='0'/>
+    </disk>
+  </devices>
+</domain>
+EOF
+
+  ftctl_xcolo_build_startup_disk_args "${xml_path}" "primary" \
+    "sda|/dev/rbd/rbd/root|raw|/tmp/primary-active-root.qcow2|/dev/rbd/rbd/secondary-root|/tmp/secondary-hidden-root.qcow2|/tmp/secondary-active-root.qcow2" \
+    primary_args
+  ftctl_xcolo_build_startup_disk_args "${xml_path}" "secondary" \
+    "sda|/dev/rbd/rbd/root|raw|/tmp/primary-active-root.qcow2|/dev/rbd/rbd/secondary-root|/tmp/secondary-hidden-root.qcow2|/tmp/secondary-active-root.qcow2" \
+    secondary_args
+
+  selftest_assert_contains "${primary_args}" "file.filename=/dev/rbd/rbd/root" "primary explicit KRBD backend"
+  selftest_assert_contains "${secondary_args}" "file.filename=/dev/rbd/rbd/secondary-root" "secondary explicit KRBD backend"
+  selftest_assert_not_contains "${primary_args}" "file=rbd:rbd/root" "primary explicit KRBD must not use librbd URI"
+  selftest_assert_not_contains "${secondary_args}" "file=rbd:rbd/secondary-root" "secondary explicit KRBD must not use librbd URI"
 )
 
 selftest_case_xcolo_block_handshake_sets_checkpoint_before_migrate() (
@@ -2485,9 +2522,9 @@ selftest_case_xcolo_stable_rbd_contract_remaps_cloud_paths() (
   selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_before_migrate_rbd_secondary_sdb")" \
     "ok:/dev/rbd/rbd/secondary-data" "secondary stable RBD state"
   selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_before_migrate_rbd_primary_backend_sda")" \
-    "ok:rbd:rbd/root" "primary native RBD backend state"
+    "ok:/dev/rbd/rbd/root" "primary stable KRBD backend state"
   selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_before_migrate_rbd_secondary_backend_sdb")" \
-    "ok:rbd:rbd/secondary-data" "secondary native RBD backend state"
+    "ok:/dev/rbd/rbd/secondary-data" "secondary stable KRBD backend state"
   selftest_assert_file_contains "${call_log}" "LOCAL:/dev/rbd/rbd/root"
   selftest_assert_file_contains "${call_log}" "REMOTE:10.0.0.2:root:/dev/rbd/rbd/secondary-root"
   selftest_assert_file_contains "${call_log}" "LOCAL_BACKEND:/dev/rbd/rbd/root"
@@ -5323,6 +5360,7 @@ selftest_main() {
   selftest_case_xcolo_primary_filter_qmp_order_matches_qemu_doc
   selftest_case_xcolo_primary_netdev_vhost_guard
   selftest_case_xcolo_startup_disk_graph_uses_native_rbd_backend
+  selftest_case_xcolo_startup_disk_graph_allows_explicit_krbd_backend
   selftest_case_xcolo_baseline_seed_uses_primary_nbd_before_runtime_graph
   selftest_case_xcolo_baseline_seed_maps_cloud_managed_rbd
   selftest_case_xcolo_secondary_runtime_maps_cloud_managed_rbd

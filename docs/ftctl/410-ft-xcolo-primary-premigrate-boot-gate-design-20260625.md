@@ -1,5 +1,12 @@
 # FT XCOLO Primary Pre-Migrate Boot Gate 개선 설계
 
+> Note: generated qemu commandline RBD backend rules in this document are
+> superseded by
+> [414. FT XCOLO RBD commandline backend contract](414-ft-xcolo-rbd-commandline-backend-contract-design-20260626.md).
+> Cloud/profile disk identity remains the stable KRBD path, but the default
+> generated XCOLO qemu commandline backend is the preserved `librbd` URI path.
+> Pure generated-commandline KRBD is an explicit experimental mode.
+
 ## 배경
 
 Run 134는 이전의 `invalid COLO message` 또는 storage log 오탐 지점을 넘어서 Primary/Secondary 모두 COLO role에 진입했다. 그러나 Primary guest QGA가 180초 동안 응답하지 않아 `xcolo_primary_guest_boot_unhealthy:qga_timeout`으로 실패했다.

@@ -1,5 +1,13 @@
 # 412. FT XCOLO qemu-commandline KRBD access guard design - 2026-06-25
 
+> Note: generated qemu commandline RBD backend rules in this document are
+> superseded by
+> [414. FT XCOLO RBD commandline backend contract](414-ft-xcolo-rbd-commandline-backend-contract-design-20260626.md).
+> The access guard remains useful only for explicit
+> `FTCTL_XCOLO_RBD_COMMANDLINE_BACKEND=krbd` experiments.  The default preserved
+> RBD to RBD path uses `librbd` commandline URIs after stable KRBD path
+> verification.
+
 ## Background
 
 The r97-link-02 FT run advanced past the earlier stable KRBD URI issue:

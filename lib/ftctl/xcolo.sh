@@ -7435,7 +7435,7 @@ ftctl_xcolo_build_startup_disk_args() {
     return 2
   }
 
-  payload="$(XML_PATH="${xml_path}" ROLE="${role}" DISK_RUNTIME="${disk_runtime}" REFERENCE_QEMU_LOG="${reference_qemu_log}" python3 - <<'PY'
+  payload="$(XML_PATH="${xml_path}" ROLE="${role}" DISK_RUNTIME="${disk_runtime}" REFERENCE_QEMU_LOG="${reference_qemu_log}" XCOLO_RBD_COMMANDLINE_BACKEND="${FTCTL_XCOLO_RBD_COMMANDLINE_BACKEND:-librbd}" python3 - <<'PY'
 import json
 import os
 import re
@@ -7447,6 +7447,9 @@ xml_path = os.environ["XML_PATH"]
 role = os.environ["ROLE"]
 runtime_raw = os.environ.get("DISK_RUNTIME", "")
 reference_qemu_log = os.environ.get("REFERENCE_QEMU_LOG", "")
+rbd_commandline_backend = (os.environ.get("XCOLO_RBD_COMMANDLINE_BACKEND") or "librbd").strip().lower()
+if rbd_commandline_backend not in {"librbd", "krbd"}:
+    raise SystemExit(f"unsupported x-colo RBD commandline backend: {rbd_commandline_backend}")
 
 def suffix(value):
     return re.sub(r"[^A-Za-z0-9_.-]", "_", value or "root")
@@ -7456,9 +7459,6 @@ def qemu_driver(fmt):
     return fmt if fmt in {"raw", "qcow2"} else "raw"
 
 def qemu_source_options(path):
-    # ABLESTACK manages RBD mapping through stable krbd paths. Do not turn
-    # /dev/rbd/rbd/<image> into userspace librbd URIs here; doing so makes the
-    # FT runtime disk backend differ from the Cloud/libvirt boot backend.
     if path.startswith("/dev/rbd/"):
         spec = path[len("/dev/rbd/"):]
         if "/" not in spec:
@@ -7468,7 +7468,9 @@ def qemu_source_options(path):
             raise SystemExit(f"invalid krbd path: {path}")
         if any(ch in pool + image for ch in ",;"):
             raise SystemExit(f"unsupported krbd pool/image characters: {path}")
-        return f"file.filename={path}"
+        if rbd_commandline_backend == "krbd":
+            return f"file.filename={path}"
+        return f"file=rbd:{pool}/{image}"
     return f"file.filename={path}"
 
 def parse_runtime(raw):
@@ -8517,15 +8519,39 @@ ftctl_xcolo_apply_startup_disk_graphs() {
   ftctl_xcolo_build_startup_disk_args "${secondary_xml}" "secondary" "${disk_runtime}" secondary_disk_args "${reference_qemu_log}" || return 1
   primary_args="$(ftctl_xcolo_qemu_args_append "${primary_net_args}" "${primary_disk_args}")"
   secondary_args="$(ftctl_xcolo_secondary_args_with_disk_graph "${secondary_net_args}" "${secondary_disk_args}")"
-  if [[ "${primary_args};${secondary_args}" == *"rbd:rbd/"* || "${primary_args};${secondary_args}" == *"file=rbd:"* ]]; then
-    ftctl_state_set "${vm}" \
-      "xcolo_startup_disk_backend=invalid" \
-      "xcolo_protocol_failure_phase=startup_disk_graph" \
-      "last_error=xcolo_startup_krbd_uri_leaked_preflight"
-    ftctl_log_event "colo" "xcolo.startup_disk_graph" "fail" "${vm}" "" \
-      "reason=krbd_uri_leaked_into_qemu_commandline"
-    return 1
-  fi
+  case "${FTCTL_XCOLO_RBD_COMMANDLINE_BACKEND:-librbd}" in
+    krbd)
+      if [[ "${primary_args};${secondary_args}" == *"rbd:rbd/"* || "${primary_args};${secondary_args}" == *"file=rbd:"* ]]; then
+        ftctl_state_set "${vm}" \
+          "xcolo_startup_disk_backend=invalid" \
+          "xcolo_protocol_failure_phase=startup_disk_graph" \
+          "last_error=xcolo_startup_krbd_uri_leaked_preflight"
+        ftctl_log_event "colo" "xcolo.startup_disk_graph" "fail" "${vm}" "" \
+          "reason=krbd_uri_leaked_into_qemu_commandline backend=krbd"
+        return 1
+      fi
+      ;;
+    librbd|"")
+      if [[ "${primary_args};${secondary_args}" == *"/dev/rbd/"* ]]; then
+        ftctl_state_set "${vm}" \
+          "xcolo_startup_disk_backend=invalid" \
+          "xcolo_protocol_failure_phase=startup_disk_graph" \
+          "last_error=xcolo_startup_krbd_path_leaked"
+        ftctl_log_event "colo" "xcolo.startup_disk_graph" "fail" "${vm}" "" \
+          "reason=krbd_path_leaked_into_qemu_commandline backend=librbd"
+        return 1
+      fi
+      ;;
+    *)
+      ftctl_state_set "${vm}" \
+        "xcolo_startup_disk_backend=invalid" \
+        "xcolo_protocol_failure_phase=startup_disk_graph" \
+        "last_error=xcolo_startup_rbd_backend_invalid"
+      ftctl_log_event "colo" "xcolo.startup_disk_graph" "fail" "${vm}" "" \
+        "reason=unsupported_rbd_commandline_backend backend=${FTCTL_XCOLO_RBD_COMMANDLINE_BACKEND}"
+      return 1
+      ;;
+  esac
   ftctl_xcolo_validate_startup_disk_topology_xml "${vm}" "${primary_xml}" "${disk_runtime}" "primary" || return 1
   ftctl_xcolo_validate_startup_disk_topology_xml "${vm}" "${secondary_xml}" "${disk_runtime}" "secondary" || return 1
   ftctl_xcolo_validate_startup_disk_args "${vm}" "${primary_args}" "primary" || return 1
@@ -8535,15 +8561,30 @@ ftctl_xcolo_apply_startup_disk_graphs() {
   ftctl_xcolo_xml_remove_disk_targets "${secondary_xml}" "${disk_runtime}" || return 1
   ftctl_xml_apply_qemu_commandline "${primary_xml}" "${primary_args}" || return 1
   ftctl_xml_apply_qemu_commandline "${secondary_xml}" "${secondary_args}" || return 1
-  if grep -Eq 'rbd:rbd/|file=rbd:' "${primary_xml}" "${secondary_xml}"; then
-    ftctl_state_set "${vm}" \
-      "xcolo_startup_disk_backend=invalid" \
-      "xcolo_protocol_failure_phase=startup_disk_graph" \
-      "last_error=xcolo_startup_krbd_uri_leaked_preflight"
-    ftctl_log_event "colo" "xcolo.startup_disk_graph" "fail" "${vm}" "" \
-      "reason=krbd_uri_leaked_into_generated_xml primary_xml=${primary_xml} secondary_xml=${secondary_xml}"
-    return 1
-  fi
+  case "${FTCTL_XCOLO_RBD_COMMANDLINE_BACKEND:-librbd}" in
+    krbd)
+      if grep -Eq 'rbd:rbd/|file=rbd:' "${primary_xml}" "${secondary_xml}"; then
+        ftctl_state_set "${vm}" \
+          "xcolo_startup_disk_backend=invalid" \
+          "xcolo_protocol_failure_phase=startup_disk_graph" \
+          "last_error=xcolo_startup_krbd_uri_leaked_preflight"
+        ftctl_log_event "colo" "xcolo.startup_disk_graph" "fail" "${vm}" "" \
+          "reason=krbd_uri_leaked_into_generated_xml backend=krbd primary_xml=${primary_xml} secondary_xml=${secondary_xml}"
+        return 1
+      fi
+      ;;
+    librbd|"")
+      if grep -Eq '/dev/rbd/' "${primary_xml}" "${secondary_xml}"; then
+        ftctl_state_set "${vm}" \
+          "xcolo_startup_disk_backend=invalid" \
+          "xcolo_protocol_failure_phase=startup_disk_graph" \
+          "last_error=xcolo_startup_krbd_path_leaked"
+        ftctl_log_event "colo" "xcolo.startup_disk_graph" "fail" "${vm}" "" \
+          "reason=krbd_path_leaked_into_generated_xml backend=librbd primary_xml=${primary_xml} secondary_xml=${secondary_xml}"
+        return 1
+      fi
+      ;;
+  esac
   ftctl_xcolo_validate_generated_commandline_contract "${vm}" "${primary_xml}" "primary" || return 1
   ftctl_xcolo_validate_generated_commandline_contract "${vm}" "${secondary_xml}" "secondary" || return 1
   ftctl_xcolo_verify_generated_guest_abi_pair "${vm}" "${primary_xml}" "${secondary_xml}" "startup_disk_graph" || return 1
@@ -8551,7 +8592,8 @@ ftctl_xcolo_apply_startup_disk_graphs() {
 
   ftctl_state_set "${vm}" \
     "xcolo_startup_disk_graph=enabled" \
-    "xcolo_startup_disk_backend=native-rbd-or-file" \
+    "xcolo_startup_disk_backend=${FTCTL_XCOLO_RBD_COMMANDLINE_BACKEND:-librbd}-rbd-or-file" \
+    "xcolo_rbd_commandline_backend=${FTCTL_XCOLO_RBD_COMMANDLINE_BACKEND:-librbd}" \
     "xcolo_startup_disk_graph_runtime=${disk_runtime}" \
     "primary_qemu_args=${primary_args}" \
     "secondary_qemu_args=${secondary_args}"

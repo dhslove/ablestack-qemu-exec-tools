@@ -1,5 +1,13 @@
 # FT XCOLO Stable KRBD Startup Path Design
 
+> Note: generated qemu commandline RBD backend rules in this document are
+> superseded by
+> [414. FT XCOLO RBD commandline backend contract](414-ft-xcolo-rbd-commandline-backend-contract-design-20260626.md).
+> Stable KRBD verification still applies to Cloud/profile/disk-plan paths.
+> However, `rbd:rbd/...` is allowed and is the default for the generated XCOLO
+> qemu commandline in `librbd` mode.  Generated-commandline KRBD is now an
+> explicit experimental mode.
+
 ## Background
 
 `r97-link-02` run 135 completed baseline seeding but failed at the startup gate.
