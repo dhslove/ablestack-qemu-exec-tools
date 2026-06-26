@@ -2488,6 +2488,7 @@ selftest_case_xcolo_stable_rbd_contract_remaps_cloud_paths() (
 
   local call_log="${SELFTEST_ROOT}/xcolo-stable-rbd-contract.log"
   : > "${call_log}"
+  FTCTL_XCOLO_RBD_COMMANDLINE_BACKEND="krbd"
 
   # shellcheck disable=SC2317
   ftctl_blockcopy_krbd_map_local() {
@@ -2529,6 +2530,50 @@ selftest_case_xcolo_stable_rbd_contract_remaps_cloud_paths() (
   selftest_assert_file_contains "${call_log}" "REMOTE:10.0.0.2:root:/dev/rbd/rbd/secondary-root"
   selftest_assert_file_contains "${call_log}" "LOCAL_BACKEND:/dev/rbd/rbd/root"
   selftest_assert_file_contains "${call_log}" "REMOTE_BACKEND:10.0.0.2:root:/dev/rbd/rbd/secondary-root"
+)
+
+selftest_case_xcolo_librbd_contract_does_not_map_primary_krbd() (
+  selftest_reset_env
+  selftest_info "x-colo librbd RBD contract does not map primary KRBD paths"
+
+  local call_log="${SELFTEST_ROOT}/xcolo-librbd-contract.log"
+  : > "${call_log}"
+  FTCTL_XCOLO_RBD_COMMANDLINE_BACKEND="librbd"
+
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_krbd_map_local() {
+    printf 'LOCAL_MAP:%s\n' "$1" >> "${call_log}"
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_verify_qemu_librbd_backend_local() {
+    printf 'LOCAL_LIBRBD:%s\n' "$1" >> "${call_log}"
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_remote_target_host_user() {
+    printf -v "$1" '%s' "10.0.0.2"
+    printf -v "$2" '%s' "root"
+  }
+  # shellcheck disable=SC2317
+  ftctl_blockcopy_map_remote_krbd_path() {
+    printf 'REMOTE:%s:%s:%s\n' "$1" "$2" "$3" >> "${call_log}"
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_verify_qemu_rbd_backend_remote() {
+    printf 'REMOTE_BACKEND:%s:%s:%s\n' "$1" "$2" "$3" >> "${call_log}"
+  }
+
+  ftctl_xcolo_verify_stable_rbd_contract "primary-vm" \
+    "sda|/dev/rbd/rbd/root|raw|block|/dev/rbd/rbd/secondary-root" \
+    "before_primary_create"
+
+  selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_before_primary_create_rbd_contract_ready")" \
+    "yes" "librbd stable RBD contract ready"
+  selftest_assert_eq "$(ftctl_state_get "primary-vm" "xcolo_before_primary_create_rbd_primary_backend_sda")" \
+    "ok:rbd" "primary native RBD backend state"
+  selftest_assert_file_contains "${call_log}" "LOCAL_LIBRBD:/dev/rbd/rbd/root"
+  selftest_assert_file_not_contains "${call_log}" "LOCAL_MAP:/dev/rbd/rbd/root"
 )
 
 selftest_case_xcolo_baseline_seed_retries_ssh_transport_failure() (
@@ -5365,6 +5410,7 @@ selftest_main() {
   selftest_case_xcolo_baseline_seed_maps_cloud_managed_rbd
   selftest_case_xcolo_secondary_runtime_maps_cloud_managed_rbd
   selftest_case_xcolo_stable_rbd_contract_remaps_cloud_paths
+  selftest_case_xcolo_librbd_contract_does_not_map_primary_krbd
   selftest_case_xcolo_baseline_seed_retries_ssh_transport_failure
   selftest_case_xcolo_runtime_validation_blocks_false_positive
   selftest_case_xcolo_runtime_validation_reports_primary_migrate_failure

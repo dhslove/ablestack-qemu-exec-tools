@@ -977,7 +977,9 @@ ftctl_xcolo_primary_guest_failure_reason_from_text() {
 ftctl_xcolo_validate_primary_storage_health() {
   local vm="${1-}"
   local reason_var="${2}"
-  local out="" rc=0 log_tail="" reason="" protocol_notice=""
+  local disk_plan="${3-}"
+  local out="" rc=0 log_tail="" reason="" protocol_notice="" rbd_conflict="" rbd_targets=""
+  [[ -n "${disk_plan}" ]] || disk_plan="$(ftctl_state_get "${vm}" "xcolo_disk_plan" 2>/dev/null || true)"
 
   ftctl_xcolo_qmp "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" '{"execute":"query-block"}' out rc
   ftctl_xcolo_write_debug_file "${vm}" "primary-health-query-block.stdout.json" "${out}" || true
@@ -1028,6 +1030,14 @@ ftctl_xcolo_validate_primary_storage_health() {
   fi
   if [[ -z "${reason}" && -n "${log_tail}" ]]; then
     ftctl_xcolo_primary_storage_failure_reason_from_text "${log_tail}" reason || true
+  fi
+  if [[ -z "${reason}" && -n "${disk_plan}" && "$(ftctl_xcolo_rbd_commandline_backend)" == "librbd" ]]; then
+    ftctl_xcolo_capture_primary_rbd_owner_evidence "${vm}" "${disk_plan}" "storage_health" || true
+    rbd_conflict="$(ftctl_state_get "${vm}" "xcolo_primary_storage_health_rbd_runtime_owner_conflict" 2>/dev/null || true)"
+    rbd_targets="$(ftctl_state_get "${vm}" "xcolo_primary_storage_health_rbd_runtime_owner_conflict_targets" 2>/dev/null || true)"
+    if [[ "${rbd_conflict}" == "yes" ]]; then
+      reason="primary_rbd_runtime_owner_conflict${rbd_targets:+:${rbd_targets}}"
+    fi
   fi
 
   if [[ -n "${reason}" ]]; then
@@ -1230,6 +1240,9 @@ ftctl_xcolo_capture_primary_premigrate_boot_evidence() {
   ftctl_xcolo_write_debug_file "${vm}" "primary-${phase}-query-named-block-nodes.rc" "${rc}" || true
 
   ftctl_xcolo_collect_primary_block_graph_state "${vm}" "${disk_plan}" || true
+  if [[ -n "${disk_plan}" && "$(ftctl_xcolo_rbd_commandline_backend)" == "librbd" ]]; then
+    ftctl_xcolo_capture_primary_rbd_owner_evidence "${vm}" "${disk_plan}" "${phase}" || true
+  fi
   ftctl_xcolo_primary_qemu_log_tail "${vm}" log_tail || true
   ftctl_xcolo_write_debug_file "${vm}" "primary-${phase}-qemu-log-tail.txt" "${log_tail}" || true
 }
@@ -1287,7 +1300,7 @@ ftctl_xcolo_wait_primary_premigrate_boot_ready() {
     fi
 
     storage_reason=""
-    if ! ftctl_xcolo_validate_primary_storage_health "${vm}" storage_reason; then
+    if ! ftctl_xcolo_validate_primary_storage_health "${vm}" storage_reason "${disk_plan}"; then
       ftctl_state_set "${vm}" \
         "xcolo_primary_premigrate_boot_gate=failed" \
         "xcolo_primary_premigrate_boot_reason=${storage_reason}" \
@@ -1341,6 +1354,22 @@ ftctl_xcolo_wait_primary_premigrate_boot_ready() {
     fi
 
     if (( elapsed >= timeout_sec )); then
+      if [[ -n "${disk_plan}" && "$(ftctl_xcolo_rbd_commandline_backend)" == "librbd" ]]; then
+        ftctl_xcolo_capture_primary_rbd_owner_evidence "${vm}" "${disk_plan}" "premigrate_boot_timeout" || true
+        if [[ "$(ftctl_state_get "${vm}" "xcolo_primary_premigrate_boot_timeout_rbd_runtime_owner_conflict" 2>/dev/null || true)" == "yes" ]]; then
+          guest_reason="primary_rbd_runtime_owner_conflict:$(ftctl_state_get "${vm}" "xcolo_primary_premigrate_boot_timeout_rbd_runtime_owner_conflict_targets" 2>/dev/null || true)"
+          ftctl_state_set "${vm}" \
+            "xcolo_primary_premigrate_boot_gate=failed" \
+            "xcolo_primary_premigrate_boot_reason=${guest_reason}" \
+            "xcolo_primary_premigrate_boot_elapsed=${elapsed}" \
+            "xcolo_primary_premigrate_boot_qga=no" \
+            "xcolo_protocol_failure_phase=primary_premigrate_boot" \
+            "last_error=xcolo_primary_colo_boot_unhealthy:${guest_reason}"
+          ftctl_log_event "colo" "xcolo.primary_premigrate_boot" "fail" "${vm}" "" \
+            "reason=${guest_reason} qga=no elapsed=${elapsed} timeout=${timeout_sec} baseline=${baseline} block_ready=${block_ready}"
+          return 1
+        fi
+      fi
       ftctl_state_set "${vm}" \
         "xcolo_primary_premigrate_boot_gate=failed" \
         "xcolo_primary_premigrate_boot_reason=qga_timeout" \
@@ -12109,6 +12138,33 @@ ftctl_xcolo_verify_qemu_rbd_backend_local() {
   fi
 }
 
+ftctl_xcolo_verify_qemu_librbd_backend_local() {
+  local path="${1-}"
+  local spec="" uri="" out="" err="" rc=0
+
+  ftctl_blockcopy_krbd_spec_from_path "${path}" spec || return 1
+  command -v rbd >/dev/null 2>&1 || {
+    echo "ERROR: rbd CLI not found for native RBD startup backend ${path}" >&2
+    return 2
+  }
+  command -v qemu-img >/dev/null 2>&1 || {
+    echo "ERROR: qemu-img not found for native RBD startup backend ${path}" >&2
+    return 2
+  }
+  rbd info "${spec}" >/dev/null || {
+    echo "ERROR: rbd info failed for native RBD startup backend ${spec}" >&2
+    return 2
+  }
+  uri="rbd:${spec}"
+  ftctl_cmd_run "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC}" out err rc -- \
+    qemu-img info --force-share --output=json "${uri}" || true
+  : "${out}"
+  if [[ "${rc}" != "0" ]]; then
+    echo "ERROR: qemu-img cannot open native RBD startup backend ${uri}: ${err}" >&2
+    return "${rc}"
+  fi
+}
+
 ftctl_xcolo_verify_qemu_rbd_backend_remote() {
   local host="${1-}"
   local user="${2-}"
@@ -12135,12 +12191,37 @@ EOF
   fi
 }
 
-ftctl_xcolo_verify_stable_rbd_contract() {
+ftctl_xcolo_rbd_commandline_backend() {
+  local backend="${FTCTL_XCOLO_RBD_COMMANDLINE_BACKEND:-librbd}"
+  backend="$(printf '%s' "${backend}" | tr '[:upper:]' '[:lower:]')"
+  case "${backend}" in
+    krbd|librbd) ;;
+    *) backend="librbd" ;;
+  esac
+  printf '%s\n' "${backend}"
+}
+
+ftctl_xcolo_local_rbd_showmapped_devices() {
+  local path="${1-}"
+  local out_var="${2}"
+  local spec="" pool="" image="" out=""
+
+  ftctl_blockcopy_krbd_spec_from_path "${path}" spec || {
+    printf -v "${out_var}" '%s' ""
+    return 1
+  }
+  pool="${spec%%/*}"
+  image="${spec#*/}"
+  out="$(rbd showmapped 2>/dev/null | awk -v p="${pool}" -v i="${image}" 'NR > 1 && $2 == p && $4 == i {print $1 "|" $6}' || true)"
+  printf -v "${out_var}" '%s' "${out}"
+}
+
+ftctl_xcolo_capture_primary_rbd_owner_evidence() {
   local vm="${1-}"
   local disk_plan="${2-}"
   local phase="${3:-runtime}"
-  local phase_key entry rest target primary_source primary_format primary_dtype secondary_dest
-  local host="" user="" map_msg="" backend_msg="" ready="yes" reason="" suffix=""
+  local phase_key entry rest target primary_source primary_format primary_dtype secondary_dest suffix
+  local spec="" mapped="" status_out="" lock_out="" map_file status_file lock_file conflict="no" conflict_targets=""
   local -a entries=() state_args=()
 
   [[ -n "${vm}" && -n "${disk_plan}" ]] || return 0
@@ -12158,28 +12239,184 @@ ftctl_xcolo_verify_stable_rbd_contract() {
     rest="${rest#*|}"
     primary_dtype="${rest%%|*}"
     secondary_dest="${rest#*|}"
+    : "${primary_format}${primary_dtype}${secondary_dest}"
+    ftctl_blockcopy_is_krbd_path "${primary_source}" || continue
+    suffix="$(ftctl_xcolo_disk_suffix "${target}")"
+
+    mapped=""
+    ftctl_xcolo_local_rbd_showmapped_devices "${primary_source}" mapped || mapped=""
+    map_file="primary-${phase_key}-rbd-${suffix}-showmapped.txt"
+    ftctl_xcolo_write_debug_file "${vm}" "${map_file}" "${mapped}" || true
+    if [[ -n "${mapped}" ]]; then
+      conflict="yes"
+      conflict_targets="${conflict_targets:+${conflict_targets},}${target}"
+      state_args+=("xcolo_primary_${phase_key}_rbd_${suffix}_krbd_mapped=yes")
+    else
+      state_args+=("xcolo_primary_${phase_key}_rbd_${suffix}_krbd_mapped=no")
+    fi
+
+    ftctl_blockcopy_krbd_spec_from_path "${primary_source}" spec || spec=""
+    if [[ -n "${spec}" ]]; then
+      status_out="$(rbd status "${spec}" 2>&1 || true)"
+      lock_out="$(rbd lock list "${spec}" 2>&1 || true)"
+      status_file="primary-${phase_key}-rbd-${suffix}-status.txt"
+      lock_file="primary-${phase_key}-rbd-${suffix}-lock-list.txt"
+      ftctl_xcolo_write_debug_file "${vm}" "${status_file}" "${status_out}" || true
+      ftctl_xcolo_write_debug_file "${vm}" "${lock_file}" "${lock_out}" || true
+      state_args+=(
+        "xcolo_primary_${phase_key}_rbd_${suffix}_status=$(ftctl_xcolo_compact_log_value "${status_out}")"
+        "xcolo_primary_${phase_key}_rbd_${suffix}_locks=$(ftctl_xcolo_compact_log_value "${lock_out}")"
+      )
+    fi
+  done
+
+  state_args+=(
+    "xcolo_primary_${phase_key}_rbd_runtime_owner_conflict=${conflict}"
+    "xcolo_primary_${phase_key}_rbd_runtime_owner_conflict_targets=${conflict_targets}"
+  )
+  ftctl_state_set "${vm}" "${state_args[@]}"
+  ftctl_log_event "colo" "xcolo.primary_rbd_owner_evidence" "$( [[ "${conflict}" == "yes" ]] && printf warn || printf ok )" "${vm}" "" \
+    "phase=${phase} backend=$(ftctl_xcolo_rbd_commandline_backend) krbd_mapped=${conflict} targets=${conflict_targets}"
+}
+
+ftctl_xcolo_release_primary_krbd_maps_for_librbd() {
+  local vm="${1-}"
+  local disk_plan="${2-}"
+  local phase="${3:-before_primary_create}"
+  local backend entry rest target primary_source primary_format primary_dtype secondary_dest suffix mapped line map_id map_dev
+  local unmap_failed=0 conflict_targets="" spec="" out=""
+  local -a entries=()
+
+  [[ -n "${vm}" && -n "${disk_plan}" ]] || return 0
+  backend="$(ftctl_xcolo_rbd_commandline_backend)"
+  [[ "${backend}" == "librbd" ]] || return 0
+
+  IFS=';' read -r -a entries <<< "${disk_plan}"
+  for entry in "${entries[@]}"; do
+    [[ -n "${entry}" ]] || continue
+    target="${entry%%|*}"
+    rest="${entry#*|}"
+    primary_source="${rest%%|*}"
+    rest="${rest#*|}"
+    primary_format="${rest%%|*}"
+    rest="${rest#*|}"
+    primary_dtype="${rest%%|*}"
+    secondary_dest="${rest#*|}"
+    : "${primary_format}${primary_dtype}${secondary_dest}"
+    ftctl_blockcopy_is_krbd_path "${primary_source}" || continue
+    suffix="$(ftctl_xcolo_disk_suffix "${target}")"
+
+    mapped=""
+    ftctl_xcolo_local_rbd_showmapped_devices "${primary_source}" mapped || mapped=""
+    if [[ -z "${mapped}" && ! -b "${primary_source}" ]]; then
+      ftctl_state_set "${vm}" "xcolo_primary_librbd_release_${suffix}=not_mapped"
+      continue
+    fi
+
+    ftctl_log_event "colo" "xcolo.primary_librbd_release_krbd" "start" "${vm}" "" \
+      "phase=${phase} target=${target} stable_path=${primary_source} mapped=$(ftctl_xcolo_compact_log_value "${mapped}")"
+    if [[ -b "${primary_source}" ]]; then
+      rbd unmap "${primary_source}" >/dev/null 2>&1 || rbd unmap -o force "${primary_source}" >/dev/null 2>&1 || true
+    fi
+    while IFS='|' read -r map_id map_dev; do
+      : "${map_id}"
+      [[ -n "${map_dev}" && -b "${map_dev}" ]] || continue
+      rbd unmap "${map_dev}" >/dev/null 2>&1 || rbd unmap -o force "${map_dev}" >/dev/null 2>&1 || true
+    done <<< "${mapped}"
+    udevadm settle >/dev/null 2>&1 || true
+
+    mapped=""
+    ftctl_xcolo_local_rbd_showmapped_devices "${primary_source}" mapped || mapped=""
+    if [[ -n "${mapped}" || -b "${primary_source}" ]]; then
+      unmap_failed=1
+      conflict_targets="${conflict_targets:+${conflict_targets},}${target}"
+      ftctl_state_set "${vm}" \
+        "xcolo_primary_librbd_release_${suffix}=failed" \
+        "xcolo_primary_librbd_release_${suffix}_mapped=$(ftctl_xcolo_compact_log_value "${mapped}")"
+      ftctl_log_event "colo" "xcolo.primary_librbd_release_krbd" "fail" "${vm}" "" \
+        "phase=${phase} target=${target} stable_path=${primary_source} remaining=$(ftctl_xcolo_compact_log_value "${mapped}")"
+      continue
+    fi
+
+    ftctl_blockcopy_krbd_spec_from_path "${primary_source}" spec || spec=""
+    if [[ -n "${spec}" ]]; then
+      out="$(rbd status "${spec}" 2>&1 || true)"
+      ftctl_xcolo_write_debug_file "${vm}" "primary-${phase}-librbd-${suffix}-status-after-unmap.txt" "${out}" || true
+    fi
+    ftctl_state_set "${vm}" "xcolo_primary_librbd_release_${suffix}=ok"
+    ftctl_log_event "colo" "xcolo.primary_librbd_release_krbd" "ok" "${vm}" "" \
+      "phase=${phase} target=${target} stable_path=${primary_source}"
+  done
+
+  if [[ "${unmap_failed}" != "0" ]]; then
+    ftctl_state_set "${vm}" \
+      "xcolo_primary_rbd_runtime_owner_conflict=yes" \
+      "xcolo_primary_rbd_runtime_owner_conflict_targets=${conflict_targets}" \
+      "xcolo_protocol_failure_phase=primary_rbd_runtime_ownership" \
+      "last_error=xcolo_primary_rbd_runtime_owner_conflict:${conflict_targets}"
+    return 1
+  fi
+  return 0
+}
+
+ftctl_xcolo_verify_stable_rbd_contract() {
+  local vm="${1-}"
+  local disk_plan="${2-}"
+  local phase="${3:-runtime}"
+  local phase_key entry rest target primary_source primary_format primary_dtype secondary_dest
+  local host="" user="" map_msg="" backend_msg="" ready="yes" reason="" suffix="" backend=""
+  local -a entries=() state_args=()
+
+  [[ -n "${vm}" && -n "${disk_plan}" ]] || return 0
+  phase_key="$(printf '%s' "${phase}" | tr -c 'A-Za-z0-9_' '_' | sed 's/_*$//')"
+  [[ -n "${phase_key}" ]] || phase_key="runtime"
+  backend="$(ftctl_xcolo_rbd_commandline_backend)"
+
+  IFS=';' read -r -a entries <<< "${disk_plan}"
+  for entry in "${entries[@]}"; do
+    [[ -n "${entry}" ]] || continue
+    target="${entry%%|*}"
+    rest="${entry#*|}"
+    primary_source="${rest%%|*}"
+    rest="${rest#*|}"
+    primary_format="${rest%%|*}"
+    rest="${rest#*|}"
+    primary_dtype="${rest%%|*}"
+    secondary_dest="${rest#*|}"
     : "${primary_format}${primary_dtype}"
     suffix="$(ftctl_xcolo_disk_suffix "${target}")"
 
     if ftctl_blockcopy_is_krbd_path "${primary_source}"; then
-      map_msg="$(ftctl_blockcopy_krbd_map_local "${primary_source}" 2>&1)" || {
-        ready="no"
-        reason="${reason:+${reason},}primary_${target}_stable_rbd_unmapped"
-        state_args+=("xcolo_${phase_key}_rbd_primary_${suffix}=fail:${primary_source}")
-        ftctl_log_event "colo" "xcolo.rbd_contract.primary" "fail" "${vm}" "" \
-          "phase=${phase} target=${target} stable_path=${primary_source} error=$(ftctl_xcolo_compact_log_value "${map_msg}")"
-        continue
-      }
       state_args+=("xcolo_${phase_key}_rbd_primary_${suffix}=ok:${primary_source}")
-      backend_msg="$(ftctl_xcolo_verify_qemu_rbd_backend_local "${primary_source}" 2>&1)" || {
-        ready="no"
-        reason="${reason:+${reason},}primary_${target}_stable_krbd_backend_unavailable"
-        state_args+=("xcolo_${phase_key}_rbd_primary_backend_${suffix}=fail:${primary_source}")
-        ftctl_log_event "colo" "xcolo.rbd_backend.primary" "fail" "${vm}" "" \
-          "phase=${phase} target=${target} path=${primary_source} error=$(ftctl_xcolo_compact_log_value "${backend_msg}")"
-        continue
-      }
-      state_args+=("xcolo_${phase_key}_rbd_primary_backend_${suffix}=ok:${primary_source}")
+      if [[ "${backend}" == "krbd" ]]; then
+        map_msg="$(ftctl_blockcopy_krbd_map_local "${primary_source}" 2>&1)" || {
+          ready="no"
+          reason="${reason:+${reason},}primary_${target}_stable_rbd_unmapped"
+          state_args+=("xcolo_${phase_key}_rbd_primary_${suffix}=fail:${primary_source}")
+          ftctl_log_event "colo" "xcolo.rbd_contract.primary" "fail" "${vm}" "" \
+            "phase=${phase} target=${target} stable_path=${primary_source} backend=${backend} error=$(ftctl_xcolo_compact_log_value "${map_msg}")"
+          continue
+        }
+        backend_msg="$(ftctl_xcolo_verify_qemu_rbd_backend_local "${primary_source}" 2>&1)" || {
+          ready="no"
+          reason="${reason:+${reason},}primary_${target}_stable_krbd_backend_unavailable"
+          state_args+=("xcolo_${phase_key}_rbd_primary_backend_${suffix}=fail:${primary_source}")
+          ftctl_log_event "colo" "xcolo.rbd_backend.primary" "fail" "${vm}" "" \
+            "phase=${phase} target=${target} path=${primary_source} backend=${backend} error=$(ftctl_xcolo_compact_log_value "${backend_msg}")"
+          continue
+        }
+        state_args+=("xcolo_${phase_key}_rbd_primary_backend_${suffix}=ok:${primary_source}")
+      else
+        backend_msg="$(ftctl_xcolo_verify_qemu_librbd_backend_local "${primary_source}" 2>&1)" || {
+          ready="no"
+          reason="${reason:+${reason},}primary_${target}_native_rbd_backend_unavailable"
+          state_args+=("xcolo_${phase_key}_rbd_primary_backend_${suffix}=fail:rbd")
+          ftctl_log_event "colo" "xcolo.rbd_backend.primary" "fail" "${vm}" "" \
+            "phase=${phase} target=${target} path=${primary_source} backend=${backend} error=$(ftctl_xcolo_compact_log_value "${backend_msg}")"
+          continue
+        }
+        state_args+=("xcolo_${phase_key}_rbd_primary_backend_${suffix}=ok:rbd")
+      fi
     fi
 
     if ftctl_blockcopy_is_krbd_path "${secondary_dest}"; then
@@ -12589,6 +12826,24 @@ ftctl_xcolo_execute_block_cold_conversion() {
     return 1
   }
   ftctl_state_set "${vm}" "conversion_stage=startup_disk_graph_ready"
+
+  ftctl_state_set "${vm}" "conversion_stage=primary_rbd_runtime_ownership_preparing"
+  ftctl_xcolo_release_primary_krbd_maps_for_librbd "${vm}" "${disk_plan}" "before_primary_create" || {
+    local rbd_owner_error
+    rbd_owner_error="$(ftctl_state_get "${vm}" "last_error" 2>/dev/null || true)"
+    [[ -n "${rbd_owner_error}" ]] || rbd_owner_error="xcolo_primary_rbd_runtime_owner_conflict"
+    ftctl_xcolo_rollback_startup_gate_failure "${vm}" "${rbd_owner_error}" || true
+    ftctl_state_set "${vm}" \
+      "conversion_stage=primary_rbd_runtime_ownership_failed" \
+      "conversion_state=error" \
+      "protection_state=error" \
+      "transport_state=failed" \
+      "xcolo_last_runtime_error=${rbd_owner_error}" \
+      "last_error=${rbd_owner_error}"
+    return 1
+  }
+  ftctl_xcolo_capture_primary_rbd_owner_evidence "${vm}" "${disk_plan}" "before_primary_create" || true
+  ftctl_state_set "${vm}" "conversion_stage=primary_rbd_runtime_ownership_ready"
 
   ftctl_xcolo_verify_stable_rbd_contract "${vm}" "${disk_plan}" "before_primary_create" || {
     local rbd_error
