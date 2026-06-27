@@ -11267,6 +11267,133 @@ ftctl_xcolo_record_primary_krbd_create_visibility() {
   [[ -n "${missing_var}" ]] && printf -v "${missing_var}" '%s' "${missing}"
 }
 
+
+ftctl_xcolo_qemu_child_pids() {
+  local root_pid="${1-}"
+  local depth="${2:-0}"
+  local child_file child
+
+  [[ -n "${root_pid}" && -d "/proc/${root_pid}" ]] || return 0
+  [[ "${depth}" =~ ^[0-9]+$ ]] || depth=0
+  (( depth <= 4 )) || return 0
+  printf '%s\n' "${root_pid}"
+  child_file="/proc/${root_pid}/task/${root_pid}/children"
+  [[ -r "${child_file}" ]] || return 0
+  for child in $(cat "${child_file}" 2>/dev/null || true); do
+    [[ -n "${child}" && -d "/proc/${child}" ]] || continue
+    ftctl_xcolo_qemu_child_pids "${child}" "$((depth + 1))"
+  done
+}
+
+ftctl_xcolo_qemu_pid_matches_vm() {
+  local pid="${1-}"
+  local vm="${2-}"
+  local comm cmd
+
+  [[ -n "${pid}" && -d "/proc/${pid}" && -n "${vm}" ]] || return 1
+  comm="$(cat "/proc/${pid}/comm" 2>/dev/null || true)"
+  cmd="$(tr '\000' ' ' < "/proc/${pid}/cmdline" 2>/dev/null || true)"
+  case "${comm}:${cmd}" in
+    *qemu-kvm*|*qemu-system*) ;;
+    *) return 1 ;;
+  esac
+  case " ${cmd} " in
+    *"guest=${vm}"*|*"guest=${vm},"*|*" ${vm} "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+ftctl_xcolo_qemu_pid_from_create_pid() {
+  local create_pid="${1-}"
+  local out_var="${2}"
+  local vm="${3-}"
+  local pid proc found_pid=""
+
+  if [[ -n "${create_pid}" ]]; then
+    while IFS= read -r pid; do
+      [[ -n "${pid}" && -d "/proc/${pid}" ]] || continue
+      if ftctl_xcolo_qemu_pid_matches_vm "${pid}" "${vm}"; then
+        found_pid="${pid}"
+        break
+      fi
+    done < <(ftctl_xcolo_qemu_child_pids "${create_pid}" | awk '!seen[$0]++')
+  fi
+
+  if [[ -z "${found_pid}" ]]; then
+    for proc in /proc/[0-9]*; do
+      pid="${proc##*/}"
+      [[ -n "${pid}" && -d "/proc/${pid}" ]] || continue
+      if ftctl_xcolo_qemu_pid_matches_vm "${pid}" "${vm}"; then
+        found_pid="${pid}"
+        break
+      fi
+    done
+  fi
+
+  printf -v "${out_var}" '%s' "${found_pid}"
+  [[ -n "${found_pid}" ]]
+}
+
+ftctl_xcolo_verify_primary_krbd_qemu_namespace() {
+  local vm="${1-}"
+  local generated_xml="${2-}"
+  local create_pid="${3-}"
+  local phase="${4:-primary_listener}"
+  local paths=()
+  local path ns_path qemu_pid="" visible="" missing="" count=0
+
+  [[ -n "${vm}" && -n "${generated_xml}" && -f "${generated_xml}" ]] || return 1
+  ftctl_xcolo_extract_krbd_paths_from_generated_xml "${generated_xml}" paths || return $?
+  ((${#paths[@]} > 0)) || {
+    ftctl_log_event "colo" "xcolo.primary_krbd_qemu_namespace" "skip" "${vm}" "" \
+      "phase=${phase} reason=no_krbd_paths"
+    return 0
+  }
+
+  if ! ftctl_xcolo_qemu_pid_from_create_pid "${create_pid}" qemu_pid "${vm}" ||
+      [[ -z "${qemu_pid}" || ! -d "/proc/${qemu_pid}" ]]; then
+    ftctl_state_set "${vm}" \
+      "xcolo_primary_krbd_qemu_namespace_phase=${phase}" \
+      "xcolo_primary_krbd_qemu_namespace_visible=unknown" \
+      "xcolo_primary_krbd_qemu_namespace_pid=" \
+      "last_error=xcolo_primary_krbd_qemu_pid_not_found"
+    ftctl_log_event "colo" "xcolo.primary_krbd_qemu_namespace" "fail" "${vm}" "" \
+      "phase=${phase} create_pid=${create_pid} qemu_pid=${qemu_pid} reason=qemu_pid_not_found"
+    return 1
+  fi
+
+  for path in "${paths[@]}"; do
+    [[ -n "${path}" ]] || continue
+    count=$((count + 1))
+    ns_path="/proc/${qemu_pid}/root${path}"
+    if [[ -b "${ns_path}" ]]; then
+      visible="${visible}${visible:+,}${path}"
+    else
+      missing="${missing}${missing:+,}${path}"
+    fi
+  done
+
+  ftctl_state_set "${vm}" \
+    "xcolo_primary_krbd_qemu_namespace_phase=${phase}" \
+    "xcolo_primary_krbd_qemu_namespace_pid=${qemu_pid}" \
+    "xcolo_primary_krbd_qemu_namespace_count=${count}" \
+    "xcolo_primary_krbd_qemu_namespace_visible_paths=$(ftctl_xcolo_compact_log_value "${visible}")" \
+    "xcolo_primary_krbd_qemu_namespace_missing_paths=$(ftctl_xcolo_compact_log_value "${missing}")"
+
+  if [[ -n "${missing}" ]]; then
+    ftctl_state_set "${vm}" \
+      "xcolo_primary_krbd_qemu_namespace_visible=no" \
+      "last_error=xcolo_primary_krbd_qemu_namespace_invisible"
+    ftctl_log_event "colo" "xcolo.primary_krbd_qemu_namespace" "fail" "${vm}" "" \
+      "phase=${phase} qemu_pid=${qemu_pid} visible=$(ftctl_xcolo_compact_log_value "${visible}") missing=$(ftctl_xcolo_compact_log_value "${missing}")"
+    return 1
+  fi
+
+  ftctl_state_set "${vm}" "xcolo_primary_krbd_qemu_namespace_visible=yes"
+  ftctl_log_event "colo" "xcolo.primary_krbd_qemu_namespace" "ok" "${vm}" "" \
+    "phase=${phase} qemu_pid=${qemu_pid} visible=$(ftctl_xcolo_compact_log_value "${visible}")"
+}
+
 ftctl_xcolo_classify_primary_create_error() {
   local err_summary="${1-}"
   local out_var="${2}"
@@ -11814,6 +11941,10 @@ ftctl_xcolo_wait_primary_generated_listeners() {
         "xcolo_primary_listener_bootstrap=${ready_reason}" \
         "xcolo_primary_listener_bootstrap_mirror_wait=${mirror_wait}" \
         "xcolo_primary_listener_bootstrap_compare_wait=${compare_wait}"
+      if ! ftctl_xcolo_verify_primary_krbd_qemu_namespace "${vm}" "${generated_xml}" "${pid}" "primary_listener"; then
+        ftctl_xcolo_capture_socket_snapshot "${vm}" "primary_krbd_namespace_failed" || true
+        return 1
+      fi
       ftctl_log_event "colo" "primary.create_generated.listeners" "ok" "${vm}" "" \
         "reason=${ready_reason} mirror_port=${mirror_port} compare_port=${compare_port} compare_local_port=${compare_local_port} compare_out_port=${compare_out_port} mirror_wait=${mirror_wait} compare_wait=${compare_wait}"
       return 0
@@ -12582,7 +12713,74 @@ ftctl_xcolo_local_rbd_showmapped_devices() {
   }
   pool="${spec%%/*}"
   image="${spec#*/}"
-  out="$(rbd showmapped 2>/dev/null | awk -v p="${pool}" -v i="${image}" 'NR > 1 && $2 == p && $4 == i {print $1 "|" $6}' || true)"
+  out="$(RBD_POOL="${pool}" RBD_IMAGE="${image}" python3 - <<'RBDJSON' 2>/dev/null || true
+import json
+import os
+import subprocess
+
+pool = os.environ.get("RBD_POOL", "")
+image = os.environ.get("RBD_IMAGE", "")
+if not pool or not image:
+    raise SystemExit(0)
+
+try:
+    raw = subprocess.check_output(
+        ["rbd", "showmapped", "--format", "json"],
+        stderr=subprocess.DEVNULL,
+        text=True,
+        timeout=10,
+    )
+    data = json.loads(raw or "{}")
+except Exception:
+    data = None
+
+rows = []
+if isinstance(data, dict):
+    if isinstance(data.get("devices"), list):
+        rows = data.get("devices") or []
+    else:
+        rows = [value for value in data.values() if isinstance(value, dict)]
+elif isinstance(data, list):
+    rows = data
+
+for row in rows:
+    row_pool = str(row.get("pool", ""))
+    row_image = str(row.get("image", row.get("name", "")))
+    row_device = str(row.get("device", row.get("dev", "")))
+    row_id = str(row.get("id", row.get("index", "")))
+    if row_pool == pool and row_image == image and row_device:
+        print(f"{row_id}|{row_device}")
+RBDJSON
+)"
+  if [[ -z "${out}" ]]; then
+    out="$(rbd showmapped 2>/dev/null | awk -v p="${pool}" -v i="${image}" '
+      NR == 1 {
+        for (idx = 1; idx <= NF; idx++) {
+          h = tolower($idx)
+          if (h == "id") id_idx = idx
+          else if (h == "pool") pool_idx = idx
+          else if (h == "image" || h == "name") image_idx = idx
+          else if (h == "device" || h == "dev") device_idx = idx
+        }
+        next
+      }
+      NF > 0 {
+        row_id = id_idx ? $id_idx : $1
+        row_pool = pool_idx ? $pool_idx : $2
+        row_device = device_idx ? $device_idx : $NF
+        if (image_idx) {
+          row_image = $image_idx
+        } else if (NF >= 6) {
+          row_image = $4
+        } else {
+          row_image = $3
+        }
+        if (row_pool == p && row_image == i && row_device != "") {
+          print row_id "|" row_device
+        }
+      }
+    ' || true)"
+  fi
   printf -v "${out_var}" '%s' "${out}"
 }
 
