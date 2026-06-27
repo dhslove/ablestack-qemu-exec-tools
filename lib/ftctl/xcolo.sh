@@ -5539,7 +5539,7 @@ ftctl_xcolo_require_primary_netdev_vhost_off() {
 ftctl_xcolo_collect_primary_filter_cmdline_state() {
   local vm="${1-}"
   local out err rc ready reason_text expected_netdev
-  local mirror_port compare_port compare_local_port compare_out_port mirror_wait
+  local mirror_port compare_port compare_local_port compare_out_port mirror_wait compare_wait
   local -a reasons=()
 
   out=""
@@ -5572,11 +5572,8 @@ done
   compare_port="${FTCTL_XCOLO_COMPARE_PORT:-9004}"
   compare_local_port="${FTCTL_XCOLO_COMPARE_LOCAL_PORT:-9001}"
   compare_out_port="${FTCTL_XCOLO_COMPARE_OUT_PORT:-9005}"
-  mirror_wait="${FTCTL_XCOLO_MIRROR_WAIT:-on}"
-  case "${mirror_wait}" in
-    on|off) ;;
-    *) mirror_wait="on" ;;
-  esac
+  mirror_wait="off"
+  compare_wait="off"
   ftctl_xcolo_update_vnet_hdr_state "${vm}" || true
   ready="yes"
   _ftctl_xcolo_expect_cmdline_token() {
@@ -5594,7 +5591,7 @@ done
   _ftctl_xcolo_expect_cmdline_token "colo-compare,id=comp0" "comp0"
   _ftctl_xcolo_expect_cmdline_token "netdev=${expected_netdev}" "primary_netdev"
   _ftctl_xcolo_expect_cmdline_token "socket,id=mirror0,host=0.0.0.0,port=${mirror_port},server=on,wait=${mirror_wait}" "doc_mirror0_listener"
-  _ftctl_xcolo_expect_cmdline_token "socket,id=compare1,host=0.0.0.0,port=${compare_port},server=on,wait=on" "doc_compare1_listener"
+  _ftctl_xcolo_expect_cmdline_token "socket,id=compare1,host=0.0.0.0,port=${compare_port},server=on,wait=${compare_wait}" "doc_compare1_listener"
   _ftctl_xcolo_expect_cmdline_token "socket,id=compare0,host=127.0.0.1,port=${compare_local_port},server=on,wait=off" "doc_compare0_loopback_server"
   _ftctl_xcolo_expect_cmdline_token "socket,id=compare0-0,host=127.0.0.1,port=${compare_local_port}" "doc_compare0_loopback_client"
   _ftctl_xcolo_expect_cmdline_token "socket,id=compare_out,host=127.0.0.1,port=${compare_out_port},server=on,wait=off" "doc_compare_out_loopback_server"
@@ -7141,20 +7138,13 @@ ftctl_xcolo_build_primary_qemu_args() {
   compare_port="${FTCTL_XCOLO_COMPARE_PORT:-9004}"
   compare_local_port="${FTCTL_XCOLO_COMPARE_LOCAL_PORT:-9001}"
   compare_out_port="${FTCTL_XCOLO_COMPARE_OUT_PORT:-9005}"
-  mirror_wait="${FTCTL_XCOLO_MIRROR_WAIT:-on}"
-  compare_wait="${FTCTL_XCOLO_COMPARE_WAIT:-on}"
-  case "${mirror_wait}" in
-    on|off) ;;
-    *) mirror_wait="on" ;;
-  esac
-  case "${compare_wait}" in
-    on|off) ;;
-    *) compare_wait="on" ;;
-  esac
+  mirror_wait="off"
+  compare_wait="off"
 
   # Keep the primary COLO network topology in the generated QEMU startup
-  # commandline. The compare listener is emitted before mirror0 so secondary
-  # red1 has a listener before the primary blocks at mirror0 wait=on.
+  # commandline. External listeners must not block QEMU command-line parsing;
+  # FTCTL gates listener readiness and red0/red1 attachment explicitly before
+  # migration.
   printf '%s\n' "-S;-chardev;socket,id=compare1,host=0.0.0.0,port=${compare_port},server=on,wait=${compare_wait};-chardev;socket,id=compare0,host=127.0.0.1,port=${compare_local_port},server=on,wait=off;-chardev;socket,id=compare0-0,host=127.0.0.1,port=${compare_local_port};-chardev;socket,id=compare_out,host=127.0.0.1,port=${compare_out_port},server=on,wait=off;-chardev;socket,id=compare_out0,host=127.0.0.1,port=${compare_out_port};-chardev;socket,id=mirror0,host=0.0.0.0,port=${mirror_port},server=on,wait=${mirror_wait};-object;filter-mirror,id=m0,netdev=${netdev_id},queue=tx,outdev=mirror0,insert=behind,position=tail${vnet_hdr_arg};-object;filter-redirector,id=redire0,netdev=${netdev_id},queue=rx,indev=compare_out,insert=behind,position=tail${vnet_hdr_arg};-object;filter-redirector,id=redire1,netdev=${netdev_id},queue=rx,outdev=compare0,insert=behind,position=tail${vnet_hdr_arg};-object;colo-compare,id=comp0,primary_in=compare0-0,secondary_in=compare1,outdev=compare_out0,iothread=iothread1${vnet_hdr_arg}"
 }
 
@@ -8698,10 +8688,11 @@ ftctl_xcolo_doc_alignment_summary() {
   cat <<'EOF'
 COLO startup alignment checklist
 1. Primary startup:
-   - mirror0 server wait=on in FTCTL's libvirt orchestration path, so the
-     primary cannot pass the mirror listener before the secondary red0 peer is
-     attached
-   - compare1 server wait=on
+   - mirror0 / compare1 external servers use wait=off in FTCTL's libvirt
+     orchestration path, so QEMU command-line parsing cannot block before both
+     listener objects are materialized
+   - FTCTL waits for both primary listeners and then waits for secondary red0 /
+     red1 attachment before migrate
    - compare0 / compare0-0 / compare_out / compare_out0 loopback sockets
    - filter-mirror, filter-redirector, and colo-compare objects are present
      in the startup qemu:commandline and start active
@@ -12189,43 +12180,21 @@ ftctl_xcolo_wait_primary_generated_listeners() {
   compare_port="${FTCTL_XCOLO_COMPARE_PORT:-9004}"
   compare_local_port="${FTCTL_XCOLO_COMPARE_LOCAL_PORT:-9001}"
   compare_out_port="${FTCTL_XCOLO_COMPARE_OUT_PORT:-9005}"
-  mirror_wait="${FTCTL_XCOLO_MIRROR_WAIT:-on}"
-  compare_wait="${FTCTL_XCOLO_COMPARE_WAIT:-on}"
-  case "${mirror_wait}" in
-    on|off) ;;
-    *) mirror_wait="on" ;;
-  esac
-  case "${compare_wait}" in
-    on|off) ;;
-    *) compare_wait="on" ;;
-  esac
+  mirror_wait="off"
+  compare_wait="off"
   for ((i=0; i<timeout_sec; i++)); do
     if [[ -n "${generated_xml}" && -f "${generated_xml}" ]]; then
       ftctl_xcolo_refresh_primary_krbd_runtime_paths_from_xml "${vm}" "${generated_xml}" "wait_listener" || return $?
     fi
     ready_reason=""
-    if [[ "${compare_wait}" == "on" && "${mirror_wait}" == "on" ]]; then
-      if ftctl_xcolo_local_tcp_listen_port_ready "${mirror_port}" &&
-          ftctl_xcolo_local_tcp_listen_port_ready "${compare_port}"; then
-        ready_reason="listener_pair"
-      elif ftctl_xcolo_local_tcp_listen_port_ready "${compare_port}"; then
-        ready_reason="compare_bootstrap"
-      fi
-    elif [[ "${mirror_wait}" == "on" ]]; then
-      if ftctl_xcolo_local_tcp_listen_port_ready "${mirror_port}"; then
-        ready_reason="mirror_bootstrap"
-      fi
-    elif [[ "${compare_wait}" == "on" ]]; then
-      if ftctl_xcolo_local_tcp_listen_port_ready "${compare_port}"; then
-        ready_reason="compare_bootstrap"
-      fi
-    elif ftctl_xcolo_local_tcp_listen_port_ready "${mirror_port}" &&
-         ftctl_xcolo_local_tcp_listen_port_ready "${compare_port}"; then
-      ready_reason="listener_pair_nowait"
+    if ftctl_xcolo_local_tcp_listen_port_ready "${mirror_port}" &&
+       ftctl_xcolo_local_tcp_listen_port_ready "${compare_port}"; then
+      ready_reason="listener_pair_wait_off"
     fi
     if [[ -n "${ready_reason}" ]]; then
       ftctl_state_set "${vm}" \
         "xcolo_bootstrap_phase=primary_listener" \
+        "xcolo_primary_listener_wait_policy=wait_off_qmp_gated" \
         "xcolo_primary_listener_bootstrap=${ready_reason}" \
         "xcolo_primary_listener_bootstrap_mirror_wait=${mirror_wait}" \
         "xcolo_primary_listener_bootstrap_compare_wait=${compare_wait}"
@@ -12273,12 +12242,24 @@ ftctl_xcolo_wait_primary_generated_listeners() {
     fi
   fi
   ftctl_xcolo_capture_socket_snapshot "${vm}" "listener_timeout" || true
+  local mirror_listen compare_listen
+  mirror_listen="no"
+  compare_listen="no"
+  if ftctl_xcolo_local_tcp_listen_port_ready "${mirror_port}"; then
+    mirror_listen="yes"
+  fi
+  if ftctl_xcolo_local_tcp_listen_port_ready "${compare_port}"; then
+    compare_listen="yes"
+  fi
   ftctl_log_event "colo" "primary.create_generated.listeners" "fail" "${vm}" "" \
-    "reason=timeout mirror_port=${mirror_port} compare_port=${compare_port} compare_local_port=${compare_local_port} compare_out_port=${compare_out_port} mirror_wait=${mirror_wait} compare_wait=${compare_wait} log_dir=${tmp_dir}"
+    "reason=primary_listener_not_open mirror_port=${mirror_port} compare_port=${compare_port} compare_local_port=${compare_local_port} compare_out_port=${compare_out_port} mirror_wait=${mirror_wait} compare_wait=${compare_wait} mirror_listen=${mirror_listen} compare_listen=${compare_listen} log_dir=${tmp_dir}"
   ftctl_state_set "${vm}" \
     "xcolo_protocol_failure_phase=primary_listener" \
+    "xcolo_primary_listener_wait_policy=wait_off_qmp_gated" \
     "xcolo_listener_timeout_evidence_captured=yes" \
-    "last_error=xcolo_primary_listener_timeout"
+    "xcolo_primary_listener_mirror_listen=${mirror_listen}" \
+    "xcolo_primary_listener_compare_listen=${compare_listen}" \
+    "last_error=xcolo_primary_listener_not_open"
   return 1
 
 }
@@ -12296,7 +12277,7 @@ ftctl_xcolo_wait_primary_peer_connections() {
   local handle="${2-}"
   local timeout_sec mirror_port compare_port i
   local pid="" rc_file="" out_file="" err_file="" tmp_dir=""
-  local create_rc generated_xml failure_reason
+  local create_rc generated_xml failure_reason secondary_vm contract_reason
   local mirror_established compare_established mirror_listen compare_listen
 
   IFS='|' read -r pid rc_file out_file err_file tmp_dir <<< "${handle}"
@@ -12306,6 +12287,7 @@ ftctl_xcolo_wait_primary_peer_connections() {
   fi
 
   generated_xml="$(ftctl_state_get "${vm}" "primary_xml_generated" 2>/dev/null || true)"
+  secondary_vm="$(ftctl_state_get "${vm}" "secondary_vm_name" 2>/dev/null || ftctl_profile_secondary_vm_name_resolved "${vm}")"
   timeout_sec="$(ftctl_xcolo_channel_connect_timeout_sec)"
   mirror_port="${FTCTL_XCOLO_MIRROR_PORT:-9003}"
   compare_port="${FTCTL_XCOLO_COMPARE_PORT:-9004}"
@@ -12343,15 +12325,21 @@ ftctl_xcolo_wait_primary_peer_connections() {
     sleep 1
   done
 
-  local secondary_vm
-  secondary_vm="$(ftctl_state_get "${vm}" "secondary_vm_name" 2>/dev/null || ftctl_profile_secondary_vm_name_resolved "${vm}")"
   ftctl_xcolo_capture_primary_channel_state "${vm}" || true
+  if [[ -n "${secondary_vm}" ]]; then
+    ftctl_xcolo_capture_colo_chardev_contract "${vm}" "${secondary_vm}" "channel_attach_timeout" || true
+  fi
   mirror_established="$(ftctl_state_get "${vm}" "xcolo_channel_mirror_established" 2>/dev/null || true)"
   compare_established="$(ftctl_state_get "${vm}" "xcolo_channel_compare_established" 2>/dev/null || true)"
   mirror_listen="$(ftctl_state_get "${vm}" "xcolo_channel_mirror_listen" 2>/dev/null || true)"
   compare_listen="$(ftctl_state_get "${vm}" "xcolo_channel_compare_listen" 2>/dev/null || true)"
   failure_reason="channel_attach_timeout"
-  if [[ "${mirror_established}" != "yes" && "${mirror_listen}" != "yes" ]]; then
+  contract_reason="$(ftctl_state_get "${vm}" "xcolo_chardev_contract_reason" 2>/dev/null || true)"
+  if [[ "${contract_reason}" == *"mirror_path_secondary_red0="* ]]; then
+    failure_reason="secondary_red0_not_connected"
+  elif [[ "${contract_reason}" == *"compare_path_secondary_red1="* ]]; then
+    failure_reason="secondary_red1_not_connected"
+  elif [[ "${mirror_established}" != "yes" && "${mirror_listen}" != "yes" ]]; then
     failure_reason="mirror_listener_absent"
   elif [[ "${mirror_established}" != "yes" ]]; then
     failure_reason="mirror_channel_not_established"
@@ -12371,7 +12359,8 @@ ftctl_xcolo_wait_primary_peer_connections() {
     "xcolo_channel_attach_timeout_mirror_established=${mirror_established}" \
     "xcolo_channel_attach_timeout_compare_established=${compare_established}" \
     "xcolo_channel_attach_timeout_mirror_listen=${mirror_listen}" \
-    "xcolo_channel_attach_timeout_compare_listen=${compare_listen}"
+    "xcolo_channel_attach_timeout_compare_listen=${compare_listen}" \
+    "xcolo_channel_attach_contract_reason=$(ftctl_xcolo_compact_log_value "${contract_reason}")"
   if ftctl_xcolo_primary_create_async_done "${handle}"; then
     create_rc="$(cat "${rc_file}" 2>/dev/null || printf '1')"
     if [[ "${create_rc}" != "0" ]]; then

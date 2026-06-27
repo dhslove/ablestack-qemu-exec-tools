@@ -991,12 +991,12 @@ EOF
   selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "filter-redirector,id=redire1,netdev=hostnet0,queue=rx,outdev=compare0,insert=behind,position=tail"
   selftest_assert_file_not_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "status=off"
   selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "colo-compare,id=comp0,primary_in=compare0-0,secondary_in=compare1,outdev=compare_out0,iothread=iothread1"
-  selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "socket,id=mirror0,host=0.0.0.0,port=9003,server=on,wait=on"
-  selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "socket,id=compare1,host=0.0.0.0,port=9004,server=on,wait=on"
+  selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "socket,id=mirror0,host=0.0.0.0,port=9003,server=on,wait=off"
+  selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "socket,id=compare1,host=0.0.0.0,port=9004,server=on,wait=off"
   selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "socket,id=compare0,host=127.0.0.1,port=9001,server=on,wait=off"
   selftest_assert_file_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "socket,id=compare_out,host=127.0.0.1,port=9005,server=on,wait=off"
-  selftest_assert_file_not_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "socket,id=mirror0,host=0.0.0.0,port=9003,server=on,wait=off"
-  selftest_assert_file_not_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "socket,id=compare1,host=0.0.0.0,port=9004,server=on,wait=off"
+  selftest_assert_file_not_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "socket,id=mirror0,host=0.0.0.0,port=9003,server=on,wait=on"
+  selftest_assert_file_not_contains "$(ftctl_state_get "${vm}" "primary_xml_generated")" "socket,id=compare1,host=0.0.0.0,port=9004,server=on,wait=on"
   selftest_assert_file_contains "$(ftctl_state_get "${vm}" "standby_xml_generated")" "qemu:commandline"
   selftest_assert_file_contains "$(ftctl_state_get "${vm}" "standby_xml_generated")" "/mirror/${vm}-vda.qcow2"
   selftest_assert_file_contains "$(ftctl_state_get "${vm}" "standby_xml_generated")" "socket,id=red0,host="
@@ -2061,6 +2061,10 @@ selftest_case_xcolo_virtio_vnet_hdr_support() (
   selftest_assert_contains "${primary_args}" "filter-redirector,id=redire0,netdev=hostnet0,queue=rx,indev=compare_out,insert=behind,position=tail,vnet_hdr_support=on" "primary redirector in vnet hdr"
   selftest_assert_contains "${primary_args}" "filter-redirector,id=redire1,netdev=hostnet0,queue=rx,outdev=compare0,insert=behind,position=tail,vnet_hdr_support=on" "primary redirector out vnet hdr"
   selftest_assert_not_contains "${primary_args}" "status=off" "primary filters must start active"
+  selftest_assert_contains "${primary_args}" "socket,id=mirror0,host=0.0.0.0,port=9003,server=on,wait=off" "primary mirror listener wait off"
+  selftest_assert_contains "${primary_args}" "socket,id=compare1,host=0.0.0.0,port=9004,server=on,wait=off" "primary compare listener wait off"
+  selftest_assert_not_contains "${primary_args}" "socket,id=mirror0,host=0.0.0.0,port=9003,server=on,wait=on" "primary mirror listener must not block"
+  selftest_assert_not_contains "${primary_args}" "socket,id=compare1,host=0.0.0.0,port=9004,server=on,wait=on" "primary compare listener must not block"
   selftest_assert_contains "${primary_args}" "colo-compare,id=comp0,primary_in=compare0-0,secondary_in=compare1,outdev=compare_out0,iothread=iothread1,vnet_hdr_support=on" "primary compare vnet hdr"
   selftest_assert_contains "${secondary_args}" "filter-redirector,id=f1,netdev=hostnet0,queue=tx,indev=red0,vnet_hdr_support=on" "secondary tx redirector vnet hdr"
   selftest_assert_contains "${secondary_args}" "filter-redirector,id=f2,netdev=hostnet0,queue=rx,outdev=red1,vnet_hdr_support=on" "secondary rx redirector vnet hdr"
@@ -5582,24 +5586,24 @@ selftest_case_xcolo_primary_restore_continues_when_destroy_rc_and_domain_absent(
     "primary_running" "primary restore verified"
 )
 
-selftest_case_xcolo_primary_disk_args_precede_blocking_chardevs() (
+selftest_case_xcolo_primary_disk_args_precede_listener_chardevs() (
   selftest_reset_env
-  selftest_info "x-colo primary commandline opens disk graph before blocking chardevs"
+  selftest_info "x-colo primary commandline opens disk graph before listener chardevs"
 
   local disk_args="-device;virtio-scsi-pci,id=scsi0,bus=pci.0,addr=0x9;-blockdev;driver=host_device,node-name=ftctl-primary-parent-sda-host,filename=/dev/rbd/rbd/root;-blockdev;driver=raw,node-name=ftctl-primary-parent-sda,file=ftctl-primary-parent-sda-host"
-  local net_args="-S;-chardev;socket,id=compare1,host=0.0.0.0,port=9104,server=on,wait=on;-chardev;socket,id=mirror0,host=0.0.0.0,port=9103,server=on,wait=on"
+  local net_args="-S;-chardev;socket,id=compare1,host=0.0.0.0,port=9104,server=on,wait=off;-chardev;socket,id=mirror0,host=0.0.0.0,port=9103,server=on,wait=off"
   local primary_args drive_prefix chardev_prefix
 
   primary_args="$(ftctl_xcolo_qemu_args_append "${disk_args}" "${net_args}")"
   drive_prefix="${primary_args%%filename=/dev/rbd/rbd/root*}"
   chardev_prefix="${primary_args%%socket,id=compare1*}"
   [[ "${#drive_prefix}" -lt "${#chardev_prefix}" ]] || \
-    selftest_fail "primary disk args must precede compare1 wait chardev"
+    selftest_fail "primary disk args must precede compare1 listener chardev"
 )
 
-selftest_case_xcolo_primary_listener_accepts_compare_bootstrap() (
+selftest_case_xcolo_primary_listener_rejects_partial_compare_bootstrap() (
   selftest_reset_env
-  selftest_info "x-colo primary listener gate accepts compare bootstrap before mirror exists"
+  selftest_info "x-colo primary listener gate rejects compare-only bootstrap"
 
   local vm="xcolo-listener-pair"
   local handle rc=0
@@ -5625,11 +5629,13 @@ selftest_case_xcolo_primary_listener_accepts_compare_bootstrap() (
   sleep() { :; }
 
   ftctl_xcolo_wait_primary_generated_listeners "${vm}" "${handle}" || rc=$?
-  selftest_assert_eq "${rc}" "0" "compare listener bootstrap must pass"
-  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_primary_listener_bootstrap")" "compare_bootstrap" "bootstrap reason"
-  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_bootstrap_phase")" "primary_listener" "bootstrap phase"
+  selftest_assert_eq "${rc}" "1" "compare-only listener bootstrap must fail"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_primary_listener_wait_policy")" "wait_off_qmp_gated" "listener policy"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_primary_listener_mirror_listen")" "no" "mirror listener missing"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_primary_listener_compare_listen")" "yes" "compare listener present"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" "xcolo_primary_listener_not_open" "listener error"
   selftest_assert_file_contains "${FTCTL_EVENTS_LOG}" "primary.create_generated.listeners"
-  selftest_assert_file_contains "${FTCTL_EVENTS_LOG}" '"reason":"compare_bootstrap"'
+  selftest_assert_file_contains "${FTCTL_EVENTS_LOG}" '"reason":"primary_listener_not_open"'
 )
 
 selftest_case_xcolo_primary_listener_refreshes_krbd_paths() (
@@ -5664,7 +5670,7 @@ XML
 
   ftctl_xcolo_domain_create_timeout_sec() { printf '%s\n' "1"; }
   ftctl_xcolo_primary_create_async_done() { return 1; }
-  ftctl_xcolo_local_tcp_listen_port_ready() { [[ "${1-}" == "9004" ]]; }
+  ftctl_xcolo_local_tcp_listen_port_ready() { [[ "${1-}" == "9003" || "${1-}" == "9004" ]]; }
   ftctl_xcolo_verify_primary_krbd_qemu_namespace() { return 0; }
   ftctl_xcolo_prepare_primary_krbd_runtime_path() {
     printf '%s|%s|%s\n' "${1-}" "${2-}" "${3-}" >> "${refresh_log}"
@@ -5882,8 +5888,8 @@ selftest_main() {
   selftest_case_xcolo_channel_timeout_records_failure_reason
   selftest_case_xcolo_primary_restore_ignores_domain_missing_destroy
   selftest_case_xcolo_primary_restore_continues_when_destroy_rc_and_domain_absent
-  selftest_case_xcolo_primary_disk_args_precede_blocking_chardevs
-  selftest_case_xcolo_primary_listener_accepts_compare_bootstrap
+  selftest_case_xcolo_primary_disk_args_precede_listener_chardevs
+  selftest_case_xcolo_primary_listener_rejects_partial_compare_bootstrap
   selftest_case_xcolo_primary_listener_refreshes_krbd_paths
   selftest_case_xcolo_primary_peer_wait_refreshes_krbd_paths
   selftest_case_cloud_managed_rollback_cleanup_does_not_restart_secondary
