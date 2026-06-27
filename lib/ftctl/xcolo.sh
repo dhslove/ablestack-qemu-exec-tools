@@ -7804,9 +7804,24 @@ for order, item in enumerate(entries):
     guest = ["-device", guest_opts]
     args.extend(blockdev_source_nodes(source, source_format, parent, parent_file, parent_host))
     if role == "secondary":
+        replication_opts = [
+            "driver=replication",
+            f"node-name={child}",
+            "mode=secondary",
+            "file.driver=qcow2",
+            f"file.node-name={active}",
+            "file.file.driver=file",
+            f"file.file.filename={item['secondary_active']}",
+            "file.backing.driver=qcow2",
+            f"file.backing.node-name={hidden}",
+            "file.backing.file.driver=file",
+            f"file.backing.file.filename={item['secondary_hidden']}",
+            f"file.backing.backing={parent}",
+            f"top-id={colo}",
+        ]
         args.extend([
             "-blockdev",
-            f"driver=replication,node-name={child},mode=secondary,file.driver=qcow2,file.node-name={active},top-id={colo},file.file.filename={item['secondary_active']},file.backing.driver=qcow2,file.backing.node-name={hidden},file.backing.file.filename={item['secondary_hidden']},file.backing.backing={parent}",
+            ",".join(replication_opts),
             "-blockdev",
             f"driver=quorum,node-name={colo},read-pattern=fifo,vote-threshold=1,children.0={child}",
         ])
@@ -8498,6 +8513,8 @@ elif role == "secondary":
         "filter-rewriter",
         "-incoming",
         "driver=replication",
+        "file.file.driver=file",
+        "file.backing.file.driver=file",
         "virtio-scsi-pci,id=scsi",
         "scsi-hd,bus=scsi",
         "drive=ftctl-colo-",

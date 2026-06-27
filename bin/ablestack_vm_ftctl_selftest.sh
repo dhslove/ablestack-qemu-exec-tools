@@ -1348,6 +1348,8 @@ EOF
   selftest_assert_contains "${primary_args}" "drive=ftctl-colo-sda,id=scsi0-0-0-0" "primary guest drive keeps source topology id"
   selftest_assert_contains "${secondary_args}" "driver=raw,node-name=ftctl-parent-sda,file=ftctl-parent-sda-host" "secondary parent raw wrapper over host_device"
   selftest_assert_contains "${secondary_args}" "drive=ftctl-colo-sda,id=scsi0-0-0-0" "secondary guest drive keeps source topology id"
+  selftest_assert_contains "${secondary_args}" "file.file.driver=file,file.file.filename=/tmp/secondary-active-root.qcow2" "secondary active qcow2 has explicit file child driver"
+  selftest_assert_contains "${secondary_args}" "file.backing.file.driver=file,file.backing.file.filename=/tmp/secondary-hidden-root.qcow2" "secondary hidden qcow2 has explicit file child driver"
   selftest_assert_not_contains "${primary_args}" "file=rbd:" "primary default must not use native librbd URI"
   selftest_assert_not_contains "${secondary_args}" "file=rbd:" "secondary default must not use native librbd URI"
 )
@@ -1383,6 +1385,8 @@ EOF
 
   selftest_assert_contains "${primary_args}" "driver=host_device,node-name=ftctl-primary-parent-sda-host,filename=/dev/rbd/rbd/root" "primary explicit KRBD host_device backend"
   selftest_assert_contains "${secondary_args}" "driver=host_device,node-name=ftctl-parent-sda-host,filename=/dev/rbd/rbd/secondary-root" "secondary explicit KRBD host_device backend"
+  selftest_assert_contains "${secondary_args}" "file.file.driver=file,file.file.filename=/tmp/secondary-active-root.qcow2" "secondary explicit KRBD active qcow2 has explicit file child driver"
+  selftest_assert_contains "${secondary_args}" "file.backing.file.driver=file,file.backing.file.filename=/tmp/secondary-hidden-root.qcow2" "secondary explicit KRBD hidden qcow2 has explicit file child driver"
   selftest_assert_not_contains "${primary_args}" "file=rbd:rbd/root" "primary explicit KRBD must not use librbd URI"
   selftest_assert_not_contains "${secondary_args}" "file=rbd:rbd/secondary-root" "secondary explicit KRBD must not use librbd URI"
 )
