@@ -11293,6 +11293,53 @@ ftctl_xcolo_prepare_primary_krbd_runtime_paths_from_xml() {
     "phase=${phase} count=${#paths[@]} path=${generated_xml}"
 }
 
+ftctl_xcolo_refresh_primary_krbd_runtime_paths_from_xml() {
+  local vm="${1-}"
+  local generated_xml="${2-}"
+  local phase="${3:-primary_create_wait}"
+  local paths=()
+  local path safe real refresh_count=0 remap_count=0 ready="yes" missing=""
+
+  [[ -n "${vm}" && -n "${generated_xml}" && -f "${generated_xml}" ]] || return 0
+  ftctl_xcolo_extract_krbd_paths_from_generated_xml "${generated_xml}" paths || return $?
+  ((${#paths[@]} > 0)) || return 0
+
+  for path in "${paths[@]}"; do
+    [[ -n "${path}" ]] || continue
+    refresh_count=$((refresh_count + 1))
+    if [[ ! -b "${path}" ]]; then
+      remap_count=$((remap_count + 1))
+      ftctl_log_event "colo" "xcolo.primary_krbd_runtime_refresh" "warn" "${vm}" ""         "phase=${phase} path=${path} reason=stable_path_missing remap=1"
+      if ! ftctl_xcolo_prepare_primary_krbd_runtime_path "${vm}" "${path}" "${phase}_remap"; then
+        ready="no"
+        missing="${missing}${missing:+,}${path}"
+        continue
+      fi
+    else
+      ftctl_xcolo_pin_primary_krbd_runtime_path "${vm}" "${path}" "${phase}_pin" || {
+        ready="no"
+        missing="${missing}${missing:+,}${path}"
+        continue
+      }
+    fi
+
+    real="$(readlink -f "${path}" 2>/dev/null || true)"
+    [[ -n "${real}" ]] || real="${path}"
+    safe="$(ftctl_xcolo_path_safe_name "${phase}_${path}")"
+    ftctl_state_set "${vm}"       "xcolo_primary_krbd_refresh_${safe}=ok:${path}->${real}"
+  done
+
+  ftctl_state_set "${vm}"     "xcolo_primary_krbd_refresh_phase=${phase}"     "xcolo_primary_krbd_refresh_count=${refresh_count}"     "xcolo_primary_krbd_refresh_remap_count=${remap_count}"     "xcolo_primary_krbd_refresh_missing=$(ftctl_xcolo_compact_log_value "${missing}")"
+
+  if [[ "${ready}" != "yes" ]]; then
+    ftctl_state_set "${vm}" "last_error=xcolo_primary_krbd_refresh_failed"
+    ftctl_log_event "colo" "xcolo.primary_krbd_runtime_refresh" "fail" "${vm}" ""       "phase=${phase} count=${refresh_count} remap_count=${remap_count} missing=$(ftctl_xcolo_compact_log_value "${missing}")"
+    return 1
+  fi
+
+  ftctl_log_event "colo" "xcolo.primary_krbd_runtime_refresh" "ok" "${vm}" ""     "phase=${phase} count=${refresh_count} remap_count=${remap_count}"
+}
+
 ftctl_xcolo_record_primary_krbd_create_visibility() {
   local vm="${1-}"
   local generated_xml="${2-}"
@@ -11682,7 +11729,7 @@ ftctl_xcolo_run_primary_generated_create_with_retry() {
       >"${out_file}" 2>"${err_file}" || create_rc=$?
   fi
 
-  if [[ "${FTCTL_XCOLO_PRIMARY_INTERNAL_CREATE_RETRY:-0}" == "1" &&
+  if [[ "${FTCTL_XCOLO_PRIMARY_INTERNAL_CREATE_RETRY:-1}" == "1" &&
         "${create_rc}" != "0" ]] &&
      grep -q "/dev/rbd/" "${err_file}" 2>/dev/null &&
      grep -q "No such file or directory" "${err_file}" 2>/dev/null; then
@@ -12153,6 +12200,9 @@ ftctl_xcolo_wait_primary_generated_listeners() {
     *) compare_wait="on" ;;
   esac
   for ((i=0; i<timeout_sec; i++)); do
+    if [[ -n "${generated_xml}" && -f "${generated_xml}" ]]; then
+      ftctl_xcolo_refresh_primary_krbd_runtime_paths_from_xml "${vm}" "${generated_xml}" "wait_listener" || return $?
+    fi
     ready_reason=""
     if [[ "${compare_wait}" == "on" && "${mirror_wait}" == "on" ]]; then
       if ftctl_xcolo_local_tcp_listen_port_ready "${mirror_port}" &&
@@ -12179,6 +12229,9 @@ ftctl_xcolo_wait_primary_generated_listeners() {
         "xcolo_primary_listener_bootstrap=${ready_reason}" \
         "xcolo_primary_listener_bootstrap_mirror_wait=${mirror_wait}" \
         "xcolo_primary_listener_bootstrap_compare_wait=${compare_wait}"
+      if [[ -n "${generated_xml}" && -f "${generated_xml}" ]]; then
+        ftctl_xcolo_refresh_primary_krbd_runtime_paths_from_xml "${vm}" "${generated_xml}" "listener_ready" || return $?
+      fi
       if ! ftctl_xcolo_verify_primary_krbd_qemu_namespace "${vm}" "${generated_xml}" "${pid}" "primary_listener"; then
         ftctl_xcolo_capture_socket_snapshot "${vm}" "primary_krbd_namespace_failed" || true
         return 1
@@ -12257,8 +12310,14 @@ ftctl_xcolo_wait_primary_peer_connections() {
   mirror_port="${FTCTL_XCOLO_MIRROR_PORT:-9003}"
   compare_port="${FTCTL_XCOLO_COMPARE_PORT:-9004}"
   for ((i=0; i<timeout_sec; i++)); do
+    if [[ -n "${generated_xml}" && -f "${generated_xml}" ]]; then
+      ftctl_xcolo_refresh_primary_krbd_runtime_paths_from_xml "${vm}" "${generated_xml}" "wait_peer_attach" || return $?
+    fi
     if ftctl_xcolo_local_tcp_established_port_ready "${mirror_port}" &&
        ftctl_xcolo_local_tcp_established_port_ready "${compare_port}"; then
+      if [[ -n "${generated_xml}" && -f "${generated_xml}" ]]; then
+        ftctl_xcolo_refresh_primary_krbd_runtime_paths_from_xml "${vm}" "${generated_xml}" "peer_attached" || return $?
+      fi
       ftctl_xcolo_capture_primary_channel_state "${vm}" || true
       ftctl_log_event "colo" "primary.create_generated.channel_attach" "ok" "${vm}" "" \
         "mirror_port=${mirror_port} compare_port=${compare_port} attempts=$((i + 1))"

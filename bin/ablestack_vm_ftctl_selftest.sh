@@ -5390,12 +5390,12 @@ selftest_case_xcolo_primary_restore_detects_generated_graph() (
   selftest_assert_contains "${graph}" "ftctl-colo-sda" "graph evidence contains ftctl node"
 )
 
-selftest_case_xcolo_primary_internal_retry_disabled_by_default() (
+selftest_case_xcolo_primary_internal_retry_enabled_by_default() (
   selftest_reset_env
-  selftest_info "x-colo primary create does not retry internally by default"
+  selftest_info "x-colo primary create retries KRBD ENOENT internally by default"
 
-  local vm="xcolo-primary-no-internal-retry"
-  local tmp_dir="${SELFTEST_ROOT}/primary-no-internal-retry"
+  local vm="xcolo-primary-internal-retry"
+  local tmp_dir="${SELFTEST_ROOT}/primary-internal-retry"
   local bin_dir="${tmp_dir}/bin"
   local xml="${tmp_dir}/primary.generated.xml"
   local out_file="${tmp_dir}/stdout"
@@ -5403,7 +5403,17 @@ selftest_case_xcolo_primary_internal_retry_disabled_by_default() (
   local count_file="${tmp_dir}/virsh.count"
   local rc=0
   mkdir -p "${bin_dir}"
-  : > "${xml}"
+  cat > "${xml}" <<'XML'
+<domain type='kvm'>
+  <name>xcolo-primary-internal-retry</name>
+  <devices>
+    <disk type='block' device='disk'>
+      <source dev='/dev/rbd/rbd/test'/>
+      <target dev='sda' bus='scsi'/>
+    </disk>
+  </devices>
+</domain>
+XML
   : > "${out_file}"
   : > "${err_file}"
   : > "${count_file}"
@@ -5430,8 +5440,9 @@ SH
   ftctl_xcolo_prepare_primary_krbd_runtime_paths_from_xml() { return 0; }
 
   ftctl_xcolo_run_primary_generated_create_with_retry "${vm}" "${xml}" "${out_file}" "${err_file}" "1" || rc=$?
-  selftest_assert_eq "${rc}" "1" "primary create should fail without internal retry"
-  selftest_assert_eq "$(cat "${count_file}")" "1" "virsh create should run once"
+  selftest_assert_eq "${rc}" "1" "primary create still fails when retry also fails"
+  selftest_assert_eq "$(cat "${count_file}")" "2" "virsh create should retry once by default"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_primary_create_retry")" "1" "retry state recorded"
 )
 
 selftest_case_xcolo_channel_timeout_records_failure_reason() (
@@ -5621,6 +5632,100 @@ selftest_case_xcolo_primary_listener_accepts_compare_bootstrap() (
   selftest_assert_file_contains "${FTCTL_EVENTS_LOG}" '"reason":"compare_bootstrap"'
 )
 
+selftest_case_xcolo_primary_listener_refreshes_krbd_paths() (
+  selftest_reset_env
+  selftest_info "x-colo primary listener wait refreshes KRBD stable paths"
+
+  local vm="xcolo-listener-krbd-refresh"
+  local tmp_dir="${SELFTEST_ROOT}/listener-krbd-refresh"
+  local xml="${tmp_dir}/primary.xml"
+  local handle rc=0 refresh_log="${tmp_dir}/refresh.log"
+  mkdir -p "${tmp_dir}"
+  cat > "${xml}" <<'XML'
+<domain type='kvm'>
+  <name>xcolo-listener-krbd-refresh</name>
+  <devices>
+    <disk type='block' device='disk'>
+      <source dev='/dev/rbd/rbd/xcolo-listener-root'/>
+      <target dev='sda' bus='scsi'/>
+    </disk>
+  </devices>
+</domain>
+XML
+  handle="999999|${tmp_dir}/rc|${tmp_dir}/stdout|${tmp_dir}/stderr|${tmp_dir}"
+  : > "${tmp_dir}/stdout"
+  : > "${tmp_dir}/stderr"
+  ftctl_state_init_vm "${vm}"
+  ftctl_state_set "${vm}" "primary_xml_generated=${xml}"
+  FTCTL_XCOLO_MIRROR_PORT="9003"
+  FTCTL_XCOLO_COMPARE_PORT="9004"
+  FTCTL_XCOLO_MIRROR_WAIT="on"
+  FTCTL_XCOLO_COMPARE_WAIT="on"
+
+  ftctl_xcolo_domain_create_timeout_sec() { printf '%s\n' "1"; }
+  ftctl_xcolo_primary_create_async_done() { return 1; }
+  ftctl_xcolo_local_tcp_listen_port_ready() { [[ "${1-}" == "9004" ]]; }
+  ftctl_xcolo_verify_primary_krbd_qemu_namespace() { return 0; }
+  ftctl_xcolo_prepare_primary_krbd_runtime_path() {
+    printf '%s|%s|%s\n' "${1-}" "${2-}" "${3-}" >> "${refresh_log}"
+    return 0
+  }
+  sleep() { :; }
+
+  ftctl_xcolo_wait_primary_generated_listeners "${vm}" "${handle}" || rc=$?
+  selftest_assert_eq "${rc}" "0" "listener wait should pass"
+  selftest_assert_file_contains "${refresh_log}" "wait_listener_remap"
+  selftest_assert_file_contains "${refresh_log}" "listener_ready_remap"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_primary_krbd_refresh_phase")" \
+    "listener_ready" "listener ready refresh phase"
+)
+
+selftest_case_xcolo_primary_peer_wait_refreshes_krbd_paths() (
+  selftest_reset_env
+  selftest_info "x-colo primary peer wait refreshes KRBD stable paths"
+
+  local vm="xcolo-peer-krbd-refresh"
+  local tmp_dir="${SELFTEST_ROOT}/peer-krbd-refresh"
+  local xml="${tmp_dir}/primary.xml"
+  local handle rc=0 refresh_log="${tmp_dir}/refresh.log"
+  mkdir -p "${tmp_dir}"
+  cat > "${xml}" <<'XML'
+<domain type='kvm'>
+  <name>xcolo-peer-krbd-refresh</name>
+  <devices>
+    <disk type='block' device='disk'>
+      <source dev='/dev/rbd/rbd/xcolo-peer-root'/>
+      <target dev='sda' bus='scsi'/>
+    </disk>
+  </devices>
+</domain>
+XML
+  handle="999999|${tmp_dir}/rc|${tmp_dir}/stdout|${tmp_dir}/stderr|${tmp_dir}"
+  : > "${tmp_dir}/stdout"
+  : > "${tmp_dir}/stderr"
+  ftctl_state_init_vm "${vm}"
+  ftctl_state_set "${vm}" "primary_xml_generated=${xml}"
+  FTCTL_XCOLO_MIRROR_PORT="9003"
+  FTCTL_XCOLO_COMPARE_PORT="9004"
+
+  ftctl_xcolo_channel_connect_timeout_sec() { printf '%s\n' "1"; }
+  ftctl_xcolo_primary_create_async_done() { return 1; }
+  ftctl_xcolo_local_tcp_established_port_ready() { return 0; }
+  ftctl_xcolo_capture_primary_channel_state() { return 0; }
+  ftctl_xcolo_prepare_primary_krbd_runtime_path() {
+    printf '%s|%s|%s\n' "${1-}" "${2-}" "${3-}" >> "${refresh_log}"
+    return 0
+  }
+  sleep() { :; }
+
+  ftctl_xcolo_wait_primary_peer_connections "${vm}" "${handle}" || rc=$?
+  selftest_assert_eq "${rc}" "0" "peer wait should pass"
+  selftest_assert_file_contains "${refresh_log}" "wait_peer_attach_remap"
+  selftest_assert_file_contains "${refresh_log}" "peer_attached_remap"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_primary_krbd_refresh_phase")" \
+    "peer_attached" "peer attached refresh phase"
+)
+
 selftest_case_cloud_managed_rollback_cleanup_does_not_restart_secondary() (
   selftest_reset_env
   selftest_info "cloud-managed FT rollback cleanup does not recreate secondary runtime"
@@ -5773,12 +5878,14 @@ selftest_main() {
   selftest_case_xcolo_materialization_pipeline_reports_pci_unassigned
   selftest_case_xcolo_materialization_pipeline_allows_scsi_bus_child_without_pci_endpoint
   selftest_case_xcolo_primary_restore_detects_generated_graph
-  selftest_case_xcolo_primary_internal_retry_disabled_by_default
+  selftest_case_xcolo_primary_internal_retry_enabled_by_default
   selftest_case_xcolo_channel_timeout_records_failure_reason
   selftest_case_xcolo_primary_restore_ignores_domain_missing_destroy
   selftest_case_xcolo_primary_restore_continues_when_destroy_rc_and_domain_absent
   selftest_case_xcolo_primary_disk_args_precede_blocking_chardevs
   selftest_case_xcolo_primary_listener_accepts_compare_bootstrap
+  selftest_case_xcolo_primary_listener_refreshes_krbd_paths
+  selftest_case_xcolo_primary_peer_wait_refreshes_krbd_paths
   selftest_case_cloud_managed_rollback_cleanup_does_not_restart_secondary
   selftest_case_events_json
   selftest_info "all checks passed"
