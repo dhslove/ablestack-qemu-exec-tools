@@ -1340,14 +1340,14 @@ EOF
     "sda|/dev/rbd/rbd/root|raw|/tmp/primary-active-root.qcow2|/dev/rbd/rbd/secondary-root|/tmp/secondary-hidden-root.qcow2|/tmp/secondary-active-root.qcow2;sdb|/dev/rbd/rbd/data|raw|/tmp/primary-active-data.qcow2|/dev/rbd/rbd/secondary-data|/tmp/secondary-hidden-data.qcow2|/tmp/secondary-active-data.qcow2" \
     secondary_args
 
-  selftest_assert_contains "${primary_args}" "file.filename=/dev/rbd/rbd/root" "primary root stable KRBD backend"
-  selftest_assert_contains "${primary_args}" "file.filename=/dev/rbd/rbd/data" "primary data stable KRBD backend"
-  selftest_assert_contains "${secondary_args}" "file.filename=/dev/rbd/rbd/secondary-root" "secondary root stable KRBD backend"
-  selftest_assert_contains "${secondary_args}" "file.filename=/dev/rbd/rbd/secondary-data" "secondary data stable KRBD backend"
-  selftest_assert_contains "${primary_args}" "id=ftctl-primary-parent-sda-bb,node-name=ftctl-primary-parent-sda" "primary parent backend/node split"
-  selftest_assert_contains "${primary_args}" "drive=ftctl-colo-sda-bb,id=scsi0-0-0-0" "primary guest drive keeps source topology id"
-  selftest_assert_contains "${secondary_args}" "id=ftctl-parent-sda-bb,node-name=ftctl-parent-sda" "secondary parent backend/node split"
-  selftest_assert_contains "${secondary_args}" "drive=ftctl-colo-sda-bb,id=scsi0-0-0-0" "secondary guest drive keeps source topology id"
+  selftest_assert_contains "${primary_args}" "driver=host_device,node-name=ftctl-primary-parent-sda-host,filename=/dev/rbd/rbd/root" "primary root stable KRBD host_device backend"
+  selftest_assert_contains "${primary_args}" "driver=host_device,node-name=ftctl-primary-parent-sdb-host,filename=/dev/rbd/rbd/data" "primary data stable KRBD host_device backend"
+  selftest_assert_contains "${secondary_args}" "driver=host_device,node-name=ftctl-parent-sda-host,filename=/dev/rbd/rbd/secondary-root" "secondary root stable KRBD host_device backend"
+  selftest_assert_contains "${secondary_args}" "driver=host_device,node-name=ftctl-parent-sdb-host,filename=/dev/rbd/rbd/secondary-data" "secondary data stable KRBD host_device backend"
+  selftest_assert_contains "${primary_args}" "driver=raw,node-name=ftctl-primary-parent-sda,file=ftctl-primary-parent-sda-host" "primary parent raw wrapper over host_device"
+  selftest_assert_contains "${primary_args}" "drive=ftctl-colo-sda,id=scsi0-0-0-0" "primary guest drive keeps source topology id"
+  selftest_assert_contains "${secondary_args}" "driver=raw,node-name=ftctl-parent-sda,file=ftctl-parent-sda-host" "secondary parent raw wrapper over host_device"
+  selftest_assert_contains "${secondary_args}" "drive=ftctl-colo-sda,id=scsi0-0-0-0" "secondary guest drive keeps source topology id"
   selftest_assert_not_contains "${primary_args}" "file=rbd:" "primary default must not use native librbd URI"
   selftest_assert_not_contains "${secondary_args}" "file=rbd:" "secondary default must not use native librbd URI"
 )
@@ -1381,8 +1381,8 @@ EOF
     "sda|/dev/rbd/rbd/root|raw|/tmp/primary-active-root.qcow2|/dev/rbd/rbd/secondary-root|/tmp/secondary-hidden-root.qcow2|/tmp/secondary-active-root.qcow2" \
     secondary_args
 
-  selftest_assert_contains "${primary_args}" "file.filename=/dev/rbd/rbd/root" "primary explicit KRBD backend"
-  selftest_assert_contains "${secondary_args}" "file.filename=/dev/rbd/rbd/secondary-root" "secondary explicit KRBD backend"
+  selftest_assert_contains "${primary_args}" "driver=host_device,node-name=ftctl-primary-parent-sda-host,filename=/dev/rbd/rbd/root" "primary explicit KRBD host_device backend"
+  selftest_assert_contains "${secondary_args}" "driver=host_device,node-name=ftctl-parent-sda-host,filename=/dev/rbd/rbd/secondary-root" "secondary explicit KRBD host_device backend"
   selftest_assert_not_contains "${primary_args}" "file=rbd:rbd/root" "primary explicit KRBD must not use librbd URI"
   selftest_assert_not_contains "${secondary_args}" "file=rbd:rbd/secondary-root" "secondary explicit KRBD must not use librbd URI"
 )
@@ -1416,10 +1416,10 @@ EOF
     "sda|/dev/rbd/rbd/root|raw|/tmp/primary-active-root.qcow2|/dev/rbd/rbd/secondary-root|/tmp/secondary-hidden-root.qcow2|/tmp/secondary-active-root.qcow2" \
     secondary_args
 
-  selftest_assert_contains "${primary_args}" "file=rbd:rbd/root" "primary explicit librbd backend"
-  selftest_assert_contains "${secondary_args}" "file=rbd:rbd/secondary-root" "secondary explicit librbd backend"
-  selftest_assert_not_contains "${primary_args}" "file.filename=/dev/rbd/rbd/root" "primary explicit librbd must not use KRBD path"
-  selftest_assert_not_contains "${secondary_args}" "file.filename=/dev/rbd/rbd/secondary-root" "secondary explicit librbd must not use KRBD path"
+  selftest_assert_contains "${primary_args}" "file.driver=rbd,file.pool=rbd,file.image=root" "primary explicit librbd backend"
+  selftest_assert_contains "${secondary_args}" "file.driver=rbd,file.pool=rbd,file.image=secondary-root" "secondary explicit librbd backend"
+  selftest_assert_not_contains "${primary_args}" "filename=/dev/rbd/rbd/root" "primary explicit librbd must not use KRBD path"
+  selftest_assert_not_contains "${secondary_args}" "filename=/dev/rbd/rbd/secondary-root" "secondary explicit librbd must not use KRBD path"
 )
 
 selftest_case_xcolo_block_handshake_sets_checkpoint_before_migrate() (
@@ -5571,12 +5571,12 @@ selftest_case_xcolo_primary_disk_args_precede_blocking_chardevs() (
   selftest_reset_env
   selftest_info "x-colo primary commandline opens disk graph before blocking chardevs"
 
-  local disk_args="-device;virtio-scsi-pci,id=scsi0,bus=pci.0,addr=0x9;-drive;if=none,id=ftctl-primary-parent-sda-bb,node-name=ftctl-primary-parent-sda,file.filename=/dev/rbd/rbd/root,driver=raw"
+  local disk_args="-device;virtio-scsi-pci,id=scsi0,bus=pci.0,addr=0x9;-blockdev;driver=host_device,node-name=ftctl-primary-parent-sda-host,filename=/dev/rbd/rbd/root;-blockdev;driver=raw,node-name=ftctl-primary-parent-sda,file=ftctl-primary-parent-sda-host"
   local net_args="-S;-chardev;socket,id=compare1,host=0.0.0.0,port=9104,server=on,wait=on;-chardev;socket,id=mirror0,host=0.0.0.0,port=9103,server=on,wait=on"
   local primary_args drive_prefix chardev_prefix
 
   primary_args="$(ftctl_xcolo_qemu_args_append "${disk_args}" "${net_args}")"
-  drive_prefix="${primary_args%%file.filename=/dev/rbd/rbd/root*}"
+  drive_prefix="${primary_args%%filename=/dev/rbd/rbd/root*}"
   chardev_prefix="${primary_args%%socket,id=compare1*}"
   [[ "${#drive_prefix}" -lt "${#chardev_prefix}" ]] || \
     selftest_fail "primary disk args must precede compare1 wait chardev"

@@ -7485,7 +7485,10 @@ def qemu_driver(fmt):
     fmt = (fmt or "raw").strip()
     return fmt if fmt in {"raw", "qcow2"} else "raw"
 
-def qemu_source_options(path):
+def is_krbd_path(path):
+    return path.startswith("/dev/rbd/")
+
+def split_krbd_path(path):
     if path.startswith("/dev/rbd/"):
         spec = path[len("/dev/rbd/"):]
         if "/" not in spec:
@@ -7495,10 +7498,30 @@ def qemu_source_options(path):
             raise SystemExit(f"invalid krbd path: {path}")
         if any(ch in pool + image for ch in ",;"):
             raise SystemExit(f"unsupported krbd pool/image characters: {path}")
+        return pool, image
+    raise SystemExit(f"not a krbd path: {path}")
+
+def blockdev_source_nodes(path, fmt, node, file_node, host_node):
+    driver = qemu_driver(fmt)
+    if is_krbd_path(path):
         if rbd_commandline_backend == "krbd":
-            return f"file.filename={path}"
-        return f"file=rbd:{pool}/{image}"
-    return f"file.filename={path}"
+            return [
+                "-blockdev",
+                f"driver=host_device,node-name={host_node},filename={path}",
+                "-blockdev",
+                f"driver={driver},node-name={node},file={host_node}",
+            ]
+        pool, image = split_krbd_path(path)
+        return [
+            "-blockdev",
+            f"driver={driver},node-name={node},file.driver=rbd,file.pool={pool},file.image={image}",
+        ]
+    return [
+        "-blockdev",
+        f"driver=file,node-name={file_node},filename={path}",
+        "-blockdev",
+        f"driver={driver},node-name={node},file={file_node}",
+    ]
 
 def parse_runtime(raw):
     entries = []
@@ -7746,23 +7769,19 @@ for order, item in enumerate(entries):
         controller_seen.add(topo["controller_index"])
     s = suffix(target)
     parent = f"ftctl-parent-{s}" if role == "secondary" else f"ftctl-primary-parent-{s}"
-    parent_bb = f"{parent}-bb"
+    parent_file = f"{parent}-file"
+    parent_host = f"{parent}-host"
     active = f"ftctl-active-{s}" if role == "secondary" else f"ftctl-primary-active-{s}"
-    active_bb = f"{active}-bb"
+    active_file = f"{active}-file"
     child = f"ftctl-childs-{s}"
-    child_bb = f"{child}-bb"
     colo = f"ftctl-colo-{s}"
-    colo_bb = f"{colo}-bb"
-    colo_dev = f"{colo}-dev"
     hidden = f"ftctl-hidden-{s}"
     source = item["secondary_dest"] if role == "secondary" else item["source"]
     source_format = item["secondary_format"] if role == "secondary" else item["format"]
-    source_driver = qemu_driver(source_format)
-    source_options = qemu_source_options(source)
     guest_opts = (
         f"scsi-hd,bus={topo['bus']},channel={topo['channel']},"
         f"scsi-id={topo['scsi_id']},lun={topo['lun']},"
-        f"drive={colo_bb},id={topo['qdev_id']}"
+        f"drive={colo},id={topo['qdev_id']}"
     )
     ref = reference_disks.get(topo["qdev_id"], {})
     serial = str(ref.get("serial") or topo["serial"] or "")
@@ -7783,30 +7802,29 @@ for order, item in enumerate(entries):
     if ref.get("share-rw") is True:
         guest_opts += ",share-rw=on"
     guest = ["-device", guest_opts]
+    args.extend(blockdev_source_nodes(source, source_format, parent, parent_file, parent_host))
     if role == "secondary":
         args.extend([
-            "-drive",
-            f"if=none,id={parent_bb},node-name={parent},{source_options},driver={source_driver}",
-            "-drive",
-            f"if=none,id={child_bb},node-name={child},driver=replication,mode=secondary,file.driver=qcow2,file.node-name={active},top-id={colo},file.file.filename={item['secondary_active']},file.backing.driver=qcow2,file.backing.node-name={hidden},file.backing.file.filename={item['secondary_hidden']},file.backing.backing={parent}",
-            "-drive",
-            f"if=none,id={colo_bb},node-name={colo},driver=quorum,read-pattern=fifo,vote-threshold=1,children.0={child}",
+            "-blockdev",
+            f"driver=replication,node-name={child},mode=secondary,file.driver=qcow2,file.node-name={active},top-id={colo},file.file.filename={item['secondary_active']},file.backing.driver=qcow2,file.backing.node-name={hidden},file.backing.file.filename={item['secondary_hidden']},file.backing.backing={parent}",
+            "-blockdev",
+            f"driver=quorum,node-name={colo},read-pattern=fifo,vote-threshold=1,children.0={child}",
         ])
     else:
         args.extend([
-            "-drive",
-            f"if=none,id={parent_bb},node-name={parent},{source_options},driver={source_driver}",
-            "-drive",
-            f"if=none,id={active_bb},node-name={active},driver=qcow2,file.filename={item['primary_active']},backing={parent}",
-            "-drive",
-            f"if=none,id={colo_bb},node-name={colo},driver=quorum,read-pattern=fifo,vote-threshold=1,children.0={active}",
+            "-blockdev",
+            f"driver=file,node-name={active_file},filename={item['primary_active']}",
+            "-blockdev",
+            f"driver=qcow2,node-name={active},file={active_file},backing={parent}",
+            "-blockdev",
+            f"driver=quorum,node-name={colo},read-pattern=fifo,vote-threshold=1,children.0={active}",
         ])
     args.extend(guest)
     state.extend([
         f"{target}.parent={parent}",
-        f"{target}.parent_backend={parent_bb}",
+        f"{target}.parent_backend={parent}",
         f"{target}.colo={colo}",
-        f"{target}.colo_backend={colo_bb}",
+        f"{target}.colo_backend={colo}",
         f"{target}.device={topo['qdev_id']}",
         f"{target}.controller={topo['controller']}",
         f"{target}.controller_bus={topo['bus']}",
@@ -7835,6 +7853,7 @@ parts = os.environ.get("XCOLO_QEMU_ARGS", "").split(";")
 errors = []
 protected_disk_count = 0
 controller_count = 0
+host_device_count = 0
 for idx, part in enumerate(parts):
     if part == "-device" and idx + 1 < len(parts):
         opts = parts[idx + 1]
@@ -7842,7 +7861,7 @@ for idx, part in enumerate(parts):
             errors.append(f"ftctl_guest_visible_controller_forbidden:{opts}")
         if opts.startswith("virtio-scsi-pci,") and "id=scsi" in opts:
             controller_count += 1
-    if part != "-drive":
+    if part not in ("-drive", "-blockdev"):
         continue
     if idx + 1 >= len(parts):
         continue
@@ -7854,6 +7873,8 @@ for idx, part in enumerate(parts):
             item[k] = v
     if item.get("id") and item.get("node-name") and item["id"] == item["node-name"]:
         errors.append(f"backend_node_conflict:{item['id']}")
+    if part == "-blockdev" and item.get("driver") == "host_device" and item.get("filename", "").startswith("/dev/rbd/"):
+        host_device_count += 1
 
 for idx, part in enumerate(parts):
     if part != "-device":
@@ -7869,7 +7890,7 @@ for idx, part in enumerate(parts):
         errors.append(f"guest_drive_missing:{opts}")
         continue
     drive = m.group(1)
-    if not drive.endswith("-bb"):
+    if not drive.startswith("ftctl-colo-"):
         errors.append(f"guest_drive_backend_invalid:{drive}")
     bm = re.search(r"(?:^|,)bus=([^,]+)", opts)
     bus = bm.group(1) if bm else ""
@@ -7881,6 +7902,9 @@ for idx, part in enumerate(parts):
         errors.append(f"guest_qdev_not_original_scsi:{qdev_id or 'missing'}")
     if ",write-cache=on" not in opts:
         errors.append(f"guest_write_cache_missing:{qdev_id or opts}")
+
+if protected_disk_count and any("/dev/rbd/" in p for p in parts) and host_device_count == 0:
+    errors.append("krbd_host_device_blockdev_missing")
 
 if errors:
     print(",".join(errors))
@@ -7902,6 +7926,11 @@ PY
         "xcolo_startup_disk_backend=invalid" \
         "xcolo_protocol_failure_phase=startup_disk_graph" \
         "last_error=xcolo_guest_topology_mismatch"
+    elif [[ "${out}" == *"krbd_host_device_blockdev_missing"* ]]; then
+      ftctl_state_set "${vm}" \
+        "xcolo_startup_disk_backend=invalid" \
+        "xcolo_protocol_failure_phase=startup_disk_graph" \
+        "last_error=xcolo_startup_krbd_host_device_missing"
     elif [[ "${out}" == *"guest_drive_backend_invalid:"* || "${out}" == *"guest_drive_missing:"* ]]; then
       ftctl_state_set "${vm}" \
         "xcolo_startup_disk_backend=invalid" \
@@ -8558,6 +8587,15 @@ ftctl_xcolo_apply_startup_disk_graphs() {
           "reason=krbd_uri_leaked_into_qemu_commandline backend=krbd"
         return 1
       fi
+      if [[ "${primary_args};${secondary_args}" == *"/dev/rbd/"* && "${primary_args};${secondary_args}" != *"driver=host_device"* ]]; then
+        ftctl_state_set "${vm}" \
+          "xcolo_startup_disk_backend=invalid" \
+          "xcolo_protocol_failure_phase=startup_disk_graph" \
+          "last_error=xcolo_startup_krbd_host_device_missing"
+        ftctl_log_event "colo" "xcolo.startup_disk_graph" "fail" "${vm}" "" \
+          "reason=krbd_path_without_host_device backend=krbd"
+        return 1
+      fi
       ;;
     librbd)
       if [[ "${primary_args};${secondary_args}" == *"/dev/rbd/"* ]]; then
@@ -8599,6 +8637,15 @@ ftctl_xcolo_apply_startup_disk_graphs() {
           "last_error=xcolo_startup_krbd_uri_leaked_preflight"
         ftctl_log_event "colo" "xcolo.startup_disk_graph" "fail" "${vm}" "" \
           "reason=krbd_uri_leaked_into_generated_xml backend=krbd primary_xml=${primary_xml} secondary_xml=${secondary_xml}"
+        return 1
+      fi
+      if grep -q '/dev/rbd/' "${primary_xml}" "${secondary_xml}" && ! grep -q 'driver=host_device' "${primary_xml}" "${secondary_xml}"; then
+        ftctl_state_set "${vm}" \
+          "xcolo_startup_disk_backend=invalid" \
+          "xcolo_protocol_failure_phase=startup_disk_graph" \
+          "last_error=xcolo_startup_krbd_host_device_missing"
+        ftctl_log_event "colo" "xcolo.startup_disk_graph" "fail" "${vm}" "" \
+          "reason=krbd_path_without_host_device_in_generated_xml backend=krbd primary_xml=${primary_xml} secondary_xml=${secondary_xml}"
         return 1
       fi
       ;;
@@ -10701,6 +10748,7 @@ ftctl_xcolo_execute_handshake_with_nodes() {
   ftctl_xcolo_secondary_accept_deferred_incoming "${vm}" "${secondary_vm}" "pre_migrate" || return 1
   ftctl_xcolo_require_pre_migrate_receiver_ready "${vm}" "${secondary_vm}" "pre_migrate_receiver" || return 1
   ftctl_xcolo_require_pre_migrate_runtime_topology_gate "${vm}" "${secondary_vm}" "before_migrate" || return 1
+  ftctl_xcolo_require_primary_krbd_materialized_before_migrate "${vm}" || return 1
   ftctl_xcolo_record_pre_migrate_materialization_result "${vm}"
   ftctl_xcolo_assert_no_premigrate_filter_mirror_send "${vm}" "before_migrate" || return 1
   ftctl_xcolo_gate_before_guest_traffic "${vm}" "${secondary_vm}" || return 1
@@ -10780,6 +10828,7 @@ ftctl_xcolo_execute_handshake_with_disk_plan() {
   ftctl_xcolo_secondary_accept_deferred_incoming "${vm}" "${secondary_vm}" "pre_migrate" || return 1
   ftctl_xcolo_require_pre_migrate_receiver_ready "${vm}" "${secondary_vm}" "pre_migrate_receiver" || return 1
   ftctl_xcolo_require_pre_migrate_runtime_topology_gate "${vm}" "${secondary_vm}" "before_migrate" || return 1
+  ftctl_xcolo_require_primary_krbd_materialized_before_migrate "${vm}" || return 1
   ftctl_xcolo_record_pre_migrate_materialization_result "${vm}"
   ftctl_xcolo_assert_no_premigrate_filter_mirror_send "${vm}" "before_migrate" || return 1
   ftctl_xcolo_gate_before_guest_traffic "${vm}" "${secondary_vm}" || return 1
@@ -11496,6 +11545,26 @@ ftctl_xcolo_verify_primary_krbd_qemu_namespace() {
     "xcolo_primary_krbd_qmp_checked=${qmp_checked}" \
     "xcolo_primary_krbd_qmp_missing_paths=$(ftctl_xcolo_compact_log_value "${qmp_missing}")"
 
+  if [[ "${phase}" == "primary_listener" && ( -n "${fd_missing}" || "${qmp_checked}" != "yes" || -n "${qmp_missing}" ) ]]; then
+    ftctl_state_set "${vm}" \
+      "xcolo_primary_krbd_qemu_namespace_visible=pending" \
+      "xcolo_primary_krbd_qemu_fd_open=pending" \
+      "xcolo_primary_krbd_materialization_pending=yes"
+    ftctl_log_event "colo" "xcolo.primary_krbd_qemu_namespace" "pending" "${vm}" "" \
+      "phase=${phase} qemu_pid=${qemu_pid} visible=$(ftctl_xcolo_compact_log_value "${visible}") fd_open=$(ftctl_xcolo_compact_log_value "${fd_open}") fd_missing=$(ftctl_xcolo_compact_log_value "${fd_missing}") namespace_missing=$(ftctl_xcolo_compact_log_value "${missing}") qmp=${qmp_checked} qmp_missing=$(ftctl_xcolo_compact_log_value "${qmp_missing}")"
+    return 0
+  fi
+
+  if [[ "${phase}" == "pre_migrate_materialized" && "${qmp_checked}" != "yes" ]]; then
+    ftctl_state_set "${vm}" \
+      "xcolo_primary_krbd_qemu_namespace_visible=no" \
+      "xcolo_primary_krbd_qemu_fd_open=no" \
+      "last_error=xcolo_primary_krbd_qmp_unavailable_pre_migrate"
+    ftctl_log_event "colo" "xcolo.primary_krbd_qemu_namespace" "fail" "${vm}" "" \
+      "phase=${phase} qemu_pid=${qemu_pid} qmp=${qmp_checked} reason=qmp_unavailable"
+    return 1
+  fi
+
   if [[ -n "${fd_missing}" ]]; then
     ftctl_state_set "${vm}" \
       "xcolo_primary_krbd_qemu_namespace_visible=no" \
@@ -11518,9 +11587,33 @@ ftctl_xcolo_verify_primary_krbd_qemu_namespace() {
 
   ftctl_state_set "${vm}" \
     "xcolo_primary_krbd_qemu_namespace_visible=$( [[ -n "${missing}" ]] && printf fd || printf yes )" \
-    "xcolo_primary_krbd_qemu_fd_open=yes"
+    "xcolo_primary_krbd_qemu_fd_open=yes" \
+    "xcolo_primary_krbd_materialization_pending=no"
   ftctl_log_event "colo" "xcolo.primary_krbd_qemu_namespace" "ok" "${vm}" "" \
     "phase=${phase} qemu_pid=${qemu_pid} visible=$(ftctl_xcolo_compact_log_value "${visible}") fd_open=$(ftctl_xcolo_compact_log_value "${fd_open}") namespace_missing=$(ftctl_xcolo_compact_log_value "${missing}") qmp=${qmp_checked}"
+}
+
+ftctl_xcolo_require_primary_krbd_materialized_before_migrate() {
+  local vm="${1-}"
+  local generated_xml
+
+  [[ -n "${vm}" ]] || return 1
+  generated_xml="$(ftctl_state_get "${vm}" "primary_xml_generated" 2>/dev/null || true)"
+  if [[ -z "${generated_xml}" || ! -f "${generated_xml}" ]]; then
+    ftctl_state_set "${vm}" \
+      "xcolo_primary_krbd_materialization_gate=skipped" \
+      "xcolo_primary_krbd_materialization_skip_reason=generated_xml_missing"
+    ftctl_log_event "colo" "xcolo.primary_krbd_materialized" "skip" "${vm}" "" \
+      "reason=generated_xml_missing path=${generated_xml}"
+    return 0
+  fi
+
+  ftctl_xcolo_verify_primary_krbd_qemu_namespace "${vm}" "${generated_xml}" "" "pre_migrate_materialized" || {
+    ftctl_state_set "${vm}" "xcolo_protocol_failure_phase=pre_migrate_primary_krbd_materialization"
+    return 1
+  }
+  ftctl_log_event "colo" "xcolo.primary_krbd_materialized" "ok" "${vm}" "" \
+    "phase=pre_migrate_materialized path=${generated_xml}"
 }
 ftctl_xcolo_classify_primary_create_error() {
   local err_summary="${1-}"
