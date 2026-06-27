@@ -8544,7 +8544,7 @@ ftctl_xcolo_apply_startup_disk_graphs() {
   reference_qemu_log="/var/log/libvirt/qemu/${vm}.log"
   ftctl_xcolo_build_startup_disk_args "${primary_xml}" "primary" "${disk_runtime}" primary_disk_args "${reference_qemu_log}" || return 1
   ftctl_xcolo_build_startup_disk_args "${secondary_xml}" "secondary" "${disk_runtime}" secondary_disk_args "${reference_qemu_log}" || return 1
-  primary_args="$(ftctl_xcolo_qemu_args_append "${primary_net_args}" "${primary_disk_args}")"
+  primary_args="$(ftctl_xcolo_qemu_args_append "${primary_disk_args}" "${primary_net_args}")"
   secondary_args="$(ftctl_xcolo_secondary_args_with_disk_graph "${secondary_net_args}" "${secondary_disk_args}")"
   rbd_backend="$(ftctl_xcolo_rbd_commandline_backend)"
   case "${rbd_backend}" in
@@ -10871,6 +10871,21 @@ ftctl_xcolo_primary_krbd_hold_dir() {
   printf '%s\n' "${FTCTL_RUN_DIR:-/run/ablestack-vm-ftctl}/krbd-hold/${vm}"
 }
 
+ftctl_xcolo_primary_krbd_guard_dir() {
+  local vm="${1-}"
+  printf '%s\n' "${FTCTL_RUN_DIR:-/run/ablestack-vm-ftctl}/krbd-guard/${vm}"
+}
+
+ftctl_xcolo_primary_krbd_pin_dir() {
+  local vm="${1-}"
+  printf '%s\n' "${FTCTL_RUN_DIR:-/run/ablestack-vm-ftctl}/krbd-pin/${vm}"
+}
+
+ftctl_xcolo_path_safe_name() {
+  local value="${1-}"
+  printf '%s' "${value}" | sed 's#[^A-Za-z0-9_.-]#_#g'
+}
+
 ftctl_xcolo_extract_krbd_paths_from_generated_xml() {
   local xml_path="${1-}"
   local out_array_name="${2}"
@@ -10927,6 +10942,7 @@ ftctl_xcolo_prepare_primary_krbd_runtime_path() {
   local path="${2-}"
   local phase="${3:-primary_create}"
   local hold_dir hold_file safe real qemu_user="qemu" access_out="" access_err="" access_rc=0
+  local open_out="" open_err="" open_rc=0
 
   [[ -n "${vm}" && -n "${path}" ]] || return 1
   ftctl_blockcopy_is_krbd_path "${path}" || return 0
@@ -10970,7 +10986,7 @@ ftctl_xcolo_prepare_primary_krbd_runtime_path() {
 
   hold_dir="$(ftctl_xcolo_primary_krbd_hold_dir "${vm}")"
   mkdir -p "${hold_dir}" 2>/dev/null || true
-  safe="$(printf '%s' "${path}" | sed 's#[^A-Za-z0-9_.-]#_#g')"
+  safe="$(ftctl_xcolo_path_safe_name "${path}")"
   hold_file="${hold_dir}/${safe}.hold"
   {
     printf 'vm=%s\n' "${vm}"
@@ -10998,8 +11014,194 @@ ftctl_xcolo_prepare_primary_krbd_runtime_path() {
     fi
   fi
 
+  if command -v qemu-img >/dev/null 2>&1; then
+    open_out=""
+    open_err=""
+    open_rc=0
+    ftctl_cmd_run "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC:-15}" open_out open_err open_rc -- \
+      qemu-img info --force-share "${path}" >/dev/null 2>&1 || true
+    if [[ "${open_rc}" != "0" ]]; then
+      open_out=""
+      open_err=""
+      open_rc=0
+      ftctl_cmd_run "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC:-15}" open_out open_err open_rc -- \
+        qemu-img info "${path}" >/dev/null 2>&1 || true
+    fi
+    if [[ "${open_rc}" != "0" ]]; then
+      ftctl_state_set "${vm}" "last_error=xcolo_primary_krbd_open_failed_before_create"
+      ftctl_log_event "colo" "xcolo.primary_krbd_runtime_path" "fail" "${vm}" "${open_rc}" \
+        "phase=${phase} path=${path} resolved=${real} reason=qemu_img_open_failed output=$(ftctl_xcolo_compact_log_value "${open_out}") error=$(ftctl_xcolo_compact_log_value "${open_err}")"
+      return 1
+    fi
+  fi
+
+  ftctl_xcolo_pin_primary_krbd_runtime_path "${vm}" "${path}" "${phase}" || return $?
+
   ftctl_log_event "colo" "xcolo.primary_krbd_runtime_path" "ok" "${vm}" "" \
     "phase=${phase} path=${path} resolved=${real} hold=${hold_file}"
+}
+
+ftctl_xcolo_pin_primary_krbd_runtime_path() {
+  local vm="${1-}"
+  local path="${2-}"
+  local phase="${3:-primary_create}"
+  local pin_dir safe pid_file path_file real existing_pid pin_pid
+
+  [[ -n "${vm}" && -n "${path}" ]] || return 1
+  ftctl_blockcopy_is_krbd_path "${path}" || return 0
+  [[ "${FTCTL_XCOLO_PRIMARY_KRBD_PIN:-1}" == "1" ]] || {
+    ftctl_log_event "colo" "xcolo.primary_krbd_pin" "skip" "${vm}" "" \
+      "phase=${phase} path=${path} reason=disabled"
+    return 0
+  }
+
+  real="$(readlink -f "${path}" 2>/dev/null || true)"
+  [[ -n "${real}" && -b "${real}" ]] || real="${path}"
+  [[ -b "${real}" ]] || {
+    ftctl_state_set "${vm}" "last_error=xcolo_primary_krbd_pin_path_missing"
+    ftctl_log_event "colo" "xcolo.primary_krbd_pin" "fail" "${vm}" "" \
+      "phase=${phase} path=${path} resolved=${real} reason=block_device_missing"
+    return 1
+  }
+
+  pin_dir="$(ftctl_xcolo_primary_krbd_pin_dir "${vm}")"
+  mkdir -p "${pin_dir}" 2>/dev/null || true
+  safe="$(ftctl_xcolo_path_safe_name "${path}")"
+  pid_file="${pin_dir}/${safe}.pid"
+  path_file="${pin_dir}/${safe}.path"
+  existing_pid="$(cat "${pid_file}" 2>/dev/null || true)"
+  if [[ -n "${existing_pid}" && -d "/proc/${existing_pid}" ]]; then
+    ftctl_log_event "colo" "xcolo.primary_krbd_pin" "ok" "${vm}" "" \
+      "phase=${phase} path=${path} resolved=${real} pid=${existing_pid} reused=1"
+    return 0
+  fi
+
+  rm -f "${pid_file}" 2>/dev/null || true
+  printf '%s\n' "${path}" > "${path_file}" 2>/dev/null || true
+  (
+    exec 9<"${real}"
+    printf '%s\n' "${BASHPID}" > "${pid_file}"
+    trap 'exit 0' TERM INT
+    while :; do sleep 3600; done
+  ) >/dev/null 2>&1 &
+  pin_pid="$!"
+
+  for _ftctl_pin_wait in 1 2 3 4 5; do
+    existing_pid="$(cat "${pid_file}" 2>/dev/null || true)"
+    [[ -n "${existing_pid}" && -d "/proc/${existing_pid}" ]] && break
+    sleep 1
+  done
+  existing_pid="$(cat "${pid_file}" 2>/dev/null || true)"
+  if [[ -z "${existing_pid}" || ! -d "/proc/${existing_pid}" ]]; then
+    kill "${pin_pid}" >/dev/null 2>&1 || true
+    ftctl_state_set "${vm}" "last_error=xcolo_primary_krbd_pin_failed"
+    ftctl_log_event "colo" "xcolo.primary_krbd_pin" "fail" "${vm}" "" \
+      "phase=${phase} path=${path} resolved=${real} reason=pin_process_not_running"
+    return 1
+  fi
+
+  ftctl_log_event "colo" "xcolo.primary_krbd_pin" "ok" "${vm}" "" \
+    "phase=${phase} path=${path} resolved=${real} pid=${existing_pid}"
+}
+
+ftctl_xcolo_release_primary_krbd_pins() {
+  local vm="${1-}"
+  local reason="${2:-release}"
+  local pin_dir pid_file path_file pid released=0
+
+  [[ -n "${vm}" ]] || return 1
+  pin_dir="$(ftctl_xcolo_primary_krbd_pin_dir "${vm}")"
+  [[ -d "${pin_dir}" ]] || return 0
+
+  for pid_file in "${pin_dir}"/*.pid; do
+    [[ -f "${pid_file}" ]] || continue
+    pid="$(cat "${pid_file}" 2>/dev/null || true)"
+    path_file="${pid_file%.pid}.path"
+    if [[ -n "${pid}" && -d "/proc/${pid}" ]]; then
+      kill "${pid}" >/dev/null 2>&1 || true
+      released=$((released + 1))
+    fi
+    rm -f "${pid_file}" "${path_file}" 2>/dev/null || true
+  done
+  rmdir "${pin_dir}" >/dev/null 2>&1 || true
+  ftctl_log_event "colo" "xcolo.primary_krbd_pin.release" "ok" "${vm}" "" \
+    "reason=${reason} released=${released}"
+}
+
+ftctl_xcolo_begin_primary_krbd_shutdown_guard() {
+  local vm="${1-}"
+  local xml_path="${2-}"
+  local phase="${3:-primary_shutdown}"
+  local guard_dir paths=() path ttl now expires token
+
+  [[ -n "${vm}" && -n "${xml_path}" && -f "${xml_path}" ]] || return 1
+  ftctl_xcolo_extract_krbd_paths_from_generated_xml "${xml_path}" paths || return $?
+  ((${#paths[@]} > 0)) || {
+    ftctl_log_event "colo" "xcolo.primary_krbd_guard" "skip" "${vm}" "" \
+      "phase=${phase} reason=no_krbd_paths"
+    return 0
+  }
+
+  guard_dir="$(ftctl_xcolo_primary_krbd_guard_dir "${vm}")"
+  mkdir -p "${guard_dir}" 2>/dev/null || true
+  ttl="${FTCTL_XCOLO_PRIMARY_KRBD_GUARD_TTL_SEC:-3600}"
+  [[ "${ttl}" =~ ^[0-9]+$ && "${ttl}" -gt 0 ]] || ttl=3600
+  now="$(date +%s 2>/dev/null || printf '0')"
+  expires=$((now + ttl))
+  token="$(date +%Y%m%d%H%M%S 2>/dev/null || printf 'token')-$$"
+  {
+    for path in "${paths[@]}"; do
+      [[ -n "${path}" ]] && printf '%s\n' "${path}"
+    done
+  } > "${guard_dir}/paths"
+  printf '1\n' > "${guard_dir}/enabled"
+  printf '%s\n' "${token}" > "${guard_dir}/token"
+  date -Is > "${guard_dir}/created" 2>/dev/null || true
+  printf '%s\n' "${expires}" > "${guard_dir}/expires"
+
+  for path in "${paths[@]}"; do
+    if ! ftctl_xcolo_prepare_primary_krbd_runtime_path "${vm}" "${path}" "${phase}"; then
+      ftctl_xcolo_end_primary_krbd_shutdown_guard "${vm}" "guard_prepare_failed" || true
+      return 1
+    fi
+  done
+  ftctl_state_set "${vm}" \
+    "xcolo_primary_krbd_guard=enabled" \
+    "xcolo_primary_krbd_guard_dir=${guard_dir}" \
+    "xcolo_primary_krbd_guard_count=${#paths[@]}" \
+    "xcolo_primary_krbd_guard_expires=${expires}"
+  ftctl_log_event "colo" "xcolo.primary_krbd_guard" "ok" "${vm}" "" \
+    "phase=${phase} count=${#paths[@]} dir=${guard_dir} expires=${expires}"
+}
+
+ftctl_xcolo_end_primary_krbd_shutdown_guard() {
+  local vm="${1-}"
+  local reason="${2:-release}"
+  local guard_dir
+
+  [[ -n "${vm}" ]] || return 1
+  ftctl_xcolo_release_primary_krbd_pins "${vm}" "${reason}" || true
+  guard_dir="$(ftctl_xcolo_primary_krbd_guard_dir "${vm}")"
+  rm -rf "${guard_dir}" 2>/dev/null || true
+  ftctl_state_set "${vm}" \
+    "xcolo_primary_krbd_guard=disabled" \
+    "xcolo_primary_krbd_guard_release_reason=${reason}"
+  ftctl_log_event "colo" "xcolo.primary_krbd_guard.release" "ok" "${vm}" "" \
+    "reason=${reason} dir=${guard_dir}"
+}
+
+ftctl_xcolo_wait_primary_shutdown_hook_settle() {
+  local vm="${1-}"
+  local delay="${FTCTL_XCOLO_SHUTDOWN_HOOK_SETTLE_SEC:-3}"
+
+  [[ "${delay}" =~ ^[0-9]+$ ]] || delay=3
+  if [[ "${delay}" -gt 0 ]]; then
+    sleep "${delay}"
+  fi
+  udevadm settle >/dev/null 2>&1 || true
+  ftctl_state_set "${vm}" "xcolo_primary_shutdown_hook_settle_sec=${delay}"
+  ftctl_log_event "colo" "xcolo.primary_shutdown_hook_settle" "ok" "${vm}" "" \
+    "delay=${delay}"
 }
 
 ftctl_xcolo_prepare_primary_krbd_runtime_paths_from_xml() {
@@ -11913,7 +12115,7 @@ ftctl_xcolo_primary_has_generated_block_graph() {
 ftctl_xcolo_force_primary_restore_from_backup() {
   local vm="${1-}"
   local reason="${2-xcolo_restore_primary}"
-  local out="" err="" rc=0 graph="" graph_rc=0 combined=""
+  local out="" err="" rc=0 graph="" graph_rc=0 combined="" destroy_state=""
 
   [[ -n "${vm}" ]] || return 1
   if [[ "${FTCTL_DRY_RUN}" == "1" ]]; then
@@ -11931,6 +12133,16 @@ ftctl_xcolo_force_primary_restore_from_backup() {
     *"failed to get domain"*|*"domain is not running"*|*"Domain not found"*) rc=0 ;;
   esac
   if [[ "${rc}" != "0" ]]; then
+    destroy_state="$(ftctl_xcolo_primary_domain_state "${vm}" 2>/dev/null || echo "unknown")"
+    case "${destroy_state}" in
+      unknown|shutoff|shut\ off)
+        ftctl_log_event "colo" "block_conversion.rollback.primary_destroy" "warn" "${vm}" "${rc}" \
+          "cause=${reason} libvirt_state=${destroy_state} action=continue_restore error=$(ftctl_xcolo_compact_log_value "${combined}")"
+        rc=0
+        ;;
+    esac
+  fi
+  if [[ "${rc}" != "0" ]]; then
     ftctl_state_set "${vm}" \
       "cloud_runtime_restore=primary_destroy_failed" \
       "last_error=${reason}:primary_destroy_failed"
@@ -11941,6 +12153,9 @@ ftctl_xcolo_force_primary_restore_from_backup() {
 
   ftctl_log_event "colo" "block_conversion.rollback.primary_destroy" "ok" "${vm}" "" \
     "cause=${reason}"
+  ftctl_xcolo_prepare_primary_krbd_runtime_paths_from_xml "${vm}" \
+    "$(ftctl_state_get "${vm}" "primary_xml_backup" 2>/dev/null || true)" \
+    "primary_restore" || true
 
   ftctl_primary_activate_from_backup "${vm}" || {
     ftctl_state_set "${vm}" \
@@ -12005,6 +12220,7 @@ ftctl_xcolo_force_primary_restore_from_backup() {
   esac
   ftctl_log_event "colo" "block_conversion.rollback.primary_restore_graph" "ok" "${vm}" "" \
     "cause=${reason} libvirt_state=${restored_state}"
+  ftctl_xcolo_end_primary_krbd_shutdown_guard "${vm}" "primary_restore_done" || true
 }
 
 ftctl_xcolo_rollback_block_primary_create_failure() {
@@ -12040,6 +12256,7 @@ ftctl_xcolo_rollback_block_primary_create_failure() {
     ftctl_log_event "colo" "block_conversion.rollback.secondary_rbd_unmap" "warn" "${vm}" "" "cause=${reason}"
   }
   "${restore_cmd}" "${vm}" "${reason}" || {
+    ftctl_xcolo_end_primary_krbd_shutdown_guard "${vm}" "rollback_restore_failed" || true
     ftctl_state_set "${vm}" \
       "conversion_stage=${rollback_stage}:primary_restore_failed" \
       "conversion_state=error" \
@@ -12053,6 +12270,7 @@ ftctl_xcolo_rollback_block_primary_create_failure() {
     ftctl_log_event "colo" "block_conversion.rollback.primary_restore" "warn" "${vm}" "" "cause=${reason}"
     return 1
   }
+  ftctl_xcolo_end_primary_krbd_shutdown_guard "${vm}" "rollback_restore_done" || true
   ftctl_state_set "${vm}" \
     "conversion_stage=${rollback_stage}" \
     "conversion_state=error" \
@@ -12780,15 +12998,25 @@ ftctl_xcolo_execute_block_cold_conversion() {
   ftctl_log_event "colo" "block_conversion.start" "ok" "${vm}" "" \
     "primary_generated=${primary_generated_xml} standby_generated=${standby_generated_xml}"
 
+  ftctl_xcolo_begin_primary_krbd_shutdown_guard "${vm}" "${primary_generated_xml}" "before_primary_shutdown" || {
+    local guard_error
+    guard_error="$(ftctl_state_get "${vm}" "last_error" 2>/dev/null || true)"
+    [[ -n "${guard_error}" ]] || guard_error="xcolo_primary_krbd_guard_prepare_failed"
+    ftctl_state_set "${vm}" "last_error=${guard_error}"
+    return 1
+  }
+
   ftctl_xcolo_shutdown_primary_for_conversion "${vm}" || {
     ftctl_log_event "colo" "block_conversion.primary_stop" "fail" "${vm}" "" \
       "reason=shutdown_failed"
     ftctl_state_set "${vm}" "last_error=xcolo_block_shutdown_failed"
+    ftctl_xcolo_end_primary_krbd_shutdown_guard "${vm}" "primary_shutdown_failed" || true
     return 1
   }
 
   ftctl_state_set "${vm}" "conversion_stage=primary_stopped"
   ftctl_log_event "colo" "block_conversion.primary_stop" "ok" "${vm}" "" ""
+  ftctl_xcolo_wait_primary_shutdown_hook_settle "${vm}" || true
 
   ftctl_xcolo_verify_stable_rbd_contract "${vm}" "${disk_plan}" "after_primary_stop" || {
     local rbd_error
@@ -13117,6 +13345,7 @@ ftctl_xcolo_execute_block_cold_conversion() {
   }
   ftctl_state_set "${vm}" "conversion_stage=primary_created"
   ftctl_log_event "colo" "block_conversion.primary_create" "ok" "${vm}" "" ""
+  ftctl_xcolo_end_primary_krbd_shutdown_guard "${vm}" "primary_generated_created" || true
   ftctl_xcolo_assert_no_premigrate_filter_mirror_send "${vm}" "after_primary_create" || {
     ftctl_xcolo_rollback_block_primary_create_failure "${vm}" "xcolo_filter_mirror_send_before_migrate" || true
     return 1

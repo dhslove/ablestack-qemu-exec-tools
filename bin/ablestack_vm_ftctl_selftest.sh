@@ -5507,6 +5507,8 @@ selftest_case_xcolo_primary_restore_ignores_domain_missing_destroy() (
     esac
   }
   # shellcheck disable=SC2317
+  ftctl_xcolo_prepare_primary_krbd_runtime_paths_from_xml() { return 0; }
+  # shellcheck disable=SC2317
   ftctl_primary_activate_from_backup() { return 0; }
   # shellcheck disable=SC2317
   ftctl_xcolo_primary_has_generated_block_graph() { return 1; }
@@ -5517,6 +5519,67 @@ selftest_case_xcolo_primary_restore_ignores_domain_missing_destroy() (
   selftest_assert_eq "${rc}" "0" "missing generated primary should not block restore"
   selftest_assert_eq "$(ftctl_state_get "${vm}" "cloud_runtime_restore")" \
     "primary_running" "primary restore verified"
+)
+
+selftest_case_xcolo_primary_restore_continues_when_destroy_rc_and_domain_absent() (
+  selftest_reset_env
+  selftest_info "x-colo primary restore checks domstate when destroy rc is nonzero"
+
+  local vm="xcolo-primary-restore-destroy-rc-domain-absent"
+  local rc=0
+  local domain_state="unknown"
+  ftctl_state_init_vm "${vm}"
+  FTCTL_DRY_RUN="0"
+  FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
+
+  # shellcheck disable=SC2317
+  ftctl_virsh() {
+    local _timeout="$1" out_var="$2" err_var="$3" rc_var="$4"
+    shift 4
+    : "${_timeout}"
+    case "$*" in
+      *" destroy "*)
+        printf -v "${out_var}" '%s' ""
+        printf -v "${err_var}" '%s' "unexpected destroy transport error"
+        printf -v "${rc_var}" '%s' "1"
+        ;;
+      *)
+        printf -v "${out_var}" '%s' ""
+        printf -v "${err_var}" '%s' ""
+        printf -v "${rc_var}" '%s' "0"
+        ;;
+    esac
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_primary_domain_state() { printf '%s\n' "${domain_state}"; }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_prepare_primary_krbd_runtime_paths_from_xml() { return 0; }
+  # shellcheck disable=SC2317
+  ftctl_primary_activate_from_backup() { domain_state="running"; return 0; }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_primary_has_generated_block_graph() { return 1; }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_end_primary_krbd_shutdown_guard() { return 0; }
+
+  ftctl_xcolo_force_primary_restore_from_backup "${vm}" "xcolo_channel_attach_timeout" || rc=$?
+  selftest_assert_eq "${rc}" "0" "unknown domstate should allow restore after destroy rc"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "cloud_runtime_restore")" \
+    "primary_running" "primary restore verified"
+)
+
+selftest_case_xcolo_primary_disk_args_precede_blocking_chardevs() (
+  selftest_reset_env
+  selftest_info "x-colo primary commandline opens disk graph before blocking chardevs"
+
+  local disk_args="-device;virtio-scsi-pci,id=scsi0,bus=pci.0,addr=0x9;-drive;if=none,id=ftctl-primary-parent-sda-bb,node-name=ftctl-primary-parent-sda,file.filename=/dev/rbd/rbd/root,driver=raw"
+  local net_args="-S;-chardev;socket,id=compare1,host=0.0.0.0,port=9104,server=on,wait=on;-chardev;socket,id=mirror0,host=0.0.0.0,port=9103,server=on,wait=on"
+  local primary_args drive_prefix chardev_prefix
+
+  primary_args="$(ftctl_xcolo_qemu_args_append "${disk_args}" "${net_args}")"
+  drive_prefix="${primary_args%%file.filename=/dev/rbd/rbd/root*}"
+  chardev_prefix="${primary_args%%socket,id=compare1*}"
+  [[ "${#drive_prefix}" -lt "${#chardev_prefix}" ]] || \
+    selftest_fail "primary disk args must precede compare1 wait chardev"
 )
 
 selftest_case_xcolo_primary_listener_accepts_compare_bootstrap() (
@@ -5709,6 +5772,8 @@ selftest_main() {
   selftest_case_xcolo_primary_internal_retry_disabled_by_default
   selftest_case_xcolo_channel_timeout_records_failure_reason
   selftest_case_xcolo_primary_restore_ignores_domain_missing_destroy
+  selftest_case_xcolo_primary_restore_continues_when_destroy_rc_and_domain_absent
+  selftest_case_xcolo_primary_disk_args_precede_blocking_chardevs
   selftest_case_xcolo_primary_listener_accepts_compare_bootstrap
   selftest_case_cloud_managed_rollback_cleanup_does_not_restart_secondary
   selftest_case_events_json
