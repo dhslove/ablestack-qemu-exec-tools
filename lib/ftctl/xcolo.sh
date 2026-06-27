@@ -7445,6 +7445,7 @@ ftctl_xcolo_build_startup_disk_args() {
   local disk_runtime="${3-}"
   local out_var="${4}"
   local reference_qemu_log="${5-}"
+  local primary_parent_nbd_map="${6-}"
   local payload
 
   command -v python3 >/dev/null 2>&1 || {
@@ -7452,7 +7453,7 @@ ftctl_xcolo_build_startup_disk_args() {
     return 2
   }
 
-  payload="$(XML_PATH="${xml_path}" ROLE="${role}" DISK_RUNTIME="${disk_runtime}" REFERENCE_QEMU_LOG="${reference_qemu_log}" XCOLO_RBD_COMMANDLINE_BACKEND="${FTCTL_XCOLO_RBD_COMMANDLINE_BACKEND:-krbd}" python3 - <<'PY'
+  payload="$(XML_PATH="${xml_path}" ROLE="${role}" DISK_RUNTIME="${disk_runtime}" REFERENCE_QEMU_LOG="${reference_qemu_log}" XCOLO_RBD_COMMANDLINE_BACKEND="${FTCTL_XCOLO_RBD_COMMANDLINE_BACKEND:-krbd}" XCOLO_PRIMARY_PARENT_NBD_MAP="${primary_parent_nbd_map}" python3 - <<'PY'
 import json
 import os
 import re
@@ -7467,6 +7468,14 @@ reference_qemu_log = os.environ.get("REFERENCE_QEMU_LOG", "")
 rbd_commandline_backend = (os.environ.get("XCOLO_RBD_COMMANDLINE_BACKEND") or "krbd").strip().lower()
 if rbd_commandline_backend not in {"librbd", "krbd"}:
     raise SystemExit(f"unsupported x-colo RBD commandline backend: {rbd_commandline_backend}")
+primary_parent_nbd_map = {}
+for raw_entry in (os.environ.get("XCOLO_PRIMARY_PARENT_NBD_MAP") or "").split(";"):
+    if not raw_entry:
+        continue
+    parts = raw_entry.split("|", 2)
+    if len(parts) != 3:
+        raise SystemExit(f"invalid x-colo primary parent nbd map entry: {raw_entry}")
+    primary_parent_nbd_map[parts[0]] = {"socket": parts[1], "export": parts[2]}
 
 def suffix(value):
     return re.sub(r"[^A-Za-z0-9_.-]", "_", value or "root")
@@ -7495,6 +7504,19 @@ def blockdev_source_nodes(path, fmt, node, file_node, host_node):
     driver = qemu_driver(fmt)
     if is_krbd_path(path):
         if rbd_commandline_backend == "krbd":
+            adapter = primary_parent_nbd_map.get(path) if role == "primary" else None
+            if adapter:
+                nbd_node = host_node[:-5] + "-nbd" if host_node.endswith("-host") else host_node + "-nbd"
+                socket_path = adapter["socket"]
+                export_name = adapter["export"]
+                if any(ch in socket_path + export_name for ch in ",;"):
+                    raise SystemExit(f"unsupported nbd adapter characters for {path}")
+                return [
+                    "-blockdev",
+                    f"driver=nbd,node-name={nbd_node},server.type=unix,server.path={socket_path},export={export_name}",
+                    "-blockdev",
+                    f"driver={driver},node-name={node},file={nbd_node}",
+                ]
             return [
                 "-blockdev",
                 f"driver=host_device,node-name={host_node},filename={path}",
@@ -8564,7 +8586,7 @@ ftctl_xcolo_apply_startup_disk_graphs() {
   local primary_net_args="${5-}"
   local secondary_net_args="${6-}"
   local primary_disk_args secondary_disk_args reference_qemu_log
-  local primary_args secondary_args rbd_backend
+  local primary_args secondary_args rbd_backend primary_parent_nbd_map
 
   [[ -n "${vm}" && -f "${primary_xml}" && -f "${secondary_xml}" && -n "${disk_runtime}" ]] || return 1
 
@@ -8578,11 +8600,15 @@ ftctl_xcolo_apply_startup_disk_graphs() {
   fi
 
   reference_qemu_log="/var/log/libvirt/qemu/${vm}.log"
-  ftctl_xcolo_build_startup_disk_args "${primary_xml}" "primary" "${disk_runtime}" primary_disk_args "${reference_qemu_log}" || return 1
+  rbd_backend="$(ftctl_xcolo_rbd_commandline_backend)"
+  primary_parent_nbd_map=""
+  if [[ "${rbd_backend}" == "krbd" ]]; then
+    ftctl_xcolo_prepare_primary_parent_nbd_adapters "${vm}" "${disk_runtime}" primary_parent_nbd_map "startup_disk_graph" || return $?
+  fi
+  ftctl_xcolo_build_startup_disk_args "${primary_xml}" "primary" "${disk_runtime}" primary_disk_args "${reference_qemu_log}" "${primary_parent_nbd_map}" || return 1
   ftctl_xcolo_build_startup_disk_args "${secondary_xml}" "secondary" "${disk_runtime}" secondary_disk_args "${reference_qemu_log}" || return 1
   primary_args="$(ftctl_xcolo_qemu_args_append "${primary_disk_args}" "${primary_net_args}")"
   secondary_args="$(ftctl_xcolo_secondary_args_with_disk_graph "${secondary_net_args}" "${secondary_disk_args}")"
-  rbd_backend="$(ftctl_xcolo_rbd_commandline_backend)"
   case "${rbd_backend}" in
     krbd)
       if [[ "${primary_args};${secondary_args}" == *"rbd:rbd/"* || "${primary_args};${secondary_args}" == *"file=rbd:"* ]]; then
@@ -8638,32 +8664,25 @@ ftctl_xcolo_apply_startup_disk_graphs() {
   case "${rbd_backend}" in
     krbd)
       if grep -Eq 'rbd:rbd/|file=rbd:' "${primary_xml}" "${secondary_xml}"; then
-        ftctl_state_set "${vm}" \
-          "xcolo_startup_disk_backend=invalid" \
-          "xcolo_protocol_failure_phase=startup_disk_graph" \
-          "last_error=xcolo_startup_krbd_uri_leaked_preflight"
-        ftctl_log_event "colo" "xcolo.startup_disk_graph" "fail" "${vm}" "" \
-          "reason=krbd_uri_leaked_into_generated_xml backend=krbd primary_xml=${primary_xml} secondary_xml=${secondary_xml}"
+        ftctl_state_set "${vm}"           "xcolo_startup_disk_backend=invalid"           "xcolo_protocol_failure_phase=startup_disk_graph"           "last_error=xcolo_startup_krbd_uri_leaked_preflight"
+        ftctl_log_event "colo" "xcolo.startup_disk_graph" "fail" "${vm}" ""           "reason=krbd_uri_leaked_into_generated_xml backend=krbd primary_xml=${primary_xml} secondary_xml=${secondary_xml}"
+        return 1
+      fi
+      if [[ -n "${primary_parent_nbd_map}" ]] && grep -q 'driver=host_device.*filename=/dev/rbd/' "${primary_xml}"; then
+        ftctl_state_set "${vm}"           "xcolo_startup_disk_backend=invalid"           "xcolo_protocol_failure_phase=startup_disk_graph"           "last_error=xcolo_startup_primary_krbd_adapter_bypass"
+        ftctl_log_event "colo" "xcolo.startup_disk_graph" "fail" "${vm}" ""           "reason=primary_krbd_host_device_leaked_in_generated_xml backend=krbd primary_xml=${primary_xml}"
         return 1
       fi
       if grep -q '/dev/rbd/' "${primary_xml}" "${secondary_xml}" && ! grep -q 'driver=host_device' "${primary_xml}" "${secondary_xml}"; then
-        ftctl_state_set "${vm}" \
-          "xcolo_startup_disk_backend=invalid" \
-          "xcolo_protocol_failure_phase=startup_disk_graph" \
-          "last_error=xcolo_startup_krbd_host_device_missing"
-        ftctl_log_event "colo" "xcolo.startup_disk_graph" "fail" "${vm}" "" \
-          "reason=krbd_path_without_host_device_in_generated_xml backend=krbd primary_xml=${primary_xml} secondary_xml=${secondary_xml}"
+        ftctl_state_set "${vm}"           "xcolo_startup_disk_backend=invalid"           "xcolo_protocol_failure_phase=startup_disk_graph"           "last_error=xcolo_startup_krbd_host_device_missing"
+        ftctl_log_event "colo" "xcolo.startup_disk_graph" "fail" "${vm}" ""           "reason=krbd_path_without_host_device_in_generated_xml backend=krbd primary_xml=${primary_xml} secondary_xml=${secondary_xml}"
         return 1
       fi
       ;;
     librbd)
       if grep -Eq '/dev/rbd/' "${primary_xml}" "${secondary_xml}"; then
-        ftctl_state_set "${vm}" \
-          "xcolo_startup_disk_backend=invalid" \
-          "xcolo_protocol_failure_phase=startup_disk_graph" \
-          "last_error=xcolo_startup_krbd_path_leaked"
-        ftctl_log_event "colo" "xcolo.startup_disk_graph" "fail" "${vm}" "" \
-          "reason=krbd_path_leaked_into_generated_xml backend=librbd primary_xml=${primary_xml} secondary_xml=${secondary_xml}"
+        ftctl_state_set "${vm}"           "xcolo_startup_disk_backend=invalid"           "xcolo_protocol_failure_phase=startup_disk_graph"           "last_error=xcolo_startup_krbd_path_leaked"
+        ftctl_log_event "colo" "xcolo.startup_disk_graph" "fail" "${vm}" ""           "reason=krbd_path_leaked_into_generated_xml backend=librbd primary_xml=${primary_xml} secondary_xml=${secondary_xml}"
         return 1
       fi
       ;;
@@ -8676,6 +8695,7 @@ ftctl_xcolo_apply_startup_disk_graphs() {
   ftctl_state_set "${vm}" \
     "xcolo_startup_disk_graph=enabled" \
     "xcolo_startup_disk_backend=${rbd_backend}-rbd-or-file" \
+    "xcolo_startup_disk_parent_backend=$( [[ -n "${primary_parent_nbd_map}" ]] && printf krbd-nbd-adapter || printf direct )" \
     "xcolo_rbd_commandline_backend=${rbd_backend}" \
     "xcolo_startup_disk_graph_runtime=${disk_runtime}" \
     "primary_qemu_args=${primary_args}" \
@@ -10939,9 +10959,160 @@ ftctl_xcolo_primary_krbd_pin_dir() {
   printf '%s\n' "${FTCTL_RUN_DIR:-/run/ablestack-vm-ftctl}/krbd-pin/${vm}"
 }
 
+ftctl_xcolo_primary_parent_nbd_dir() {
+  local vm="${1-}"
+  printf '%s\n' "${FTCTL_RUN_DIR:-/run/ablestack-vm-ftctl}/xcolo-parent-nbd/${vm}"
+}
+
 ftctl_xcolo_path_safe_name() {
   local value="${1-}"
   printf '%s' "${value}" | sed 's#[^A-Za-z0-9_.-]#_#g'
+}
+
+ftctl_xcolo_stop_primary_parent_nbd_adapters() {
+  local vm="${1-}"
+  local reason="${2:-release}"
+  local dir pid_file pid proc_cmd cmdline killed=0
+
+  [[ -n "${vm}" ]] || return 1
+  dir="$(ftctl_xcolo_primary_parent_nbd_dir "${vm}")"
+  [[ -d "${dir}" ]] || return 0
+
+  for pid_file in "${dir}"/*.pid; do
+    [[ -f "${pid_file}" ]] || continue
+    pid="$(cat "${pid_file}" 2>/dev/null || true)"
+    if [[ -n "${pid}" && "${pid}" =~ ^[0-9]+$ && -d "/proc/${pid}" ]]; then
+      kill "${pid}" >/dev/null 2>&1 || true
+      killed=$((killed + 1))
+    fi
+    rm -f -- "${pid_file}" 2>/dev/null || true
+  done
+
+  for proc_cmd in /proc/[0-9]*/cmdline; do
+    [[ -r "${proc_cmd}" ]] || continue
+    pid="${proc_cmd#/proc/}"
+    pid="${pid%%/*}"
+    [[ -n "${pid}" && "${pid}" =~ ^[0-9]+$ ]] || continue
+    [[ "${pid}" != "$$" ]] || continue
+    cmdline="$(tr '\0' ' ' < "${proc_cmd}" 2>/dev/null || true)"
+    [[ "${cmdline}" == *qemu-nbd* && "${cmdline}" == *"${dir}"* ]] || continue
+    kill "${pid}" >/dev/null 2>&1 || true
+    killed=$((killed + 1))
+  done
+
+  rm -rf -- "${dir}" 2>/dev/null || true
+  ftctl_log_event "colo" "xcolo.primary_parent_nbd.release" "ok" "${vm}" ""     "reason=${reason} dir=${dir} killed=${killed}"
+}
+
+ftctl_xcolo_probe_primary_parent_nbd_adapter() {
+  local vm="${1-}"
+  local target="${2-}"
+  local socket_path="${3-}"
+  local export_name="${4-}"
+  local out="" err="" rc=0 uri opts
+
+  [[ -n "${vm}" && -n "${target}" && -n "${socket_path}" && -n "${export_name}" ]] || return 1
+  [[ -S "${socket_path}" ]] || {
+    ftctl_state_set "${vm}" "last_error=xcolo_parent_nbd_adapter_socket_missing"
+    ftctl_log_event "colo" "xcolo.primary_parent_nbd.probe" "fail" "${vm}" ""       "target=${target} socket=${socket_path} export=${export_name} reason=socket_missing"
+    return 1
+  }
+  command -v qemu-img >/dev/null 2>&1 || return 0
+
+  uri="nbd+unix:///${export_name}?socket=${socket_path}"
+  ftctl_cmd_run "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC:-15}" out err rc --     qemu-img info --force-share "${uri}" >/dev/null 2>&1 || true
+  if [[ "${rc}" != "0" ]]; then
+    out=""
+    err=""
+    rc=0
+    opts="driver=nbd,server.type=unix,server.path=${socket_path},export=${export_name}"
+    ftctl_cmd_run "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC:-15}" out err rc --       qemu-img info --force-share --image-opts "${opts}" >/dev/null 2>&1 || true
+  fi
+  if [[ "${rc}" != "0" ]]; then
+    ftctl_state_set "${vm}" "last_error=xcolo_parent_nbd_adapter_probe_failed"
+    ftctl_log_event "colo" "xcolo.primary_parent_nbd.probe" "fail" "${vm}" "${rc}"       "target=${target} socket=${socket_path} export=${export_name} error=$(ftctl_xcolo_compact_log_value "${err:-${out}}")"
+    return 1
+  fi
+
+  ftctl_log_event "colo" "xcolo.primary_parent_nbd.probe" "ok" "${vm}" ""     "target=${target} socket=${socket_path} export=${export_name}"
+}
+
+ftctl_xcolo_start_primary_parent_nbd_adapter() {
+  local vm="${1-}"
+  local target="${2-}"
+  local krbd_path="${3-}"
+  local source_format="${4:-raw}"
+  local phase="${5:-startup_disk_graph}"
+  local out_var="${6}"
+  local dir suffix socket_path export_name pid_file out="" err="" rc=0 wait_i
+
+  [[ -n "${vm}" && -n "${target}" && -n "${krbd_path}" && -n "${out_var}" ]] || return 1
+  ftctl_blockcopy_is_krbd_path "${krbd_path}" || return 1
+  [[ -n "${source_format}" ]] || source_format="raw"
+
+  ftctl_xcolo_prepare_primary_krbd_runtime_path "${vm}" "${krbd_path}" "${phase}_parent_nbd" || return $?
+
+  dir="$(ftctl_xcolo_primary_parent_nbd_dir "${vm}")"
+  mkdir -p "${dir}" 2>/dev/null || true
+  suffix="$(ftctl_xcolo_disk_suffix "${target}")"
+  socket_path="${dir}/${suffix}.sock"
+  export_name="ftctl-primary-parent-${suffix}"
+  pid_file="${dir}/${suffix}.pid"
+  rm -f -- "${socket_path}" "${pid_file}" 2>/dev/null || true
+
+  out=""
+  err=""
+  rc=0
+  ftctl_cmd_run "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC:-15}" out err rc --     qemu-nbd --fork --persistent --read-only --shared=8       --socket "${socket_path}"       --export-name "${export_name}"       --format "${source_format}"       --pid-file "${pid_file}"       "${krbd_path}" || true
+  if [[ "${rc}" != "0" ]]; then
+    ftctl_state_set "${vm}" "last_error=xcolo_parent_nbd_adapter_start_failed"
+    ftctl_log_event "colo" "xcolo.primary_parent_nbd.start" "fail" "${vm}" "${rc}"       "phase=${phase} target=${target} krbd=${krbd_path} socket=${socket_path} export=${export_name} error=$(ftctl_xcolo_compact_log_value "${err:-${out}}")"
+    return 1
+  fi
+
+  for wait_i in 1 2 3 4 5; do
+    [[ -S "${socket_path}" ]] && break
+    sleep 1
+  done
+  ftctl_xcolo_probe_primary_parent_nbd_adapter "${vm}" "${target}" "${socket_path}" "${export_name}" || return $?
+
+  ftctl_log_event "colo" "xcolo.primary_parent_nbd.start" "ok" "${vm}" ""     "phase=${phase} target=${target} krbd=${krbd_path} socket=${socket_path} export=${export_name} pid=$(cat "${pid_file}" 2>/dev/null || true)"
+  printf -v "${out_var}" '%s|%s|%s' "${krbd_path}" "${socket_path}" "${export_name}"
+}
+
+ftctl_xcolo_prepare_primary_parent_nbd_adapters() {
+  local vm="${1-}"
+  local disk_runtime="${2-}"
+  local out_var="${3}"
+  local phase="${4:-startup_disk_graph}"
+  local entries=() entry target primary_source primary_format primary_active secondary_dest secondary_hidden secondary_active secondary_format
+  local record map="" count=0
+
+  [[ -n "${vm}" && -n "${out_var}" ]] || return 1
+  printf -v "${out_var}" '%s' ""
+  [[ -n "${disk_runtime}" ]] || return 0
+
+  ftctl_xcolo_stop_primary_parent_nbd_adapters "${vm}" "prepare_refresh" || true
+  IFS=';' read -r -a entries <<< "${disk_runtime}"
+  for entry in "${entries[@]}"; do
+    [[ -n "${entry}" ]] || continue
+    IFS='|' read -r target primary_source primary_format primary_active secondary_dest secondary_hidden secondary_active secondary_format <<< "${entry}"
+    : "${primary_active}${secondary_dest}${secondary_hidden}${secondary_active}${secondary_format}"
+    ftctl_blockcopy_is_krbd_path "${primary_source}" || continue
+    [[ -n "${primary_format}" ]] || primary_format="raw"
+    ftctl_xcolo_start_primary_parent_nbd_adapter "${vm}" "${target}" "${primary_source}" "${primary_format}" "${phase}" record || return $?
+    map="${map}${map:+;}${record}"
+    count=$((count + 1))
+  done
+
+  if [[ "${count}" -gt 0 ]]; then
+    ftctl_state_set "${vm}"       "xcolo_primary_parent_nbd_adapter=enabled"       "xcolo_primary_parent_nbd_adapter_count=${count}"       "xcolo_primary_parent_nbd_adapter_map=$(ftctl_xcolo_compact_log_value "${map}")"       "xcolo_startup_disk_parent_backend=krbd-nbd-adapter"
+    ftctl_log_event "colo" "xcolo.primary_parent_nbd.prepare" "ok" "${vm}" ""       "phase=${phase} count=${count} map=$(ftctl_xcolo_compact_log_value "${map}")"
+  else
+    ftctl_state_set "${vm}"       "xcolo_primary_parent_nbd_adapter=disabled"       "xcolo_primary_parent_nbd_adapter_count=0"
+    ftctl_log_event "colo" "xcolo.primary_parent_nbd.prepare" "skip" "${vm}" ""       "phase=${phase} reason=no_primary_krbd_parent"
+  fi
+  printf -v "${out_var}" '%s' "${map}"
 }
 
 ftctl_xcolo_extract_krbd_paths_from_generated_xml() {
@@ -11168,6 +11339,7 @@ ftctl_xcolo_release_primary_krbd_pins() {
   local pin_dir pid_file path_file pid released=0
 
   [[ -n "${vm}" ]] || return 1
+  ftctl_xcolo_stop_primary_parent_nbd_adapters "${vm}" "${reason}" || true
   pin_dir="$(ftctl_xcolo_primary_krbd_pin_dir "${vm}")"
   [[ -d "${pin_dir}" ]] || return 0
 
@@ -12711,6 +12883,8 @@ ftctl_xcolo_rollback_startup_gate_failure() {
       "reason=dry_run cause=${reason}"
     return 0
   fi
+
+  ftctl_xcolo_stop_primary_parent_nbd_adapters "${vm}" "rollback_startup_gate" || true
 
   secondary_vm_name="$(ftctl_state_get "${vm}" "secondary_vm_name" 2>/dev/null || ftctl_profile_secondary_vm_name_resolved "${vm}")"
   if [[ -n "${secondary_vm_name}" ]]; then

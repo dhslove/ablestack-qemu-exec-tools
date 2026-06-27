@@ -1333,18 +1333,20 @@ selftest_case_xcolo_startup_disk_graph_uses_krbd_backend_by_default() (
 </domain>
 EOF
 
+  primary_parent_nbd_map="/dev/rbd/rbd/root|/run/ablestack-vm-ftctl/xcolo-parent-nbd/i-2-test-VM/sda.sock|ftctl-primary-parent-sda;/dev/rbd/rbd/data|/run/ablestack-vm-ftctl/xcolo-parent-nbd/i-2-test-VM/sdb.sock|ftctl-primary-parent-sdb"
   ftctl_xcolo_build_startup_disk_args "${xml_path}" "primary" \
     "sda|/dev/rbd/rbd/root|raw|/tmp/primary-active-root.qcow2|/dev/rbd/rbd/secondary-root|/tmp/secondary-hidden-root.qcow2|/tmp/secondary-active-root.qcow2;sdb|/dev/rbd/rbd/data|raw|/tmp/primary-active-data.qcow2|/dev/rbd/rbd/secondary-data|/tmp/secondary-hidden-data.qcow2|/tmp/secondary-active-data.qcow2" \
-    primary_args
+    primary_args "" "${primary_parent_nbd_map}"
   ftctl_xcolo_build_startup_disk_args "${xml_path}" "secondary" \
     "sda|/dev/rbd/rbd/root|raw|/tmp/primary-active-root.qcow2|/dev/rbd/rbd/secondary-root|/tmp/secondary-hidden-root.qcow2|/tmp/secondary-active-root.qcow2;sdb|/dev/rbd/rbd/data|raw|/tmp/primary-active-data.qcow2|/dev/rbd/rbd/secondary-data|/tmp/secondary-hidden-data.qcow2|/tmp/secondary-active-data.qcow2" \
     secondary_args
 
-  selftest_assert_contains "${primary_args}" "driver=host_device,node-name=ftctl-primary-parent-sda-host,filename=/dev/rbd/rbd/root" "primary root stable KRBD host_device backend"
-  selftest_assert_contains "${primary_args}" "driver=host_device,node-name=ftctl-primary-parent-sdb-host,filename=/dev/rbd/rbd/data" "primary data stable KRBD host_device backend"
+  selftest_assert_contains "${primary_args}" "driver=nbd,node-name=ftctl-primary-parent-sda-nbd,server.type=unix,server.path=/run/ablestack-vm-ftctl/xcolo-parent-nbd/i-2-test-VM/sda.sock,export=ftctl-primary-parent-sda" "primary root KRBD local NBD parent adapter backend"
+  selftest_assert_contains "${primary_args}" "driver=nbd,node-name=ftctl-primary-parent-sdb-nbd,server.type=unix,server.path=/run/ablestack-vm-ftctl/xcolo-parent-nbd/i-2-test-VM/sdb.sock,export=ftctl-primary-parent-sdb" "primary data KRBD local NBD parent adapter backend"
   selftest_assert_contains "${secondary_args}" "driver=host_device,node-name=ftctl-parent-sda-host,filename=/dev/rbd/rbd/secondary-root" "secondary root stable KRBD host_device backend"
   selftest_assert_contains "${secondary_args}" "driver=host_device,node-name=ftctl-parent-sdb-host,filename=/dev/rbd/rbd/secondary-data" "secondary data stable KRBD host_device backend"
-  selftest_assert_contains "${primary_args}" "driver=raw,node-name=ftctl-primary-parent-sda,file=ftctl-primary-parent-sda-host" "primary parent raw wrapper over host_device"
+  selftest_assert_contains "${primary_args}" "driver=raw,node-name=ftctl-primary-parent-sda,file=ftctl-primary-parent-sda-nbd" "primary parent raw wrapper over local NBD adapter"
+  selftest_assert_not_contains "${primary_args}" "driver=host_device,node-name=ftctl-primary-parent-sda-host,filename=/dev/rbd/rbd/root" "primary adapter path must not expose KRBD host_device directly"
   selftest_assert_contains "${primary_args}" "drive=ftctl-colo-sda,id=scsi0-0-0-0" "primary guest drive keeps source topology id"
   selftest_assert_contains "${secondary_args}" "driver=raw,node-name=ftctl-parent-sda,file=ftctl-parent-sda-host" "secondary parent raw wrapper over host_device"
   selftest_assert_contains "${secondary_args}" "drive=ftctl-colo-sda,id=scsi0-0-0-0" "secondary guest drive keeps source topology id"
@@ -1359,7 +1361,7 @@ selftest_case_xcolo_startup_disk_graph_allows_explicit_krbd_backend() (
   selftest_info "x-colo startup disk graph allows explicit KRBD commandline backend"
 
   local xml_path="${SELFTEST_ROOT}/xcolo-startup-explicit-krbd.xml"
-  local primary_args="" secondary_args=""
+  local primary_args="" secondary_args="" primary_parent_nbd_map=""
   FTCTL_XCOLO_RBD_COMMANDLINE_BACKEND="krbd"
   cat > "${xml_path}" <<'EOF'
 <domain type='kvm'>
@@ -1376,14 +1378,16 @@ selftest_case_xcolo_startup_disk_graph_allows_explicit_krbd_backend() (
 </domain>
 EOF
 
+  primary_parent_nbd_map="/dev/rbd/rbd/root|/run/ablestack-vm-ftctl/xcolo-parent-nbd/i-2-test-VM/sda.sock|ftctl-primary-parent-sda"
   ftctl_xcolo_build_startup_disk_args "${xml_path}" "primary" \
     "sda|/dev/rbd/rbd/root|raw|/tmp/primary-active-root.qcow2|/dev/rbd/rbd/secondary-root|/tmp/secondary-hidden-root.qcow2|/tmp/secondary-active-root.qcow2" \
-    primary_args
+    primary_args "" "${primary_parent_nbd_map}"
   ftctl_xcolo_build_startup_disk_args "${xml_path}" "secondary" \
     "sda|/dev/rbd/rbd/root|raw|/tmp/primary-active-root.qcow2|/dev/rbd/rbd/secondary-root|/tmp/secondary-hidden-root.qcow2|/tmp/secondary-active-root.qcow2" \
     secondary_args
 
-  selftest_assert_contains "${primary_args}" "driver=host_device,node-name=ftctl-primary-parent-sda-host,filename=/dev/rbd/rbd/root" "primary explicit KRBD host_device backend"
+  selftest_assert_contains "${primary_args}" "driver=nbd,node-name=ftctl-primary-parent-sda-nbd,server.type=unix,server.path=/run/ablestack-vm-ftctl/xcolo-parent-nbd/i-2-test-VM/sda.sock,export=ftctl-primary-parent-sda" "primary explicit KRBD local NBD parent adapter backend"
+  selftest_assert_not_contains "${primary_args}" "driver=host_device,node-name=ftctl-primary-parent-sda-host,filename=/dev/rbd/rbd/root" "primary explicit KRBD must not expose host_device when adapter map exists"
   selftest_assert_contains "${secondary_args}" "driver=host_device,node-name=ftctl-parent-sda-host,filename=/dev/rbd/rbd/secondary-root" "secondary explicit KRBD host_device backend"
   selftest_assert_contains "${secondary_args}" "file.file.driver=file,file.file.filename=/tmp/secondary-active-root.qcow2" "secondary explicit KRBD active qcow2 has explicit file child driver"
   selftest_assert_contains "${secondary_args}" "file.backing.file.driver=file,file.backing.file.filename=/tmp/secondary-hidden-root.qcow2" "secondary explicit KRBD hidden qcow2 has explicit file child driver"
