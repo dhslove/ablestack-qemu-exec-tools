@@ -8585,6 +8585,7 @@ ftctl_xcolo_apply_startup_disk_graphs() {
   ftctl_xcolo_validate_startup_disk_args "${vm}" "${primary_args}" "primary" || return 1
   ftctl_xcolo_validate_startup_disk_args "${vm}" "${secondary_args}" "secondary" || return 1
 
+  ftctl_xcolo_record_krbd_materialization_contract "${vm}" "${disk_runtime}" "startup_disk_graph" || return 1
   ftctl_xcolo_xml_remove_disk_targets "${primary_xml}" "${disk_runtime}" || return 1
   ftctl_xcolo_xml_remove_disk_targets "${secondary_xml}" "${disk_runtime}" || return 1
   ftctl_xml_apply_qemu_commandline "${primary_xml}" "${primary_args}" || return 1
@@ -11268,6 +11269,95 @@ ftctl_xcolo_record_primary_krbd_create_visibility() {
 }
 
 
+ftctl_xcolo_krbd_contract_dir() {
+  printf '%s\n' "/run/ablestack-vm-ftctl/krbd-contract"
+}
+
+ftctl_xcolo_record_krbd_materialization_contract() {
+  local vm="${1-}"
+  local disk_runtime="${2-}"
+  local phase="${3:-startup_disk_graph}"
+  local contract_dir contract_file tmp_file
+  local entries=()
+  local entry target primary_source primary_format primary_overlay secondary_dest secondary_hidden secondary_active secondary_format
+  local source real major_minor role count=0 summary=""
+
+  [[ -n "${vm}" && -n "${disk_runtime}" ]] || return 1
+
+  contract_dir="$(ftctl_xcolo_krbd_contract_dir)"
+  ftctl_ensure_dir "${contract_dir}" "0755"
+  contract_file="${contract_dir}/${vm}.env"
+  tmp_file="$(mktemp -t ftctl.krbd-contract.XXXXXX)"
+  {
+    printf 'vm=%q\n' "${vm}"
+    printf 'phase=%q\n' "${phase}"
+    printf 'created_at=%q\n' "$(ftctl_now_iso8601)"
+  } > "${tmp_file}"
+
+  IFS=';' read -r -a entries <<< "${disk_runtime}"
+  for entry in "${entries[@]}"; do
+    [[ -n "${entry}" ]] || continue
+    IFS='|' read -r target primary_source primary_format primary_overlay secondary_dest secondary_hidden secondary_active secondary_format <<< "${entry}"
+    for role in primary secondary; do
+      source=""
+      case "${role}" in
+        primary) source="${primary_source}" ;;
+        secondary) source="${secondary_dest}" ;;
+      esac
+      [[ "${source}" == /dev/rbd/* ]] || continue
+      real="$(readlink -f "${source}" 2>/dev/null || true)"
+      if [[ -b "${source}" ]]; then
+        major_minor="$(stat -Lc '%t:%T' "${source}" 2>/dev/null || true)"
+      else
+        major_minor="missing"
+      fi
+      count=$((count + 1))
+      {
+        printf 'entry_%d_role=%q\n' "${count}" "${role}"
+        printf 'entry_%d_target=%q\n' "${count}" "${target}"
+        printf 'entry_%d_source=%q\n' "${count}" "${source}"
+        printf 'entry_%d_real=%q\n' "${count}" "${real}"
+        printf 'entry_%d_major_minor=%q\n' "${count}" "${major_minor}"
+      } >> "${tmp_file}"
+      summary="${summary}${summary:+,}${role}:${target}:${source}->${real}:${major_minor}"
+    done
+  done
+
+  printf 'count=%q\n' "${count}" >> "${tmp_file}"
+  mv -f "${tmp_file}" "${contract_file}"
+  chmod 0644 "${contract_file}" 2>/dev/null || true
+
+  ftctl_state_set "${vm}" \
+    "xcolo_krbd_materialization_contract_phase=${phase}" \
+    "xcolo_krbd_materialization_contract_file=${contract_file}" \
+    "xcolo_krbd_materialization_contract_count=${count}" \
+    "xcolo_krbd_materialization_contract_summary=$(ftctl_xcolo_compact_log_value "${summary}")"
+  ftctl_log_event "colo" "xcolo.krbd_materialization_contract" "ok" "${vm}" "" \
+    "phase=${phase} count=${count} file=${contract_file} summary=$(ftctl_xcolo_compact_log_value "${summary}")"
+}
+
+ftctl_xcolo_qemu_fd_matches_krbd_path() {
+  local qemu_pid="${1-}"
+  local path="${2-}"
+  local out_var="${3}"
+  local source_dev fd fd_dev link found=""
+
+  [[ -n "${qemu_pid}" && -d "/proc/${qemu_pid}" && -n "${path}" ]] || return 1
+  source_dev="$(stat -Lc '%t:%T' "${path}" 2>/dev/null || true)"
+  [[ -n "${source_dev}" ]] || return 1
+  for fd in /proc/${qemu_pid}/fd/*; do
+    [[ -e "${fd}" ]] || continue
+    fd_dev="$(stat -Lc '%t:%T' "${fd}" 2>/dev/null || true)"
+    [[ "${fd_dev}" == "${source_dev}" ]] || continue
+    link="$(readlink "${fd}" 2>/dev/null || true)"
+    found="${fd##*/}->${link:-unknown}"
+    break
+  done
+  printf -v "${out_var}" '%s' "${found}"
+  [[ -n "${found}" ]]
+}
+
+
 ftctl_xcolo_qemu_child_pids() {
   local root_pid="${1-}"
   local depth="${2:-0}"
@@ -11341,6 +11431,8 @@ ftctl_xcolo_verify_primary_krbd_qemu_namespace() {
   local phase="${4:-primary_listener}"
   local paths=()
   local path ns_path qemu_pid="" visible="" missing="" count=0
+  local fd_match="" fd_open="" fd_missing=""
+  local qmp_out="" qmp_rc=0 qmp_missing="" qmp_checked="no"
 
   [[ -n "${vm}" && -n "${generated_xml}" && -f "${generated_xml}" ]] || return 1
   ftctl_xcolo_extract_krbd_paths_from_generated_xml "${generated_xml}" paths || return $?
@@ -11368,32 +11460,68 @@ ftctl_xcolo_verify_primary_krbd_qemu_namespace() {
     ns_path="/proc/${qemu_pid}/root${path}"
     if [[ -b "${ns_path}" ]]; then
       visible="${visible}${visible:+,}${path}"
+    elif ftctl_xcolo_qemu_fd_matches_krbd_path "${qemu_pid}" "${path}" fd_match; then
+      fd_open="${fd_open}${fd_open:+,}${path}->${fd_match}"
     else
       missing="${missing}${missing:+,}${path}"
+      fd_missing="${fd_missing}${fd_missing:+,}${path}"
     fi
   done
+
+  if command -v timeout >/dev/null 2>&1; then
+    qmp_out="$(timeout 8 virsh -c "${FTCTL_PROFILE_PRIMARY_URI}" qemu-monitor-command "${vm}" --pretty '{"execute":"query-named-block-nodes"}' 2>/dev/null)" || qmp_rc=$?
+  else
+    qmp_out="$(virsh -c "${FTCTL_PROFILE_PRIMARY_URI}" qemu-monitor-command "${vm}" --pretty '{"execute":"query-named-block-nodes"}' 2>/dev/null)" || qmp_rc=$?
+  fi
+  if [[ "${qmp_rc}" == "0" && -n "${qmp_out}" ]]; then
+    qmp_checked="yes"
+    for path in "${paths[@]}"; do
+      [[ -n "${path}" ]] || continue
+      if [[ "${qmp_out}" != *"${path}"* ]]; then
+        qmp_missing="${qmp_missing}${qmp_missing:+,}${path}"
+      fi
+    done
+  else
+    qmp_checked="unavailable:${qmp_rc}"
+  fi
 
   ftctl_state_set "${vm}" \
     "xcolo_primary_krbd_qemu_namespace_phase=${phase}" \
     "xcolo_primary_krbd_qemu_namespace_pid=${qemu_pid}" \
     "xcolo_primary_krbd_qemu_namespace_count=${count}" \
     "xcolo_primary_krbd_qemu_namespace_visible_paths=$(ftctl_xcolo_compact_log_value "${visible}")" \
-    "xcolo_primary_krbd_qemu_namespace_missing_paths=$(ftctl_xcolo_compact_log_value "${missing}")"
+    "xcolo_primary_krbd_qemu_namespace_missing_paths=$(ftctl_xcolo_compact_log_value "${missing}")" \
+    "xcolo_primary_krbd_qemu_fd_open_paths=$(ftctl_xcolo_compact_log_value "${fd_open}")" \
+    "xcolo_primary_krbd_qemu_fd_missing_paths=$(ftctl_xcolo_compact_log_value "${fd_missing}")" \
+    "xcolo_primary_krbd_qmp_checked=${qmp_checked}" \
+    "xcolo_primary_krbd_qmp_missing_paths=$(ftctl_xcolo_compact_log_value "${qmp_missing}")"
 
-  if [[ -n "${missing}" ]]; then
+  if [[ -n "${fd_missing}" ]]; then
     ftctl_state_set "${vm}" \
       "xcolo_primary_krbd_qemu_namespace_visible=no" \
-      "last_error=xcolo_primary_krbd_qemu_namespace_invisible"
+      "xcolo_primary_krbd_qemu_fd_open=no" \
+      "last_error=xcolo_primary_krbd_open_fd_missing"
     ftctl_log_event "colo" "xcolo.primary_krbd_qemu_namespace" "fail" "${vm}" "" \
-      "phase=${phase} qemu_pid=${qemu_pid} visible=$(ftctl_xcolo_compact_log_value "${visible}") missing=$(ftctl_xcolo_compact_log_value "${missing}")"
+      "phase=${phase} qemu_pid=${qemu_pid} visible=$(ftctl_xcolo_compact_log_value "${visible}") fd_open=$(ftctl_xcolo_compact_log_value "${fd_open}") fd_missing=$(ftctl_xcolo_compact_log_value "${fd_missing}") namespace_missing=$(ftctl_xcolo_compact_log_value "${missing}")"
     return 1
   fi
 
-  ftctl_state_set "${vm}" "xcolo_primary_krbd_qemu_namespace_visible=yes"
-  ftctl_log_event "colo" "xcolo.primary_krbd_qemu_namespace" "ok" "${vm}" "" \
-    "phase=${phase} qemu_pid=${qemu_pid} visible=$(ftctl_xcolo_compact_log_value "${visible}")"
-}
+  if [[ "${qmp_checked}" == "yes" && -n "${qmp_missing}" ]]; then
+    ftctl_state_set "${vm}" \
+      "xcolo_primary_krbd_qemu_namespace_visible=$( [[ -n "${missing}" ]] && printf fd || printf yes )" \
+      "xcolo_primary_krbd_qemu_fd_open=yes" \
+      "last_error=xcolo_primary_krbd_qmp_node_missing"
+    ftctl_log_event "colo" "xcolo.primary_krbd_qemu_namespace" "fail" "${vm}" "" \
+      "phase=${phase} qemu_pid=${qemu_pid} qmp_missing=$(ftctl_xcolo_compact_log_value "${qmp_missing}") fd_open=$(ftctl_xcolo_compact_log_value "${fd_open}") visible=$(ftctl_xcolo_compact_log_value "${visible}")"
+    return 1
+  fi
 
+  ftctl_state_set "${vm}" \
+    "xcolo_primary_krbd_qemu_namespace_visible=$( [[ -n "${missing}" ]] && printf fd || printf yes )" \
+    "xcolo_primary_krbd_qemu_fd_open=yes"
+  ftctl_log_event "colo" "xcolo.primary_krbd_qemu_namespace" "ok" "${vm}" "" \
+    "phase=${phase} qemu_pid=${qemu_pid} visible=$(ftctl_xcolo_compact_log_value "${visible}") fd_open=$(ftctl_xcolo_compact_log_value "${fd_open}") namespace_missing=$(ftctl_xcolo_compact_log_value "${missing}") qmp=${qmp_checked}"
+}
 ftctl_xcolo_classify_primary_create_error() {
   local err_summary="${1-}"
   local out_var="${2}"
