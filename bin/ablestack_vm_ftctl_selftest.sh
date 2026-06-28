@@ -2388,6 +2388,60 @@ selftest_case_xcolo_baseline_seed_uses_primary_nbd_before_runtime_graph() (
     "baseline seed state"
 )
 
+selftest_case_xcolo_primary_parent_nbd_qemu_user_probe() (
+  selftest_reset_env
+  selftest_info "x-colo primary parent NBD adapter is probed with the libvirt qemu user"
+
+  local vm="i-2-test-VM" call_log="${SELFTEST_ROOT}/xcolo-parent-nbd-qemu-user.log"
+  local fakebin="${SELFTEST_ROOT}/fakebin"
+  local rc=0
+  mkdir -p "${fakebin}"
+  printf '#!/bin/sh\nexit 0\n' > "${fakebin}/qemu-img"
+  printf '#!/bin/sh\nexit 0\n' > "${fakebin}/runuser"
+  chmod +x "${fakebin}/qemu-img" "${fakebin}/runuser"
+  PATH="${fakebin}:${PATH}"
+  ftctl_state_init_vm "${vm}"
+
+  # shellcheck disable=SC2317
+  ftctl_xcolo_libvirt_qemu_identity() {
+    printf -v "$1" '%s' "qemu"
+    printf -v "$2" '%s' "qemu"
+  }
+  # shellcheck disable=SC2317
+  ftctl_cmd_run() {
+    local _timeout="$1" out_var="$2" err_var="$3" rc_var="$4"
+    shift 4
+    [[ "${1-}" == "--" ]] && shift
+    : "${_timeout}"
+    printf 'CMD:%s\n' "$*" >> "${call_log}"
+    printf -v "${out_var}" '%s' ""
+    printf -v "${err_var}" '%s' ""
+    printf -v "${rc_var}" '%s' "0"
+  }
+
+  ftctl_xcolo_probe_parent_nbd_as_qemu_user \
+    "${vm}" "sda" "/run/ablestack-vm-ftctl/xcolo-parent-nbd/${vm}/sda.sock" "ftctl-primary-parent-sda"
+  selftest_assert_file_contains "${call_log}" "runuser -u qemu -- qemu-img info --force-share nbd+unix:///ftctl-primary-parent-sda?socket=/run/ablestack-vm-ftctl/xcolo-parent-nbd/${vm}/sda.sock"
+
+  # shellcheck disable=SC2317
+  ftctl_cmd_run() {
+    local _timeout="$1" out_var="$2" err_var="$3" rc_var="$4"
+    shift 4
+    [[ "${1-}" == "--" ]] && shift
+    : "${_timeout}"
+    printf 'FAILCMD:%s\n' "$*" >> "${call_log}"
+    printf -v "${out_var}" '%s' ""
+    printf -v "${err_var}" '%s' "Permission denied"
+    printf -v "${rc_var}" '%s' "1"
+  }
+
+  ftctl_xcolo_probe_parent_nbd_as_qemu_user \
+    "${vm}" "sda" "/run/ablestack-vm-ftctl/xcolo-parent-nbd/${vm}/sda.sock" "ftctl-primary-parent-sda" || rc=$?
+  selftest_assert_eq "${rc}" "1" "qemu-user parent NBD probe failure should fail hard"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" "xcolo_primary_parent_nbd_permission_failed" \
+    "qemu-user parent NBD probe last_error"
+)
+
 selftest_case_xcolo_baseline_seed_maps_cloud_managed_rbd() (
   selftest_reset_env
   selftest_info "x-colo baseline seed maps cloud-managed secondary RBD targets"
@@ -5831,6 +5885,7 @@ selftest_main() {
   selftest_case_xcolo_startup_disk_graph_allows_explicit_krbd_backend
   selftest_case_xcolo_startup_disk_graph_allows_explicit_librbd_backend
   selftest_case_xcolo_baseline_seed_uses_primary_nbd_before_runtime_graph
+  selftest_case_xcolo_primary_parent_nbd_qemu_user_probe
   selftest_case_xcolo_baseline_seed_maps_cloud_managed_rbd
   selftest_case_xcolo_secondary_runtime_maps_cloud_managed_rbd
   selftest_case_xcolo_stable_rbd_contract_remaps_cloud_paths

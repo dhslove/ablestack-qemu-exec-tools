@@ -2329,3 +2329,47 @@ Notes:
   - after source-host recovery and cooldown, `failback --force` returned the pair to `active_side=primary`
   - final state returned to `protected / mirroring`
 ```
+
+## Test ID: FT-XCOLO-R97-LINK-02-20260628-1311
+Area: FT XCOLO KRBD primary parent via local NBD adapter
+
+Environment:
+- Cluster: 10.10.32.x
+- Primary VM: 97-link-02 / i-2-197-VM
+- Primary Host: 10.10.32.3 / blecube32-3
+- Standby VM created by Cloud: 97-link-02-standby / i-2-223-VM
+- Standby Host: 10.10.32.1
+- Backend: FT emote-nbd, primary parent KRBD exposed through local Unix NBD adapter
+- Target storage: blecube32-1-local-4fd4a520
+
+Procedure:
+- user started FT protection from Cloud UI
+- assistant monitored Cloud DB, primary generated XML, FTCTL events, and libvirt/QEMU logs
+
+Expected Result:
+- primary generated XML should use driver=nbd for primary KRBD parent adapters instead of direct /dev/rbd/... host-device parents
+- generated primary QEMU should pass listener startup, then proceed toward secondary/incoming and migration checks
+
+Actual Result:
+- Cloud row tctl_protection.id=153 entered error / failed
+- latest error: xcolo_primary_create_failed_before_listener
+- generated XML did contain driver=nbd and xcolo-parent-nbd entries for both disks
+- FTCTL events showed both xcolo.primary_parent_nbd.probe and xcolo.primary_parent_nbd.start succeeded for sda and sdb
+- libvirt/QEMU failed before listener open with:
+  - qemu-kvm: -blockdev driver=nbd,...server.path=/run/ablestack-vm-ftctl/xcolo-parent-nbd/i-2-197-VM/sda.sock,...: Could not open image: Permission denied
+- controlled smoke test on 10.10.32.3 reproduced the root cause:
+  - root qemu-img info nbd+unix://... succeeds against a default qemu-nbd socket
+  - unuser -u qemu -- qemu-img info nbd+unix://... fails while the socket is srwxr-xr-x root:root
+  - after chmod 777 on the Unix socket, the qemu-user probe succeeds
+
+Progress Assessment:
+- Improved versus previous KRBD ENOENT loop: generated primary XML no longer points QEMU directly at /dev/rbd/... for the parent backing nodes.
+- New blocker: the local NBD adapter socket is usable by root-only probes but not by the libvirt QEMU process user.
+- This is not a repeat of the /dev/rbd/... ENOENT failure; it is the next permission boundary exposed by the new NBD adapter path.
+
+Required Follow-up:
+- after starting each primary parent qemu-nbd adapter, FTCTL must make the Unix socket accessible to the libvirt QEMU process before generated primary irsh create
+- add a pre-create probe using the same runtime user model as libvirt QEMU, not only a root probe
+- fail early with a dedicated reason such as xcolo_primary_parent_nbd_permission_failed if the qemu-user probe cannot open the socket
+
+Status: FAIL

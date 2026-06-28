@@ -10969,6 +10969,122 @@ ftctl_xcolo_path_safe_name() {
   printf '%s' "${value}" | sed 's#[^A-Za-z0-9_.-]#_#g'
 }
 
+ftctl_xcolo_libvirt_qemu_identity() {
+  local out_user="${1-}"
+  local out_group="${2-}"
+  local conf="${FTCTL_LIBVIRT_QEMU_CONF:-/etc/libvirt/qemu.conf}"
+  local qemu_user="${FTCTL_LIBVIRT_QEMU_USER:-qemu}"
+  local qemu_group="${FTCTL_LIBVIRT_QEMU_GROUP:-qemu}"
+  local parsed
+
+  if [[ -r "${conf}" ]]; then
+    parsed="$(awk -F= '
+      /^[[:space:]]*#/ { next }
+      /^[[:space:]]*user[[:space:]]*=/ {
+        value=$2
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+        gsub(/^"|"$/, "", value)
+        print value
+        exit
+      }
+    ' "${conf}" 2>/dev/null || true)"
+    [[ -n "${parsed}" ]] && qemu_user="${parsed}"
+    parsed="$(awk -F= '
+      /^[[:space:]]*#/ { next }
+      /^[[:space:]]*group[[:space:]]*=/ {
+        value=$2
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+        gsub(/^"|"$/, "", value)
+        print value
+        exit
+      }
+    ' "${conf}" 2>/dev/null || true)"
+    [[ -n "${parsed}" ]] && qemu_group="${parsed}"
+  fi
+
+  if ! getent passwd "${qemu_user}" >/dev/null 2>&1; then
+    qemu_user="qemu"
+  fi
+  if ! getent group "${qemu_group}" >/dev/null 2>&1; then
+    qemu_group="${qemu_user}"
+  fi
+  if ! getent passwd "${qemu_user}" >/dev/null 2>&1; then
+    return 1
+  fi
+
+  printf -v "${out_user}" '%s' "${qemu_user}"
+  printf -v "${out_group}" '%s' "${qemu_group}"
+}
+
+ftctl_xcolo_fix_parent_nbd_socket_permissions() {
+  local vm="${1-}"
+  local target="${2-}"
+  local socket_path="${3-}"
+  local dir="${4-}"
+  local qemu_user="" qemu_group="" base_dir
+
+  [[ -n "${vm}" && -n "${target}" && -n "${socket_path}" && -n "${dir}" ]] || return 1
+  [[ -S "${socket_path}" ]] || return 1
+
+  if ! ftctl_xcolo_libvirt_qemu_identity qemu_user qemu_group; then
+    ftctl_log_event "colo" "xcolo.primary_parent_nbd.permission" "warn" "${vm}" "" \
+      "target=${target} socket=${socket_path} reason=qemu_identity_unresolved"
+    return 0
+  fi
+
+  base_dir="$(dirname "${dir}")"
+  if getent group "${qemu_group}" >/dev/null 2>&1; then
+    chgrp "${qemu_group}" "${base_dir}" "${dir}" "${socket_path}" >/dev/null 2>&1 || true
+    chmod 0750 "${base_dir}" >/dev/null 2>&1 || true
+    chmod 0770 "${dir}" >/dev/null 2>&1 || true
+    chmod 0660 "${socket_path}" >/dev/null 2>&1 || true
+  fi
+
+  if command -v setfacl >/dev/null 2>&1; then
+    setfacl -m "u:${qemu_user}:rx" "${base_dir}" >/dev/null 2>&1 || true
+    setfacl -m "u:${qemu_user}:rwx" "${dir}" >/dev/null 2>&1 || true
+    setfacl -m "u:${qemu_user}:rw" "${socket_path}" >/dev/null 2>&1 || true
+  fi
+
+  ftctl_log_event "colo" "xcolo.primary_parent_nbd.permission" "ok" "${vm}" "" \
+    "target=${target} socket=${socket_path} user=${qemu_user} group=${qemu_group}"
+}
+
+ftctl_xcolo_probe_parent_nbd_as_qemu_user() {
+  local vm="${1-}"
+  local target="${2-}"
+  local socket_path="${3-}"
+  local export_name="${4-}"
+  local qemu_user="" qemu_group="" out="" err="" rc=0 uri opts
+
+  [[ -n "${vm}" && -n "${target}" && -n "${socket_path}" && -n "${export_name}" ]] || return 1
+  command -v qemu-img >/dev/null 2>&1 || return 0
+  command -v runuser >/dev/null 2>&1 || return 0
+  ftctl_xcolo_libvirt_qemu_identity qemu_user qemu_group || return 0
+  : "${qemu_group}"
+
+  uri="nbd+unix:///${export_name}?socket=${socket_path}"
+  ftctl_cmd_run "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC:-15}" out err rc -- \
+    runuser -u "${qemu_user}" -- qemu-img info --force-share "${uri}" || true
+  if [[ "${rc}" != "0" ]]; then
+    out=""
+    err=""
+    rc=0
+    opts="driver=nbd,server.type=unix,server.path=${socket_path},export=${export_name}"
+    ftctl_cmd_run "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC:-15}" out err rc -- \
+      runuser -u "${qemu_user}" -- qemu-img info --force-share --image-opts "${opts}" || true
+  fi
+  if [[ "${rc}" != "0" ]]; then
+    ftctl_state_set "${vm}" "last_error=xcolo_primary_parent_nbd_permission_failed"
+    ftctl_log_event "colo" "xcolo.primary_parent_nbd.qemu_user_probe" "fail" "${vm}" "${rc}" \
+      "target=${target} socket=${socket_path} export=${export_name} user=${qemu_user} error=$(ftctl_xcolo_compact_log_value "${err:-${out}}")"
+    return 1
+  fi
+
+  ftctl_log_event "colo" "xcolo.primary_parent_nbd.qemu_user_probe" "ok" "${vm}" "" \
+    "target=${target} socket=${socket_path} export=${export_name} user=${qemu_user}"
+}
+
 ftctl_xcolo_stop_primary_parent_nbd_adapters() {
   local vm="${1-}"
   local reason="${2:-release}"
@@ -11074,7 +11190,9 @@ ftctl_xcolo_start_primary_parent_nbd_adapter() {
     [[ -S "${socket_path}" ]] && break
     sleep 1
   done
+  ftctl_xcolo_fix_parent_nbd_socket_permissions "${vm}" "${target}" "${socket_path}" "${dir}" || return $?
   ftctl_xcolo_probe_primary_parent_nbd_adapter "${vm}" "${target}" "${socket_path}" "${export_name}" || return $?
+  ftctl_xcolo_probe_parent_nbd_as_qemu_user "${vm}" "${target}" "${socket_path}" "${export_name}" || return $?
 
   ftctl_log_event "colo" "xcolo.primary_parent_nbd.start" "ok" "${vm}" ""     "phase=${phase} target=${target} krbd=${krbd_path} socket=${socket_path} export=${export_name} pid=$(cat "${pid_file}" 2>/dev/null || true)"
   printf -v "${out_var}" '%s|%s|%s' "${krbd_path}" "${socket_path}" "${export_name}"
