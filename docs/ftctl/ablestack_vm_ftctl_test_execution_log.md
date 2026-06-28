@@ -2415,3 +2415,15 @@ Required Follow-up:
 - add a selftest that calls the resolver with same-named caller locals to prevent repeating this loop
 
 Status: FAIL
+
+## 2026-06-28 - FT r97-link-02 Native RBD Runtime Backend Change
+
+- Retest row 155 failed during generated primary creation before listener open.
+- Primary QEMU log reported `Could not open image: Permission denied` for the
+  local parent NBD adapter socket under `/run/ablestack-vm-ftctl/xcolo-parent-nbd`.
+- SELinux was permissive and qemu-user probe had passed; the failure is treated
+  as a libvirt/qemu-commandline resource modeling problem rather than simple
+  file mode failure.
+- Design `430-ft-xcolo-native-rbd-runtime-backend-design-20260628.md` changes
+  FT/XCOLO RBD runtime default from KRBD/NBD adapter to native librbd while
+  preserving Cloud/libvirt KRBD inventory semantics.

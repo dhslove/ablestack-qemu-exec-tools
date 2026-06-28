@@ -1,5 +1,11 @@
 # FT XCOLO KRBD commandline backend contract - 2026-06-26
 
+> Superseded for FT/XCOLO runtime by
+> `430-ft-xcolo-native-rbd-runtime-backend-design-20260628.md`.
+> This document is retained as historical context for the earlier KRBD-default
+> decision.  Current FT runtime defaults to native librbd while Cloud/libvirt
+> inventory and normal VM operation still use stable KRBD paths.
+
 ## Background
 
 ABLESTACK manages RBD-backed VM disks through the stable KRBD path:

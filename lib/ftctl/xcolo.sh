@@ -7453,7 +7453,7 @@ ftctl_xcolo_build_startup_disk_args() {
     return 2
   }
 
-  payload="$(XML_PATH="${xml_path}" ROLE="${role}" DISK_RUNTIME="${disk_runtime}" REFERENCE_QEMU_LOG="${reference_qemu_log}" XCOLO_RBD_COMMANDLINE_BACKEND="${FTCTL_XCOLO_RBD_COMMANDLINE_BACKEND:-krbd}" XCOLO_PRIMARY_PARENT_NBD_MAP="${primary_parent_nbd_map}" python3 - <<'PY'
+  payload="$(XML_PATH="${xml_path}" ROLE="${role}" DISK_RUNTIME="${disk_runtime}" REFERENCE_QEMU_LOG="${reference_qemu_log}" XCOLO_RBD_COMMANDLINE_BACKEND="${FTCTL_XCOLO_RBD_COMMANDLINE_BACKEND:-librbd}" XCOLO_PRIMARY_PARENT_NBD_MAP="${primary_parent_nbd_map}" python3 - <<'PY'
 import json
 import os
 import re
@@ -7465,7 +7465,7 @@ xml_path = os.environ["XML_PATH"]
 role = os.environ["ROLE"]
 runtime_raw = os.environ.get("DISK_RUNTIME", "")
 reference_qemu_log = os.environ.get("REFERENCE_QEMU_LOG", "")
-rbd_commandline_backend = (os.environ.get("XCOLO_RBD_COMMANDLINE_BACKEND") or "krbd").strip().lower()
+rbd_commandline_backend = (os.environ.get("XCOLO_RBD_COMMANDLINE_BACKEND") or "librbd").strip().lower()
 if rbd_commandline_backend not in {"librbd", "krbd"}:
     raise SystemExit(f"unsupported x-colo RBD commandline backend: {rbd_commandline_backend}")
 primary_parent_nbd_map = {}
@@ -8586,7 +8586,7 @@ ftctl_xcolo_apply_startup_disk_graphs() {
   local primary_net_args="${5-}"
   local secondary_net_args="${6-}"
   local primary_disk_args secondary_disk_args reference_qemu_log
-  local primary_args secondary_args rbd_backend primary_parent_nbd_map
+  local primary_args secondary_args rbd_backend primary_parent_nbd_map startup_parent_backend
 
   [[ -n "${vm}" && -f "${primary_xml}" && -f "${secondary_xml}" && -n "${disk_runtime}" ]] || return 1
 
@@ -8602,8 +8602,14 @@ ftctl_xcolo_apply_startup_disk_graphs() {
   reference_qemu_log="/var/log/libvirt/qemu/${vm}.log"
   rbd_backend="$(ftctl_xcolo_rbd_commandline_backend)"
   primary_parent_nbd_map=""
+  startup_parent_backend="direct"
   if [[ "${rbd_backend}" == "krbd" ]]; then
     ftctl_xcolo_prepare_primary_parent_nbd_adapters "${vm}" "${disk_runtime}" primary_parent_nbd_map "startup_disk_graph" || return $?
+    [[ -n "${primary_parent_nbd_map}" ]] && startup_parent_backend="krbd-nbd-adapter"
+  elif [[ "${rbd_backend}" == "librbd" ]]; then
+    startup_parent_backend="native-rbd"
+    ftctl_state_set "${vm}"       "xcolo_primary_parent_nbd_adapter=disabled"       "xcolo_primary_parent_nbd_adapter_count=0"
+    ftctl_log_event "colo" "xcolo.primary_parent_nbd.prepare" "skip" "${vm}" ""       "phase=startup_disk_graph reason=native_rbd_runtime_backend"
   fi
   ftctl_xcolo_build_startup_disk_args "${primary_xml}" "primary" "${disk_runtime}" primary_disk_args "${reference_qemu_log}" "${primary_parent_nbd_map}" || return 1
   ftctl_xcolo_build_startup_disk_args "${secondary_xml}" "secondary" "${disk_runtime}" secondary_disk_args "${reference_qemu_log}" || return 1
@@ -8695,7 +8701,7 @@ ftctl_xcolo_apply_startup_disk_graphs() {
   ftctl_state_set "${vm}" \
     "xcolo_startup_disk_graph=enabled" \
     "xcolo_startup_disk_backend=${rbd_backend}-rbd-or-file" \
-    "xcolo_startup_disk_parent_backend=$( [[ -n "${primary_parent_nbd_map}" ]] && printf krbd-nbd-adapter || printf direct )" \
+    "xcolo_startup_disk_parent_backend=${startup_parent_backend}" \
     "xcolo_rbd_commandline_backend=${rbd_backend}" \
     "xcolo_startup_disk_graph_runtime=${disk_runtime}" \
     "primary_qemu_args=${primary_args}" \
@@ -13198,6 +13204,11 @@ ftctl_xcolo_prepare_secondary_runtime_rbd() {
 
   [[ "${FTCTL_PROFILE_PROVISIONING_BACKEND:-libvirt-managed}" == "cloud-managed" ]] || return 0
   [[ -n "${xml_path}" && -f "${xml_path}" && -n "${disk_plan}" ]] || return 0
+  if [[ "$(ftctl_xcolo_rbd_commandline_backend)" == "librbd" ]]; then
+    ftctl_state_set "${vm}"       "xcolo_secondary_runtime_rbd_prepared=skipped_native_rbd"       "xcolo_secondary_runtime_rbd_backend=native-rbd"
+    ftctl_log_event "colo" "block_conversion.secondary_runtime_rbd_prepare" "skip" "${vm}" ""       "backend=native-rbd reason=qemu_librbd_runtime"
+    return 0
+  fi
 
   IFS=';' read -r -a runtime_disk_entries <<< "${disk_plan}"
   for entry in "${runtime_disk_entries[@]}"; do
@@ -13298,12 +13309,37 @@ EOF
   fi
 }
 
+ftctl_xcolo_verify_qemu_librbd_backend_remote() {
+  local host="${1-}"
+  local user="${2-}"
+  local path="${3-}"
+  local spec="" q_spec="" q_uri="" remote_cmd="" out="" err="" rc=0
+
+  ftctl_blockcopy_krbd_spec_from_path "${path}" spec || return 1
+  printf -v q_spec '%q' "${spec}"
+  printf -v q_uri '%q' "rbd:${spec}"
+  remote_cmd="$(cat <<EOF
+set -euo pipefail
+command -v rbd >/dev/null 2>&1
+command -v qemu-img >/dev/null 2>&1
+rbd info ${q_spec} >/dev/null
+qemu-img info --force-share --output=json ${q_uri} >/dev/null
+EOF
+)"
+  ftctl_blockcopy_remote_exec "${host}" "${user}" out err rc "${remote_cmd}" || true
+  : "${out}"
+  if [[ "${rc}" != "0" ]]; then
+    echo "ERROR: remote qemu-img cannot open native RBD startup backend rbd:${spec}: ${err}" >&2
+    return "${rc}"
+  fi
+}
+
 ftctl_xcolo_rbd_commandline_backend() {
-  local backend="${FTCTL_XCOLO_RBD_COMMANDLINE_BACKEND:-krbd}"
+  local backend="${FTCTL_XCOLO_RBD_COMMANDLINE_BACKEND:-librbd}"
   backend="$(printf '%s' "${backend}" | tr '[:upper:]' '[:lower:]')"
   case "${backend}" in
     krbd|librbd) ;;
-    *) backend="krbd" ;;
+    *) backend="librbd" ;;
   esac
   printf '%s\n' "${backend}"
 }
@@ -13605,24 +13641,33 @@ ftctl_xcolo_verify_stable_rbd_contract() {
           continue
         }
       fi
-      map_msg="$(ftctl_blockcopy_map_remote_krbd_path "${host}" "${user}" "${secondary_dest}" 2>&1)" || {
-        ready="no"
-        reason="${reason:+${reason},}secondary_${target}_stable_rbd_unmapped"
-        state_args+=("xcolo_${phase_key}_rbd_secondary_${suffix}=fail:${secondary_dest}")
-        ftctl_log_event "colo" "xcolo.rbd_contract.secondary" "fail" "${vm}" "" \
-          "phase=${phase} target=${target} stable_path=${secondary_dest} error=$(ftctl_xcolo_compact_log_value "${map_msg}")"
-        continue
-      }
       state_args+=("xcolo_${phase_key}_rbd_secondary_${suffix}=ok:${secondary_dest}")
-      backend_msg="$(ftctl_xcolo_verify_qemu_rbd_backend_remote "${host}" "${user}" "${secondary_dest}" 2>&1)" || {
-        ready="no"
-        reason="${reason:+${reason},}secondary_${target}_stable_krbd_backend_unavailable"
-        state_args+=("xcolo_${phase_key}_rbd_secondary_backend_${suffix}=fail:${secondary_dest}")
-        ftctl_log_event "colo" "xcolo.rbd_backend.secondary" "fail" "${vm}" "" \
-          "phase=${phase} target=${target} path=${secondary_dest} error=$(ftctl_xcolo_compact_log_value "${backend_msg}")"
-        continue
-      }
-      state_args+=("xcolo_${phase_key}_rbd_secondary_backend_${suffix}=ok:${secondary_dest}")
+      if [[ "${backend}" == "krbd" ]]; then
+        map_msg="$(ftctl_blockcopy_map_remote_krbd_path "${host}" "${user}" "${secondary_dest}" 2>&1)" || {
+          ready="no"
+          reason="${reason:+${reason},}secondary_${target}_stable_rbd_unmapped"
+          state_args+=("xcolo_${phase_key}_rbd_secondary_${suffix}=fail:${secondary_dest}")
+          ftctl_log_event "colo" "xcolo.rbd_contract.secondary" "fail" "${vm}" ""             "phase=${phase} target=${target} stable_path=${secondary_dest} backend=${backend} error=$(ftctl_xcolo_compact_log_value "${map_msg}")"
+          continue
+        }
+        backend_msg="$(ftctl_xcolo_verify_qemu_rbd_backend_remote "${host}" "${user}" "${secondary_dest}" 2>&1)" || {
+          ready="no"
+          reason="${reason:+${reason},}secondary_${target}_stable_krbd_backend_unavailable"
+          state_args+=("xcolo_${phase_key}_rbd_secondary_backend_${suffix}=fail:${secondary_dest}")
+          ftctl_log_event "colo" "xcolo.rbd_backend.secondary" "fail" "${vm}" ""             "phase=${phase} target=${target} path=${secondary_dest} backend=${backend} error=$(ftctl_xcolo_compact_log_value "${backend_msg}")"
+          continue
+        }
+        state_args+=("xcolo_${phase_key}_rbd_secondary_backend_${suffix}=ok:${secondary_dest}")
+      else
+        backend_msg="$(ftctl_xcolo_verify_qemu_librbd_backend_remote "${host}" "${user}" "${secondary_dest}" 2>&1)" || {
+          ready="no"
+          reason="${reason:+${reason},}secondary_${target}_native_rbd_backend_unavailable"
+          state_args+=("xcolo_${phase_key}_rbd_secondary_backend_${suffix}=fail:rbd")
+          ftctl_log_event "colo" "xcolo.rbd_backend.secondary" "fail" "${vm}" ""             "phase=${phase} target=${target} path=${secondary_dest} backend=${backend} error=$(ftctl_xcolo_compact_log_value "${backend_msg}")"
+          continue
+        }
+        state_args+=("xcolo_${phase_key}_rbd_secondary_backend_${suffix}=ok:rbd")
+      fi
     fi
   done
 
