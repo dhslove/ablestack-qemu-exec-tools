@@ -10973,9 +10973,11 @@ ftctl_xcolo_libvirt_qemu_identity() {
   local out_user="${1-}"
   local out_group="${2-}"
   local conf="${FTCTL_LIBVIRT_QEMU_CONF:-/etc/libvirt/qemu.conf}"
-  local qemu_user="${FTCTL_LIBVIRT_QEMU_USER:-qemu}"
-  local qemu_group="${FTCTL_LIBVIRT_QEMU_GROUP:-qemu}"
+  local resolved_user="${FTCTL_LIBVIRT_QEMU_USER:-qemu}"
+  local resolved_group="${FTCTL_LIBVIRT_QEMU_GROUP:-qemu}"
   local parsed
+
+  [[ -n "${out_user}" && -n "${out_group}" ]] || return 1
 
   if [[ -r "${conf}" ]]; then
     parsed="$(awk -F= '
@@ -10988,7 +10990,7 @@ ftctl_xcolo_libvirt_qemu_identity() {
         exit
       }
     ' "${conf}" 2>/dev/null || true)"
-    [[ -n "${parsed}" ]] && qemu_user="${parsed}"
+    [[ -n "${parsed}" ]] && resolved_user="${parsed}"
     parsed="$(awk -F= '
       /^[[:space:]]*#/ { next }
       /^[[:space:]]*group[[:space:]]*=/ {
@@ -10999,21 +11001,30 @@ ftctl_xcolo_libvirt_qemu_identity() {
         exit
       }
     ' "${conf}" 2>/dev/null || true)"
-    [[ -n "${parsed}" ]] && qemu_group="${parsed}"
+    [[ -n "${parsed}" ]] && resolved_group="${parsed}"
   fi
 
-  if ! getent passwd "${qemu_user}" >/dev/null 2>&1; then
-    qemu_user="qemu"
+  if ! getent passwd "${resolved_user}" >/dev/null 2>&1; then
+    resolved_user="qemu"
   fi
-  if ! getent group "${qemu_group}" >/dev/null 2>&1; then
-    qemu_group="${qemu_user}"
+  if ! getent group "${resolved_group}" >/dev/null 2>&1; then
+    resolved_group="$(id -gn "${resolved_user}" 2>/dev/null || true)"
   fi
-  if ! getent passwd "${qemu_user}" >/dev/null 2>&1; then
+  if [[ -z "${resolved_group}" ]] || ! getent group "${resolved_group}" >/dev/null 2>&1; then
+    resolved_group="${resolved_user}"
+  fi
+  if [[ -z "${resolved_user}" || -z "${resolved_group}" ]]; then
+    return 1
+  fi
+  if ! getent passwd "${resolved_user}" >/dev/null 2>&1; then
+    return 1
+  fi
+  if ! getent group "${resolved_group}" >/dev/null 2>&1; then
     return 1
   fi
 
-  printf -v "${out_user}" '%s' "${qemu_user}"
-  printf -v "${out_group}" '%s' "${qemu_group}"
+  printf -v "${out_user}" '%s' "${resolved_user}"
+  printf -v "${out_group}" '%s' "${resolved_group}"
 }
 
 ftctl_xcolo_fix_parent_nbd_socket_permissions() {
@@ -11027,9 +11038,16 @@ ftctl_xcolo_fix_parent_nbd_socket_permissions() {
   [[ -S "${socket_path}" ]] || return 1
 
   if ! ftctl_xcolo_libvirt_qemu_identity qemu_user qemu_group; then
-    ftctl_log_event "colo" "xcolo.primary_parent_nbd.permission" "warn" "${vm}" "" \
+    ftctl_state_set "${vm}" "last_error=xcolo_primary_parent_nbd_identity_failed"
+    ftctl_log_event "colo" "xcolo.primary_parent_nbd.permission" "fail" "${vm}" "" \
       "target=${target} socket=${socket_path} reason=qemu_identity_unresolved"
-    return 0
+    return 1
+  fi
+  if [[ -z "${qemu_user}" || -z "${qemu_group}" ]]; then
+    ftctl_state_set "${vm}" "last_error=xcolo_primary_parent_nbd_identity_failed"
+    ftctl_log_event "colo" "xcolo.primary_parent_nbd.permission" "fail" "${vm}" "" \
+      "target=${target} socket=${socket_path} reason=qemu_identity_empty user=${qemu_user} group=${qemu_group}"
+    return 1
   fi
 
   base_dir="$(dirname "${dir}")"
@@ -11060,8 +11078,18 @@ ftctl_xcolo_probe_parent_nbd_as_qemu_user() {
   [[ -n "${vm}" && -n "${target}" && -n "${socket_path}" && -n "${export_name}" ]] || return 1
   command -v qemu-img >/dev/null 2>&1 || return 0
   command -v runuser >/dev/null 2>&1 || return 0
-  ftctl_xcolo_libvirt_qemu_identity qemu_user qemu_group || return 0
-  : "${qemu_group}"
+  if ! ftctl_xcolo_libvirt_qemu_identity qemu_user qemu_group; then
+    ftctl_state_set "${vm}" "last_error=xcolo_primary_parent_nbd_identity_failed"
+    ftctl_log_event "colo" "xcolo.primary_parent_nbd.qemu_user_probe" "fail" "${vm}" "" \
+      "target=${target} socket=${socket_path} export=${export_name} reason=qemu_identity_unresolved"
+    return 1
+  fi
+  if [[ -z "${qemu_user}" || -z "${qemu_group}" ]]; then
+    ftctl_state_set "${vm}" "last_error=xcolo_primary_parent_nbd_identity_failed"
+    ftctl_log_event "colo" "xcolo.primary_parent_nbd.qemu_user_probe" "fail" "${vm}" "" \
+      "target=${target} socket=${socket_path} export=${export_name} reason=qemu_identity_empty user=${qemu_user} group=${qemu_group}"
+    return 1
+  fi
 
   uri="nbd+unix:///${export_name}?socket=${socket_path}"
   ftctl_cmd_run "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC:-15}" out err rc -- \
@@ -11082,7 +11110,7 @@ ftctl_xcolo_probe_parent_nbd_as_qemu_user() {
   fi
 
   ftctl_log_event "colo" "xcolo.primary_parent_nbd.qemu_user_probe" "ok" "${vm}" "" \
-    "target=${target} socket=${socket_path} export=${export_name} user=${qemu_user}"
+    "target=${target} socket=${socket_path} export=${export_name} user=${qemu_user} group=${qemu_group}"
 }
 
 ftctl_xcolo_stop_primary_parent_nbd_adapters() {

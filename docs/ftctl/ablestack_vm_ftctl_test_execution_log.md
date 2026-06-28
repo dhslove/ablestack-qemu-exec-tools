@@ -2335,12 +2335,12 @@ Area: FT XCOLO KRBD primary parent via local NBD adapter
 
 Environment:
 - Cluster: 10.10.32.x
-- Primary VM: 97-link-02 / i-2-197-VM
-- Primary Host: 10.10.32.3 / blecube32-3
-- Standby VM created by Cloud: 97-link-02-standby / i-2-223-VM
+- Primary VM: r97-link-02 / i-2-197-VM
+- Primary Host: 10.10.32.3 / ablecube32-3
+- Standby VM created by Cloud: r97-link-02-standby / i-2-223-VM
 - Standby Host: 10.10.32.1
-- Backend: FT emote-nbd, primary parent KRBD exposed through local Unix NBD adapter
-- Target storage: blecube32-1-local-4fd4a520
+- Backend: FT remote-nbd, primary parent KRBD exposed through local Unix NBD adapter
+- Target storage: ablecube32-1-local-4fd4a520
 
 Procedure:
 - user started FT protection from Cloud UI
@@ -2351,7 +2351,7 @@ Expected Result:
 - generated primary QEMU should pass listener startup, then proceed toward secondary/incoming and migration checks
 
 Actual Result:
-- Cloud row tctl_protection.id=153 entered error / failed
+- Cloud row ftctl_protection.id=153 entered error / failed
 - latest error: xcolo_primary_create_failed_before_listener
 - generated XML did contain driver=nbd and xcolo-parent-nbd entries for both disks
 - FTCTL events showed both xcolo.primary_parent_nbd.probe and xcolo.primary_parent_nbd.start succeeded for sda and sdb
@@ -2359,8 +2359,8 @@ Actual Result:
   - qemu-kvm: -blockdev driver=nbd,...server.path=/run/ablestack-vm-ftctl/xcolo-parent-nbd/i-2-197-VM/sda.sock,...: Could not open image: Permission denied
 - controlled smoke test on 10.10.32.3 reproduced the root cause:
   - root qemu-img info nbd+unix://... succeeds against a default qemu-nbd socket
-  - unuser -u qemu -- qemu-img info nbd+unix://... fails while the socket is srwxr-xr-x root:root
-  - after chmod 777 on the Unix socket, the qemu-user probe succeeds
+  - runuser -u qemu -- qemu-img info nbd+unix://... fails while the socket is srwxr-xr-x root:root
+  - after making the socket accessible to the qemu runtime user, the qemu-user probe succeeds
 
 Progress Assessment:
 - Improved versus previous KRBD ENOENT loop: generated primary XML no longer points QEMU directly at /dev/rbd/... for the parent backing nodes.
@@ -2368,8 +2368,50 @@ Progress Assessment:
 - This is not a repeat of the /dev/rbd/... ENOENT failure; it is the next permission boundary exposed by the new NBD adapter path.
 
 Required Follow-up:
-- after starting each primary parent qemu-nbd adapter, FTCTL must make the Unix socket accessible to the libvirt QEMU process before generated primary irsh create
+- after starting each primary parent qemu-nbd adapter, FTCTL must make the Unix socket accessible to the libvirt QEMU process before generated primary virsh create
 - add a pre-create probe using the same runtime user model as libvirt QEMU, not only a root probe
 - fail early with a dedicated reason such as xcolo_primary_parent_nbd_permission_failed if the qemu-user probe cannot open the socket
+
+Status: FAIL
+
+## Test ID: FT-XCOLO-R97-LINK-02-20260628-1400
+Area: FT XCOLO primary parent NBD qemu-user permission gate
+
+Environment:
+- Cluster: 10.10.32.x
+- Primary VM: r97-link-02 / i-2-197-VM
+- Primary Host: 10.10.32.3 / ablecube32-3
+- Standby VM created by Cloud: r97-link-02-standby / i-2-224-VM
+- Standby Host: 10.10.32.1
+- Backend: FT remote-nbd, primary parent KRBD exposed through local Unix NBD adapter
+
+Procedure:
+- user started FT protection from Cloud UI
+- assistant monitored Cloud DB, FTCTL events, state files, and libvirt logs
+
+Expected Result:
+- parent NBD socket permission correction should expose concrete qemu identity
+- qemu-user parent NBD probe should pass before primary generated virsh create
+
+Actual Result:
+- Cloud row ftctl_protection.id=154 entered error / failed
+- latest error: xcolo_primary_parent_nbd_permission_failed
+- baseline copy completed for both disks
+- startup overlay preparation completed for both disks
+- parent NBD root probe succeeded for sda
+- qemu-user probe failed before primary generated create:
+  - xcolo.primary_parent_nbd.permission result=ok user=
+  - xcolo.primary_parent_nbd.qemu_user_probe result=fail user=
+- rollback restored the primary VM to Running
+
+Progress Assessment:
+- Improved versus the previous run: FTCTL no longer waits until libvirt/QEMU create fails; it detects the problem before generated primary create.
+- The new failure exposed a Bash dynamic-scoping bug in the qemu identity resolver: caller locals named qemu_user/qemu_group shadowed helper locals with the same names, so printf -v wrote into the helper scope and returned empty values to the caller.
+- This is not a network, storage, or RBD regression. It is a local identity propagation bug in the new permission gate.
+
+Required Follow-up:
+- rename helper internal variables so caller variables named qemu_user/qemu_group are populated correctly
+- hard-fail empty qemu identity as xcolo_primary_parent_nbd_identity_failed
+- add a selftest that calls the resolver with same-named caller locals to prevent repeating this loop
 
 Status: FAIL

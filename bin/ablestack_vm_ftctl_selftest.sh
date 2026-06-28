@@ -2388,6 +2388,49 @@ selftest_case_xcolo_baseline_seed_uses_primary_nbd_before_runtime_graph() (
     "baseline seed state"
 )
 
+selftest_case_xcolo_libvirt_qemu_identity_avoids_local_name_collision() (
+  selftest_reset_env
+  selftest_info "x-colo libvirt qemu identity returns values to same-named caller locals"
+
+  local qemu_user="" qemu_group="" rc=0
+  local missing_user="" missing_group="" missing_rc=0
+
+  # shellcheck disable=SC2317
+  getent() {
+    case "${1-}:${2-}" in
+      passwd:qemu|group:qemu) return 0 ;;
+      *) return 1 ;;
+    esac
+  }
+  # shellcheck disable=SC2317
+  id() {
+    if [[ "${1-}" == "-gn" && "${2-}" == "qemu" ]]; then
+      printf '%s\n' "qemu"
+      return 0
+    fi
+    return 1
+  }
+
+  FTCTL_LIBVIRT_QEMU_USER="qemu"
+  FTCTL_LIBVIRT_QEMU_GROUP="qemu"
+  ftctl_xcolo_libvirt_qemu_identity qemu_user qemu_group || rc=$?
+  selftest_assert_eq "${rc}" "0" "qemu identity should resolve"
+  selftest_assert_eq "${qemu_user}" "qemu" "same-named caller qemu_user should be populated"
+  selftest_assert_eq "${qemu_group}" "qemu" "same-named caller qemu_group should be populated"
+
+  # shellcheck disable=SC2317
+  getent() {
+    return 1
+  }
+  missing_rc=0
+  FTCTL_LIBVIRT_QEMU_USER="missing-user"
+  FTCTL_LIBVIRT_QEMU_GROUP="missing-group"
+  ftctl_xcolo_libvirt_qemu_identity missing_user missing_group || missing_rc=$?
+  selftest_assert_eq "${missing_rc}" "1" "missing qemu identity should fail"
+  selftest_assert_eq "${missing_user}" "" "missing qemu user should stay empty"
+  selftest_assert_eq "${missing_group}" "" "missing qemu group should stay empty"
+)
+
 selftest_case_xcolo_primary_parent_nbd_qemu_user_probe() (
   selftest_reset_env
   selftest_info "x-colo primary parent NBD adapter is probed with the libvirt qemu user"
@@ -5885,6 +5928,7 @@ selftest_main() {
   selftest_case_xcolo_startup_disk_graph_allows_explicit_krbd_backend
   selftest_case_xcolo_startup_disk_graph_allows_explicit_librbd_backend
   selftest_case_xcolo_baseline_seed_uses_primary_nbd_before_runtime_graph
+  selftest_case_xcolo_libvirt_qemu_identity_avoids_local_name_collision
   selftest_case_xcolo_primary_parent_nbd_qemu_user_probe
   selftest_case_xcolo_baseline_seed_maps_cloud_managed_rbd
   selftest_case_xcolo_secondary_runtime_maps_cloud_managed_rbd
