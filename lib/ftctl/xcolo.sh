@@ -6877,18 +6877,32 @@ ftctl_xcolo_wait_pair_running() {
   return 1
 }
 
+ftctl_xcolo_secondary_domain_name() {
+  local vm="${1-}"
+  local secondary_vm
+
+  secondary_vm="$(ftctl_state_get "${vm}" "secondary_vm_name" 2>/dev/null || true)"
+  if [[ -z "${secondary_vm}" ]]; then
+    secondary_vm="$(ftctl_profile_secondary_vm_name_resolved "${vm}")"
+  fi
+  printf '%s\n' "${secondary_vm}"
+}
+
 ftctl_xcolo_prebuilt_secondary_stage() {
   local vm="${1-}"
   local nbd_host="${2-}"
   local nbd_port="${3-}"
+  local secondary_vm
 
-  ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_SECONDARY_URI}" "${vm}" \
+  secondary_vm="$(ftctl_xcolo_secondary_domain_name "${vm}")"
+
+  ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" \
     '{"execute":"qmp_capabilities"}' "colo" "secondary.qmp_capabilities" || return 1
-  ftctl_xcolo_set_and_verify_migrate_capabilities "${FTCTL_PROFILE_SECONDARY_URI}" "${vm}" "${vm}" "secondary" "secondary" || return 1
-  ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_SECONDARY_URI}" "${vm}" \
+  ftctl_xcolo_set_and_verify_migrate_capabilities "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" "${vm}" "secondary" "secondary" || return 1
+  ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" \
     "{\"execute\":\"nbd-server-start\",\"arguments\":{\"addr\":{\"type\":\"inet\",\"data\":{\"host\":\"${nbd_host}\",\"port\":\"${nbd_port}\"}}}}" \
     "colo" "secondary.nbd_server_start" || return 1
-  ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_SECONDARY_URI}" "${vm}" \
+  ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" \
     "{\"execute\":\"nbd-server-add\",\"arguments\":{\"device\":\"${FTCTL_PROFILE_XCOLO_PRIMARY_DISK_NODE}\",\"writable\":true}}" \
     "colo" "secondary.nbd_server_add" || return 1
 }
@@ -6897,6 +6911,9 @@ ftctl_xcolo_prebuilt_primary_stage() {
   local vm="${1-}"
   local nbd_host="${2-}"
   local nbd_port="${3-}"
+  local secondary_vm
+
+  secondary_vm="$(ftctl_xcolo_secondary_domain_name "${vm}")"
 
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
     '{"execute":"qmp_capabilities"}' "colo" "primary.qmp_capabilities" || return 1
@@ -6910,16 +6927,16 @@ ftctl_xcolo_prebuilt_primary_stage() {
   ftctl_xcolo_require_checkpoint_delay_before_migrate "${vm}" || return 1
   ftctl_xcolo_record_pre_migrate_evidence "${vm}" "on" || true
   ftctl_xcolo_preflight_firewall_contract "${vm}" || return 1
-  ftctl_xcolo_require_secondary_startup_materialization_gate "${vm}" "${vm}" "secondary_startup_materialization" || return 1
-  ftctl_xcolo_secondary_accept_deferred_incoming "${vm}" "${vm}" "pre_migrate" || return 1
-  ftctl_xcolo_require_pre_migrate_receiver_ready "${vm}" "${vm}" "pre_migrate_receiver" || return 1
-  ftctl_xcolo_require_pre_migrate_runtime_topology_gate "${vm}" "${vm}" "before_migrate" || return 1
+  ftctl_xcolo_require_secondary_startup_materialization_gate "${vm}" "${secondary_vm}" "secondary_startup_materialization" || return 1
+  ftctl_xcolo_secondary_accept_deferred_incoming "${vm}" "${secondary_vm}" "pre_migrate" || return 1
+  ftctl_xcolo_require_pre_migrate_receiver_ready "${vm}" "${secondary_vm}" "pre_migrate_receiver" || return 1
+  ftctl_xcolo_require_pre_migrate_runtime_topology_gate "${vm}" "${secondary_vm}" "before_migrate" || return 1
   ftctl_xcolo_record_pre_migrate_materialization_result "${vm}"
-  ftctl_xcolo_gate_before_guest_traffic "${vm}" "${vm}" || return 1
+  ftctl_xcolo_gate_before_guest_traffic "${vm}" "${secondary_vm}" || return 1
   ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" \
     "{\"execute\":\"migrate\",\"arguments\":{\"uri\":\"${FTCTL_PROFILE_XCOLO_MIGRATE_URI}\"}}" \
     "colo" "primary.migrate" || return 1
-  ftctl_xcolo_activate_primary_filters_after_migrate "${vm}" "${vm}" || return 1
+  ftctl_xcolo_activate_primary_filters_after_migrate "${vm}" "${secondary_vm}" || return 1
 }
 
 ftctl_xcolo_primary_domain_state() {
@@ -8750,7 +8767,7 @@ EOF
 
 ftctl_xcolo_backup_prebuilt_pair_xml() {
   local vm="${1-}"
-  local bundle_dir primary_xml standby_xml meta_file out err rc checksum persistence
+  local bundle_dir primary_xml standby_xml meta_file out err rc checksum persistence secondary_vm
 
   bundle_dir="$(ftctl_inventory_xml_backup_path "${vm}")"
   ftctl_ensure_dir "${bundle_dir}" "0755"
@@ -8766,10 +8783,11 @@ ftctl_xcolo_backup_prebuilt_pair_xml() {
   [[ "${rc}" == "0" ]] || return "${rc}"
   printf '%s\n' "${out}" > "${primary_xml}"
 
+  secondary_vm="$(ftctl_xcolo_secondary_domain_name "${vm}")"
   out=""
   err=""
   rc=0
-  ftctl_virsh "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC}" out err rc -- -c "${FTCTL_PROFILE_SECONDARY_URI}" dumpxml --security-info "${vm}" || true
+  ftctl_virsh "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC}" out err rc -- -c "${FTCTL_PROFILE_SECONDARY_URI}" dumpxml --security-info "${secondary_vm}" || true
   : "${err}"
   [[ "${rc}" == "0" ]] || return "${rc}"
   printf '%s\n' "${out}" > "${standby_xml}"
@@ -14370,11 +14388,70 @@ ftctl_xcolo_detect_block_backed_ft() {
   [[ "${dtype}" == "block" ]]
 }
 
+ftctl_xcolo_detect_cold_conversion_ft() {
+  local vm="${1-}"
+  local out_kind_var="${2}"
+  local out_target_var="${3}"
+  local out_source_var="${4}"
+  local out_format_var="${5}"
+  local disks=()
+  local first entry rest target source format dtype file_qcow2_allowed
+
+  printf -v "${out_kind_var}" '%s' "unknown"
+  printf -v "${out_target_var}" '%s' ""
+  printf -v "${out_source_var}" '%s' ""
+  printf -v "${out_format_var}" '%s' ""
+
+  ftctl_inventory_collect_vm_disks_detailed "${vm}" disks || return 1
+  first="${disks[0]}"
+  target="${first%%|*}"
+  first="${first#*|}"
+  source="${first%%|*}"
+  first="${first#*|}"
+  format="${first%%|*}"
+  dtype="${first##*|}"
+
+  printf -v "${out_target_var}" '%s' "${target}"
+  printf -v "${out_source_var}" '%s' "${source}"
+  printf -v "${out_format_var}" '%s' "${format}"
+  printf -v "${out_kind_var}" '%s' "${dtype}"
+
+  file_qcow2_allowed="0"
+  if [[ "${FTCTL_PROFILE_BACKEND_MODE:-}" == "remote-nbd" &&
+        "${FTCTL_PROFILE_TARGET_STORAGE_SCOPE:-}" == "secondary-local" &&
+        "${FTCTL_PROFILE_DISK_MAP:-auto}" != "auto" ]]; then
+    file_qcow2_allowed="1"
+  fi
+
+  for entry in "${disks[@]}"; do
+    target="${entry%%|*}"
+    rest="${entry#*|}"
+    source="${rest%%|*}"
+    rest="${rest#*|}"
+    format="${rest%%|*}"
+    dtype="${rest##*|}"
+    case "${dtype}:${format}" in
+      block:*)
+        ;;
+      file:qcow2)
+        [[ "${file_qcow2_allowed}" == "1" ]] || return 1
+        ftctl_profile_lookup_map_value "${FTCTL_PROFILE_DISK_MAP}" "${target}" >/dev/null 2>&1 || return 1
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+  done
+
+  return 0
+}
+
 ftctl_xcolo_plan_protect_prebuilt() {
   local vm="${1-}"
   local nbd_host nbd_port
-  local primary_xml_backup standby_xml_seed
+  local primary_xml_backup standby_xml_seed secondary_vm
 
+  secondary_vm="$(ftctl_xcolo_secondary_domain_name "${vm}")"
   ftctl_xcolo_parse_tcp_endpoint "${FTCTL_PROFILE_XCOLO_NBD_ENDPOINT}" nbd_host nbd_port
   primary_xml_backup="$(ftctl_state_get "${vm}" "primary_xml_backup" 2>/dev/null || true)"
   standby_xml_seed="$(ftctl_state_get "${vm}" "standby_xml_seed" 2>/dev/null || true)"
@@ -14404,10 +14481,10 @@ ftctl_xcolo_plan_protect_prebuilt() {
   fi
 
   ftctl_xcolo_prebuilt_secondary_stage "${vm}" "${nbd_host}" "${nbd_port}" || return 1
-  ftctl_xcolo_capture_runtime_snapshot "${vm}" "xcolo_after_secondary"
+  ftctl_xcolo_capture_runtime_snapshot "${vm}" "xcolo_after_secondary" "${secondary_vm}"
   ftctl_state_set "${vm}" "xcolo_protect_stage=primary-stage"
   ftctl_xcolo_prebuilt_primary_stage "${vm}" "${nbd_host}" "${nbd_port}" || return 1
-  ftctl_xcolo_capture_runtime_snapshot "${vm}" "xcolo_after_primary"
+  ftctl_xcolo_capture_runtime_snapshot "${vm}" "xcolo_after_primary" "${secondary_vm}"
 
   ftctl_xcolo_state_write "${vm}" \
     "proxy_endpoint=${FTCTL_PROFILE_XCOLO_PROXY_ENDPOINT}" \
@@ -14418,9 +14495,9 @@ ftctl_xcolo_plan_protect_prebuilt() {
     "nbd_node=${FTCTL_PROFILE_XCOLO_NBD_NODE}"
 
   ftctl_state_set "${vm}" "xcolo_protect_stage=wait-running"
-  ftctl_xcolo_capture_runtime_snapshot "${vm}"
-  if [[ "${FTCTL_DRY_RUN}" != "1" ]] && ! ftctl_xcolo_wait_pair_running "${vm}" "20" "${vm}"; then
-    ftctl_xcolo_capture_runtime_snapshot "${vm}"
+  ftctl_xcolo_capture_runtime_snapshot "${vm}" "" "${secondary_vm}"
+  if [[ "${FTCTL_DRY_RUN}" != "1" ]] && ! ftctl_xcolo_wait_pair_running "${vm}" "20" "${secondary_vm}"; then
+    ftctl_xcolo_capture_runtime_snapshot "${vm}" "" "${secondary_vm}"
     ftctl_state_set "${vm}" \
       "protection_state=error" \
       "transport_state=planned" \
@@ -14430,7 +14507,7 @@ ftctl_xcolo_plan_protect_prebuilt() {
     return 1
   fi
   local validate_rc=0 validate_error
-  ftctl_xcolo_validate_pair_runtime "${vm}" "${vm}" || validate_rc=$?
+  ftctl_xcolo_validate_pair_runtime "${vm}" "${secondary_vm}" || validate_rc=$?
   case "${validate_rc}" in
     0)
       ftctl_xcolo_verify_checkpoint_delay_after_start "${vm}" || \
@@ -14481,7 +14558,7 @@ ftctl_xcolo_plan_protect_block_cold_conversion() {
   local primary_netdev_id secondary_netdev_id
   local xcolo_disk_plan primary_disk_map primary_disk_metadata
 
-  ftctl_xcolo_detect_block_backed_ft "${vm}" disk_kind primary_target primary_source primary_format || return 1
+  ftctl_xcolo_detect_cold_conversion_ft "${vm}" disk_kind primary_target primary_source primary_format || return 1
   current_node=""
   current_qdev=""
   primary_xml_backup="$(ftctl_state_get "${vm}" "primary_xml_backup" 2>/dev/null || true)"
@@ -14661,7 +14738,7 @@ ftctl_xcolo_plan_protect() {
 
   ftctl_xcolo_require_supported_machine_contract "${vm}" || return 1
 
-  if ftctl_xcolo_detect_block_backed_ft "${vm}" disk_kind primary_target primary_source primary_format; then
+  if ftctl_xcolo_detect_cold_conversion_ft "${vm}" disk_kind primary_target primary_source primary_format; then
     ftctl_xcolo_plan_protect_block_cold_conversion "${vm}"
     return $?
   fi
@@ -14671,15 +14748,17 @@ ftctl_xcolo_plan_protect() {
 
 ftctl_xcolo_rearm() {
   local vm="${1-}"
+  local secondary_vm
   local count
   count="$(ftctl_state_increment "${vm}" "rearm_count")"
+  secondary_vm="$(ftctl_xcolo_secondary_domain_name "${vm}")"
   ftctl_state_set "${vm}" \
     "protection_state=colo_rearming" \
     "transport_state=rearm_pending" \
     "last_rearm_ts=$(ftctl_now_iso8601)" \
     "last_error="
 
-  ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_SECONDARY_URI}" "${vm}" \
+  ftctl_xcolo_qmp_require_ok "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" \
     '{"execute":"nbd-server-stop"}' "rearm" "secondary.nbd_server_stop" || true
   ftctl_xcolo_plan_protect "${vm}" || {
     ftctl_state_set "${vm}" \
@@ -14696,8 +14775,7 @@ ftctl_xcolo_failover() {
   local vm="${1-}"
   local secondary_vm=""
 
-  secondary_vm="$(ftctl_state_get "${vm}" "secondary_vm_name" 2>/dev/null || true)"
-  [[ -n "${secondary_vm}" ]] || secondary_vm="${vm}"
+  secondary_vm="$(ftctl_xcolo_secondary_domain_name "${vm}")"
 
   if [[ "${FTCTL_DRY_RUN}" == "1" ]]; then
     ftctl_state_set "${vm}" \
@@ -14722,7 +14800,14 @@ ftctl_xcolo_failover() {
 
 ftctl_xcolo_failback_policy() {
   local vm="${1-}"
-  local disk_kind primary_target primary_source primary_format
+  local disk_kind primary_target primary_source primary_format conversion_policy
+  conversion_policy="$(ftctl_state_get "${vm}" "conversion_policy" 2>/dev/null || true)"
+  case "${conversion_policy}" in
+    block-backed-cold-restart|file-backed-cold-restart|cold-conversion)
+      printf '%s\n' "block-ft-cold-cutback"
+      return 0
+      ;;
+  esac
   disk_kind="$(ftctl_state_get "${vm}" "primary_disk_type" 2>/dev/null || true)"
   if [[ "${disk_kind}" == "block" ]]; then
     printf '%s\n' "block-ft-cold-cutback"

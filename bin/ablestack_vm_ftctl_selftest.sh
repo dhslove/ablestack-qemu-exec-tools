@@ -1162,6 +1162,82 @@ PY
   fi
 }
 
+selftest_case_xcolo_file_qcow2_uses_cold_conversion_detection() (
+  selftest_reset_env
+  selftest_info "file-backed qcow2 FT uses cold-conversion detection"
+
+  local vm="file-qcow2-ftvm"
+  local kind="" detected_target="" detected_source="" detected_format=""
+  local detailed_disks=()
+
+  FTCTL_PROFILE_BACKEND_MODE="remote-nbd"
+  FTCTL_PROFILE_TARGET_STORAGE_SCOPE="secondary-local"
+  FTCTL_PROFILE_DISK_MAP="sda=/var/lib/libvirt/images/${vm}-standby-root;sdb=/var/lib/libvirt/images/${vm}-standby-data"
+
+  # shellcheck disable=SC2317
+  ftctl_inventory_collect_vm_disks_detailed() {
+    local _vm="${1-}"
+    local out_array_name="${2}"
+    # shellcheck disable=SC2178
+    local -n _out_array="${out_array_name}"
+    : "${_vm}"
+    _out_array=(
+      "sda|/var/lib/libvirt/images/${vm}-root|qcow2|file"
+      "sdb|/var/lib/libvirt/images/${vm}-data|qcow2|file"
+    )
+  }
+
+  ftctl_inventory_collect_vm_disks_detailed "${vm}" detailed_disks
+  selftest_assert_eq "${detailed_disks[0]-}" "sda|/var/lib/libvirt/images/${vm}-root|qcow2|file" "file qcow2 inventory mock root disk"
+
+  ftctl_xcolo_detect_cold_conversion_ft "${vm}" kind detected_target detected_source detected_format
+  selftest_assert_eq "${kind}" "file" "file qcow2 cold conversion kind"
+  selftest_assert_eq "${detected_target}" "sda" "file qcow2 cold conversion target"
+  selftest_assert_eq "${detected_format}" "qcow2" "file qcow2 cold conversion format"
+
+  if ftctl_xcolo_detect_block_backed_ft "${vm}" kind detected_target detected_source detected_format; then
+    selftest_fail "file-backed qcow2 must not be reported as block-backed"
+  fi
+
+  FTCTL_PROFILE_DISK_MAP="auto"
+  if ftctl_xcolo_detect_cold_conversion_ft "${vm}" kind detected_target detected_source detected_format; then
+    selftest_fail "file-backed qcow2 cold conversion must require explicit disk map"
+  fi
+)
+
+selftest_case_xcolo_prebuilt_backup_uses_secondary_vm_name() (
+  selftest_reset_env
+  selftest_info "prebuilt XCOLO XML backup uses secondary VM name"
+
+  local vm="primary-vm"
+  local secondary_vm="i-2-230-VM"
+  local call_log="${SELFTEST_ROOT}/xcolo-prebuilt-backup-domain.log"
+
+  FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
+  FTCTL_PROFILE_SECONDARY_URI="qemu+ssh://peer/system"
+  FTCTL_PROFILE_SECONDARY_VM_NAME="${secondary_vm}"
+
+  # shellcheck disable=SC2317
+  ftctl_virsh() {
+    local _timeout="$1" out_var="$2" err_var="$3" rc_var="$4"
+    shift 4
+    : "${_timeout}"
+    [[ "${1-}" == "--" ]] && shift
+    printf '%s\n' "$*" >> "${call_log}"
+    printf -v "${out_var}" '%s' "<domain type='kvm'><name>${*: -1}</name><devices/></domain>"
+    printf -v "${err_var}" '%s' ""
+    printf -v "${rc_var}" '%s' "0"
+  }
+
+  ftctl_xcolo_backup_prebuilt_pair_xml "${vm}"
+
+  selftest_assert_file_contains "${call_log}" "qemu:///system dumpxml --security-info ${vm}"
+  selftest_assert_file_contains "${call_log}" "qemu+ssh://peer/system dumpxml --security-info ${secondary_vm}"
+  if grep -F "qemu+ssh://peer/system dumpxml --security-info ${vm}" "${call_log}" >/dev/null 2>&1; then
+    selftest_fail "prebuilt backup must not query the secondary URI with the primary VM name"
+  fi
+)
+
 selftest_case_xcolo_cloud_managed_rbd_metadata_inference() {
   selftest_reset_env
   selftest_info "cloud-managed x-colo RBD metadata does not require mapped secondary paths"
@@ -5905,6 +5981,8 @@ selftest_main() {
   selftest_case_xcolo_and_xml
   selftest_case_xcolo_iothread_contract_validation
   selftest_case_xcolo_block_xml_preserves_disk_targets
+  selftest_case_xcolo_file_qcow2_uses_cold_conversion_detection
+  selftest_case_xcolo_prebuilt_backup_uses_secondary_vm_name
   selftest_case_xcolo_cloud_managed_rbd_metadata_inference
   selftest_case_xcolo_primary_create_maps_rbd_sources
   selftest_case_xcolo_runtime_disk_device_replace_is_forbidden
