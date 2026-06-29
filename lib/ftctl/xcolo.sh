@@ -6335,6 +6335,7 @@ ftctl_xcolo_validate_pair_runtime() {
         "xcolo_channel_compare_out_established=${channel_compare_out}" \
         "xcolo_secondary_block_graph_ready=${secondary_block_graph}" \
         "xcolo_secondary_block_graph_reason=${secondary_block_graph_reason}"
+      ftctl_xcolo_clear_runtime_pending_markers "${vm}" "runtime_validate"
       ftctl_log_event "colo" "xcolo.runtime_validate" "ok" "${vm}" "" \
         "reason=colo_role_active primary_running=${primary_running} secondary_running=${secondary_running} primary_status=${primary_status} secondary_status=${secondary_status} primary_colo=${primary_colo} secondary_colo=${secondary_colo} primary_migrate=${primary_migrate} secondary_migrate=${secondary_migrate} primary_qga=${primary_qga} secondary_qga=${secondary_qga} primary_storage_health=$(ftctl_state_get "${vm}" "xcolo_primary_storage_health_gate" 2>/dev/null || true) primary_guest_health=$(ftctl_state_get "${vm}" "xcolo_primary_guest_health_gate" 2>/dev/null || true) filter_qom=${primary_filter_qom} filter_cmdline=${primary_filter_cmdline} chardev=${primary_chardev} mirror=${channel_mirror} compare=${channel_compare} compare_local=${channel_compare_local} compare_out=${channel_compare_out} secondary_block_graph=${secondary_block_graph} attempts=$((i + 1))"
       return 0
@@ -6695,6 +6696,67 @@ ftctl_xcolo_mark_runtime_pending() {
     "last_error="
 }
 
+ftctl_xcolo_clear_runtime_pending_markers() {
+  local vm="${1-}"
+  local source="${2:-runtime_validate}"
+  local old_reason old_since now
+
+  old_reason="$(ftctl_state_get "${vm}" "xcolo_pending_reason" 2>/dev/null || true)"
+  old_since="$(ftctl_state_get "${vm}" "xcolo_runtime_pending_since" 2>/dev/null || true)"
+  now="$(ftctl_now_iso8601)"
+
+  if [[ -n "${old_reason}" || -n "${old_since}" ]]; then
+    ftctl_state_set "${vm}" \
+      "xcolo_last_pending_reason=${old_reason}" \
+      "xcolo_last_pending_since=${old_since}" \
+      "xcolo_pending_reason=" \
+      "xcolo_runtime_pending_since=" \
+      "xcolo_runtime_pending_resolved_ts=${now}" \
+      "xcolo_runtime_pending_resolved_by=${source}"
+    return 0
+  fi
+
+  ftctl_state_set "${vm}" \
+    "xcolo_pending_reason=" \
+    "xcolo_runtime_pending_since="
+}
+
+ftctl_xcolo_mark_runtime_steady_ok() {
+  local vm="${1-}"
+  local source="${2:-runtime_reconcile}"
+  local now conversion_stage conversion_state
+
+  now="$(ftctl_now_iso8601)"
+  conversion_stage="$(ftctl_state_get "${vm}" "conversion_stage" 2>/dev/null || true)"
+  conversion_state="$(ftctl_state_get "${vm}" "conversion_state" 2>/dev/null || true)"
+  ftctl_xcolo_clear_runtime_pending_markers "${vm}" "${source}"
+
+  if [[ "${source}" == "block_cold_conversion" || -n "${conversion_stage}" || -n "${conversion_state}" ]]; then
+    ftctl_state_set "${vm}" \
+      "conversion_stage=handshake_complete" \
+      "conversion_state=colo_running" \
+      "protection_state=colo_running" \
+      "transport_state=mirroring" \
+      "active_side=primary" \
+      "xcolo_steady_state_gate=ok" \
+      "xcolo_steady_state_source=${source}" \
+      "xcolo_steady_state_ts=${now}" \
+      "last_sync_ts=${now}" \
+      "last_error="
+    return 0
+  fi
+
+  ftctl_state_set "${vm}" \
+    "protection_state=colo_running" \
+    "transport_state=mirroring" \
+    "active_side=primary" \
+    "xcolo_steady_state_gate=ok" \
+    "xcolo_steady_state_source=${source}" \
+    "xcolo_steady_state_ts=${now}" \
+    "last_sync_ts=${now}" \
+    "last_error="
+}
+
 ftctl_xcolo_runtime_candidate_observe_sec() {
   local threshold="${FTCTL_XCOLO_RUNTIME_CANDIDATE_OBSERVE_SEC:-}"
   if [[ -z "${threshold}" ]]; then
@@ -6818,14 +6880,7 @@ ftctl_xcolo_reconcile_pending_runtime() {
       ftctl_xcolo_verify_checkpoint_delay_after_start "${vm}" || \
         ftctl_log_event "colo" "primary.migrate_set_parameters.post_start" "warn" "${vm}" "" \
           "checkpoint_delay=${FTCTL_PROFILE_XCOLO_CHECKPOINT_DELAY:-}"
-      ftctl_state_set "${vm}" \
-        "conversion_stage=handshake_complete" \
-        "conversion_state=colo_running" \
-        "protection_state=colo_running" \
-        "transport_state=mirroring" \
-        "active_side=primary" \
-        "last_sync_ts=$(ftctl_now_iso8601)" \
-        "last_error="
+      ftctl_xcolo_mark_runtime_steady_ok "${vm}" "runtime_reconcile"
       ftctl_log_event "colo" "xcolo.runtime_reconcile" "ok" "${vm}" "" \
         "secondary_vm=${secondary_vm}"
       return 0
@@ -14354,14 +14409,7 @@ ftctl_xcolo_execute_block_cold_conversion() {
       ;;
   esac
 
-  ftctl_state_set "${vm}" \
-    "conversion_stage=handshake_complete" \
-    "conversion_state=colo_running" \
-    "protection_state=colo_running" \
-    "transport_state=mirroring" \
-    "active_side=primary" \
-    "last_sync_ts=$(ftctl_now_iso8601)" \
-    "last_error="
+  ftctl_xcolo_mark_runtime_steady_ok "${vm}" "block_cold_conversion"
   ftctl_log_event "colo" "xcolo.block_cold_conversion.execute" "ok" "${vm}" "" \
     "primary_base=${primary_base_node} secondary_base=${secondary_base_node}"
   return 0
@@ -14572,11 +14620,7 @@ ftctl_xcolo_plan_protect_prebuilt() {
       return 1
       ;;
   esac
-  ftctl_state_set "${vm}" \
-    "protection_state=colo_running" \
-    "transport_state=mirroring" \
-    "last_sync_ts=$(ftctl_now_iso8601)" \
-    "last_error="
+  ftctl_xcolo_mark_runtime_steady_ok "${vm}" "protect_prebuilt"
   ftctl_log_event "colo" "xcolo.protect" "ok" "${vm}" "" \
     "qmp_timeout=${FTCTL_XCOLO_QMP_TIMEOUT_SEC}"
 }

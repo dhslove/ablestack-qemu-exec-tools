@@ -3959,6 +3959,127 @@ selftest_case_xcolo_runtime_validation_requires_primary_qga() (
     "required qga failure reason"
 )
 
+selftest_case_xcolo_runtime_reconcile_marks_steady_after_guest_health_recovers() (
+  selftest_reset_env
+  selftest_info "x-colo runtime reconcile clears guest-health pending markers after recovery"
+
+  local vm="xcolo-runtime-reconcile-steady"
+  ftctl_state_init_vm "${vm}"
+  ftctl_state_set "${vm}" \
+    "mode=ft" \
+    "protection_state=pairing" \
+    "transport_state=establishing" \
+    "active_side=primary" \
+    "conversion_stage=runtime_converging" \
+    "conversion_state=pending" \
+    "secondary_vm_name=${vm}-standby" \
+    "xcolo_steady_state_gate=pending" \
+    "xcolo_pending_reason=primary_guest_health_pending:qga_stabilizing" \
+    "xcolo_runtime_pending_since=$(date -d '5 seconds ago' '+%Y-%m-%dT%H:%M:%S%:z')" \
+    "xcolo_primary_guest_health_qga_success_count=1"
+  FTCTL_DRY_RUN="0"
+  FTCTL_PROFILE_PRIMARY_URI="qemu:///system"
+  FTCTL_PROFILE_SECONDARY_URI="qemu+ssh://peer/system"
+  FTCTL_PROFILE_QGA_POLICY="required"
+  FTCTL_XCOLO_RUNTIME_VALIDATE_TIMEOUT_SEC="1"
+  FTCTL_XCOLO_PRIMARY_GUEST_HEALTH_POLICY="required"
+  FTCTL_XCOLO_PRIMARY_GUEST_HEALTH_STABLE_COUNT="2"
+  selftest_mock_xcolo_primary_channels_ready
+
+  # shellcheck disable=SC2317
+  ftctl_xcolo_query_running_flag() {
+    local out_var="${3}"
+    printf -v "${out_var}" '%s' "true"
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_query_status_name() {
+    local out_var="${3}"
+    printf -v "${out_var}" '%s' "running"
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_query_migrate_status() {
+    local out_var="${3}"
+    printf -v "${out_var}" '%s' "colo"
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_query_colo_mode() {
+    local uri="${1-}" out_var="${3}"
+    if [[ "${uri}" == "${FTCTL_PROFILE_PRIMARY_URI}" ]]; then
+      printf -v "${out_var}" '%s' "primary"
+    else
+      printf -v "${out_var}" '%s' "secondary"
+    fi
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_query_guest_ping() {
+    local out_var="${3}"
+    printf -v "${out_var}" '%s' "yes"
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_domain_xml_has_runtime_markers() {
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_qmp() {
+    local out_var="${4}" rc_var="${5}"
+    printf -v "${out_var}" '%s' '{"return":[]}'
+    printf -v "${rc_var}" '%s' "0"
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_write_debug_file() {
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_primary_qemu_log_tail() {
+    local out_var="${2}"
+    printf -v "${out_var}" '%s' ""
+    return 0
+  }
+  # shellcheck disable=SC2317
+  ftctl_xcolo_verify_checkpoint_delay_after_start() {
+    return 0
+  }
+
+  ftctl_xcolo_reconcile_pending_runtime "${vm}"
+
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "protection_state")" \
+    "colo_running" \
+    "runtime reconcile protection state"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "transport_state")" \
+    "mirroring" \
+    "runtime reconcile transport state"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "conversion_stage")" \
+    "handshake_complete" \
+    "runtime reconcile conversion stage"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "conversion_state")" \
+    "colo_running" \
+    "runtime reconcile conversion state"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_steady_state_gate")" \
+    "ok" \
+    "runtime reconcile steady gate"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_primary_guest_health_gate")" \
+    "ok" \
+    "runtime reconcile guest gate"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_pending_reason")" \
+    "" \
+    "runtime reconcile clears pending reason"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_runtime_pending_since")" \
+    "" \
+    "runtime reconcile clears pending since"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_runtime_pending_resolved_by")" \
+    "runtime_validate" \
+    "runtime reconcile records resolver"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "last_error")" \
+    "" \
+    "runtime reconcile keeps last_error clear"
+)
+
 selftest_case_xcolo_runtime_recovery_preserves_error_reason() (
   selftest_reset_env
   selftest_info "x-colo runtime recovery preserves validation error reason"
@@ -6124,6 +6245,7 @@ selftest_main() {
   selftest_case_xcolo_runtime_validation_accepts_reported_colo_role
   selftest_case_xcolo_runtime_validation_records_optional_qga
   selftest_case_xcolo_runtime_validation_requires_primary_qga
+  selftest_case_xcolo_runtime_reconcile_marks_steady_after_guest_health_recovers
   selftest_case_xcolo_runtime_recovery_preserves_error_reason
   selftest_case_xcolo_block_handshake_failure_recovers_runtime
   selftest_case_xcolo_error_status_uses_sticky_runtime_error
