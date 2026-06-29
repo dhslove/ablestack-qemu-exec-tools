@@ -9187,7 +9187,6 @@ ftctl_xcolo_collect_block_disk_plan() {
     rest="${rest#*|}"
     format="${rest%%|*}"
     dtype="${rest##*|}"
-    [[ -n "${format}" ]] || format="raw"
     secondary_dest="$(ftctl_profile_lookup_map_value "${FTCTL_PROFILE_DISK_MAP}" "${target}" 2>/dev/null || true)"
     if [[ -z "${secondary_dest}" ]]; then
       ftctl_log_event "colo" "xcolo.protect.block_cold_conversion" "fail" "${vm}" "" \
@@ -9196,10 +9195,20 @@ ftctl_xcolo_collect_block_disk_plan() {
     fi
     case "${dtype}" in
       block)
+        [[ -n "${format}" ]] || format="raw"
         source_attr="dev"
         disk_type="block"
         ;;
       file)
+        if [[ -z "${format}" ]]; then
+          ftctl_inventory_detect_disk_format "${source}" format
+        fi
+        if [[ -z "${format}" ]]; then
+          ftctl_state_set "${vm}" "last_error=xcolo_file_disk_format_unknown:${target}"
+          ftctl_log_event "colo" "xcolo.protect.block_cold_conversion" "fail" "${vm}" "" \
+            "reason=file_disk_format_unknown target=${target} source=${source}"
+          return 1
+        fi
         source_attr="file"
         disk_type="file"
         ;;
@@ -14396,6 +14405,7 @@ ftctl_xcolo_detect_cold_conversion_ft() {
   local out_format_var="${5}"
   local disks=()
   local first entry rest target source format dtype file_qcow2_allowed
+  local first_target="" first_source="" first_format="" first_dtype=""
 
   printf -v "${out_kind_var}" '%s' "unknown"
   printf -v "${out_target_var}" '%s' ""
@@ -14410,11 +14420,10 @@ ftctl_xcolo_detect_cold_conversion_ft() {
   first="${first#*|}"
   format="${first%%|*}"
   dtype="${first##*|}"
-
-  printf -v "${out_target_var}" '%s' "${target}"
-  printf -v "${out_source_var}" '%s' "${source}"
-  printf -v "${out_format_var}" '%s' "${format}"
-  printf -v "${out_kind_var}" '%s' "${dtype}"
+  first_target="${target}"
+  first_source="${source}"
+  first_format="${format}"
+  first_dtype="${dtype}"
 
   file_qcow2_allowed="0"
   if [[ "${FTCTL_PROFILE_BACKEND_MODE:-}" == "remote-nbd" &&
@@ -14430,12 +14439,32 @@ ftctl_xcolo_detect_cold_conversion_ft() {
     rest="${rest#*|}"
     format="${rest%%|*}"
     dtype="${rest##*|}"
+    if [[ "${dtype}" == "file" && -z "${format}" ]]; then
+      ftctl_inventory_detect_disk_format "${source}" format
+    fi
+    if [[ "${target}" == "${first_target}" ]]; then
+      first_format="${format}"
+      first_dtype="${dtype}"
+    fi
     case "${dtype}:${format}" in
       block:*)
         ;;
       file:qcow2)
-        [[ "${file_qcow2_allowed}" == "1" ]] || return 1
-        ftctl_profile_lookup_map_value "${FTCTL_PROFILE_DISK_MAP}" "${target}" >/dev/null 2>&1 || return 1
+        if [[ "${file_qcow2_allowed}" != "1" ]]; then
+          ftctl_state_set "${vm}" "last_error=xcolo_file_qcow2_explicit_map_required:${target}"
+          return 2
+        fi
+        if ! ftctl_profile_lookup_map_value "${FTCTL_PROFILE_DISK_MAP}" "${target}" >/dev/null 2>&1; then
+          ftctl_state_set "${vm}" "last_error=xcolo_file_qcow2_disk_map_missing:${target}"
+          return 2
+        fi
+        ;;
+      file:*)
+        if [[ "${file_qcow2_allowed}" == "1" ]]; then
+          ftctl_state_set "${vm}" "last_error=xcolo_file_disk_format_unsupported:${target}:${format:-unknown}"
+          return 2
+        fi
+        return 1
         ;;
       *)
         return 1
@@ -14443,6 +14472,10 @@ ftctl_xcolo_detect_cold_conversion_ft() {
     esac
   done
 
+  printf -v "${out_target_var}" '%s' "${first_target}"
+  printf -v "${out_source_var}" '%s' "${first_source}"
+  printf -v "${out_format_var}" '%s' "${first_format}"
+  printf -v "${out_kind_var}" '%s' "${first_dtype}"
   return 0
 }
 
@@ -14557,6 +14590,7 @@ ftctl_xcolo_plan_protect_block_cold_conversion() {
   local primary_qemu_args secondary_qemu_args
   local primary_netdev_id secondary_netdev_id
   local xcolo_disk_plan primary_disk_map primary_disk_metadata
+  local conversion_policy
 
   ftctl_xcolo_detect_cold_conversion_ft "${vm}" disk_kind primary_target primary_source primary_format || return 1
   current_node=""
@@ -14667,9 +14701,14 @@ ftctl_xcolo_plan_protect_block_cold_conversion() {
     return 1
   }
 
+  conversion_policy="block-backed-cold-restart"
+  if [[ "${disk_kind}" == "file" ]]; then
+    conversion_policy="file-backed-cold-restart"
+  fi
+
   ftctl_xcolo_state_write "${vm}" \
     "mode=cold-conversion" \
-    "conversion_policy=block-backed-cold-restart" \
+    "conversion_policy=${conversion_policy}" \
     "conversion_required=yes" \
     "primary_disk_type=${disk_kind}" \
     "primary_disk_target=${primary_target}" \
@@ -14735,13 +14774,28 @@ ftctl_xcolo_plan_protect_block_cold_conversion() {
 ftctl_xcolo_plan_protect() {
   local vm="${1-}"
   local disk_kind primary_target primary_source primary_format
+  local detect_rc=0 detect_error=""
 
   ftctl_xcolo_require_supported_machine_contract "${vm}" || return 1
 
-  if ftctl_xcolo_detect_cold_conversion_ft "${vm}" disk_kind primary_target primary_source primary_format; then
-    ftctl_xcolo_plan_protect_block_cold_conversion "${vm}"
-    return $?
-  fi
+  ftctl_xcolo_detect_cold_conversion_ft "${vm}" disk_kind primary_target primary_source primary_format || detect_rc=$?
+  case "${detect_rc}" in
+    0)
+      ftctl_xcolo_plan_protect_block_cold_conversion "${vm}"
+      return $?
+      ;;
+    2)
+      detect_error="$(ftctl_state_get "${vm}" "last_error" 2>/dev/null || true)"
+      [[ -n "${detect_error}" ]] || detect_error="xcolo_cold_conversion_detection_failed"
+      ftctl_state_set "${vm}" \
+        "protection_state=error" \
+        "transport_state=planned" \
+        "last_error=${detect_error}"
+      ftctl_log_event "colo" "xcolo.protect" "fail" "${vm}" "" \
+        "reason=${detect_error}"
+      return 1
+      ;;
+  esac
 
   ftctl_xcolo_plan_protect_prebuilt "${vm}"
 }

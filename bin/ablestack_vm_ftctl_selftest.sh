@@ -1205,6 +1205,102 @@ selftest_case_xcolo_file_qcow2_uses_cold_conversion_detection() (
   fi
 )
 
+selftest_case_inventory_disk_format_uses_force_share() (
+  selftest_reset_env
+  selftest_info "inventory disk format detection uses qemu-img force-share"
+
+  local fmt="" call_log="${SELFTEST_ROOT}/inventory-format-force-share.log"
+
+  # shellcheck disable=SC2317
+  command() {
+    if [[ "${1-}" == "-v" && ( "${2-}" == "qemu-img" || "${2-}" == "jq" ) ]]; then
+      return 0
+    fi
+    builtin command "$@"
+  }
+
+  # shellcheck disable=SC2317
+  ftctl_cmd_run() {
+    local _timeout="$1" out_var="$2" err_var="$3" rc_var="$4"
+    shift 4
+    : "${_timeout}"
+    [[ "${1-}" == "--" ]] && shift
+    printf '%s\n' "$*" >> "${call_log}"
+    if [[ "$*" == *"qemu-img info --force-share --output=json /var/lib/libvirt/images/no-extension"* ]]; then
+      printf -v "${out_var}" '%s' '{"format":"qcow2"}'
+      printf -v "${err_var}" '%s' ""
+      printf -v "${rc_var}" '%s' "0"
+      return 0
+    fi
+    printf -v "${out_var}" '%s' ""
+    printf -v "${err_var}" '%s' "unexpected command"
+    printf -v "${rc_var}" '%s' "1"
+  }
+
+  ftctl_inventory_detect_disk_format "/var/lib/libvirt/images/no-extension" fmt
+  selftest_assert_eq "${fmt}" "qcow2" "force-share qemu-img format detection"
+  selftest_assert_file_contains "${call_log}" "qemu-img info --force-share --output=json /var/lib/libvirt/images/no-extension"
+)
+
+selftest_case_xcolo_file_qcow2_empty_format_avoids_prebuilt_fallback() (
+  selftest_reset_env
+  selftest_info "file-backed qcow2 with empty inventory format uses cold conversion, not prebuilt"
+
+  local vm="file-qcow2-empty-format-ftvm"
+  local call_log="${SELFTEST_ROOT}/xcolo-empty-format-routing.log"
+  local kind="" detected_target="" detected_source="" detected_format=""
+
+  FTCTL_PROFILE_BACKEND_MODE="remote-nbd"
+  FTCTL_PROFILE_TARGET_STORAGE_SCOPE="secondary-local"
+  FTCTL_PROFILE_DISK_MAP="sda=/var/lib/libvirt/images/${vm}-standby-root;sdb=/var/lib/libvirt/images/${vm}-standby-data"
+
+  # shellcheck disable=SC2317
+  ftctl_inventory_collect_vm_disks_detailed() {
+    local _vm="${1-}"
+    local out_array_name="${2}"
+    # shellcheck disable=SC2178
+    local -n _out_array="${out_array_name}"
+    : "${_vm}"
+    _out_array=(
+      "sda|/var/lib/libvirt/images/${vm}-root||file"
+      "sdb|/var/lib/libvirt/images/${vm}-data||file"
+    )
+  }
+
+  # shellcheck disable=SC2317
+  ftctl_inventory_detect_disk_format() {
+    printf 'FORMAT:%s\n' "${1-}" >> "${call_log}"
+    printf -v "${2}" '%s' "qcow2"
+  }
+
+  # shellcheck disable=SC2317
+  ftctl_xcolo_require_supported_machine_contract() {
+    :
+  }
+
+  # shellcheck disable=SC2317
+  ftctl_xcolo_plan_protect_block_cold_conversion() {
+    printf 'COLD:%s\n' "${1-}" >> "${call_log}"
+  }
+
+  # shellcheck disable=SC2317
+  ftctl_xcolo_plan_protect_prebuilt() {
+    printf 'PREBUILT:%s\n' "${1-}" >> "${call_log}"
+    return 1
+  }
+
+  ftctl_xcolo_detect_cold_conversion_ft "${vm}" kind detected_target detected_source detected_format
+  selftest_assert_eq "${kind}" "file" "empty format file qcow2 kind"
+  selftest_assert_eq "${detected_target}" "sda" "empty format file qcow2 target"
+  selftest_assert_eq "${detected_format}" "qcow2" "empty format file qcow2 detected format"
+
+  ftctl_xcolo_plan_protect "${vm}"
+  selftest_assert_file_contains "${call_log}" "FORMAT:/var/lib/libvirt/images/${vm}-root"
+  selftest_assert_file_contains "${call_log}" "FORMAT:/var/lib/libvirt/images/${vm}-data"
+  selftest_assert_file_contains "${call_log}" "COLD:${vm}"
+  selftest_assert_file_not_contains "${call_log}" "PREBUILT:${vm}"
+)
+
 selftest_case_xcolo_prebuilt_backup_uses_secondary_vm_name() (
   selftest_reset_env
   selftest_info "prebuilt XCOLO XML backup uses secondary VM name"
@@ -2631,6 +2727,7 @@ selftest_case_xcolo_secondary_runtime_maps_cloud_managed_rbd() (
   FTCTL_PROFILE_SECONDARY_URI="qemu+ssh://peer/system"
   FTCTL_PROFILE_FENCING_SSH_USER="root"
   FTCTL_PROFILE_PROVISIONING_BACKEND="cloud-managed"
+  FTCTL_XCOLO_RBD_COMMANDLINE_BACKEND="krbd"
 
   cat > "${xml_path}" <<EOF
 <domain type="kvm">
@@ -5982,6 +6079,8 @@ selftest_main() {
   selftest_case_xcolo_iothread_contract_validation
   selftest_case_xcolo_block_xml_preserves_disk_targets
   selftest_case_xcolo_file_qcow2_uses_cold_conversion_detection
+  selftest_case_inventory_disk_format_uses_force_share
+  selftest_case_xcolo_file_qcow2_empty_format_avoids_prebuilt_fallback
   selftest_case_xcolo_prebuilt_backup_uses_secondary_vm_name
   selftest_case_xcolo_cloud_managed_rbd_metadata_inference
   selftest_case_xcolo_primary_create_maps_rbd_sources

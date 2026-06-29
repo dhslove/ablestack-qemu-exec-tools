@@ -127,33 +127,47 @@ ftctl_inventory_check_vm() {
   printf '%s %s %s %s %s\n' "${local_rc}" "${peer_rc}" "${result}" "${peer_domain_expected}" "${standby_domain_state}"
 }
 
+ftctl_inventory_qemu_img_info_json() {
+  local source_path="${1-}"
+  local _out_var="${2}"
+  local _info_out="" _info_err="" _info_rc=0
+
+  ftctl_cmd_run "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC:-30}" _info_out _info_err _info_rc -- \
+    qemu-img info --force-share --output=json "${source_path}" || true
+  if [[ "${_info_rc}" != "0" ]]; then
+    _info_out=""
+    _info_err=""
+    _info_rc=0
+    ftctl_cmd_run "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC:-30}" _info_out _info_err _info_rc -- \
+      qemu-img info --output=json "${source_path}" || true
+  fi
+  [[ "${_info_rc}" == "0" ]] || return "${_info_rc}"
+  printf -v "${_out_var}" '%s' "${_info_out}"
+}
+
 ftctl_inventory_detect_disk_format() {
   local source_path="${1-}"
   local _out_var="${2}"
-  local fmt=""
-  local out err rc
+  local _detected_format=""
+  local out=""
 
   if command -v qemu-img >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
-    out=""
-    err=""
-    rc=0
-    ftctl_cmd_run "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC}" out err rc -- qemu-img info --output=json "${source_path}" || true
-    if [[ "${rc}" == "0" ]]; then
-      fmt="$(printf '%s' "${out}" | jq -r '.format // empty' 2>/dev/null || true)"
+    if ftctl_inventory_qemu_img_info_json "${source_path}" out; then
+      _detected_format="$(printf '%s' "${out}" | jq -r '.format // empty' 2>/dev/null || true)"
     fi
   fi
 
-  if [[ -z "${fmt}" ]]; then
+  if [[ -z "${_detected_format}" ]]; then
     case "${source_path}" in
-      rbd:*) fmt="qcow2" ;;
-      rbd/*) fmt="qcow2" ;;
-      *.qcow2|*.qcow2.*) fmt="qcow2" ;;
-      *.raw) fmt="raw" ;;
-      *) fmt="" ;;
+      rbd:*) _detected_format="qcow2" ;;
+      rbd/*) _detected_format="qcow2" ;;
+      *.qcow2|*.qcow2.*) _detected_format="qcow2" ;;
+      *.raw) _detected_format="raw" ;;
+      *) _detected_format="" ;;
     esac
   fi
 
-  printf -v "${_out_var}" '%s' "${fmt}"
+  printf -v "${_out_var}" '%s' "${_detected_format}"
 }
 
 ftctl_inventory_collect_vm_disks() {
