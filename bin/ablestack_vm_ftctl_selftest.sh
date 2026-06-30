@@ -2265,6 +2265,22 @@ selftest_case_xcolo_storage_mismatch_gate() (
   selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_storage_compatibility")" "blocked" "storage mismatch compatibility"
 )
 
+selftest_case_xcolo_storage_qcow2_to_librbd_allowed() (
+  selftest_reset_env
+  selftest_info "x-colo allows file-backed qcow2 primary to RBD secondary with librbd runtime"
+
+  local vm="ft-qcow2-to-rbd"
+  local plan="sda|/var/lib/libvirt/images/${vm}.qcow2|qcow2|file|/dev/rbd/rbd/${vm}-standby"
+  FTCTL_XCOLO_RBD_COMMANDLINE_BACKEND="librbd"
+
+  ftctl_xcolo_record_storage_symmetry "${vm}" "${plan}"
+  ftctl_xcolo_require_storage_symmetry "${vm}"
+
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_storage_symmetry")" "ok" "qcow2 to librbd symmetry"
+  selftest_assert_eq "$(ftctl_state_get "${vm}" "xcolo_storage_compatibility")" "mixed_file_qcow2_to_librbd_rbd" "qcow2 to librbd compatibility"
+  selftest_assert_contains "$(ftctl_state_get "${vm}" "xcolo_storage_compatibility_reason")" "sda:mixed_file_qcow2_to_librbd_rbd" "qcow2 to librbd compatibility reason"
+)
+
 selftest_case_xcolo_machine_contract_gate() (
   selftest_reset_env
   selftest_info "x-colo rejects q35 and accepts pc-i440fx machine contracts"
@@ -6215,6 +6231,7 @@ selftest_main() {
   selftest_case_xcolo_strict_chardev_binding_rejects_closed_frontends
   selftest_case_xcolo_virtio_vnet_hdr_support
   selftest_case_xcolo_storage_mismatch_gate
+  selftest_case_xcolo_storage_qcow2_to_librbd_allowed
   selftest_case_xcolo_machine_contract_gate
   selftest_case_xcolo_filter_qom_hard_gate
   selftest_case_xcolo_primary_filter_qmp_order_matches_qemu_doc

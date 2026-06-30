@@ -9290,6 +9290,7 @@ ftctl_xcolo_record_storage_symmetry() {
   local entry rest target primary_source primary_format primary_dtype secondary_dest
   local secondary_layout primary_layout=""
   local layouts="" secondary_layouts="" symmetry="ok" reason=""
+  local compatibility="ok" compatibility_reason="" compatible_reason=""
   local suffix result="ok"
   local -a _ftctl_xcolo_symmetry_entries=()
 
@@ -9320,8 +9321,13 @@ ftctl_xcolo_record_storage_symmetry() {
       "xcolo_disk_${suffix}_primary_source=${primary_source}" \
       "xcolo_disk_${suffix}_secondary_dest=${secondary_dest}"
     if [[ "${primary_layout}" != "${secondary_layout}" ]]; then
-      symmetry="warning"
-      reason="${reason}${reason:+,}${target}:primary_${primary_layout}_secondary_${secondary_layout}"
+      if ftctl_xcolo_storage_layout_compatible "${primary_layout}" "${secondary_layout}" "${secondary_dest}" compatible_reason; then
+        compatibility="${compatible_reason}"
+        compatibility_reason="${compatibility_reason}${compatibility_reason:+,}${target}:${compatible_reason}"
+      else
+        symmetry="warning"
+        reason="${reason}${reason:+,}${target}:primary_${primary_layout}_secondary_${secondary_layout}"
+      fi
     fi
   done
 
@@ -9329,10 +9335,36 @@ ftctl_xcolo_record_storage_symmetry() {
     "xcolo_storage_primary_layouts=${layouts}" \
     "xcolo_storage_secondary_layouts=${secondary_layouts}" \
     "xcolo_storage_symmetry=${symmetry}" \
-    "xcolo_storage_symmetry_reason=${reason}"
+    "xcolo_storage_symmetry_reason=${reason}" \
+    "xcolo_storage_compatibility=${compatibility}" \
+    "xcolo_storage_compatibility_reason=${compatibility_reason}"
   [[ "${symmetry}" == "warning" ]] && result="warn"
   ftctl_log_event "colo" "xcolo.storage_symmetry" "${result}" "${vm}" "" \
-    "primary=${layouts} secondary=${secondary_layouts} reason=${reason}"
+    "primary=${layouts} secondary=${secondary_layouts} reason=${reason} compatibility=${compatibility} compatibility_reason=${compatibility_reason}"
+  return 0
+}
+
+ftctl_xcolo_storage_layout_compatible() {
+  local primary_layout="${1-}"
+  local secondary_layout="${2-}"
+  local secondary_dest="${3-}"
+  local out_var="${4-}"
+  local reason=""
+
+  if [[ "${primary_layout}" == "${secondary_layout}" ]]; then
+    reason="matching_layout"
+  elif [[ "${primary_layout}" == "file/qcow2" &&
+          "${secondary_layout}" == "block/raw" &&
+          "${secondary_dest}" == /dev/rbd/* &&
+          "$(ftctl_xcolo_rbd_commandline_backend)" == "librbd" ]]; then
+    reason="mixed_file_qcow2_to_librbd_rbd"
+  else
+    return 1
+  fi
+
+  if [[ -n "${out_var}" ]]; then
+    printf -v "${out_var}" '%s' "${reason}"
+  fi
   return 0
 }
 
