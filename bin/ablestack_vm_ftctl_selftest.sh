@@ -20,7 +20,31 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-LIB_BASE="${ROOT_DIR}/lib"
+LIB_BASE=""
+
+selftest_die_load() {
+  printf '[SELFTEST][FAIL] %s\n' "$*" >&2
+  exit 1
+}
+
+selftest_resolve_lib_base() {
+  local c
+  local candidates=(
+    "${ROOT_DIR}/lib/ablestack-qemu-exec-tools"
+    "${ROOT_DIR}/lib"
+    "/usr/local/lib/ablestack-qemu-exec-tools"
+    "/usr/local/lib"
+  )
+  for c in "${candidates[@]}"; do
+    if [[ -d "${c}/ftctl" ]]; then
+      LIB_BASE="${c}"
+      return 0
+    fi
+  done
+  selftest_die_load "ftctl library directory not found"
+}
+
+selftest_resolve_lib_base
 
 # shellcheck source=/dev/null
 source "${LIB_BASE}/ftctl/common.sh"
