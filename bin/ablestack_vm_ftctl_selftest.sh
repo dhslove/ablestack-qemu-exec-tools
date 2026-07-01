@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------
 # Copyright 2026 ABLECLOUD
-# 
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -76,6 +76,14 @@ source "${LIB_BASE}/ftctl/fencing.sh"
 source "${LIB_BASE}/ftctl/failover.sh"
 # shellcheck source=/dev/null
 source "${LIB_BASE}/ftctl/events.sh"
+# shellcheck source=/dev/null
+source "${LIB_BASE}/ftctl/dr_ablestack.sh"
+# shellcheck source=/dev/null
+source "${LIB_BASE}/ftctl/dr_vmware.sh"
+# shellcheck source=/dev/null
+source "${LIB_BASE}/ftctl/dr_scheduler.sh"
+# shellcheck source=/dev/null
+source "${LIB_BASE}/ftctl/dr_runtime.sh"
 # shellcheck source=/dev/null
 source "${LIB_BASE}/ftctl/verify.sh"
 # shellcheck source=/dev/null
@@ -284,6 +292,10 @@ selftest_run_lint() {
     "lib/ftctl/fencing.sh"
     "lib/ftctl/failover.sh"
     "lib/ftctl/events.sh"
+    "lib/ftctl/dr_ablestack.sh"
+    "lib/ftctl/dr_vmware.sh"
+    "lib/ftctl/dr_scheduler.sh"
+    "lib/ftctl/dr_runtime.sh"
     "lib/ftctl/verify.sh"
     "lib/ftctl/orchestrator.sh"
     "completions/ablestack_vm_ftctl"
@@ -6220,6 +6232,1103 @@ EOF
   selftest_assert_contains "${out}" '"event":"rearm.defer"' "events latest item"
 }
 
+selftest_case_dr_runtime_profile_status_cancel() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR runtime profile, status, and cancel path"
+
+  local profile="${SELFTEST_ROOT}/dr-profile.json"
+  local out="" status="" canceled=""
+  cat > "${profile}" <<'JSON'
+{
+  "version": 1,
+  "engine": "FTCTL_DR",
+  "planUuid": "plan-step3",
+  "runUuid": "run-step3",
+  "direction": "KVM_TO_VMWARE",
+  "activeSide": "SOURCE",
+  "request": {
+    "mode": "planned",
+    "remoteMoldSecretKey": "plain-secret"
+  }
+}
+JSON
+
+  out="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-plan-apply \
+    --config "${SELFTEST_CONFIG}" \
+    --plan plan-step3 \
+    --profile-json "${profile}" \
+    --role coordinator \
+    --dry-run \
+    --json)"
+  selftest_assert_contains "${out}" '"command":"dr-plan-apply"' "plan apply command"
+  selftest_assert_contains "${out}" '"capable":true' "plan apply capable"
+
+  out="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-sync-start \
+    --config "${SELFTEST_CONFIG}" \
+    --plan plan-step3 \
+    --run run-step3 \
+    --profile-json "${profile}" \
+    --role coordinator \
+    --mode planned \
+    --wait=false \
+    --json)"
+  selftest_assert_contains "${out}" '"result":"accepted"' "sync start accepted"
+  selftest_assert_contains "${out}" '"state":"SYNCING"' "sync state"
+  selftest_assert_contains "${out}" '"step":"sync-start-accepted"' "sync step"
+  selftest_assert_contains "${out}" '"external_job_ref":"run-step3"' "external job ref"
+  selftest_assert_not_contains "${out}" "plain-secret" "sync output redacts secret"
+
+  selftest_assert_file_contains "${SELFTEST_ROOT}/run/dr-runtime/plans/plan-step3/profile.json" '"remoteMoldSecretKey":"REDACTED"'
+  selftest_assert_file_not_contains "${SELFTEST_ROOT}/run/dr-runtime/plans/plan-step3/profile.json" "plain-secret"
+
+  status="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-status \
+    --config "${SELFTEST_CONFIG}" \
+    --plan plan-step3 \
+    --run run-step3 \
+    --events-offset 0 \
+    --json)"
+  selftest_assert_contains "${status}" '"command":"dr-status"' "status command"
+  selftest_assert_contains "${status}" '"state":"SYNCING"' "status state"
+  selftest_assert_contains "${status}" '"progress":1' "status progress"
+  selftest_assert_contains "${status}" '"events_offset":' "status event offset"
+
+  canceled="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-cancel \
+    --config "${SELFTEST_CONFIG}" \
+    --plan plan-step3 \
+    --run run-step3 \
+    --json)"
+  selftest_assert_contains "${canceled}" '"command":"dr-cancel"' "cancel command"
+  selftest_assert_contains "${canceled}" '"result":"canceled"' "cancel result"
+  selftest_assert_contains "${canceled}" '"accepted":true' "cancel accepted"
+
+  status="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-status \
+    --config "${SELFTEST_CONFIG}" \
+    --plan plan-step3 \
+    --run run-step3 \
+    --json)"
+  selftest_assert_contains "${status}" '"state":"CANCELED"' "status canceled"
+  selftest_assert_contains "${status}" '"progress":100' "cancel progress"
+}
+
+selftest_case_dr_runtime_control_actions() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR runtime control actions"
+
+  local profile="${SELFTEST_ROOT}/dr-control-profile.json"
+  local out=""
+  cat > "${profile}" <<'JSON'
+{
+  "version": 1,
+  "engine": "FTCTL_DR",
+  "planUuid": "plan-control",
+  "direction": "KVM_TO_KVM",
+  "request": {
+    "mode": "planned"
+  }
+}
+JSON
+
+  bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-sync-start \
+    --config "${SELFTEST_CONFIG}" \
+    --plan plan-control \
+    --run run-control \
+    --profile-json "${profile}" \
+    --json >/dev/null
+
+  out="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-sync-pause \
+    --config "${SELFTEST_CONFIG}" \
+    --plan plan-control \
+    --run run-pause \
+    --profile-json "${profile}" \
+    --json)"
+  selftest_assert_contains "${out}" '"state":"PAUSED"' "pause state"
+  selftest_assert_contains "${out}" '"progress":100' "pause progress"
+
+  out="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-sync-resume \
+    --config "${SELFTEST_CONFIG}" \
+    --plan plan-control \
+    --run run-resume \
+    --profile-json "${profile}" \
+    --json)"
+  selftest_assert_contains "${out}" '"state":"SYNCING"' "resume state"
+
+  out="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-release \
+    --config "${SELFTEST_CONFIG}" \
+    --plan plan-control \
+    --run run-release \
+    --profile-json "${profile}" \
+    --force \
+    --json)"
+  selftest_assert_contains "${out}" '"state":"RELEASED"' "release state"
+  selftest_assert_contains "${out}" '"step":"release-completed"' "release step"
+}
+
+selftest_case_dr_ablestack_target_prepare() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR ABLESTACK target prepare driver"
+
+  local fakebin="${SELFTEST_ROOT}/fakebin"
+  local call_log="${SELFTEST_ROOT}/qemu-img.log"
+  local profile="${SELFTEST_ROOT}/dr-ablestack-profile.json"
+  local out="" manifest=""
+  mkdir -p "${fakebin}" "${SELFTEST_ROOT}/src" "${SELFTEST_ROOT}/target"
+  cat > "${fakebin}/qemu-img" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "${call_log}"
+if [[ "\$1" == "create" ]]; then
+  args=("\$@")
+  target="\${args[\${#args[@]}-2]}"
+  : > "\${target}"
+  exit 0
+fi
+if [[ "\$1" == "info" ]]; then
+  printf '{"format":"qcow2","virtual-size":1048576}\n'
+  exit 0
+fi
+if [[ "\$1" == "convert" ]]; then
+  exit 0
+fi
+exit 0
+EOF
+  chmod +x "${fakebin}/qemu-img"
+
+  cat > "${profile}" <<JSON
+{
+  "version": 1,
+  "engine": "FTCTL_DR",
+  "planUuid": "plan-step4",
+  "runUuid": "run-step4",
+  "direction": "KVM_TO_KVM",
+  "source": {"provider": "ABLESTACK", "driver": "KVM_QMP"},
+  "target": {"provider": "ABLESTACK", "driver": "ABLESTACK"},
+  "mapping": {
+    "disks": [
+      {
+        "device": "vda",
+        "sourcePath": "${SELFTEST_ROOT}/src/root.qcow2",
+        "targetPath": "${SELFTEST_ROOT}/target/root.qcow2",
+        "sourceFormat": "qcow2",
+        "targetFormat": "qcow2",
+        "sizeBytes": 1048576
+      }
+    ]
+  }
+}
+JSON
+
+  out="$(FTCTL_DR_SCHEDULER_DISABLE=1 PATH="${fakebin}:$PATH" bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-sync-start \
+    --config "${SELFTEST_CONFIG}" \
+    --plan plan-step4 \
+    --run run-step4 \
+    --profile-json "${profile}" \
+    --role coordinator \
+    --mode planned \
+    --wait=false \
+    --json)"
+  selftest_assert_contains "${out}" '"state":"SYNCING"' "prepare state"
+  selftest_assert_contains "${out}" '"step":"ablestack-targets-prepared"' "prepare step"
+  selftest_assert_contains "${out}" '"progress":5' "prepare progress"
+  selftest_assert_contains "${out}" '"driver":"ABLESTACK"' "prepare driver"
+  selftest_assert_contains "${out}" '"driver_state":"TARGET_PREPARED"' "prepare driver state"
+  selftest_assert_file_contains "${call_log}" "create -f qcow2 ${SELFTEST_ROOT}/target/root.qcow2 1048576"
+  manifest="${SELFTEST_ROOT}/run/dr-runtime/plans/plan-step4/manifests/run-step4-manifest.json"
+  selftest_assert_file_contains "${manifest}" '"phase":"target-prepared"'
+  selftest_assert_file_contains "${manifest}" '"targetPath":"'"${SELFTEST_ROOT}"'/target/root.qcow2"'
+  selftest_assert_file_contains "${SELFTEST_ROOT}/run/dr-runtime/plans/plan-step4/checkpoints/run-step4-checkpoint.json" '"state":"TARGET_PREPARED"'
+}
+
+selftest_case_dr_ablestack_full_seed_once() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR ABLESTACK full seed driver"
+
+  local fakebin="${SELFTEST_ROOT}/fakebin"
+  local call_log="${SELFTEST_ROOT}/qemu-img-full-seed.log"
+  local profile="${SELFTEST_ROOT}/dr-ablestack-full-seed-profile.json"
+  local out=""
+  mkdir -p "${fakebin}" "${SELFTEST_ROOT}/src" "${SELFTEST_ROOT}/target"
+  cat > "${fakebin}/qemu-img" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "${call_log}"
+if [[ "\$1" == "create" ]]; then
+  args=("\$@")
+  target="\${args[\${#args[@]}-2]}"
+  : > "\${target}"
+  exit 0
+fi
+if [[ "\$1" == "info" ]]; then
+  printf '{"format":"qcow2","virtual-size":1048576}\n'
+  exit 0
+fi
+if [[ "\$1" == "convert" ]]; then
+  exit 0
+fi
+exit 0
+EOF
+  chmod +x "${fakebin}/qemu-img"
+
+  cat > "${profile}" <<JSON
+{
+  "version": 1,
+  "engine": "FTCTL_DR",
+  "planUuid": "plan-step4-full",
+  "runUuid": "run-step4-full",
+  "direction": "KVM_TO_KVM",
+  "source": {"provider": "ABLESTACK", "driver": "KVM_QMP"},
+  "target": {"provider": "ABLESTACK", "driver": "ABLESTACK"},
+  "request": {"performFullSeed": true},
+  "mapping": {
+    "disks": [
+      {
+        "device": "vda",
+        "sourcePath": "${SELFTEST_ROOT}/src/root.qcow2",
+        "targetPath": "${SELFTEST_ROOT}/target/root.qcow2",
+        "sourceFormat": "qcow2",
+        "targetFormat": "qcow2",
+        "sizeBytes": 1048576
+      }
+    ]
+  }
+}
+JSON
+
+  out="$(FTCTL_DR_SCHEDULER_DISABLE=1 PATH="${fakebin}:$PATH" bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-sync-start \
+    --config "${SELFTEST_CONFIG}" \
+    --plan plan-step4-full \
+    --run run-step4-full \
+    --profile-json "${profile}" \
+    --role coordinator \
+    --mode planned \
+    --wait=true \
+    --json)"
+  selftest_assert_contains "${out}" '"state":"READY"' "full seed state"
+  selftest_assert_contains "${out}" '"step":"ablestack-full-seed-complete"' "full seed step"
+  selftest_assert_contains "${out}" '"progress":100' "full seed progress"
+  selftest_assert_contains "${out}" '"driver_state":"TARGET_READY"' "full seed driver state"
+  selftest_assert_contains "${out}" '"target_ready_rpo_seconds":' "full seed rpo field"
+  selftest_assert_file_contains "${call_log}" "convert --force-share -p -n -S"
+  selftest_assert_file_contains "${SELFTEST_ROOT}/run/dr-runtime/plans/plan-step4-full/checkpoints/run-step4-full-checkpoint.json" '"state":"TARGET_READY"'
+}
+
+selftest_case_dr_ablestack_missing_disk_map_waits() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR ABLESTACK missing disk map waits"
+
+  local profile="${SELFTEST_ROOT}/dr-ablestack-missing-map-profile.json"
+  local out=""
+  cat > "${profile}" <<'JSON'
+{
+  "version": 1,
+  "engine": "FTCTL_DR",
+  "planUuid": "plan-step4-wait",
+  "runUuid": "run-step4-wait",
+  "direction": "KVM_TO_KVM",
+  "source": {"provider": "ABLESTACK", "driver": "KVM_QMP"},
+  "target": {"provider": "ABLESTACK", "driver": "ABLESTACK"}
+}
+JSON
+
+  out="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-sync-start \
+    --config "${SELFTEST_CONFIG}" \
+    --plan plan-step4-wait \
+    --run run-step4-wait \
+    --profile-json "${profile}" \
+    --role coordinator \
+    --mode planned \
+    --wait=false \
+    --json)"
+  selftest_assert_contains "${out}" '"result":"accepted"' "missing map still accepted"
+  selftest_assert_contains "${out}" '"state":"SYNCING"' "missing map state"
+  selftest_assert_contains "${out}" '"step":"ablestack-disk-map-pending"' "missing map step"
+  selftest_assert_contains "${out}" '"driver_state":"WAITING_FOR_DISK_MAP"' "missing map driver state"
+}
+
+selftest_case_dr_vmware_preflight_missing_vddk() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR VMware preflight reports missing VDDK"
+
+  local profile="${SELFTEST_ROOT}/dr-vmware-preflight-profile.json"
+  local out=""
+  cat > "${profile}" <<'JSON'
+{
+  "version": 1,
+  "engine": "FTCTL_DR",
+  "planUuid": "plan-vmware-preflight",
+  "direction": "KVM_TO_VMWARE",
+  "source": {"provider": "ABLESTACK", "driver": "KVM_QMP"},
+  "target": {"provider": "VMWARE", "driver": "VMWARE_VDDK"}
+}
+JSON
+
+  out="$(FTCTL_DR_VMWARE_FORCE_MISSING_VDDK=1 bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-plan-apply \
+    --config "${SELFTEST_CONFIG}" \
+    --plan plan-vmware-preflight \
+    --profile-json "${profile}" \
+    --role coordinator \
+    --dry-run \
+    --json)"
+  selftest_assert_contains "${out}" '"command":"dr-plan-apply"' "vmware preflight command"
+  selftest_assert_contains "${out}" '"capable":false' "vmware preflight capable false"
+  selftest_assert_contains "${out}" '"error_code":"DR_MISSING_VDDK"' "vmware preflight error code"
+  selftest_assert_contains "${out}" '"driver":"VMWARE"' "vmware preflight details"
+}
+
+selftest_case_dr_vmware_contract_ready() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR VMware contract-ready metadata path"
+
+  local profile="${SELFTEST_ROOT}/dr-vmware-contract-profile.json"
+  local out="" manifest="" checkpoint=""
+  cat > "${profile}" <<'JSON'
+{
+  "version": 1,
+  "engine": "FTCTL_DR",
+  "planUuid": "plan-vmware-ready",
+  "runUuid": "run-vmware-ready",
+  "direction": "VMWARE_TO_VMWARE",
+  "source": {
+    "provider": "VMWARE",
+    "driver": "VMWARE_CBT",
+    "vmId": "vm-101",
+    "vcenterRef": "vc-a"
+  },
+  "target": {
+    "provider": "VMWARE",
+    "driver": "VMWARE_VDDK",
+    "vmId": "vm-201",
+    "datastoreRef": "ds-dr",
+    "folderPath": "/DR",
+    "resourcePoolRef": "rp-dr",
+    "networkRef": "net-dr"
+  },
+  "mapping": {
+    "disks": [
+      {
+        "device": "scsi0:0",
+        "sourceVmdkPath": "[prod] vm-101/root.vmdk",
+        "targetVmdkPath": "[dr] vm-201/root.vmdk",
+        "sizeBytes": 1048576,
+        "changeId": "52 00 01",
+        "snapshotRef": "snap-1"
+      }
+    ]
+  }
+}
+JSON
+
+  out="$(FTCTL_DR_VMWARE_FORCE_VDDK_READY=1 bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-plan-apply \
+    --config "${SELFTEST_CONFIG}" \
+    --plan plan-vmware-ready \
+    --profile-json "${profile}" \
+    --role coordinator \
+    --dry-run \
+    --json)"
+  selftest_assert_contains "${out}" '"capable":true' "vmware preflight capable true"
+  selftest_assert_contains "${out}" '"disk_count":1' "vmware preflight disk count"
+  selftest_assert_contains "${out}" '"vddk_ready":true' "vmware preflight vddk ready"
+
+  out="$(FTCTL_DR_SCHEDULER_DISABLE=1 FTCTL_DR_VMWARE_FORCE_VDDK_READY=1 bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-sync-start \
+    --config "${SELFTEST_CONFIG}" \
+    --plan plan-vmware-ready \
+    --run run-vmware-ready \
+    --profile-json "${profile}" \
+    --role coordinator \
+    --mode planned \
+    --wait=false \
+    --json)"
+  selftest_assert_contains "${out}" '"result":"accepted"' "vmware sync accepted"
+  selftest_assert_contains "${out}" '"state":"SYNCING"' "vmware sync state"
+  selftest_assert_contains "${out}" '"step":"vmware-driver-contract-ready"' "vmware sync step"
+  selftest_assert_contains "${out}" '"driver":"VMWARE"' "vmware sync driver"
+  selftest_assert_contains "${out}" '"driver_state":"VMWARE_CONTRACT_READY"' "vmware sync driver state"
+  manifest="${SELFTEST_ROOT}/run/dr-runtime/plans/plan-vmware-ready/manifests/run-vmware-ready-vmware-manifest.json"
+  checkpoint="${SELFTEST_ROOT}/run/dr-runtime/plans/plan-vmware-ready/checkpoints/run-vmware-ready-vmware-checkpoint.json"
+  selftest_assert_file_contains "${manifest}" '"phase":"vmware-contract-ready"'
+  selftest_assert_file_contains "${manifest}" '"changeId":"52 00 01"'
+  selftest_assert_file_contains "${checkpoint}" '"state":"VMWARE_CONTRACT_READY"'
+}
+
+selftest_case_dr_vmware_missing_vddk_blocks_sync() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR VMware missing VDDK blocks sync start"
+
+  local profile="${SELFTEST_ROOT}/dr-vmware-missing-vddk-profile.json"
+  local out="" rc=0
+  cat > "${profile}" <<'JSON'
+{
+  "version": 1,
+  "engine": "FTCTL_DR",
+  "planUuid": "plan-vmware-missing",
+  "runUuid": "run-vmware-missing",
+  "direction": "VMWARE_TO_VMWARE",
+  "source": {"provider": "VMWARE", "driver": "VMWARE_CBT", "vmId": "vm-101"},
+  "target": {"provider": "VMWARE", "driver": "VMWARE_VDDK", "vmId": "vm-201"},
+  "mapping": {
+    "disks": [
+      {
+        "device": "scsi0:0",
+        "sourceVmdkPath": "[prod] vm-101/root.vmdk",
+        "targetVmdkPath": "[dr] vm-201/root.vmdk",
+        "sizeBytes": 1048576
+      }
+    ]
+  }
+}
+JSON
+
+  out="$(FTCTL_DR_VMWARE_FORCE_MISSING_VDDK=1 bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-sync-start \
+    --config "${SELFTEST_CONFIG}" \
+    --plan plan-vmware-missing \
+    --run run-vmware-missing \
+    --profile-json "${profile}" \
+    --role coordinator \
+    --mode planned \
+    --wait=false \
+    --json)" || rc=$?
+  [[ "${rc}" != "0" ]] || selftest_fail "vmware missing VDDK sync should fail"
+  selftest_assert_contains "${out}" '"result":"error"' "vmware missing sync result"
+  selftest_assert_contains "${out}" '"accepted":false' "vmware missing sync accepted false"
+  selftest_assert_contains "${out}" '"state":"ERROR"' "vmware missing sync state"
+  selftest_assert_contains "${out}" '"step":"vmware-capability-missing"' "vmware missing sync step"
+  selftest_assert_contains "${out}" '"error_code":"DR_MISSING_VDDK"' "vmware missing sync error code"
+  selftest_assert_contains "${out}" '"driver_state":"MISSING_VDDK"' "vmware missing sync driver state"
+}
+
+selftest_case_dr_scheduler_ablestack_checkpoint_loop() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR scheduler ABLESTACK checkpoint loop"
+
+  local fakebin="${SELFTEST_ROOT}/fakebin"
+  local call_log="${SELFTEST_ROOT}/qemu-img-scheduler.log"
+  local profile="${SELFTEST_ROOT}/dr-scheduler-ablestack-profile.json"
+  local out="" restore_points="" convert_count=""
+  mkdir -p "${fakebin}" "${SELFTEST_ROOT}/src" "${SELFTEST_ROOT}/target"
+  cat > "${fakebin}/qemu-img" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "${call_log}"
+if [[ "\$1" == "create" ]]; then
+  args=("\$@")
+  target="\${args[\${#args[@]}-2]}"
+  : > "\${target}"
+  exit 0
+fi
+if [[ "\$1" == "info" ]]; then
+  printf '{"format":"qcow2","virtual-size":1048576}\n'
+  exit 0
+fi
+if [[ "\$1" == "convert" ]]; then
+  exit 0
+fi
+exit 0
+EOF
+  chmod +x "${fakebin}/qemu-img"
+
+  cat > "${profile}" <<JSON
+{
+  "version": 1,
+  "engine": "FTCTL_DR",
+  "planUuid": "plan-scheduler-ablestack",
+  "runUuid": "run-scheduler-ablestack",
+  "direction": "KVM_TO_KVM",
+  "source": {"provider": "ABLESTACK", "driver": "KVM_QMP"},
+  "target": {"provider": "ABLESTACK", "driver": "ABLESTACK"},
+  "schedule": {"intervalSeconds": 0},
+  "request": {"maxCycles": 2},
+  "mapping": {
+    "disks": [
+      {
+        "device": "vda",
+        "sourcePath": "${SELFTEST_ROOT}/src/root.qcow2",
+        "targetPath": "${SELFTEST_ROOT}/target/root.qcow2",
+        "sourceFormat": "qcow2",
+        "targetFormat": "qcow2",
+        "sizeBytes": 1048576
+      }
+    ]
+  }
+}
+JSON
+
+  out="$(FTCTL_DR_SCHEDULER_FOREGROUND=1 PATH="${fakebin}:$PATH" bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-sync-start \
+    --config "${SELFTEST_CONFIG}" \
+    --plan plan-scheduler-ablestack \
+    --run run-scheduler-ablestack \
+    --profile-json "${profile}" \
+    --role coordinator \
+    --mode planned \
+    --wait=false \
+    --json)"
+  selftest_assert_contains "${out}" '"state":"READY"' "scheduler completed state"
+  selftest_assert_contains "${out}" '"step":"scheduler-completed"' "scheduler completed step"
+  selftest_assert_contains "${out}" '"scheduler_state":"COMPLETED"' "scheduler completed flag"
+  selftest_assert_contains "${out}" '"checkpoint_sequence":2' "scheduler checkpoint sequence"
+  selftest_assert_contains "${out}" '"driver_state":"CHECKPOINT_READY"' "scheduler driver state"
+  restore_points="${SELFTEST_ROOT}/run/dr-runtime/plans/plan-scheduler-ablestack/restore-points.jsonl"
+  selftest_assert_eq "$(wc -l < "${restore_points}" | tr -d '[:space:]')" "2" "restore point count"
+  selftest_assert_file_contains "${restore_points}" '"cycleType":"full-seed"'
+  selftest_assert_file_contains "${restore_points}" '"cycleType":"incremental"'
+  convert_count="$(grep -c -- "convert --force-share -p -n -S" "${call_log}")"
+  selftest_assert_eq "${convert_count}" "2" "scheduler convert count"
+}
+
+selftest_case_dr_scheduler_vmware_mock_checkpoint_loop() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR scheduler VMware mock checkpoint loop"
+
+  local profile="${SELFTEST_ROOT}/dr-scheduler-vmware-profile.json"
+  local out="" restore_points="" checkpoint=""
+  cat > "${profile}" <<'JSON'
+{
+  "version": 1,
+  "engine": "FTCTL_DR",
+  "planUuid": "plan-scheduler-vmware",
+  "runUuid": "run-scheduler-vmware",
+  "direction": "VMWARE_TO_VMWARE",
+  "source": {"provider": "VMWARE", "driver": "VMWARE_CBT", "vmId": "vm-101", "vcenterRef": "vc-a"},
+  "target": {"provider": "VMWARE", "driver": "VMWARE_VDDK", "vmId": "vm-201", "datastoreRef": "ds-dr"},
+  "schedule": {"intervalSeconds": 0},
+  "request": {"maxCycles": 2},
+  "mapping": {
+    "disks": [
+      {
+        "device": "scsi0:0",
+        "sourceVmdkPath": "[prod] vm-101/root.vmdk",
+        "targetVmdkPath": "[dr] vm-201/root.vmdk",
+        "sizeBytes": 1048576,
+        "changeId": "52 00 01",
+        "snapshotRef": "snap-1"
+      }
+    ]
+  }
+}
+JSON
+
+  out="$(FTCTL_DR_VMWARE_FORCE_VDDK_READY=1 FTCTL_DR_VMWARE_MOCK_CYCLE=1 FTCTL_DR_SCHEDULER_FOREGROUND=1 bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-sync-start \
+    --config "${SELFTEST_CONFIG}" \
+    --plan plan-scheduler-vmware \
+    --run run-scheduler-vmware \
+    --profile-json "${profile}" \
+    --role coordinator \
+    --mode planned \
+    --wait=false \
+    --json)"
+  selftest_assert_contains "${out}" '"state":"READY"' "vmware scheduler completed state"
+  selftest_assert_contains "${out}" '"step":"scheduler-completed"' "vmware scheduler completed step"
+  selftest_assert_contains "${out}" '"driver":"VMWARE"' "vmware scheduler driver"
+  selftest_assert_contains "${out}" '"checkpoint_sequence":2' "vmware scheduler checkpoint sequence"
+  restore_points="${SELFTEST_ROOT}/run/dr-runtime/plans/plan-scheduler-vmware/restore-points.jsonl"
+  selftest_assert_eq "$(wc -l < "${restore_points}" | tr -d '[:space:]')" "2" "vmware restore point count"
+  selftest_assert_file_contains "${restore_points}" '"cycleType":"incremental"'
+  checkpoint="${SELFTEST_ROOT}/run/dr-runtime/plans/plan-scheduler-vmware/checkpoints/run-scheduler-vmware-cycle-2-vmware-checkpoint.json"
+  selftest_assert_file_contains "${checkpoint}" '"state":"TARGET_READY"'
+  selftest_assert_file_contains "${SELFTEST_ROOT}/run/dr-runtime/plans/plan-scheduler-vmware/manifests/run-scheduler-vmware-cycle-2-vmware-manifest.json" '"phase":"vmware-incremental-complete"'
+}
+
+selftest_case_dr_runtime_test_failover_cleanup() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR test failover selects restore point and cleanup returns READY"
+
+  local plan="plan-test-session"
+  local profile="${SELFTEST_ROOT}/dr-test-session-profile.json"
+  local plan_dir="${SELFTEST_ROOT}/run/dr-runtime/plans/${plan}"
+  local restore_points="${plan_dir}/restore-points.jsonl"
+  local checkpoint1="${plan_dir}/checkpoints/cycle-1-checkpoint.json"
+  local checkpoint2="${plan_dir}/checkpoints/cycle-2-checkpoint.json"
+  local manifest1="${plan_dir}/manifests/cycle-1-manifest.json"
+  local manifest2="${plan_dir}/manifests/cycle-2-manifest.json"
+  local fakebin="${SELFTEST_ROOT}/fakebin"
+  local call_log="${SELFTEST_ROOT}/qemu-img-test-session.log"
+  local status_path="${plan_dir}/status.state"
+  local session_path="" artifact_dir="" out="" cleanup=""
+
+  mkdir -p "${plan_dir}/checkpoints" "${plan_dir}/manifests" "${fakebin}" "${SELFTEST_ROOT}/target"
+  cat > "${fakebin}/qemu-img" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "${call_log}"
+target="\${@: -1}"
+: > "\${target}"
+EOF
+  chmod +x "${fakebin}/qemu-img"
+  cat > "${profile}" <<JSON
+{
+  "version": 1,
+  "engine": "FTCTL_DR",
+  "planUuid": "${plan}",
+  "runUuid": "run-test-session",
+  "direction": "KVM_TO_KVM",
+  "source": {"provider": "ABLESTACK", "driver": "KVM_QMP"},
+  "target": {"provider": "ABLESTACK", "driver": "ABLESTACK"},
+  "request": {
+    "restorePointRef": "ftctl:${plan}:2",
+    "networkMode": "isolated"
+  },
+  "mapping": {
+    "disks": [
+      {"device": "vda", "sourcePath": "/src/root.qcow2", "targetPath": "${SELFTEST_ROOT}/target/root.qcow2", "targetFormat": "qcow2"}
+    ]
+  }
+}
+JSON
+  cat > "${checkpoint1}" <<JSON
+{"state":"TARGET_READY","sourceCheckpointAt":"2026-07-01T01:00:00Z","targetDurableAt":"2026-07-01T01:00:03Z","targetReadyRpoSeconds":3}
+JSON
+  cat > "${checkpoint2}" <<JSON
+{"state":"TARGET_READY","sourceCheckpointAt":"2026-07-01T01:05:00Z","targetDurableAt":"2026-07-01T01:05:02Z","targetReadyRpoSeconds":2}
+JSON
+  cat > "${manifest1}" <<JSON
+{"phase":"incremental-complete","sequence":1}
+JSON
+  cat > "${manifest2}" <<JSON
+{"phase":"incremental-complete","sequence":2}
+JSON
+  cat > "${restore_points}" <<JSON
+{"planUuid":"${plan}","runUuid":"run-sync","checkpointSequence":1,"cycleType":"full-seed","driver":"ABLESTACK","manifest":"${manifest1}","checkpoint":"${checkpoint1}","sourceCheckpointAt":"2026-07-01T01:00:00Z","targetDurableAt":"2026-07-01T01:00:03Z","targetReadyRpoSeconds":3,"state":"TARGET_READY","recordedAt":"2026-07-01T01:00:04Z"}
+{"planUuid":"${plan}","runUuid":"run-sync","checkpointSequence":2,"cycleType":"incremental","driver":"ABLESTACK","manifest":"${manifest2}","checkpoint":"${checkpoint2}","sourceCheckpointAt":"2026-07-01T01:05:00Z","targetDurableAt":"2026-07-01T01:05:02Z","targetReadyRpoSeconds":2,"state":"TARGET_READY","recordedAt":"2026-07-01T01:05:03Z"}
+JSON
+  cat > "${status_path}" <<EOF
+plan=${plan}
+run=run-sync
+action=dr-sync-start
+state=READY
+step=scheduler-completed
+progress=100
+accepted=true
+external_job_ref=run-sync
+last_source_checkpoint_at=2026-07-01T01:05:00Z
+last_target_durable_at=2026-07-01T01:05:02Z
+target_ready_rpo_seconds=2
+error_code=
+updated_at=2026-07-01T01:05:03Z
+manifest_path=${manifest2}
+checkpoint_path=${checkpoint2}
+checkpoint_sequence=2
+restore_points_path=${restore_points}
+EOF
+
+  out="$(PATH="${fakebin}:$PATH" bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-test-failover \
+    --config "${SELFTEST_CONFIG}" \
+    --plan "${plan}" \
+    --run run-test-session \
+    --profile-json "${profile}" \
+    --restore-point "ftctl:${plan}:2" \
+    --json)"
+  selftest_assert_contains "${out}" '"result":"accepted"' "test failover accepted"
+  selftest_assert_contains "${out}" '"state":"TESTING"' "test failover state"
+  selftest_assert_contains "${out}" '"step":"test-session-ready"' "test failover step"
+  selftest_assert_contains "${out}" '"test_session_state":"READY"' "test session ready"
+  selftest_assert_contains "${out}" '"test_restore_point_ref":"ftctl:plan-test-session:2"' "test restore point ref"
+  selftest_assert_contains "${out}" '"test_restore_point_sequence":2' "test restore point sequence"
+  selftest_assert_contains "${out}" '"test_artifacts_state":"CREATED"' "test artifact state"
+  selftest_assert_contains "${out}" '"test_artifact_count":1' "test artifact count"
+  session_path="${SELFTEST_ROOT}/run/dr-runtime/plans/${plan}/test-sessions/run-test-session.json"
+  artifact_dir="${SELFTEST_ROOT}/run/dr-runtime/plans/${plan}/test-sessions/run-test-session-artifacts"
+  selftest_assert_file_contains "${session_path}" '"networkMode":"isolated"'
+  selftest_assert_file_contains "${session_path}" '"checkpointSequence":2'
+  selftest_assert_file_contains "${session_path}" '"type":"qcow2-overlay"'
+  selftest_assert_file_contains "${call_log}" "create -f qcow2 -F qcow2 -b ${SELFTEST_ROOT}/target/root.qcow2 ${artifact_dir}/vda.qcow2"
+  [[ -f "${artifact_dir}/vda.qcow2" ]] || selftest_fail "test overlay should be created"
+
+  out="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-status \
+    --config "${SELFTEST_CONFIG}" \
+    --plan "${plan}" \
+    --json)"
+  selftest_assert_contains "${out}" '"state":"TESTING"' "status projects test state"
+  selftest_assert_file_contains "${SELFTEST_ROOT}/run/dr-runtime/plans/${plan}/test-sessions/active.json" '"sessionId":"plan-test-session:run-test-session"'
+
+  cleanup="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-test-cleanup \
+    --config "${SELFTEST_CONFIG}" \
+    --plan "${plan}" \
+    --run run-test-cleanup \
+    --profile-json "${profile}" \
+    --json)"
+  selftest_assert_contains "${cleanup}" '"state":"READY"' "test cleanup state"
+  selftest_assert_contains "${cleanup}" '"step":"test-cleanup-completed"' "test cleanup step"
+  selftest_assert_contains "${cleanup}" '"test_session_state":"CLEANED"' "test cleanup session state"
+  selftest_assert_contains "${cleanup}" '"test_artifacts_state":"CLEANED"' "test artifact cleanup state"
+  [[ ! -e "${SELFTEST_ROOT}/run/dr-runtime/plans/${plan}/test-sessions/active.json" ]] || selftest_fail "active test session should be removed"
+  [[ ! -d "${artifact_dir}" ]] || selftest_fail "test artifact directory should be removed"
+}
+
+selftest_case_dr_runtime_planned_failover_promotes_latest_checkpoint() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR planned failover locks a final checkpoint and delegates target power-on"
+
+  local plan="plan-failover"
+  local profile="${SELFTEST_ROOT}/dr-failover-profile.json"
+  local plan_dir="${SELFTEST_ROOT}/run/dr-runtime/plans/${plan}"
+  local restore_points="${plan_dir}/restore-points.jsonl"
+  local checkpoint1="${plan_dir}/checkpoints/cycle-1-checkpoint.json"
+  local checkpoint2="${plan_dir}/checkpoints/cycle-2-checkpoint.json"
+  local manifest1="${plan_dir}/manifests/cycle-1-manifest.json"
+  local manifest2="${plan_dir}/manifests/cycle-2-manifest.json"
+  local fakebin="${SELFTEST_ROOT}/fakebin"
+  local call_log="${SELFTEST_ROOT}/qemu-img-failover.log"
+  local status_path="${plan_dir}/status.state"
+  local out="" session_path="" active_path=""
+
+  mkdir -p "${plan_dir}/checkpoints" "${plan_dir}/manifests" "${fakebin}" "${SELFTEST_ROOT}/target"
+  cat > "${fakebin}/qemu-img" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "${call_log}"
+case "\${1:-}" in
+  info)
+    printf '{"format":"qcow2","virtual-size":1048576}\n'
+    ;;
+  create)
+    target="\${@: -2:1}"
+    : > "\${target}"
+    ;;
+  convert)
+    target="\${@: -1}"
+    : > "\${target}"
+    ;;
+esac
+EOF
+  chmod +x "${fakebin}/qemu-img"
+  cat > "${profile}" <<JSON
+{
+  "version": 1,
+  "engine": "FTCTL_DR",
+  "planUuid": "${plan}",
+  "runUuid": "run-failover",
+  "direction": "KVM_TO_KVM",
+  "source": {"provider": "ABLESTACK", "driver": "KVM_QMP"},
+  "target": {"provider": "ABLESTACK", "driver": "ABLESTACK"},
+  "request": {
+    "mode": "planned",
+    "finalSync": true
+  },
+  "mapping": {
+    "disks": [
+      {"device": "vda", "sourcePath": "/src/root.qcow2", "targetPath": "${SELFTEST_ROOT}/target/root.qcow2", "sourceFormat": "qcow2", "targetFormat": "qcow2", "sizeBytes": 1048576}
+    ]
+  }
+}
+JSON
+  cat > "${checkpoint1}" <<JSON
+{"state":"TARGET_READY","sourceCheckpointAt":"2026-07-01T01:00:00Z","targetDurableAt":"2026-07-01T01:00:03Z","targetReadyRpoSeconds":3}
+JSON
+  cat > "${checkpoint2}" <<JSON
+{"state":"TARGET_READY","sourceCheckpointAt":"2026-07-01T01:05:00Z","targetDurableAt":"2026-07-01T01:05:02Z","targetReadyRpoSeconds":2}
+JSON
+  cat > "${manifest1}" <<JSON
+{"phase":"incremental-complete","sequence":1}
+JSON
+  cat > "${manifest2}" <<JSON
+{"phase":"incremental-complete","sequence":2}
+JSON
+  cat > "${restore_points}" <<JSON
+{"planUuid":"${plan}","runUuid":"run-sync","checkpointSequence":1,"cycleType":"full-seed","driver":"ABLESTACK","manifest":"${manifest1}","checkpoint":"${checkpoint1}","sourceCheckpointAt":"2026-07-01T01:00:00Z","targetDurableAt":"2026-07-01T01:00:03Z","targetReadyRpoSeconds":3,"state":"TARGET_READY","recordedAt":"2026-07-01T01:00:04Z"}
+{"planUuid":"${plan}","runUuid":"run-sync","checkpointSequence":2,"cycleType":"incremental","driver":"ABLESTACK","manifest":"${manifest2}","checkpoint":"${checkpoint2}","sourceCheckpointAt":"2026-07-01T01:05:00Z","targetDurableAt":"2026-07-01T01:05:02Z","targetReadyRpoSeconds":2,"state":"TARGET_READY","recordedAt":"2026-07-01T01:05:03Z"}
+JSON
+  cat > "${status_path}" <<EOF
+plan=${plan}
+run=run-sync
+action=dr-sync-start
+state=READY
+step=scheduler-completed
+progress=100
+accepted=true
+external_job_ref=run-sync
+last_source_checkpoint_at=2026-07-01T01:05:00Z
+last_target_durable_at=2026-07-01T01:05:02Z
+target_ready_rpo_seconds=2
+error_code=
+updated_at=2026-07-01T01:05:03Z
+manifest_path=${manifest2}
+checkpoint_path=${checkpoint2}
+checkpoint_sequence=2
+restore_points_path=${restore_points}
+EOF
+
+  out="$(FTCTL_DR_FAILOVER_FOREGROUND=1 PATH="${fakebin}:$PATH" bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-failover \
+    --config "${SELFTEST_CONFIG}" \
+    --plan "${plan}" \
+    --run run-failover \
+    --profile-json "${profile}" \
+    --mode planned \
+    --wait=false \
+    --json)"
+  selftest_assert_contains "${out}" '"result":"accepted"' "planned failover accepted"
+  selftest_assert_contains "${out}" '"state":"FAILED_OVER"' "planned failover final state"
+  selftest_assert_contains "${out}" '"step":"active-side-switch"' "planned failover final step"
+  selftest_assert_contains "${out}" '"failover_mode":"planned"' "planned failover mode"
+  selftest_assert_contains "${out}" '"failover_restore_point_ref":"ftctl:plan-failover:3"' "planned failover restore point ref"
+  selftest_assert_contains "${out}" '"failover_restore_point_sequence":3' "planned failover restore point sequence"
+  selftest_assert_contains "${out}" '"active_side":"TARGET"' "planned failover active side"
+  selftest_assert_contains "${out}" '"target_power_state":"POWER_ON_DELEGATED"' "planned failover target power delegated"
+  selftest_assert_contains "${out}" '"target_promotion_state":"PROMOTED"' "planned failover target promoted"
+  selftest_assert_contains "${out}" '"rto_actual_seconds":' "planned failover RTO field"
+  selftest_assert_file_contains "${restore_points}" '"cycleType":"failover-final"'
+  selftest_assert_file_contains "${call_log}" "convert --force-share -p -n -S"
+
+  session_path="${SELFTEST_ROOT}/run/dr-runtime/plans/${plan}/failovers/run-failover.json"
+  active_path="${SELFTEST_ROOT}/run/dr-runtime/plans/${plan}/failovers/active.json"
+  selftest_assert_file_contains "${session_path}" '"state":"FAILED_OVER"'
+  selftest_assert_file_contains "${session_path}" '"lifecycleOwner":"Cloud"'
+  selftest_assert_file_contains "${active_path}" '"sessionId":"plan-failover:run-failover"'
+
+  out="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-status \
+    --config "${SELFTEST_CONFIG}" \
+    --plan "${plan}" \
+    --json)"
+  selftest_assert_contains "${out}" '"state":"FAILED_OVER"' "status projects failover state"
+  selftest_assert_contains "${out}" '"active_side":"TARGET"' "status projects active target"
+  selftest_assert_contains "${out}" '"target_power_state":"POWER_ON_DELEGATED"' "status projects delegated power state"
+}
+
+selftest_case_dr_runtime_failback_restores_source_after_reverse_checkpoint() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR failback runs reverse checkpoint and restores source active side"
+
+  local plan="plan-failback"
+  local profile="${SELFTEST_ROOT}/dr-failback-profile.json"
+  local plan_dir="${SELFTEST_ROOT}/run/dr-runtime/plans/${plan}"
+  local status_path="${plan_dir}/status.state"
+  local fakebin="${SELFTEST_ROOT}/fakebin"
+  local call_log="${SELFTEST_ROOT}/qemu-img-failback.log"
+  local out="" session_path="" active_path="" reverse_profile="" reverse_points=""
+
+  mkdir -p "${plan_dir}" "${fakebin}" "${SELFTEST_ROOT}/source" "${SELFTEST_ROOT}/target"
+  cat > "${fakebin}/qemu-img" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "${call_log}"
+case "\${1:-}" in
+  info)
+    printf '{"format":"qcow2","virtual-size":1048576}\n'
+    ;;
+  create)
+    target="\${@: -2:1}"
+    : > "\${target}"
+    ;;
+  convert)
+    target="\${@: -1}"
+    : > "\${target}"
+    ;;
+esac
+EOF
+  chmod +x "${fakebin}/qemu-img"
+  : > "${SELFTEST_ROOT}/target/root.qcow2"
+  cat > "${profile}" <<JSON
+{
+  "version": 1,
+  "engine": "FTCTL_DR",
+  "planUuid": "${plan}",
+  "runUuid": "run-original",
+  "direction": "KVM_TO_KVM",
+  "source": {"provider": "ABLESTACK", "driver": "KVM_QMP"},
+  "target": {"provider": "ABLESTACK", "driver": "ABLESTACK"},
+  "mapping": {
+    "disks": [
+      {"device": "vda", "sourcePath": "${SELFTEST_ROOT}/source/root.qcow2", "targetPath": "${SELFTEST_ROOT}/target/root.qcow2", "sourceFormat": "qcow2", "targetFormat": "qcow2", "sizeBytes": 1048576}
+    ]
+  }
+}
+JSON
+  cat > "${status_path}" <<EOF
+plan=${plan}
+run=run-failover
+action=dr-failover
+state=FAILED_OVER
+step=active-side-switch
+progress=100
+accepted=true
+active_side=TARGET
+target_power_state=POWER_ON_DELEGATED
+target_promotion_state=PROMOTED
+checkpoint_sequence=3
+last_source_checkpoint_at=2026-07-01T01:10:00Z
+last_target_durable_at=2026-07-01T01:10:03Z
+target_ready_rpo_seconds=3
+error_code=
+updated_at=2026-07-01T01:10:04Z
+EOF
+
+  out="$(FTCTL_DR_FAILBACK_FOREGROUND=1 PATH="${fakebin}:$PATH" bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-failback \
+    --config "${SELFTEST_CONFIG}" \
+    --plan "${plan}" \
+    --run run-failback \
+    --profile-json "${profile}" \
+    --wait=false \
+    --json)"
+  selftest_assert_contains "${out}" '"result":"accepted"' "failback accepted"
+  selftest_assert_contains "${out}" '"state":"READY"' "failback returns ready"
+  selftest_assert_contains "${out}" '"step":"active-side-restore"' "failback final step"
+  selftest_assert_contains "${out}" '"active_side":"SOURCE"' "failback active source"
+  selftest_assert_contains "${out}" '"source_power_state":"POWER_ON_DELEGATED"' "failback source power delegated"
+  selftest_assert_contains "${out}" '"source_promotion_state":"PROMOTED"' "failback source promoted"
+  selftest_assert_contains "${out}" '"failback_restore_point_sequence":4' "failback reverse checkpoint sequence"
+  selftest_assert_contains "${out}" '"reverse_direction":"KVM_TO_KVM"' "failback reverse direction"
+  selftest_assert_contains "${out}" '"failback_rto_actual_seconds":' "failback RTO field"
+
+  reverse_profile="${SELFTEST_ROOT}/run/dr-runtime/plans/${plan}/reverse-profiles/run-failback-failback.json"
+  reverse_points="${SELFTEST_ROOT}/run/dr-runtime/plans/${plan}/reverse-restore-points.jsonl"
+  session_path="${SELFTEST_ROOT}/run/dr-runtime/plans/${plan}/failbacks/run-failback.json"
+  active_path="${SELFTEST_ROOT}/run/dr-runtime/plans/${plan}/failbacks/active.json"
+  selftest_assert_file_contains "${reverse_profile}" "\"sourcePath\":\"${SELFTEST_ROOT}/target/root.qcow2\""
+  selftest_assert_file_contains "${reverse_profile}" "\"targetPath\":\"${SELFTEST_ROOT}/source/root.qcow2\""
+  selftest_assert_file_contains "${reverse_points}" '"cycleType":"failback-final"'
+  selftest_assert_file_contains "${session_path}" '"operation":"failback"'
+  selftest_assert_file_contains "${active_path}" '"activeSide":"SOURCE"'
+  selftest_assert_file_contains "${call_log}" "convert --force-share -p -n -S"
+
+  out="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-status \
+    --config "${SELFTEST_CONFIG}" \
+    --plan "${plan}" \
+    --json)"
+  selftest_assert_contains "${out}" '"state":"READY"' "failback status ready"
+  selftest_assert_contains "${out}" '"active_side":"SOURCE"' "failback status source active"
+}
+
+selftest_case_dr_runtime_reprotect_starts_reverse_protection_checkpoint() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR reprotect starts reverse protection while target remains active"
+
+  local plan="plan-reprotect"
+  local profile="${SELFTEST_ROOT}/dr-reprotect-profile.json"
+  local plan_dir="${SELFTEST_ROOT}/run/dr-runtime/plans/${plan}"
+  local status_path="${plan_dir}/status.state"
+  local active_profile="${plan_dir}/profile.json"
+  local fakebin="${SELFTEST_ROOT}/fakebin"
+  local call_log="${SELFTEST_ROOT}/qemu-img-reprotect.log"
+  local out="" session_path="" active_path="" reverse_profile="" reverse_points=""
+
+  mkdir -p "${plan_dir}" "${fakebin}" "${SELFTEST_ROOT}/source" "${SELFTEST_ROOT}/target"
+  cat > "${fakebin}/qemu-img" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "${call_log}"
+case "\${1:-}" in
+  info)
+    printf '{"format":"qcow2","virtual-size":1048576}\n'
+    ;;
+  create)
+    target="\${@: -2:1}"
+    : > "\${target}"
+    ;;
+  convert)
+    target="\${@: -1}"
+    : > "\${target}"
+    ;;
+esac
+EOF
+  chmod +x "${fakebin}/qemu-img"
+  : > "${SELFTEST_ROOT}/target/root.qcow2"
+  cat > "${profile}" <<JSON
+{
+  "version": 1,
+  "engine": "FTCTL_DR",
+  "planUuid": "${plan}",
+  "runUuid": "run-original",
+  "direction": "KVM_TO_KVM",
+  "source": {"provider": "ABLESTACK", "driver": "KVM_QMP"},
+  "target": {"provider": "ABLESTACK", "driver": "ABLESTACK"},
+  "mapping": {
+    "disks": [
+      {"device": "vda", "sourcePath": "${SELFTEST_ROOT}/source/root.qcow2", "targetPath": "${SELFTEST_ROOT}/target/root.qcow2", "sourceFormat": "qcow2", "targetFormat": "qcow2", "sizeBytes": 1048576}
+    ]
+  }
+}
+JSON
+  cat > "${status_path}" <<EOF
+plan=${plan}
+run=run-failover
+action=dr-failover
+state=FAILED_OVER
+step=active-side-switch
+progress=100
+accepted=true
+active_side=TARGET
+target_power_state=POWER_ON_DELEGATED
+target_promotion_state=PROMOTED
+checkpoint_sequence=5
+last_source_checkpoint_at=2026-07-01T02:10:00Z
+last_target_durable_at=2026-07-01T02:10:03Z
+target_ready_rpo_seconds=3
+error_code=
+updated_at=2026-07-01T02:10:04Z
+EOF
+
+  out="$(FTCTL_DR_REPROTECT_FOREGROUND=1 PATH="${fakebin}:$PATH" bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-reprotect \
+    --config "${SELFTEST_CONFIG}" \
+    --plan "${plan}" \
+    --run run-reprotect \
+    --profile-json "${profile}" \
+    --wait=false \
+    --json)"
+  selftest_assert_contains "${out}" '"result":"accepted"' "reprotect accepted"
+  selftest_assert_contains "${out}" '"state":"READY"' "reprotect ready"
+  selftest_assert_contains "${out}" '"step":"reprotect-ready"' "reprotect final step"
+  selftest_assert_contains "${out}" '"active_side":"TARGET"' "reprotect target active"
+  selftest_assert_contains "${out}" '"reprotect_mode":"reverse"' "reprotect reverse mode"
+  selftest_assert_contains "${out}" '"reprotect_restore_point_sequence":6' "reprotect reverse checkpoint sequence"
+  selftest_assert_contains "${out}" '"reverse_direction":"KVM_TO_KVM"' "reprotect reverse direction"
+
+  reverse_profile="${SELFTEST_ROOT}/run/dr-runtime/plans/${plan}/reverse-profiles/run-reprotect-reprotect.json"
+  reverse_points="${SELFTEST_ROOT}/run/dr-runtime/plans/${plan}/reverse-restore-points.jsonl"
+  session_path="${SELFTEST_ROOT}/run/dr-runtime/plans/${plan}/reprotects/run-reprotect.json"
+  active_path="${SELFTEST_ROOT}/run/dr-runtime/plans/${plan}/reprotects/active.json"
+  selftest_assert_file_contains "${reverse_profile}" "\"sourcePath\":\"${SELFTEST_ROOT}/target/root.qcow2\""
+  selftest_assert_file_contains "${reverse_profile}" "\"targetPath\":\"${SELFTEST_ROOT}/source/root.qcow2\""
+  selftest_assert_file_contains "${reverse_points}" '"cycleType":"reprotect-seed"'
+  selftest_assert_file_contains "${session_path}" '"operation":"reprotect"'
+  selftest_assert_file_contains "${active_path}" '"activeSide":"TARGET"'
+  selftest_assert_file_contains "${active_profile}" '"reverseOf"'
+  selftest_assert_file_contains "${call_log}" "convert --force-share -p -n -S"
+
+  out="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-status \
+    --config "${SELFTEST_CONFIG}" \
+    --plan "${plan}" \
+    --json)"
+  selftest_assert_contains "${out}" '"state":"READY"' "reprotect status ready"
+  selftest_assert_contains "${out}" '"active_side":"TARGET"' "reprotect status target active"
+}
+
+selftest_case_dr_scheduler_vmware_requires_mover() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR scheduler VMware path requires a mover"
+
+  local profile="${SELFTEST_ROOT}/dr-scheduler-vmware-no-mover-profile.json"
+  local out="" rc=0
+  cat > "${profile}" <<'JSON'
+{
+  "version": 1,
+  "engine": "FTCTL_DR",
+  "planUuid": "plan-scheduler-vmware-no-mover",
+  "runUuid": "run-scheduler-vmware-no-mover",
+  "direction": "VMWARE_TO_VMWARE",
+  "source": {"provider": "VMWARE", "driver": "VMWARE_CBT", "vmId": "vm-101"},
+  "target": {"provider": "VMWARE", "driver": "VMWARE_VDDK", "vmId": "vm-201"},
+  "schedule": {"intervalSeconds": 0},
+  "request": {"maxCycles": 1},
+  "mapping": {
+    "disks": [
+      {
+        "device": "scsi0:0",
+        "sourceVmdkPath": "[prod] vm-101/root.vmdk",
+        "targetVmdkPath": "[dr] vm-201/root.vmdk",
+        "sizeBytes": 1048576
+      }
+    ]
+  }
+}
+JSON
+
+  out="$(FTCTL_DR_VMWARE_FORCE_VDDK_READY=1 FTCTL_DR_SCHEDULER_FOREGROUND=1 bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-sync-start \
+    --config "${SELFTEST_CONFIG}" \
+    --plan plan-scheduler-vmware-no-mover \
+    --run run-scheduler-vmware-no-mover \
+    --profile-json "${profile}" \
+    --role coordinator \
+    --mode planned \
+    --wait=false \
+    --json)" || rc=$?
+  [[ "${rc}" != "0" ]] || selftest_fail "vmware scheduler without mover should fail"
+  selftest_assert_contains "${out}" '"result":"error"' "vmware no mover result"
+  selftest_assert_contains "${out}" '"accepted":false' "vmware no mover accepted"
+  selftest_assert_contains "${out}" '"state":"ERROR"' "vmware no mover state"
+  selftest_assert_contains "${out}" '"scheduler_state":"ERROR"' "vmware no mover scheduler state"
+  selftest_assert_contains "${out}" '"error_code":"DR_VMWARE_MOVER_UNAVAILABLE"' "vmware no mover error code"
+}
+
 selftest_main() {
   selftest_run_lint
   selftest_case_cluster_cli
@@ -6333,6 +7442,21 @@ selftest_main() {
   selftest_case_xcolo_primary_listener_refreshes_krbd_paths
   selftest_case_xcolo_primary_peer_wait_refreshes_krbd_paths
   selftest_case_cloud_managed_rollback_cleanup_does_not_restart_secondary
+  selftest_case_dr_runtime_profile_status_cancel
+  selftest_case_dr_runtime_control_actions
+  selftest_case_dr_ablestack_target_prepare
+  selftest_case_dr_ablestack_full_seed_once
+  selftest_case_dr_ablestack_missing_disk_map_waits
+  selftest_case_dr_vmware_preflight_missing_vddk
+  selftest_case_dr_vmware_contract_ready
+  selftest_case_dr_vmware_missing_vddk_blocks_sync
+  selftest_case_dr_scheduler_ablestack_checkpoint_loop
+  selftest_case_dr_scheduler_vmware_mock_checkpoint_loop
+  selftest_case_dr_runtime_test_failover_cleanup
+  selftest_case_dr_runtime_planned_failover_promotes_latest_checkpoint
+  selftest_case_dr_runtime_failback_restores_source_after_reverse_checkpoint
+  selftest_case_dr_runtime_reprotect_starts_reverse_protection_checkpoint
+  selftest_case_dr_scheduler_vmware_requires_mover
   selftest_case_events_json
   selftest_info "all checks passed"
 }

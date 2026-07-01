@@ -113,8 +113,12 @@ ftctl_command_requires_lock() {
     reconcile)
       return 1
       ;;
-    status|check|health|events|protect-start|preflight-remote|dr-key-ensure|dr-key-install|dr-key-remove)
+    status|check|health|events|protect-start|preflight-remote|dr-key-ensure|dr-key-install|dr-key-remove|dr-status)
       return 1
+      ;;
+    dr-plan-apply)
+      [[ "${CLI_DRY_RUN:-0}" == "1" ]] && return 1
+      return 0
       ;;
     config)
       case "${action}" in

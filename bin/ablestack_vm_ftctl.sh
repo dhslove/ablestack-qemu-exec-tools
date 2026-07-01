@@ -87,6 +87,12 @@ CLI_LIMIT=""
 CLI_PUBLIC_KEY=""
 CLI_KEY_COMMENT=""
 CLI_SSH_USER=""
+CLI_PLAN=""
+CLI_RUN=""
+CLI_PROFILE_JSON=""
+CLI_RESTORE_POINT=""
+CLI_EVENTS_OFFSET=""
+CLI_WAIT_VALUE=""
 
 FTCTL_LIB_BASE=""
 
@@ -130,6 +136,10 @@ ftctl_load_libs() {
     fencing.sh
     failover.sh
     events.sh
+    dr_ablestack.sh
+    dr_vmware.sh
+    dr_scheduler.sh
+    dr_runtime.sh
     verify.sh
     orchestrator.sh
   )
@@ -169,6 +179,14 @@ ftctl_load_libs() {
   # shellcheck source=/dev/null
   source "${FTCTL_LIB_BASE}/ftctl/events.sh"
   # shellcheck source=/dev/null
+  source "${FTCTL_LIB_BASE}/ftctl/dr_ablestack.sh"
+  # shellcheck source=/dev/null
+  source "${FTCTL_LIB_BASE}/ftctl/dr_vmware.sh"
+  # shellcheck source=/dev/null
+  source "${FTCTL_LIB_BASE}/ftctl/dr_scheduler.sh"
+  # shellcheck source=/dev/null
+  source "${FTCTL_LIB_BASE}/ftctl/dr_runtime.sh"
+  # shellcheck source=/dev/null
   source "${FTCTL_LIB_BASE}/ftctl/verify.sh"
   # shellcheck source=/dev/null
   source "${FTCTL_LIB_BASE}/ftctl/orchestrator.sh"
@@ -203,6 +221,18 @@ Commands:
   health             Check local libvirt health only
   events             Show recent FTCTL events
   snapshot           Show recorded FTCTL state/check/health/events only
+  dr-plan-apply      Validate/apply a Cloud-provided FTCTL_DR profile
+  dr-sync-start      Accept a DR sync session
+  dr-sync-pause      Pause a DR sync session
+  dr-sync-resume     Resume a DR sync session
+  dr-test-failover   Accept a DR test failover session
+  dr-test-cleanup    Complete DR test cleanup state
+  dr-failover        Accept a DR failover session
+  dr-failback        Accept a DR failback session
+  dr-reprotect       Accept a DR reprotect session
+  dr-release         Release DR runtime state
+  dr-status          Show DR runtime status for a plan/run
+  dr-cancel          Cancel a DR runtime run
   config             Manage cluster/host inventory
 
 Global options:
@@ -232,6 +262,13 @@ Global options:
       --key-comment COMMENT
       --ssh-user USER
       --limit N       Limit items for commands that support it
+      --plan UUID     FTCTL_DR plan UUID
+      --run UUID      FTCTL_DR run UUID
+      --profile-json PATH
+                     Cloud-provided FTCTL_DR profile JSON
+      --restore-point ID
+      --events-offset N
+      --wait VALUE    DR command wait policy; --wait=false returns after accept
       --secondary-vm-name NAME
       --active-side SIDE
       --provisioning-backend BACKEND
@@ -279,7 +316,7 @@ parse_args() {
         print_version
         exit "${EXIT_OK}"
         ;;
-      protect|protect-start|status|reconcile|failover|failover-prepare|failback|failback-sync|failback-finalize|failback-reprotect|unprotect|fence-confirm|fence-clear|pause-protection|resume-protection|preflight-remote|dr-key-ensure|dr-key-install|dr-key-remove|check|health|events|snapshot|config)
+      protect|protect-start|status|reconcile|failover|failover-prepare|failback|failback-sync|failback-finalize|failback-reprotect|unprotect|fence-confirm|fence-clear|pause-protection|resume-protection|preflight-remote|dr-key-ensure|dr-key-install|dr-key-remove|check|health|events|snapshot|dr-plan-apply|dr-sync-start|dr-sync-pause|dr-sync-resume|dr-test-failover|dr-test-cleanup|dr-failover|dr-failback|dr-reprotect|dr-release|dr-status|dr-cancel|config)
         [[ -z "${CLI_COMMAND}" ]] || {
           echo "ERROR: multiple commands specified" >&2
           exit "${EXIT_USAGE}"
@@ -504,6 +541,34 @@ parse_args() {
         CLI_LIMIT="${2-}"
         shift 2
         ;;
+      --plan)
+        CLI_PLAN="${2-}"
+        shift 2
+        ;;
+      --run)
+        CLI_RUN="${2-}"
+        shift 2
+        ;;
+      --profile-json)
+        CLI_PROFILE_JSON="${2-}"
+        shift 2
+        ;;
+      --restore-point)
+        CLI_RESTORE_POINT="${2-}"
+        shift 2
+        ;;
+      --events-offset)
+        CLI_EVENTS_OFFSET="${2-}"
+        shift 2
+        ;;
+      --wait)
+        CLI_WAIT_VALUE="${2-}"
+        shift 2
+        ;;
+      --wait=*)
+        CLI_WAIT_VALUE="${1#--wait=}"
+        shift
+        ;;
       *)
         echo "ERROR: unknown argument: $1" >&2
         exit "${EXIT_USAGE}"
@@ -563,6 +628,19 @@ emit_action_result_json() {
 
 dispatch() {
   case "${CLI_COMMAND}" in
+    dr-plan-apply)
+      ftctl_dr_runtime_plan_apply "${CLI_PLAN}" "${CLI_PROFILE_JSON}" "${CLI_ROLE}" "${CLI_DRY_RUN}" "${CLI_JSON}"
+      ;;
+    dr-sync-start|dr-sync-pause|dr-sync-resume|dr-test-failover|dr-test-cleanup|dr-failover|dr-failback|dr-reprotect|dr-release)
+      ftctl_dr_runtime_action "${CLI_COMMAND}" "${CLI_PLAN}" "${CLI_RUN}" "${CLI_PROFILE_JSON}" "${CLI_ROLE}" \
+        "${CLI_MODE}" "${CLI_RESTORE_POINT}" "${CLI_FORCE}" "${CLI_DRY_RUN}" "${CLI_WAIT_VALUE}" "${CLI_JSON}"
+      ;;
+    dr-status)
+      ftctl_dr_runtime_status "${CLI_PLAN}" "${CLI_RUN}" "${CLI_EVENTS_OFFSET}" "${CLI_JSON}"
+      ;;
+    dr-cancel)
+      ftctl_dr_runtime_cancel "${CLI_PLAN}" "${CLI_RUN}" "${CLI_FORCE}" "${CLI_JSON}"
+      ;;
     config)
       case "${CLI_ACTION}" in
         init-cluster)
