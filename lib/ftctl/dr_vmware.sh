@@ -490,6 +490,7 @@ PY
 ftctl_dr_vmware_replication_cycle() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" sequence="${4-}" cycle_type="${5-}"
   local disk_map capability_path manifest_path checkpoint_path cycle_run now mover_rc=0
+  local credentials_file=""
   local source_epoch target_epoch rpo="0"
 
   [[ -n "${plan}" && -n "${run}" && -n "${profile_file}" ]] || return 2
@@ -502,6 +503,7 @@ ftctl_dr_vmware_replication_cycle() {
   [[ -f "${capability_path}" ]] || ftctl_dr_vmware_write_capability "${capability_path}" || return $?
 
   if [[ -n "${FTCTL_DR_VMWARE_MOVER:-}" ]]; then
+    credentials_file="$(ftctl_dr_runtime_credential_path "${plan}" 2>/dev/null || true)"
     FTCTL_DR_PLAN_UUID="${plan}" \
     FTCTL_DR_RUN_UUID="${run}" \
     FTCTL_DR_CHECKPOINT_SEQUENCE="${sequence:-0}" \
@@ -510,6 +512,7 @@ ftctl_dr_vmware_replication_cycle() {
     FTCTL_DR_CAPABILITY="${capability_path}" \
     FTCTL_DR_MANIFEST="${manifest_path}" \
     FTCTL_DR_CHECKPOINT="${checkpoint_path}" \
+    FTCTL_DR_CREDENTIALS_FILE="$([[ -f "${credentials_file}" ]] && printf '%s' "${credentials_file}")" \
       "${FTCTL_DR_VMWARE_MOVER}" || mover_rc=$?
     [[ "${mover_rc}" == "0" ]] || return "${mover_rc}"
   elif [[ "${FTCTL_DR_VMWARE_MOCK_CYCLE:-0}" == "1" ]]; then

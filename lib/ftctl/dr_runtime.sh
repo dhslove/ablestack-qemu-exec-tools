@@ -34,6 +34,11 @@ ftctl_dr_runtime_profile_path() {
   printf '%s/profile.json\n' "$(ftctl_dr_runtime_plan_dir "${plan}")"
 }
 
+ftctl_dr_runtime_credential_path() {
+  local plan="${1-}"
+  printf '%s/credentials.json\n' "$(ftctl_dr_runtime_plan_dir "${plan}")"
+}
+
 ftctl_dr_runtime_status_path() {
   local plan="${1-}"
   printf '%s/status.state\n' "$(ftctl_dr_runtime_plan_dir "${plan}")"
@@ -251,6 +256,45 @@ print(json.dumps(redact(data), separators=(",", ":"), sort_keys=True))
 PY
 }
 
+ftctl_dr_runtime_save_credentials() {
+  local plan="${1-}" profile_file="${2-}"
+  local out_path tmp_path rc=0
+
+  [[ -n "${profile_file}" && -f "${profile_file}" ]] || return 0
+  out_path="$(ftctl_dr_runtime_credential_path "${plan}")"
+  tmp_path="${out_path}.tmp.$$"
+  python3 - "${profile_file}" "${tmp_path}" <<'PY' || rc=$?
+import json
+import os
+import sys
+
+profile_path, out_path = sys.argv[1], sys.argv[2]
+with open(profile_path, "r", encoding="utf-8") as fh:
+    profile = json.load(fh)
+credentials = profile.get("credentials")
+if not isinstance(credentials, dict) or not credentials:
+    sys.exit(3)
+payload = {
+    "version": 1,
+    "credentials": credentials,
+}
+with open(out_path, "w", encoding="utf-8") as fh:
+    json.dump(payload, fh, sort_keys=True, separators=(",", ":"))
+    fh.write("\n")
+PY
+  if [[ "${rc}" == "3" ]]; then
+    rm -f "${tmp_path}" 2>/dev/null || true
+    return 0
+  fi
+  [[ "${rc}" == "0" ]] || {
+    rm -f "${tmp_path}" 2>/dev/null || true
+    return "${rc}"
+  }
+  chmod 0600 "${tmp_path}" 2>/dev/null || true
+  mv -f "${tmp_path}" "${out_path}"
+  chmod 0600 "${out_path}" 2>/dev/null || true
+}
+
 ftctl_dr_runtime_save_profile() {
   local plan="${1-}" profile_file="${2-}"
   local redacted
@@ -258,6 +302,7 @@ ftctl_dr_runtime_save_profile() {
   [[ -n "${profile_file}" ]] || return 0
   ftctl_dr_runtime_validate_profile_file "${profile_file}" || return $?
   ftctl_dr_runtime_ensure_plan_dirs "${plan}"
+  ftctl_dr_runtime_save_credentials "${plan}" "${profile_file}" || return $?
   redacted="$(ftctl_dr_runtime_redacted_profile_json "${profile_file}")" || return $?
   ftctl_state_write_json_file "$(ftctl_dr_runtime_profile_path "${plan}")" "${redacted}"
 }
