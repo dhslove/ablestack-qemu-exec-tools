@@ -129,6 +129,46 @@ def infer_format(path, disk_type):
         return "raw"
     return ""
 
+def join_path(base, name, suffix=""):
+    base = str(base or "").rstrip("/")
+    name = str(name or "").strip().lstrip("/")
+    if not base or not name:
+        return ""
+    return f"{base}/{name}{suffix}"
+
+def derive_target_path(target_name, storage_ref, storage_path, krbd_path, pool_type):
+    name = str(target_name or "").strip()
+    if not name:
+        return ""
+    pool_text = str(pool_type or "").upper()
+    krbd_text = str(krbd_path or "").strip()
+    path_text = str(storage_path or "").strip()
+    storage_text = str(storage_ref or "").strip()
+    if "RBD" in pool_text and krbd_text:
+        return join_path(krbd_text, name)
+    if path_text.startswith("/"):
+        suffix = "" if name.endswith((".qcow2", ".raw")) else ".qcow2"
+        return join_path(path_text, name, suffix)
+    if path_text.startswith("rbd:") or path_text.startswith("rbd/"):
+        return join_path(path_text, name)
+    if storage_text.startswith("/") or storage_text.startswith("rbd:") or storage_text.startswith("rbd/"):
+        suffix = "" if storage_text.startswith(("rbd:", "rbd/")) or name.endswith((".qcow2", ".raw")) else ".qcow2"
+        return join_path(storage_text, name, suffix)
+    return ""
+
+def first_networks(*values):
+    out = []
+    for value in values:
+        for item in arr(value):
+            item = obj(item)
+            network_ref = first_str(value_at(item, "networkId", "networkRef", "id", "uuid", "value", "ref"))
+            if network_ref:
+                out.append({
+                    "networkId": network_ref,
+                    "role": first_str(value_at(item, "role"), "default"),
+                })
+    return out
+
 def normalize_disk(item, index):
     item = obj(item)
     source = obj(item.get("source"))
@@ -141,6 +181,28 @@ def normalize_disk(item, index):
         value_at(item, "targetPath", "targetDiskRef", "targetDisk", "destination", "dest", "target"),
         value_at(target, "path", "diskRef", "disk", "targetPath", "ref"),
     )
+    target_name = first_str(
+        value_at(item, "targetName", "targetDiskName", "targetRef"),
+        value_at(target, "name", "targetName", "ref"),
+    )
+    target_storage_ref = first_str(
+        value_at(item, "targetStorageRef", "targetStorage", "targetDatastoreRef"),
+        value_at(target, "storageRef", "storagePoolId", "datastoreRef", "targetStorageRef"),
+    )
+    target_storage_path = first_str(
+        value_at(item, "targetStoragePath", "storagePath"),
+        value_at(target, "storagePath", "pathPrefix"),
+    )
+    target_storage_krbd_path = first_str(
+        value_at(item, "targetStorageKrbdPath", "krbdPath"),
+        value_at(target, "krbdPath"),
+    )
+    target_storage_type = first_str(
+        value_at(item, "targetStorageType", "storagePoolType"),
+        value_at(target, "storagePoolType", "poolType"),
+    )
+    if not target_path:
+        target_path = derive_target_path(target_name, target_storage_ref, target_storage_path, target_storage_krbd_path, target_storage_type)
     device = first_str(
         value_at(item, "device", "targetDevice", "diskTarget", "sourceDevice"),
         value_at(source, "device", "targetDevice"),
@@ -160,6 +222,10 @@ def normalize_disk(item, index):
         infer_format(target_path, target_type),
         source_format if target_type == "file" else "",
     )
+    target_disk_offering_id = first_str(
+        value_at(item, "targetDiskOfferingId", "diskOfferingId"),
+        value_at(target, "diskOfferingId", "diskOfferingRef", "offeringId"),
+    )
     size_bytes = first_int(
         value_at(item, "sizeBytes", "virtualSize", "bytesTotal", "capacityBytes"),
         value_at(source, "sizeBytes", "virtualSize", "bytesTotal", "capacityBytes"),
@@ -174,6 +240,12 @@ def normalize_disk(item, index):
         "sizeBytes": size_bytes,
         "sourceType": source_type,
         "targetType": target_type,
+        "targetName": target_name,
+        "targetStorageRef": target_storage_ref,
+        "targetStoragePath": target_storage_path,
+        "targetStorageKrbdPath": target_storage_krbd_path,
+        "targetStorageType": target_storage_type,
+        "targetDiskOfferingId": target_disk_offering_id,
     }
 
 def normalize_pair(source_item, target_item, index):
@@ -194,6 +266,7 @@ def normalize_pair(source_item, target_item, index):
 source = obj(profile.get("source"))
 target = obj(profile.get("target"))
 mapping = obj(profile.get("mapping"))
+mapping_target = obj(mapping.get("target"))
 
 disk_items = []
 for key in ("disks", "diskMappings", "volumes", "volumeMappings"):
@@ -228,6 +301,16 @@ out = {
     "targetProvider": str(target.get("provider", "")).upper(),
     "sourceDriver": source.get("driver", ""),
     "targetDriver": target.get("driver", ""),
+    "target": {
+        "siteId": first_str(target.get("siteId"), mapping_target.get("siteId")),
+        "siteUuid": first_str(target.get("siteUuid"), mapping_target.get("siteUuid")),
+        "zoneId": first_str(target.get("zoneId"), mapping_target.get("zoneId"), mapping.get("targetZoneId")),
+        "workerHostId": first_str(target.get("workerHostId"), mapping_target.get("workerHostId"), mapping.get("targetWorkerHostId")),
+        "vmName": first_str(target.get("vmName"), mapping_target.get("vmName"), mapping.get("targetVmName")),
+        "storageRef": first_str(target.get("storageRef"), target.get("storagePoolId"), mapping_target.get("storageRef"), mapping_target.get("storagePoolId"), mapping.get("targetStorageRef"), mapping.get("targetDatastoreRef")),
+        "serviceOfferingId": first_str(target.get("serviceOfferingId"), mapping_target.get("serviceOfferingId"), mapping.get("targetComputeRef")),
+        "networks": first_networks(target.get("networks"), mapping_target.get("networks")),
+    },
     "requiresDiskMap": len(disks) == 0,
     "count": len(disks),
     "disks": disks,
@@ -250,6 +333,54 @@ import sys
 with open(sys.argv[1], "r", encoding="utf-8") as fh:
     data = json.load(fh)
 print(int(data.get("count") or 0))
+PY
+}
+
+ftctl_dr_ablestack_missing_config() {
+  local disk_map="${1-}"
+  [[ -n "${disk_map}" && -f "${disk_map}" ]] || return 1
+  python3 - "${disk_map}" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    data = json.load(fh)
+
+def text(value):
+    return str(value or "").strip()
+
+missing = []
+target_provider = text(data.get("targetProvider")).upper()
+target = data.get("target") if isinstance(data.get("target"), dict) else {}
+disks = data.get("disks") if isinstance(data.get("disks"), list) else []
+
+if target_provider == "ABLESTACK":
+    if not text(target.get("zoneId")):
+        missing.append("TARGET_SITE_ZONE_REQUIRED")
+    if not text(target.get("storageRef")):
+        missing.append("TARGET_STORAGE_REQUIRED")
+    if not text(target.get("serviceOfferingId")):
+        missing.append("TARGET_SERVICE_OFFERING_REQUIRED")
+    if not target.get("networks"):
+        missing.append("TARGET_NETWORK_REQUIRED")
+    if not disks:
+        missing.append("DISK_MAPPING_REQUIRED")
+    for index, disk in enumerate(disks):
+        if not isinstance(disk, dict):
+            missing.append(f"DISK_MAPPING_REQUIRED:{index}")
+            continue
+        if not text(disk.get("sourcePath")):
+            missing.append(f"DISK_SOURCE_REQUIRED:{index}")
+        if not text(disk.get("targetName")) and not text(disk.get("targetPath")):
+            missing.append(f"DISK_TARGET_REQUIRED:{index}")
+        if not text(disk.get("targetPath")):
+            missing.append(f"DISK_TARGET_PATH_REQUIRED:{index}")
+        if not text(disk.get("targetStorageRef")) and not text(target.get("storageRef")):
+            missing.append(f"TARGET_STORAGE_REQUIRED:{index}")
+        if not text(disk.get("targetDiskOfferingId")):
+            missing.append(f"TARGET_DISK_OFFERING_REQUIRED:{index}")
+
+print(",".join(missing))
 PY
 }
 
@@ -418,6 +549,7 @@ manifest = {
     "runUuid": disk_map.get("runUuid", ""),
     "sourceProvider": disk_map.get("sourceProvider", ""),
     "targetProvider": disk_map.get("targetProvider", ""),
+    "target": disk_map.get("target", {}),
     "count": len(disks),
     "disks": disks,
 }
@@ -560,7 +692,7 @@ ftctl_dr_ablestack_profile_bool() {
 
 ftctl_dr_ablestack_sync_start() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" state_path="${4-}" wait_value="${5-}"
-  local disk_map manifest_path checkpoint_path count now source_provider target_provider
+  local disk_map manifest_path checkpoint_path count now source_provider target_provider missing_config
 
   [[ -n "${profile_file}" && -f "${profile_file}" ]] || return 0
   ftctl_dr_ablestack_profile_involves_ablestack "${profile_file}" || return 0
@@ -579,6 +711,21 @@ ftctl_dr_ablestack_sync_start() {
   if [[ "${target_provider}" != "ABLESTACK" ]]; then
     ftctl_log_event "dr-runtime" "dr.ablestack.source_metadata" "ok" "" "" \
       "plan=${plan} run=${run} source=${source_provider:-unknown} target=${target_provider:-unknown} disks=${count}"
+    return 0
+  fi
+
+  missing_config="$(ftctl_dr_ablestack_missing_config "${disk_map}" || true)"
+  if [[ -n "${missing_config}" ]]; then
+    ftctl_dr_runtime_path_set "${state_path}" \
+      "driver=ABLESTACK" \
+      "driver_state=CONFIG_INCOMPLETE" \
+      "state=CONFIG_INCOMPLETE" \
+      "step=ablestack-target-config-incomplete" \
+      "progress=1" \
+      "disk_map_path=${disk_map}" \
+      "last_error=DR_TARGET_MAPPING_INVALID:${missing_config}"
+    ftctl_log_event "dr-runtime" "dr.ablestack.config_incomplete" "warn" "" "" \
+      "plan=${plan} run=${run} reason=${missing_config}"
     return 0
   fi
 
