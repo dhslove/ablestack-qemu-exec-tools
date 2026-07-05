@@ -6594,13 +6594,13 @@ selftest_case_dr_vmware_contract_ready() {
   "target": {
     "provider": "VMWARE",
     "driver": "VMWARE_VDDK",
-    "vmId": "vm-201",
-    "datastoreRef": "ds-dr",
-    "folderPath": "/DR",
-    "resourcePoolRef": "rp-dr",
-    "networkRef": "net-dr"
+    "vmId": "vm-201"
   },
   "mapping": {
+    "targetStorageRef": "ds-dr",
+    "targetFolderPath": "/DR",
+    "targetComputeRef": "rp-dr",
+    "targetNetworkRef": "net-dr",
     "disks": [
       {
         "device": "scsi0:0",
@@ -6643,6 +6643,9 @@ JSON
   manifest="${SELFTEST_ROOT}/run/dr-runtime/plans/plan-vmware-ready/manifests/run-vmware-ready-vmware-manifest.json"
   checkpoint="${SELFTEST_ROOT}/run/dr-runtime/plans/plan-vmware-ready/checkpoints/run-vmware-ready-vmware-checkpoint.json"
   selftest_assert_file_contains "${manifest}" '"phase":"vmware-contract-ready"'
+  selftest_assert_file_contains "${manifest}" '"datastoreRef":"ds-dr"'
+  selftest_assert_file_contains "${manifest}" '"resourcePoolRef":"rp-dr"'
+  selftest_assert_file_contains "${manifest}" '"networkRef":"net-dr"'
   selftest_assert_file_contains "${manifest}" '"changeId":"52 00 01"'
   selftest_assert_file_contains "${checkpoint}" '"state":"VMWARE_CONTRACT_READY"'
 }
