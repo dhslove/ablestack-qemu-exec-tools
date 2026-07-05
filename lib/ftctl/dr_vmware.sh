@@ -582,18 +582,21 @@ ftctl_dr_vmware_sync_start() {
   if [[ "${count}" == "0" ]]; then
     now="$(ftctl_now_iso8601)"
     ftctl_dr_vmware_write_manifest "${disk_map}" "${capability_path}" "${manifest_path}" "vmware-disk-map-pending" || return $?
-    ftctl_dr_vmware_write_checkpoint "${disk_map}" "${manifest_path}" "${checkpoint_path}" "WAITING_FOR_VMWARE_DISK_MAP" "${now}" "" "" || return $?
+    ftctl_dr_vmware_write_checkpoint "${disk_map}" "${manifest_path}" "${checkpoint_path}" "CONFIG_INCOMPLETE" "${now}" "" "" || return $?
     ftctl_dr_runtime_path_set "${state_path}" \
       "driver=VMWARE" \
-      "driver_state=WAITING_FOR_VMWARE_DISK_MAP" \
+      "driver_state=CONFIG_INCOMPLETE" \
+      "state=CONFIG_INCOMPLETE" \
       "step=vmware-disk-map-pending" \
-      "progress=1" \
+      "progress=0" \
+      "accepted=false" \
+      "error_code=DR_TARGET_MAPPING_INVALID" \
       "disk_map_path=${disk_map}" \
       "manifest_path=${manifest_path}" \
       "checkpoint_path=${checkpoint_path}" \
       "updated_at=${now}"
     ftctl_log_event "dr-runtime" "dr.vmware.disk_map" "warn" "" "" \
-      "plan=${plan} run=${run} reason=missing_explicit_disk_map"
+      "plan=${plan} run=${run} reason=config_incomplete_missing_explicit_disk_map"
     return 0
   fi
 

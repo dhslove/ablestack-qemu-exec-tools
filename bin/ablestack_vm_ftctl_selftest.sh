@@ -6650,6 +6650,41 @@ JSON
   selftest_assert_file_contains "${checkpoint}" '"state":"VMWARE_CONTRACT_READY"'
 }
 
+selftest_case_dr_vmware_missing_disk_map_config_incomplete() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR VMware missing disk map reports config incomplete"
+
+  local profile="${SELFTEST_ROOT}/dr-vmware-missing-disk-map-profile.json"
+  local out="" checkpoint=""
+  cat > "${profile}" <<'JSON'
+{
+  "version": 1,
+  "engine": "FTCTL_DR",
+  "planUuid": "plan-vmware-config-incomplete",
+  "runUuid": "run-vmware-config-incomplete",
+  "direction": "VMWARE_TO_VMWARE",
+  "source": {"provider": "VMWARE", "driver": "VMWARE_CBT", "vmId": "vm-101"},
+  "target": {"provider": "VMWARE", "driver": "VMWARE_VDDK", "vmId": "vm-201"}
+}
+JSON
+
+  out="$(FTCTL_DR_SCHEDULER_DISABLE=1 FTCTL_DR_VMWARE_FORCE_VDDK_READY=1 bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-sync-start \
+    --config "${SELFTEST_CONFIG}" \
+    --plan plan-vmware-config-incomplete \
+    --run run-vmware-config-incomplete \
+    --profile-json "${profile}" \
+    --role coordinator \
+    --mode planned \
+    --wait=false \
+    --json)"
+  selftest_assert_contains "${out}" '"state":"CONFIG_INCOMPLETE"' "vmware missing disk map state"
+  selftest_assert_contains "${out}" '"step":"vmware-disk-map-pending"' "vmware missing disk map step"
+  selftest_assert_contains "${out}" '"driver_state":"CONFIG_INCOMPLETE"' "vmware missing disk map driver state"
+  selftest_assert_contains "${out}" '"error_code":"DR_TARGET_MAPPING_INVALID"' "vmware missing disk map error code"
+  checkpoint="${SELFTEST_ROOT}/run/dr-runtime/plans/plan-vmware-config-incomplete/checkpoints/run-vmware-config-incomplete-vmware-checkpoint.json"
+  selftest_assert_file_contains "${checkpoint}" '"state":"CONFIG_INCOMPLETE"'
+}
+
 selftest_case_dr_vmware_missing_vddk_blocks_sync() {
   selftest_reset_env
   selftest_info "FTCTL_DR VMware missing VDDK blocks sync start"
@@ -7452,6 +7487,7 @@ selftest_main() {
   selftest_case_dr_ablestack_missing_disk_map_waits
   selftest_case_dr_vmware_preflight_missing_vddk
   selftest_case_dr_vmware_contract_ready
+  selftest_case_dr_vmware_missing_disk_map_config_incomplete
   selftest_case_dr_vmware_missing_vddk_blocks_sync
   selftest_case_dr_scheduler_ablestack_checkpoint_loop
   selftest_case_dr_scheduler_vmware_mock_checkpoint_loop
