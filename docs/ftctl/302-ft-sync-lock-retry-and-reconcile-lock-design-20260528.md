@@ -48,3 +48,90 @@ Protection registration should not fail only because the FTCTL timer reconciled 
 - Cloud changed-module build must pass.
 - A failed partial FT registration must be cleaned before retesting.
 - Retest should verify that no active protection row remains in error and that X-COLO transfer starts after protection registration.
+
+## 2026-07-06 DR runtime extension
+
+The same retry contract applies to Cross Hypervisor DR runtime commands.
+
+Observed DR lock example:
+
+```json
+{
+  "command": "dr-sync-start",
+  "result": "locked",
+  "lock_file": "/run/ablestack-vm-ftctl/lock",
+  "holder_pid": "3981802",
+  "holder_command": "dr-sync-pause",
+  "holder_age_sec": "14",
+  "exit_code": 20,
+  "retryable": true,
+  "retry_after_sec": 2
+}
+```
+
+Required behavior:
+
+- `dr-sync-start` blocked by `dr-sync-pause` is engine busy, not a completed sync failure.
+- Cloud must map this response to a retryable state such as `DR_ENGINE_BUSY_RETRYABLE`.
+- The plan must not remain `SYNCING` unless the DR runtime accepted the sync run.
+- A terminal failure must close all open run steps; stale `QUEUED` or `RUNNING` steps must not remain beside the final failed step.
+- UI must show a user-level message such as "previous pause operation is still finishing" and keep the raw JSON only in the detail view.
+
+`dr-status` is different from action commands. It must be a lock-free, bounded, read-only command:
+
+- no global FTCTL lock acquisition;
+- no background worker or scheduler start;
+- no remote Mold, vCenter, qemu, libvirt, or blockjob probe;
+- only read profile/status/run state files and a bounded event tail;
+- return a timeout JSON such as `DR_STATUS_TIMEOUT` instead of spinning indefinitely.
+
+Acceptance test:
+
+1. Start or simulate `dr-sync-pause` holding the FTCTL lock.
+2. Run `ablestack_vm_ftctl dr-sync-start --plan <plan> --run <run> --json`.
+3. Verify `result=locked`, `retryable=true`, and `retry_after_sec` are present.
+4. Run `ablestack_vm_ftctl dr-status --plan <plan> --json` repeatedly.
+5. Verify every status command returns within the configured status timeout and leaves no orphan process.
+
+## 2026-07-06 DR async worker self-lock extension
+
+Observed additional DR failure:
+
+```json
+{"command":"dr-sync-start","result":"locked","lock_file":"/run/ablestack-vm-ftctl/lock","holder_command":"dr-sync-start","holder_age_sec":"0","exit_code":20,"retryable":true,"retry_after_sec":2}
+```
+
+This is not a user-visible target readiness failure by itself. It means the async parent accepted the run, then the background worker re-entered the same top-level `dr-sync-start` command and hit the global lock before doing real work.
+
+Required ftctl changes:
+
+- Split async parent commands from worker commands such as `dr-sync-worker`.
+- Use the global lock only for short profile/run admission critical sections.
+- Use a plan/run scoped worker lock for long DR worker execution.
+- Persist worker admission state in the run and status files:
+  - `worker_state=STARTING|RUNNING|RETRYING|FAILED|SUCCEEDED`
+  - `worker_pid`
+  - `worker_exit_code`
+  - `retryable`
+  - `retry_after_sec`
+  - `holder_command`
+  - `lock_scope`
+- If the worker sees a retryable lock, write `worker_state=RETRYING` to `status.state` before exiting or sleeping.
+- `dr-status` remains lock-free and read-only.
+
+Required Cloud contract:
+
+- `accepted=true` is not enough to mark a DR sync run successful.
+- If status shows `worker_state=RETRYING` or `retryable=true`, Cloud must mark the run retryable and schedule retry.
+- If status remains `sync-start-accepted` with no `worker_pid` or heartbeat beyond the accepted-stall threshold, Cloud must mark `DR_ENGINE_WORKER_STALLED` or retryable busy instead of leaving the run in plain `ACCEPTED`.
+- Next-step readiness remains Fail until target VM, target storage, restore point, and durable checkpoint are confirmed.
+
+## 2026-07-06 Implementation Update
+
+Implemented the immediate self-lock recovery in the current command structure:
+
+- The delegated parent action writes `worker_state=STARTING`, releases the global command lock, and then spawns the background worker.
+- The spawned worker records `worker_state=RUNNING` when it enters the real action path and `worker_state=SUCCEEDED` or `FAILED` before it exits the startup path.
+- DR command lock conflicts update the run/status files with `worker_state=RETRYING`, `retryable=true`, `retry_after_sec=2`, holder metadata, and `error_code=DR_ENGINE_BUSY_RETRYABLE`.
+- `dr-status` emits worker and retry metadata so Cloud can distinguish target materialization from worker admission failure.
+- The longer-term `dr-sync-worker` command split remains a valid cleanup direction, but the deployed mitigation removes the observed parent/worker self-lock without changing the Cloud action API.

@@ -30,6 +30,8 @@ ftctl_lock_emit_conflict() {
       holder_age="$(( $(date +%s) - started_epoch ))"
     fi
   fi
+  command -v ftctl_dr_runtime_record_lock_conflict >/dev/null 2>&1 &&
+    ftctl_dr_runtime_record_lock_conflict "${lock_file}" "${cmd}" "${holder_pid}" "${holder_command}" "${holder_age}" "${EXIT_LOCKED:-20}" || true
   if [[ "${CLI_JSON:-0}" == "1" ]]; then
     printf '{"command":"%s","result":"%s","lock_file":"%s","vm":"%s","holder_pid":"%s","holder_command":"%s","holder_age_sec":"%s","exit_code":%s,"retryable":true,"retry_after_sec":2}\n' \
       "$(ftctl__json_escape "${cmd}")" \

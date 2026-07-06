@@ -333,6 +333,32 @@ ftctl_dr_runtime_path_set() {
   chmod 0644 "${path}" 2>/dev/null || true
 }
 
+ftctl_dr_runtime_record_lock_conflict() {
+  local lock_file="${1-}" command_name="${2-}" holder_pid="${3-}" holder_command="${4-}" holder_age="${5-}" exit_code="${6-20}"
+  local plan="${CLI_PLAN:-}" run="${CLI_RUN:-}" run_path status_path now
+
+  [[ "${command_name}" == dr-* && -n "${plan}" && -n "${run}" ]] || return 0
+  run_path="$(ftctl_dr_runtime_run_path "${plan}" "${run}")"
+  status_path="$(ftctl_dr_runtime_status_path "${plan}")"
+  [[ -f "${run_path}" ]] || return 0
+  now="$(ftctl_now_iso8601)"
+  ftctl_dr_runtime_path_set "${run_path}" \
+    "worker_state=RETRYING" \
+    "worker_pid=$$" \
+    "worker_exit_code=${exit_code}" \
+    "worker_updated_at=${now}" \
+    "retryable=true" \
+    "retry_after_sec=2" \
+    "lock_file=${lock_file}" \
+    "holder_pid=${holder_pid}" \
+    "holder_command=${holder_command}" \
+    "holder_age_sec=${holder_age}" \
+    "error_code=DR_ENGINE_BUSY_RETRYABLE" \
+    "updated_at=${now}" || true
+  cp -f "${run_path}" "${status_path}" 2>/dev/null || true
+  chmod 0644 "${status_path}" 2>/dev/null || true
+}
+
 ftctl_dr_runtime_json_string_field() {
   local key="${1-}" value="${2-}"
   printf ',"%s":"%s"' "${key}" "$(ftctl__json_escape "${value}")"
@@ -1841,20 +1867,28 @@ ftctl_dr_runtime_start_reprotect() {
 
 ftctl_dr_runtime_emit_events_since() {
   local offset="${1-}"
-  local current line first="1" count="0"
+  local current line first="1" count="0" max_events start_line global_line
   [[ "${offset}" =~ ^[0-9]+$ ]] || offset="0"
   current="$(ftctl_dr_runtime_events_offset)"
   printf ',"events_offset":%s' "${current}"
   printf ',"events":['
   if [[ -f "${FTCTL_EVENTS_LOG}" ]]; then
+    max_events="${FTCTL_DR_STATUS_MAX_EVENTS:-100}"
+    [[ "${max_events}" =~ ^[0-9]+$ ]] || max_events="100"
+    (( max_events > 0 )) || max_events="100"
+    start_line="1"
+    if [[ "${current}" =~ ^[0-9]+$ ]] && (( current > max_events )); then
+      start_line=$((current - max_events + 1))
+    fi
     while IFS= read -r line; do
       count=$((count + 1))
-      (( count > offset )) || continue
+      global_line=$((start_line + count - 1))
+      (( global_line > offset )) || continue
       [[ -n "${line}" ]] || continue
       [[ "${first}" == "1" ]] || printf ','
       first="0"
       printf '%s' "${line}"
-    done < "${FTCTL_EVENTS_LOG}"
+    done < <(tail -n "${max_events}" "${FTCTL_EVENTS_LOG}" 2>/dev/null || true)
   fi
   printf ']'
 }
@@ -1864,7 +1898,9 @@ ftctl_dr_runtime_emit_state_json() {
   local action state step progress external_job_ref error_code last_source last_target target_rpo updated accepted
   local runtime_exists profile_exists run_exists
   local driver driver_state disk_map_path manifest_path checkpoint_path
-  local scheduler_state worker_pid checkpoint_sequence restore_points_path dynamic_rpo
+  local scheduler_state worker_pid worker_state worker_started_at worker_updated_at worker_exit_code
+  local retryable retry_after_sec lock_file holder_pid holder_command holder_age_sec
+  local checkpoint_sequence restore_points_path dynamic_rpo
   local test_session_id test_session_state test_restore_point_ref test_restore_point_sequence
   local test_manifest_path test_checkpoint_path
   local test_artifacts_state test_artifacts_path test_artifact_count
@@ -1879,6 +1915,7 @@ ftctl_dr_runtime_emit_state_json() {
   local reprotect_session_id reprotect_mode reprotect_restore_point_ref reprotect_restore_point_sequence
   local reprotect_manifest_path reprotect_checkpoint_path reprotect_requested_at reprotect_completed_at
   local reprotect_rto_actual_seconds reverse_direction reverse_profile_path reverse_restore_points_path reprotect_worker_pid
+  local target_vm_id target_external_ref target_materialized target_vm_present target_storage_present target_network_present restore_point_present
 
   action="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "action")"
   state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "state")"
@@ -1901,6 +1938,16 @@ ftctl_dr_runtime_emit_state_json() {
   checkpoint_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "checkpoint_path")"
   scheduler_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "scheduler_state")"
   worker_pid="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "worker_pid")"
+  worker_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "worker_state")"
+  worker_started_at="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "worker_started_at")"
+  worker_updated_at="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "worker_updated_at")"
+  worker_exit_code="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "worker_exit_code")"
+  retryable="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "retryable")"
+  retry_after_sec="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "retry_after_sec")"
+  lock_file="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "lock_file")"
+  holder_pid="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "holder_pid")"
+  holder_command="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "holder_command")"
+  holder_age_sec="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "holder_age_sec")"
   checkpoint_sequence="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "checkpoint_sequence")"
   restore_points_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "restore_points_path")"
   test_session_id="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "test_session_id")"
@@ -1957,8 +2004,44 @@ ftctl_dr_runtime_emit_state_json() {
   reverse_profile_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "reverse_profile_path")"
   reverse_restore_points_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "reverse_restore_points_path")"
   reprotect_worker_pid="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "reprotect_worker_pid")"
+  target_vm_id="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "target_vm_id")"
+  target_external_ref="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "target_external_ref")"
   dynamic_rpo="$(ftctl_dr_runtime_rpo_from_target_at "${last_target}" 2>/dev/null || true)"
   [[ -n "${dynamic_rpo}" ]] && target_rpo="${dynamic_rpo}"
+  target_vm_present="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "target_vm_present")"
+  [[ -n "${target_vm_present}" ]] || {
+    if [[ -n "${target_vm_id}" || -n "${target_external_ref}" ]]; then
+      target_vm_present="true"
+    else
+      target_vm_present="false"
+    fi
+  }
+  target_storage_present="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "target_storage_present")"
+  [[ -n "${target_storage_present}" ]] || {
+    if [[ -n "${last_target}" || -n "${checkpoint_path}" || -n "${manifest_path}" ]]; then
+      target_storage_present="true"
+    else
+      target_storage_present="false"
+    fi
+  }
+  restore_point_present="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "restore_point_present")"
+  [[ -n "${restore_point_present}" ]] || {
+    if [[ -n "${last_target}" || ( -n "${restore_points_path}" && -s "${restore_points_path}" ) ]]; then
+      restore_point_present="true"
+    else
+      restore_point_present="false"
+    fi
+  }
+  target_network_present="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "target_network_present")"
+  [[ -n "${target_network_present}" ]] || target_network_present="${target_vm_present}"
+  target_materialized="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "target_materialized")"
+  [[ -n "${target_materialized}" ]] || {
+    if [[ "${target_vm_present}" == "true" && "${target_storage_present}" == "true" && "${target_network_present}" == "true" && "${restore_point_present}" == "true" ]]; then
+      target_materialized="true"
+    else
+      target_materialized="false"
+    fi
+  }
 
   printf '{"command":"%s","result":"%s"' \
     "$(ftctl__json_escape "${command}")" \
@@ -1974,6 +2057,13 @@ ftctl_dr_runtime_emit_state_json() {
   ftctl_dr_runtime_json_string_field "last_source_checkpoint_at" "${last_source}"
   ftctl_dr_runtime_json_string_field "last_target_durable_at" "${last_target}"
   ftctl_dr_runtime_json_number_field "target_ready_rpo_seconds" "${target_rpo}"
+  printf ',"target_materialized":%s' "${target_materialized}"
+  printf ',"target_vm_present":%s' "${target_vm_present}"
+  printf ',"target_storage_present":%s' "${target_storage_present}"
+  printf ',"target_network_present":%s' "${target_network_present}"
+  printf ',"restore_point_present":%s' "${restore_point_present}"
+  ftctl_dr_runtime_json_string_field "target_vm_id" "${target_vm_id}"
+  ftctl_dr_runtime_json_string_field "target_external_ref" "${target_external_ref}"
   ftctl_dr_runtime_json_string_field "error_code" "${error_code}"
   ftctl_dr_runtime_json_string_field "updated_at" "${updated}"
   ftctl_dr_runtime_json_string_field "driver" "${driver}"
@@ -1983,6 +2073,16 @@ ftctl_dr_runtime_emit_state_json() {
   ftctl_dr_runtime_json_string_field "checkpoint_path" "${checkpoint_path}"
   ftctl_dr_runtime_json_string_field "scheduler_state" "${scheduler_state}"
   ftctl_dr_runtime_json_number_field "worker_pid" "${worker_pid}"
+  ftctl_dr_runtime_json_string_field "worker_state" "${worker_state}"
+  ftctl_dr_runtime_json_string_field "worker_started_at" "${worker_started_at}"
+  ftctl_dr_runtime_json_string_field "worker_updated_at" "${worker_updated_at}"
+  ftctl_dr_runtime_json_number_field "worker_exit_code" "${worker_exit_code}"
+  [[ -n "${retryable}" ]] && printf ',"retryable":%s' "${retryable}"
+  ftctl_dr_runtime_json_number_field "retry_after_sec" "${retry_after_sec}"
+  ftctl_dr_runtime_json_string_field "lock_file" "${lock_file}"
+  ftctl_dr_runtime_json_number_field "holder_pid" "${holder_pid}"
+  ftctl_dr_runtime_json_string_field "holder_command" "${holder_command}"
+  ftctl_dr_runtime_json_number_field "holder_age_sec" "${holder_age_sec}"
   ftctl_dr_runtime_json_number_field "checkpoint_sequence" "${checkpoint_sequence}"
   ftctl_dr_runtime_json_string_field "restore_points_path" "${restore_points_path}"
   ftctl_dr_runtime_json_string_field "test_session_id" "${test_session_id}"
@@ -2219,10 +2319,28 @@ ftctl_dr_runtime_should_delegate_action() {
 
 ftctl_dr_runtime_start_background_worker() {
   local action="${1-}" plan="${2-}" run="${3-}" role="${4-}" mode="${5-}" restore_point="${6-}" force="${7-0}" dry_run="${8-0}" log_path ftctl_bin profile_path
+  local run_path status_path now worker_pid
   local -a worker_cmd
 
   log_path="$(ftctl_dr_runtime_run_log_path "${plan}" "${run}")"
   profile_path="$(ftctl_dr_runtime_profile_path "${plan}")"
+  run_path="$(ftctl_dr_runtime_run_path "${plan}" "${run}")"
+  status_path="$(ftctl_dr_runtime_status_path "${plan}")"
+  now="$(ftctl_now_iso8601)"
+  ftctl_dr_runtime_path_set "${run_path}" \
+    "worker_state=STARTING" \
+    "worker_pid=" \
+    "worker_started_at=${now}" \
+    "worker_updated_at=${now}" \
+    "worker_exit_code=" \
+    "retryable=false" \
+    "retry_after_sec=" \
+    "lock_file=" \
+    "holder_pid=" \
+    "holder_command=" \
+    "holder_age_sec=" || true
+  cp -f "${run_path}" "${status_path}" 2>/dev/null || true
+  chmod 0644 "${status_path}" 2>/dev/null || true
   ftctl_bin="${FTCTL_DR_RUNTIME_WORKER_COMMAND:-$(command -v ablestack_vm_ftctl 2>/dev/null || true)}"
   [[ -n "${ftctl_bin}" ]] || ftctl_bin="${0}"
   worker_cmd=("${ftctl_bin}" "${action}" "--plan" "${plan}" "--run" "${run}" "--profile-json" "${profile_path}" "--role" "${role:-coordinator}")
@@ -2236,11 +2354,38 @@ ftctl_dr_runtime_start_background_worker() {
     export FTCTL_DR_RUNTIME_WORKER=1
     exec nohup "${worker_cmd[@]}" >>"${log_path}" 2>&1
   ) >/dev/null 2>&1 &
+  worker_pid="$!"
+  now="$(ftctl_now_iso8601)"
+  ftctl_dr_runtime_path_set "${run_path}" \
+    "worker_state=STARTED" \
+    "worker_pid=${worker_pid}" \
+    "worker_updated_at=${now}" || true
+  cp -f "${run_path}" "${status_path}" 2>/dev/null || true
+  chmod 0644 "${status_path}" 2>/dev/null || true
+}
+
+ftctl_dr_runtime_mark_worker_terminal() {
+  local run_path="${1-}" status_path="${2-}" state="${3-}" exit_code="${4-0}" error_code="${5-}" retryable="${6-false}" retry_after="${7-}"
+  local now
+
+  [[ "${FTCTL_DR_RUNTIME_WORKER:-0}" == "1" && -n "${run_path}" && -f "${run_path}" ]] || return 0
+  now="$(ftctl_now_iso8601)"
+  ftctl_dr_runtime_path_set "${run_path}" \
+    "worker_state=${state}" \
+    "worker_pid=$$" \
+    "worker_exit_code=${exit_code}" \
+    "worker_updated_at=${now}" \
+    "retryable=${retryable}" \
+    "retry_after_sec=${retry_after}" \
+    "error_code=${error_code}" || true
+  [[ -n "${status_path}" ]] && cp -f "${run_path}" "${status_path}" 2>/dev/null || true
+  [[ -n "${status_path}" ]] && chmod 0644 "${status_path}" 2>/dev/null || true
 }
 
 ftctl_dr_runtime_action() {
   local action="${1-}" plan="${2-}" run="${3-}" profile_file="${4-}" role="${5-}" mode="${6-}" restore_point="${7-}" force="${8-0}" dry_run="${9-0}" wait_value="${10-}" json="${11-0}"
   local state_tuple state step progress run_path status_path external_ref rc error_code
+  local target_vm_id target_external_ref
 
   ftctl_dr_runtime_require_plan "${plan}" || return 2
   ftctl_dr_runtime_require_run "${run}" || return 2
@@ -2257,10 +2402,23 @@ ftctl_dr_runtime_action() {
   run_path="$(ftctl_dr_runtime_run_path "${plan}" "${run}")"
   status_path="$(ftctl_dr_runtime_status_path "${plan}")"
   ftctl_dr_runtime_write_state "${run_path}" "${plan}" "${run}" "${action}" "${state}" "${step}" "${progress}" "${external_ref}" ""
+  if [[ -n "${profile_file}" && -f "${profile_file}" ]]; then
+    target_vm_id="$(ftctl_dr_runtime_profile_value "${profile_file}" "target.vmId" || true)"
+    [[ -n "${target_vm_id}" ]] || target_vm_id="$(ftctl_dr_runtime_profile_value "${profile_file}" "target.id" || true)"
+    target_external_ref="$(ftctl_dr_runtime_profile_value "${profile_file}" "target.externalRef" || true)"
+    [[ -n "${target_external_ref}" ]] || target_external_ref="$(ftctl_dr_runtime_profile_value "${profile_file}" "target.vmRef" || true)"
+    [[ -n "${target_external_ref}" ]] || target_external_ref="$(ftctl_dr_runtime_profile_value "${profile_file}" "target.uuid" || true)"
+    ftctl_dr_runtime_path_set "${run_path}" \
+      "target_vm_id=${target_vm_id}" \
+      "target_external_ref=${target_external_ref}" \
+      "target_vm_present=$([[ -n "${target_vm_id}${target_external_ref}" ]] && printf true || printf false)" \
+      "target_network_present=$([[ -n "${target_vm_id}${target_external_ref}" ]] && printf true || printf false)" || true
+  fi
 
   if ftctl_dr_runtime_should_delegate_action "${action}" "${wait_value}" "${dry_run}"; then
     cp -f "${run_path}" "${status_path}"
     chmod 0644 "${status_path}" 2>/dev/null || true
+    command -v ftctl_lock_release >/dev/null 2>&1 && ftctl_lock_release || true
     ftctl_dr_runtime_start_background_worker "${action}" "${plan}" "${run}" "${role}" "${mode}" "${restore_point}" "${force}" "${dry_run}"
     ftctl_log_event "dr-runtime" "dr.action.accepted" "ok" "" "" \
       "plan=${plan} run=${run} action=${action} role=${role:-} mode=${mode:-} restore_point=${restore_point:-} force=${force} dry_run=${dry_run} wait=${wait_value:-} delegated=1"
@@ -2270,6 +2428,19 @@ ftctl_dr_runtime_action() {
       printf '%s: plan=%s run=%s accepted state=%s step=%s delegated=1\n' "${action}" "${plan}" "${run}" "${state}" "${step}"
     fi
     return 0
+  fi
+
+  if [[ "${FTCTL_DR_RUNTIME_WORKER:-0}" == "1" && "${dry_run}" != "1" ]]; then
+    ftctl_dr_runtime_path_set "${run_path}" \
+      "worker_state=RUNNING" \
+      "worker_pid=$$" \
+      "worker_started_at=$(ftctl_now_iso8601)" \
+      "worker_updated_at=$(ftctl_now_iso8601)" \
+      "worker_exit_code=" \
+      "retryable=false" \
+      "retry_after_sec=" || true
+    cp -f "${run_path}" "${status_path}" 2>/dev/null || true
+    chmod 0644 "${status_path}" 2>/dev/null || true
   fi
 
   case "${action}" in
@@ -2398,6 +2569,7 @@ ftctl_dr_runtime_action() {
         "updated_at=$(ftctl_now_iso8601)" || true
       cp -f "${run_path}" "${status_path}" 2>/dev/null || true
       chmod 0644 "${status_path}" 2>/dev/null || true
+      ftctl_dr_runtime_mark_worker_terminal "${run_path}" "${status_path}" "FAILED" "${rc}" "${error_code}" "false" ""
       ftctl_log_event "dr-runtime" "dr.vmware.driver" "fail" "" "${rc}" \
         "plan=${plan} run=${run} action=${action} error=${error_code}"
       if [[ "${json}" == "1" ]]; then
@@ -2423,6 +2595,7 @@ ftctl_dr_runtime_action() {
         "updated_at=$(ftctl_now_iso8601)" || true
       cp -f "${run_path}" "${status_path}" 2>/dev/null || true
       chmod 0644 "${status_path}" 2>/dev/null || true
+      ftctl_dr_runtime_mark_worker_terminal "${run_path}" "${status_path}" "FAILED" "${rc}" "DR_ABLESTACK_DRIVER_FAILED" "false" ""
       ftctl_log_event "dr-runtime" "dr.ablestack.driver" "fail" "" "${rc}" \
         "plan=${plan} run=${run} action=${action}"
       if [[ "${json}" == "1" ]]; then
@@ -2451,6 +2624,7 @@ ftctl_dr_runtime_action() {
         "updated_at=$(ftctl_now_iso8601)" || true
       cp -f "${run_path}" "${status_path}" 2>/dev/null || true
       chmod 0644 "${status_path}" 2>/dev/null || true
+      ftctl_dr_runtime_mark_worker_terminal "${run_path}" "${status_path}" "FAILED" "${rc}" "${error_code}" "false" ""
       ftctl_log_event "dr-runtime" "dr.scheduler" "fail" "" "${rc}" \
         "plan=${plan} run=${run} action=${action} error=${error_code}"
       if [[ "${json}" == "1" ]]; then
@@ -2462,6 +2636,7 @@ ftctl_dr_runtime_action() {
     fi
   fi
 
+  ftctl_dr_runtime_mark_worker_terminal "${run_path}" "${status_path}" "SUCCEEDED" "0" "" "false" ""
   cp -f "${run_path}" "${status_path}"
   chmod 0644 "${status_path}" 2>/dev/null || true
   ftctl_log_event "dr-runtime" "dr.action.accepted" "ok" "" "" \
