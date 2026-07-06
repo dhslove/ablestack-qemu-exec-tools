@@ -1862,6 +1862,7 @@ ftctl_dr_runtime_emit_events_since() {
 ftctl_dr_runtime_emit_state_json() {
   local command="${1-}" result="${2-ok}" plan="${3-}" run="${4-}" state_path="${5-}" events_offset="${6-}"
   local action state step progress external_job_ref error_code last_source last_target target_rpo updated accepted
+  local runtime_exists profile_exists run_exists
   local driver driver_state disk_map_path manifest_path checkpoint_path
   local scheduler_state worker_pid checkpoint_sequence restore_points_path dynamic_rpo
   local test_session_id test_session_state test_restore_point_ref test_restore_point_sequence
@@ -1890,6 +1891,9 @@ ftctl_dr_runtime_emit_state_json() {
   target_rpo="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "target_ready_rpo_seconds")"
   updated="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "updated_at")"
   accepted="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "accepted")"
+  [[ -f "${state_path}" ]] && runtime_exists="true" || runtime_exists="false"
+  [[ -f "$(ftctl_dr_runtime_profile_path "${plan}")" ]] && profile_exists="true" || profile_exists="false"
+  [[ -n "${run}" && -f "$(ftctl_dr_runtime_run_path "${plan}" "${run}")" ]] && run_exists="true" || run_exists="false"
   driver="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "driver")"
   driver_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "driver_state")"
   disk_map_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "disk_map_path")"
@@ -1966,6 +1970,7 @@ ftctl_dr_runtime_emit_state_json() {
   ftctl_dr_runtime_json_string_field "step" "${step:-planned}"
   ftctl_dr_runtime_json_number_field "progress" "${progress:-0}"
   ftctl_dr_runtime_json_string_field "external_job_ref" "${external_job_ref:-${run}}"
+  printf ',"runtime_exists":%s,"profile_exists":%s,"run_exists":%s' "${runtime_exists}" "${profile_exists}" "${run_exists}"
   ftctl_dr_runtime_json_string_field "last_source_checkpoint_at" "${last_source}"
   ftctl_dr_runtime_json_string_field "last_target_durable_at" "${last_target}"
   ftctl_dr_runtime_json_number_field "target_ready_rpo_seconds" "${target_rpo}"
@@ -2191,6 +2196,48 @@ ftctl_dr_runtime_plan_apply() {
   fi
 }
 
+ftctl_dr_runtime_run_log_path() {
+  local plan="${1-}" run="${2-}"
+  ftctl_dr_runtime_ensure_plan_dirs "${plan}"
+  printf '%s/runs/%s.log' "$(ftctl_dr_runtime_plan_dir "${plan}")" "${run}"
+}
+
+ftctl_dr_runtime_should_delegate_action() {
+  local action="${1-}" wait_value="${2-}" dry_run="${3-0}"
+  local wait_lower
+
+  [[ "${dry_run}" != "1" ]] || return 1
+  [[ "${FTCTL_DR_RUNTIME_WORKER:-0}" != "1" ]] || return 1
+  wait_lower="$(printf '%s' "${wait_value}" | tr '[:upper:]' '[:lower:]')"
+  [[ "${wait_lower}" == "false" || "${wait_lower}" == "0" || "${wait_lower}" == "no" ]] || return 1
+
+  case "${action}" in
+    dr-sync-start|dr-test-failover|dr-failover|dr-failback|dr-reprotect) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+ftctl_dr_runtime_start_background_worker() {
+  local action="${1-}" plan="${2-}" run="${3-}" role="${4-}" mode="${5-}" restore_point="${6-}" force="${7-0}" dry_run="${8-0}" log_path ftctl_bin profile_path
+  local -a worker_cmd
+
+  log_path="$(ftctl_dr_runtime_run_log_path "${plan}" "${run}")"
+  profile_path="$(ftctl_dr_runtime_profile_path "${plan}")"
+  ftctl_bin="${FTCTL_DR_RUNTIME_WORKER_COMMAND:-$(command -v ablestack_vm_ftctl 2>/dev/null || true)}"
+  [[ -n "${ftctl_bin}" ]] || ftctl_bin="${0}"
+  worker_cmd=("${ftctl_bin}" "${action}" "--plan" "${plan}" "--run" "${run}" "--profile-json" "${profile_path}" "--role" "${role:-coordinator}")
+  [[ -n "${mode}" ]] && worker_cmd+=("--mode" "${mode}")
+  [[ -n "${restore_point}" ]] && worker_cmd+=("--restore-point" "${restore_point}")
+  [[ "${force}" == "1" ]] && worker_cmd+=("--force")
+  [[ "${dry_run}" == "1" ]] && worker_cmd+=("--dry-run")
+  worker_cmd+=("--wait=true" "--json")
+
+  (
+    export FTCTL_DR_RUNTIME_WORKER=1
+    exec nohup "${worker_cmd[@]}" >>"${log_path}" 2>&1
+  ) >/dev/null 2>&1 &
+}
+
 ftctl_dr_runtime_action() {
   local action="${1-}" plan="${2-}" run="${3-}" profile_file="${4-}" role="${5-}" mode="${6-}" restore_point="${7-}" force="${8-0}" dry_run="${9-0}" wait_value="${10-}" json="${11-0}"
   local state_tuple state step progress run_path status_path external_ref rc error_code
@@ -2210,6 +2257,20 @@ ftctl_dr_runtime_action() {
   run_path="$(ftctl_dr_runtime_run_path "${plan}" "${run}")"
   status_path="$(ftctl_dr_runtime_status_path "${plan}")"
   ftctl_dr_runtime_write_state "${run_path}" "${plan}" "${run}" "${action}" "${state}" "${step}" "${progress}" "${external_ref}" ""
+
+  if ftctl_dr_runtime_should_delegate_action "${action}" "${wait_value}" "${dry_run}"; then
+    cp -f "${run_path}" "${status_path}"
+    chmod 0644 "${status_path}" 2>/dev/null || true
+    ftctl_dr_runtime_start_background_worker "${action}" "${plan}" "${run}" "${role}" "${mode}" "${restore_point}" "${force}" "${dry_run}"
+    ftctl_log_event "dr-runtime" "dr.action.accepted" "ok" "" "" \
+      "plan=${plan} run=${run} action=${action} role=${role:-} mode=${mode:-} restore_point=${restore_point:-} force=${force} dry_run=${dry_run} wait=${wait_value:-} delegated=1"
+    if [[ "${json}" == "1" ]]; then
+      ftctl_dr_runtime_emit_state_json "${action}" "accepted" "${plan}" "${run}" "${run_path}" "0"
+    else
+      printf '%s: plan=%s run=%s accepted state=%s step=%s delegated=1\n' "${action}" "${plan}" "${run}" "${state}" "${step}"
+    fi
+    return 0
+  fi
 
   case "${action}" in
     dr-sync-pause|dr-sync-resume|dr-release)
