@@ -135,3 +135,31 @@ Implemented the immediate self-lock recovery in the current command structure:
 - DR command lock conflicts update the run/status files with `worker_state=RETRYING`, `retryable=true`, `retry_after_sec=2`, holder metadata, and `error_code=DR_ENGINE_BUSY_RETRYABLE`.
 - `dr-status` emits worker and retry metadata so Cloud can distinguish target materialization from worker admission failure.
 - The longer-term `dr-sync-worker` command split remains a valid cleanup direction, but the deployed mitigation removes the observed parent/worker self-lock without changing the Cloud action API.
+
+## 2026-07-07 DR run-aware status and target driver diagnostics extension
+
+The VMware to ABLESTACK sync test found a terminal runtime failure that Cloud did not project:
+
+- plan: `b0522fc5-047f-4dc6-9cd7-b43a17daae45`
+- run: `bdbea146-ac2d-4ab1-9e6e-6a004a5173cc`
+- runtime state: `ERROR`
+- runtime step: `ablestack-driver-failed`
+- error code: `DR_ABLESTACK_DRIVER_FAILED`
+- worker state: `FAILED`
+- worker exit code: `32`
+
+Required ftctl updates:
+
+- `dr-status --plan <plan> --run <run> --json` must read the run state first and return terminal runtime status even when the status command itself exits successfully.
+- status JSON must include `state`, `step`, `error_code`, `error_message`, `driver`, `driver_state`, `worker_state`, `worker_exit_code`, target presence flags, and checkpoint timestamps.
+- ABLESTACK target preparation must persist exact sub-error codes instead of only returning exit code `32`.
+- VMware source disk ids such as `2000` must not be treated as local qemu file paths for size detection. Disk size must come from VMware/VDDK metadata, Cloud guided inventory, or explicit UI target size.
+- ABLESTACK RBD target storage must normalize to `targetType=rbd`; a profile with RBD storage and `targetType=file` must fail preflight.
+
+Required Cloud contract:
+
+- Cloud agent wrappers must pass `--run` when the latest run UUID is known.
+- Backend projection must treat runtime `state=ERROR`, `worker_state=FAILED`, or non-empty `error_code` as terminal failure.
+- Plan/run/step/replica/disk projection must move atomically to failure so UI cannot show `SYNCING` or `ACCEPTED` after FTCTL has failed.
+
+The paired Cloud-side design is documented in `docs/ftctl/536-cross-hypervisor-dr-terminal-projection-and-target-driver-contract-design-20260707.md` in the `ablestack-cloud` repository.

@@ -146,6 +146,12 @@ def derive_target_path(target_name, storage_ref, storage_path, krbd_path, pool_t
     storage_text = str(storage_ref or "").strip()
     if "RBD" in pool_text and krbd_text:
         return join_path(krbd_text, name)
+    if "RBD" in pool_text and (path_text.startswith("rbd:") or path_text.startswith("rbd/")):
+        return join_path(path_text, name)
+    if "RBD" in pool_text and path_text and not path_text.startswith("/"):
+        return join_path("rbd/" + path_text.strip("/"), name)
+    if "RBD" in pool_text and (storage_text.startswith("rbd:") or storage_text.startswith("rbd/")):
+        return join_path(storage_text, name)
     if path_text.startswith("/"):
         suffix = "" if name.endswith((".qcow2", ".raw")) else ".qcow2"
         return join_path(path_text, name, suffix)
@@ -203,6 +209,12 @@ def normalize_disk(item, index):
     )
     if not target_path:
         target_path = derive_target_path(target_name, target_storage_ref, target_storage_path, target_storage_krbd_path, target_storage_type)
+    elif "RBD" in str(target_storage_type or "").upper() and not (
+        target_path.startswith("rbd:") or target_path.startswith("rbd/") or target_path.startswith("/dev/rbd/")
+    ):
+        derived_target_path = derive_target_path(target_name, target_storage_ref, target_storage_path, target_storage_krbd_path, target_storage_type)
+        if derived_target_path:
+            target_path = derived_target_path
     device = first_str(
         value_at(item, "device", "targetDevice", "diskTarget", "sourceDevice"),
         value_at(source, "device", "targetDevice"),
@@ -211,6 +223,8 @@ def normalize_disk(item, index):
     )
     source_type = infer_disk_type(source_path)
     target_type = infer_disk_type(target_path)
+    if "RBD" in str(target_storage_type or "").upper() and target_path:
+        target_type = "rbd"
     source_format = first_str(
         value_at(item, "sourceFormat", "format"),
         value_at(source, "format", "sourceFormat"),
@@ -219,6 +233,7 @@ def normalize_disk(item, index):
     target_format = first_str(
         value_at(item, "targetFormat"),
         value_at(target, "format", "targetFormat"),
+        "raw" if target_type == "rbd" else "",
         infer_format(target_path, target_type),
         source_format if target_type == "file" else "",
     )
@@ -506,6 +521,34 @@ ftctl_dr_ablestack_prepare_target() {
   esac
 }
 
+ftctl_dr_ablestack_error_code_for_rc() {
+  local rc="${1-}"
+  case "${rc}" in
+    31) printf 'DR_TARGET_DISK_MAPPING_INVALID\n' ;;
+    32) printf 'DR_TARGET_DISK_TYPE_INVALID\n' ;;
+    33) printf 'DR_TARGET_DISK_SIZE_UNRESOLVED\n' ;;
+    34) printf 'DR_TARGET_DISK_PREPARE_FAILED\n' ;;
+    *) printf 'DR_ABLESTACK_DRIVER_FAILED\n' ;;
+  esac
+}
+
+ftctl_dr_ablestack_mark_driver_error() {
+  local state_path="${1-}" rc="${2-}" step="${3-}" message="${4-}"
+  local error_code
+  error_code="$(ftctl_dr_ablestack_error_code_for_rc "${rc}")"
+  ftctl_dr_runtime_path_set "${state_path}" \
+    "driver=ABLESTACK" \
+    "driver_state=ERROR" \
+    "state=ERROR" \
+    "step=${step:-ablestack-driver-failed}" \
+    "progress=100" \
+    "accepted=false" \
+    "error_code=${error_code}" \
+    "error_message=${message:-ABLESTACK target driver failed}" \
+    "driver_exit_code=${rc}" \
+    "updated_at=$(ftctl_now_iso8601)" || true
+}
+
 ftctl_dr_ablestack_write_manifest() {
   local disk_map="${1-}" records_path="${2-}" manifest_path="${3-}" phase="${4-}"
   ftctl_ensure_dir "$(dirname "${manifest_path}")" "0755"
@@ -614,12 +657,28 @@ ftctl_dr_ablestack_prepare_targets() {
   : > "${records_path}"
   while IFS=$'\t' read -r device source_path target_path source_format target_format size_bytes source_type target_type; do
     [[ -n "${device}" ]] || continue
-    [[ -n "${source_path}" && -n "${target_path}" ]] || return 31
+    if [[ -z "${source_path}" || -z "${target_path}" ]]; then
+      ftctl_log_event "dr-runtime" "dr.ablestack.disk_map" "fail" "" "31" \
+        "plan=${plan} run=${run} device=${device} reason=missing_source_or_target_path"
+      return 31
+    fi
     [[ -n "${target_format}" ]] || target_format="${source_format:-raw}"
-    [[ -n "${target_type}" ]] || return 32
+    if [[ -z "${target_type}" ]]; then
+      ftctl_log_event "dr-runtime" "dr.ablestack.disk_map" "fail" "" "32" \
+        "plan=${plan} run=${run} device=${device} target=${target_path} reason=missing_target_type"
+      return 32
+    fi
     resolved_size=""
-    ftctl_dr_ablestack_source_size_bytes "${device}" "${source_path}" "${size_bytes}" resolved_size || return $?
-    ftctl_dr_ablestack_prepare_target "${target_path}" "${target_format}" "${resolved_size}" "${target_type}" || return $?
+    if ! ftctl_dr_ablestack_source_size_bytes "${device}" "${source_path}" "${size_bytes}" resolved_size; then
+      ftctl_log_event "dr-runtime" "dr.ablestack.source_size" "fail" "" "33" \
+        "plan=${plan} run=${run} device=${device} source=${source_path} explicit_size=${size_bytes:-0}"
+      return 33
+    fi
+    if ! ftctl_dr_ablestack_prepare_target "${target_path}" "${target_format}" "${resolved_size}" "${target_type}"; then
+      ftctl_log_event "dr-runtime" "dr.ablestack.target_prepare" "fail" "" "34" \
+        "plan=${plan} run=${run} device=${device} target=${target_path} target_type=${target_type} size=${resolved_size}"
+      return 34
+    fi
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
       "${device}" "${source_path}" "${target_path}" "${source_format}" "${target_format}" "${resolved_size}" "${source_type}" "${target_type}" >> "${records_path}"
   done < <(ftctl_dr_ablestack_disk_rows "${disk_map}")
@@ -692,7 +751,7 @@ ftctl_dr_ablestack_profile_bool() {
 
 ftctl_dr_ablestack_sync_start() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" state_path="${4-}" wait_value="${5-}"
-  local disk_map manifest_path checkpoint_path count now source_provider target_provider missing_config
+  local disk_map manifest_path checkpoint_path count now source_provider target_provider missing_config rc
 
   [[ -n "${profile_file}" && -f "${profile_file}" ]] || return 0
   ftctl_dr_ablestack_profile_involves_ablestack "${profile_file}" || return 0
@@ -743,7 +802,13 @@ ftctl_dr_ablestack_sync_start() {
 
   if [[ "${FTCTL_DR_ABLESTACK_FULL_SEED_ON_START}" == "1" ]] ||
       { [[ "${wait_value}" != "false" ]] && ftctl_dr_ablestack_profile_bool "${profile_file}" "request.performFullSeed"; }; then
-    ftctl_dr_ablestack_full_seed_once "${plan}" "${run}" "${profile_file}" "${disk_map}" "${manifest_path}" "${checkpoint_path}" || return $?
+    rc=0
+    ftctl_dr_ablestack_full_seed_once "${plan}" "${run}" "${profile_file}" "${disk_map}" "${manifest_path}" "${checkpoint_path}" || rc=$?
+    if [[ "${rc}" != "0" ]]; then
+      ftctl_dr_ablestack_mark_driver_error "${state_path}" "${rc}" "ablestack-full-seed-failed" \
+        "ABLESTACK full seed failed before target durable checkpoint"
+      return "${rc}"
+    fi
     now="$(ftctl_now_iso8601)"
     ftctl_dr_runtime_path_set "${state_path}" \
       "driver=ABLESTACK" \
@@ -759,7 +824,13 @@ ftctl_dr_ablestack_sync_start() {
     return 0
   fi
 
-  ftctl_dr_ablestack_prepare_targets "${plan}" "${run}" "${profile_file}" "${disk_map}" "${manifest_path}" "${checkpoint_path}" || return $?
+  rc=0
+  ftctl_dr_ablestack_prepare_targets "${plan}" "${run}" "${profile_file}" "${disk_map}" "${manifest_path}" "${checkpoint_path}" || rc=$?
+  if [[ "${rc}" != "0" ]]; then
+    ftctl_dr_ablestack_mark_driver_error "${state_path}" "${rc}" "ablestack-target-prepare-failed" \
+      "ABLESTACK target preparation failed before target VM materialization"
+    return "${rc}"
+  fi
   now="$(ftctl_now_iso8601)"
   ftctl_dr_runtime_path_set "${state_path}" \
     "driver=ABLESTACK" \

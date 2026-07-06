@@ -1895,7 +1895,7 @@ ftctl_dr_runtime_emit_events_since() {
 
 ftctl_dr_runtime_emit_state_json() {
   local command="${1-}" result="${2-ok}" plan="${3-}" run="${4-}" state_path="${5-}" events_offset="${6-}"
-  local action state step progress external_job_ref error_code last_source last_target target_rpo updated accepted
+  local action state step progress external_job_ref error_code error_message driver_exit_code last_source last_target target_rpo updated accepted
   local runtime_exists profile_exists run_exists
   local driver driver_state disk_map_path manifest_path checkpoint_path
   local scheduler_state worker_pid worker_state worker_started_at worker_updated_at worker_exit_code
@@ -1923,6 +1923,8 @@ ftctl_dr_runtime_emit_state_json() {
   progress="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "progress")"
   external_job_ref="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "external_job_ref")"
   error_code="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "error_code")"
+  error_message="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "error_message")"
+  driver_exit_code="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "driver_exit_code")"
   last_source="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "last_source_checkpoint_at")"
   last_target="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "last_target_durable_at")"
   target_rpo="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "target_ready_rpo_seconds")"
@@ -2065,6 +2067,8 @@ ftctl_dr_runtime_emit_state_json() {
   ftctl_dr_runtime_json_string_field "target_vm_id" "${target_vm_id}"
   ftctl_dr_runtime_json_string_field "target_external_ref" "${target_external_ref}"
   ftctl_dr_runtime_json_string_field "error_code" "${error_code}"
+  ftctl_dr_runtime_json_string_field "error_message" "${error_message}"
+  ftctl_dr_runtime_json_number_field "driver_exit_code" "${driver_exit_code}"
   ftctl_dr_runtime_json_string_field "updated_at" "${updated}"
   ftctl_dr_runtime_json_string_field "driver" "${driver}"
   ftctl_dr_runtime_json_string_field "driver_state" "${driver_state}"
@@ -2586,22 +2590,26 @@ ftctl_dr_runtime_action() {
     rc=0
     ftctl_dr_ablestack_sync_start "${plan}" "${run}" "${profile_file}" "${run_path}" "${wait_value}" || rc=$?
     if [[ "${rc}" != "0" ]]; then
+      error_code="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "error_code")"
+      [[ -n "${error_code}" ]] || error_code="DR_ABLESTACK_DRIVER_FAILED"
+      step="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "step")"
+      [[ -n "${step}" ]] || step="ablestack-driver-failed"
       ftctl_dr_runtime_path_set "${run_path}" \
         "state=ERROR" \
-        "step=ablestack-driver-failed" \
+        "step=${step}" \
         "progress=100" \
         "accepted=false" \
-        "error_code=DR_ABLESTACK_DRIVER_FAILED" \
+        "error_code=${error_code}" \
         "updated_at=$(ftctl_now_iso8601)" || true
       cp -f "${run_path}" "${status_path}" 2>/dev/null || true
       chmod 0644 "${status_path}" 2>/dev/null || true
-      ftctl_dr_runtime_mark_worker_terminal "${run_path}" "${status_path}" "FAILED" "${rc}" "DR_ABLESTACK_DRIVER_FAILED" "false" ""
+      ftctl_dr_runtime_mark_worker_terminal "${run_path}" "${status_path}" "FAILED" "${rc}" "${error_code}" "false" ""
       ftctl_log_event "dr-runtime" "dr.ablestack.driver" "fail" "" "${rc}" \
-        "plan=${plan} run=${run} action=${action}"
+        "plan=${plan} run=${run} action=${action} error=${error_code}"
       if [[ "${json}" == "1" ]]; then
         ftctl_dr_runtime_emit_state_json "${action}" "error" "${plan}" "${run}" "${run_path}" "0"
       else
-        printf '%s: plan=%s run=%s ablestack driver failed rc=%s\n' "${action}" "${plan}" "${run}" "${rc}" >&2
+        printf '%s: plan=%s run=%s ablestack driver failed rc=%s error=%s\n' "${action}" "${plan}" "${run}" "${rc}" "${error_code}" >&2
       fi
       return "${rc}"
     fi
