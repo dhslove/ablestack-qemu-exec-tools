@@ -6445,6 +6445,81 @@ JSON
   selftest_assert_file_contains "${SELFTEST_ROOT}/run/dr-runtime/plans/plan-step4/checkpoints/run-step4-checkpoint.json" '"state":"TARGET_PREPARED"'
 }
 
+selftest_case_dr_ablestack_rbd_target_prepare_preserves_empty_source_format() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR ABLESTACK RBD target prepare preserves empty source format"
+
+  local fakebin="${SELFTEST_ROOT}/fakebin"
+  local call_log="${SELFTEST_ROOT}/rbd.log"
+  local profile="${SELFTEST_ROOT}/dr-ablestack-rbd-profile.json"
+  local out="" manifest=""
+  mkdir -p "${fakebin}" "${SELFTEST_ROOT}/src"
+  cat > "${fakebin}/rbd" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "${call_log}"
+if [[ "\$1" == "info" ]]; then
+  exit 2
+fi
+if [[ "\$1" == "create" ]]; then
+  exit 0
+fi
+exit 0
+EOF
+  chmod +x "${fakebin}/rbd"
+
+  cat > "${profile}" <<JSON
+{
+  "version": 1,
+  "engine": "FTCTL_DR",
+  "planUuid": "plan-step4-rbd",
+  "runUuid": "run-step4-rbd",
+  "direction": "KVM_TO_KVM",
+  "source": {"provider": "ABLESTACK", "driver": "KVM_QMP"},
+  "target": {
+    "provider": "ABLESTACK",
+    "driver": "ABLESTACK",
+    "zoneId": "zone-1",
+    "storageRef": "Primary",
+    "serviceOfferingId": "service-offering-1",
+    "networks": [{"networkId": "network-1"}]
+  },
+  "mapping": {
+    "disks": [
+      {
+        "device": "scsi0:0",
+        "sourcePath": "2000",
+        "targetName": "root-rbd",
+        "sourceFormat": "",
+        "targetFormat": "raw",
+        "sizeBytes": 1048576,
+        "targetStorageType": "RBD",
+        "targetStoragePath": "rbd",
+        "targetStorageKrbdPath": "/dev/rbd",
+        "targetDiskOfferingId": "disk-offering-1"
+      }
+    ]
+  }
+}
+JSON
+
+  out="$(FTCTL_DR_SYNC_FOREGROUND=1 FTCTL_DR_SCHEDULER_DISABLE=1 PATH="${fakebin}:$PATH" bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-sync-start \
+    --config "${SELFTEST_CONFIG}" \
+    --plan plan-step4-rbd \
+    --run run-step4-rbd \
+    --profile-json "${profile}" \
+    --role coordinator \
+    --mode planned \
+    --wait=false \
+    --json)"
+  selftest_assert_contains "${out}" '"state":"SYNCING"' "rbd prepare state"
+  selftest_assert_contains "${out}" '"step":"ablestack-targets-prepared"' "rbd prepare step"
+  selftest_assert_file_contains "${call_log}" "create --image-format 2 --size 1 rbd/root-rbd"
+  manifest="${SELFTEST_ROOT}/run/dr-runtime/plans/plan-step4-rbd/manifests/run-step4-rbd-manifest.json"
+  selftest_assert_file_contains "${manifest}" '"targetPath":"/dev/rbd/rbd/root-rbd"'
+  selftest_assert_file_contains "${manifest}" '"targetType":"rbd"'
+  selftest_assert_file_contains "${manifest}" '"sourceFormat":""'
+}
+
 selftest_case_dr_ablestack_full_seed_once() {
   selftest_reset_env
   selftest_info "FTCTL_DR ABLESTACK full seed driver"
@@ -7590,6 +7665,7 @@ selftest_main() {
   selftest_case_dr_runtime_profile_status_cancel
   selftest_case_dr_runtime_control_actions
   selftest_case_dr_ablestack_target_prepare
+  selftest_case_dr_ablestack_rbd_target_prepare_preserves_empty_source_format
   selftest_case_dr_ablestack_full_seed_once
   selftest_case_dr_ablestack_missing_disk_map_waits
   selftest_case_dr_ablestack_vmware_source_size_unresolved

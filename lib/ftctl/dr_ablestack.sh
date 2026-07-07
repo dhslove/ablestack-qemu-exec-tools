@@ -136,6 +136,21 @@ def join_path(base, name, suffix=""):
         return ""
     return f"{base}/{name}{suffix}"
 
+def rbd_pool_from_ref(value):
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if text.startswith("rbd:"):
+        text = text[4:]
+    elif text.startswith("rbd/"):
+        text = text[4:]
+    elif text.startswith("/dev/rbd/"):
+        text = text[len("/dev/rbd/"):]
+    text = text.strip("/")
+    if not text or text.startswith("/"):
+        return ""
+    return text.split("/", 1)[0]
+
 def derive_target_path(target_name, storage_ref, storage_path, krbd_path, pool_type):
     name = str(target_name or "").strip()
     if not name:
@@ -145,6 +160,9 @@ def derive_target_path(target_name, storage_ref, storage_path, krbd_path, pool_t
     path_text = str(storage_path or "").strip()
     storage_text = str(storage_ref or "").strip()
     if "RBD" in pool_text and krbd_text:
+        pool_name = rbd_pool_from_ref(path_text) or rbd_pool_from_ref(storage_text)
+        if krbd_text.rstrip("/") == "/dev/rbd" and pool_name:
+            return join_path("/dev/rbd/" + pool_name, name)
         return join_path(krbd_text, name)
     if "RBD" in pool_text and (path_text.startswith("rbd:") or path_text.startswith("rbd/")):
         return join_path(path_text, name)
@@ -191,6 +209,8 @@ def normalize_disk(item, index):
         value_at(item, "targetName", "targetDiskName", "targetRef"),
         value_at(target, "name", "targetName", "ref"),
     )
+    if not target_name and target_path:
+        target_name = os.path.basename(target_path.rstrip("/"))
     target_storage_ref = first_str(
         value_at(item, "targetStorageRef", "targetStorage", "targetDatastoreRef"),
         value_at(target, "storageRef", "storagePoolId", "datastoreRef", "targetStorageRef"),
@@ -209,6 +229,12 @@ def normalize_disk(item, index):
     )
     if not target_path:
         target_path = derive_target_path(target_name, target_storage_ref, target_storage_path, target_storage_krbd_path, target_storage_type)
+    elif "RBD" in str(target_storage_type or "").upper() and target_path.startswith("/dev/rbd/"):
+        rbd_suffix = target_path[len("/dev/rbd/"):].strip("/")
+        if rbd_suffix and "/" not in rbd_suffix:
+            derived_target_path = derive_target_path(target_name or rbd_suffix, target_storage_ref, target_storage_path, target_storage_krbd_path, target_storage_type)
+            if derived_target_path:
+                target_path = derived_target_path
     elif "RBD" in str(target_storage_type or "").upper() and not (
         target_path.startswith("rbd:") or target_path.startswith("rbd/") or target_path.startswith("/dev/rbd/")
     ):
@@ -472,24 +498,62 @@ import sys
 with open(sys.argv[1], "r", encoding="utf-8") as fh:
     data = json.load(fh)
 for disk in data.get("disks") or []:
-    print("\t".join(str(disk.get(key, "") or "") for key in (
-        "device", "sourcePath", "targetPath", "sourceFormat", "targetFormat",
-        "sizeBytes", "sourceType", "targetType"
-    )))
+    print(json.dumps({
+        key: str(disk.get(key, "") or "") for key in (
+            "device", "sourcePath", "targetPath", "sourceFormat", "targetFormat",
+            "sizeBytes", "sourceType", "targetType"
+        )
+    }, sort_keys=True, separators=(",", ":")))
+PY
+}
+
+ftctl_dr_ablestack_disk_json_field() {
+  local disk_json="${1-}" field="${2-}"
+  python3 - "${disk_json}" "${field}" <<'PY'
+import json
+import sys
+
+try:
+    disk = json.loads(sys.argv[1])
+except Exception:
+    disk = {}
+value = disk.get(sys.argv[2], "")
+print("" if value is None else str(value))
+PY
+}
+
+ftctl_dr_ablestack_append_disk_record() {
+  local records_path="${1-}" disk_json="${2-}" source_format="${3-}" target_format="${4-}" resolved_size="${5-}" source_type="${6-}" target_type="${7-}"
+  python3 - "${records_path}" "${disk_json}" "${source_format}" "${target_format}" "${resolved_size}" "${source_type}" "${target_type}" <<'PY'
+import json
+import sys
+
+records_path, disk_json, source_format, target_format, resolved_size, source_type, target_type = sys.argv[1:8]
+disk = json.loads(disk_json)
+disk.update({
+    "sourceFormat": source_format,
+    "targetFormat": target_format,
+    "sizeBytes": int(resolved_size or "0"),
+    "sourceType": source_type,
+    "targetType": target_type,
+})
+with open(records_path, "a", encoding="utf-8") as fh:
+    json.dump(disk, fh, sort_keys=True, separators=(",", ":"))
+    fh.write("\n")
 PY
 }
 
 ftctl_dr_ablestack_rbd_spec_from_path() {
   local path="${1-}" out_var="${2}"
-  local spec=""
+  local rbd_spec=""
   case "${path}" in
-    rbd:*) spec="${path#rbd:}" ;;
-    /dev/rbd/*/*) spec="${path#/dev/rbd/}" ;;
-    rbd/*/*) spec="${path#rbd/}" ;;
+    rbd:*) rbd_spec="${path#rbd:}" ;;
+    /dev/rbd/*/*) rbd_spec="${path#/dev/rbd/}" ;;
+    rbd/*/*) rbd_spec="${path#rbd/}" ;;
     *) return 1 ;;
   esac
-  [[ "${spec}" == */* && "${spec}" != */ ]] || return 1
-  printf -v "${out_var}" '%s' "${spec}"
+  [[ "${rbd_spec}" == */* && "${rbd_spec}" != */ ]] || return 1
+  printf -v "${out_var}" '%s' "${rbd_spec}"
 }
 
 ftctl_dr_ablestack_qemu_info_value() {
@@ -630,9 +694,16 @@ records = {}
 if os.path.exists(records_path):
     with open(records_path, "r", encoding="utf-8") as fh:
         for line in fh:
-            parts = line.rstrip("\n").split("\t")
-            if len(parts) >= 8:
-                records[parts[0]] = {
+            line = line.rstrip("\n")
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                parts = line.split("\t")
+                if len(parts) < 8:
+                    continue
+                record = {
                     "device": parts[0],
                     "sourcePath": parts[1],
                     "targetPath": parts[2],
@@ -642,6 +713,9 @@ if os.path.exists(records_path):
                     "sourceType": parts[6],
                     "targetType": parts[7],
                 }
+            device = str(record.get("device") or "")
+            if device:
+                records[device] = record
 
 disks = []
 for disk in disk_map.get("disks") or []:
@@ -706,7 +780,7 @@ PY
 
 ftctl_dr_ablestack_prepare_targets() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" disk_map="${4-}" manifest_path="${5-}" checkpoint_path="${6-}"
-  local records_path count device source_path target_path source_format target_format size_bytes source_type target_type resolved_size
+  local records_path count disk_json device source_path target_path source_format target_format size_bytes source_type target_type resolved_size
   local source_at
 
   ftctl_dr_ablestack_canonicalize_profile "${profile_file}" "${disk_map}" || return $?
@@ -718,9 +792,17 @@ ftctl_dr_ablestack_prepare_targets() {
   fi
 
   ftctl_ensure_dir "$(dirname "${manifest_path}")" "0755"
-  records_path="${manifest_path}.records"
+  records_path="${manifest_path}.records.jsonl"
   : > "${records_path}"
-  while IFS=$'\t' read -r device source_path target_path source_format target_format size_bytes source_type target_type; do
+  while IFS= read -r disk_json; do
+    device="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" device)"
+    source_path="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" sourcePath)"
+    target_path="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" targetPath)"
+    source_format="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" sourceFormat)"
+    target_format="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" targetFormat)"
+    size_bytes="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" sizeBytes)"
+    source_type="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" sourceType)"
+    target_type="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" targetType)"
     [[ -n "${device}" ]] || continue
     if [[ -z "${source_path}" || -z "${target_path}" ]]; then
       ftctl_log_event "dr-runtime" "dr.ablestack.disk_map" "fail" "" "31" \
@@ -744,8 +826,8 @@ ftctl_dr_ablestack_prepare_targets() {
         "plan=${plan} run=${run} device=${device} target=${target_path} target_type=${target_type} size=${resolved_size}"
       return 34
     fi
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-      "${device}" "${source_path}" "${target_path}" "${source_format}" "${target_format}" "${resolved_size}" "${source_type}" "${target_type}" >> "${records_path}"
+    ftctl_dr_ablestack_append_disk_record "${records_path}" "${disk_json}" \
+      "${source_format}" "${target_format}" "${resolved_size}" "${source_type}" "${target_type}"
   done < <(ftctl_dr_ablestack_disk_rows "${disk_map}")
 
   ftctl_dr_ablestack_write_manifest "${disk_map}" "${records_path}" "${manifest_path}" "target-prepared" || return $?
@@ -757,11 +839,19 @@ ftctl_dr_ablestack_prepare_targets() {
 
 ftctl_dr_ablestack_full_seed_once() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" disk_map="${4-}" manifest_path="${5-}" checkpoint_path="${6-}"
-  local device source_path target_path source_format target_format size_bytes source_type target_type resolved_size target_uri
+  local disk_json device source_path target_path source_format target_format size_bytes source_type target_type resolved_size target_uri
   local out="" err="" rc=0 source_at target_at source_epoch target_epoch rpo="0"
 
   ftctl_dr_ablestack_prepare_targets "${plan}" "${run}" "${profile_file}" "${disk_map}" "${manifest_path}" "${checkpoint_path}" || return $?
-  while IFS=$'\t' read -r device source_path target_path source_format target_format size_bytes source_type target_type; do
+  while IFS= read -r disk_json; do
+    device="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" device)"
+    source_path="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" sourcePath)"
+    target_path="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" targetPath)"
+    source_format="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" sourceFormat)"
+    target_format="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" targetFormat)"
+    size_bytes="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" sizeBytes)"
+    source_type="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" sourceType)"
+    target_type="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" targetType)"
     [[ -n "${device}" ]] || continue
     : "${size_bytes}${source_type}${target_type}"
     [[ -n "${source_format}" ]] || source_format="raw"
@@ -786,7 +876,7 @@ ftctl_dr_ablestack_full_seed_once() {
   if [[ "${source_epoch}" =~ ^[0-9]+$ && "${target_epoch}" =~ ^[0-9]+$ && "${target_epoch}" -ge "${source_epoch}" ]]; then
     rpo="$((target_epoch - source_epoch))"
   fi
-  ftctl_dr_ablestack_write_manifest "${disk_map}" "${manifest_path}.records" "${manifest_path}" "full-seed-complete" || return $?
+  ftctl_dr_ablestack_write_manifest "${disk_map}" "${manifest_path}.records.jsonl" "${manifest_path}" "full-seed-complete" || return $?
   ftctl_dr_ablestack_write_checkpoint "${disk_map}" "${manifest_path}" "${checkpoint_path}" "TARGET_READY" "${source_at}" "${target_at}" "${rpo}" || return $?
   ftctl_log_event "dr-runtime" "dr.ablestack.full_seed" "ok" "" "" \
     "plan=${plan} run=${run} checkpoint=${checkpoint_path} rpo=${rpo}"
