@@ -25,6 +25,7 @@ fi
 
 FTCTL_DR_VMWARE_MOVER_LOG_DIR="${FTCTL_DR_VMWARE_MOVER_LOG_DIR:-/run/ablestack-vm-ftctl/dr-runtime/mover}"
 FTCTL_DR_VMWARE_NBDKIT_READY_TIMEOUT="${FTCTL_DR_VMWARE_NBDKIT_READY_TIMEOUT:-20}"
+FTCTL_DR_VMWARE_QEMU_INFO_TIMEOUT="${FTCTL_DR_VMWARE_QEMU_INFO_TIMEOUT:-20}"
 
 ftctl_vmware_mover_die() {
   local rc="${1:-65}"
@@ -69,6 +70,27 @@ ftctl_vmware_mover_target_uri() {
       printf '%s\n' "${raw_path}"
       ;;
   esac
+}
+
+ftctl_vmware_mover_qemu_opt_escape() {
+  local value="${1-}"
+  value="${value//\\/\\\\}"
+  value="${value//,/\\,}"
+  printf '%s\n' "${value}"
+}
+
+ftctl_vmware_mover_source_image_opts() {
+  local socket_path="${1-}" escaped_socket
+  [[ -n "${socket_path}" ]] || ftctl_vmware_mover_die 72 "DR_VMWARE_MOVER_SOURCE_GRAPH_INVALID: nbd socket path is empty"
+  escaped_socket="$(ftctl_vmware_mover_qemu_opt_escape "${socket_path}")"
+  printf 'driver=raw,file.driver=nbd,file.server.type=unix,file.server.path=%s\n' "${escaped_socket}"
+}
+
+ftctl_vmware_mover_cleanup_nbdkit() {
+  local pid="${1-}" work_dir="${2-}"
+  [[ -n "${pid}" ]] && kill "${pid}" 2>/dev/null || true
+  [[ -n "${pid}" ]] && wait "${pid}" 2>/dev/null || true
+  [[ -n "${work_dir}" ]] && rm -rf "${work_dir}"
 }
 
 ftctl_vmware_mover_disk_plan() {
@@ -143,7 +165,7 @@ ftctl_vmware_mover_wait_for_socket() {
 ftctl_vmware_mover_convert_disk() {
   local source_vmdk="${1-}" source_vm_ref="${2-}" target_uri="${3-}" target_format="${4-}" label="${5-}"
   local endpoint="${6-}" username="${7-}" password_file="${8-}" tls_verify="${9-}" thumbprint="${10-}" libdir="${11-}"
-  local work_dir socket_path pid nbd_source
+  local work_dir socket_path pid source_opts
 
   [[ -n "${source_vmdk}" ]] || ftctl_vmware_mover_die 65 "source VMDK path is empty for ${label}"
   [[ -n "${target_uri}" ]] || ftctl_vmware_mover_die 65 "target disk path is empty for ${label}"
@@ -177,23 +199,27 @@ ftctl_vmware_mover_convert_disk() {
   nbdkit "${nbdkit_args[@]}" &
   pid=$!
   if ! ftctl_vmware_mover_wait_for_socket "${socket_path}" "${pid}" "${FTCTL_DR_VMWARE_NBDKIT_READY_TIMEOUT}"; then
-    kill "${pid}" 2>/dev/null || true
-    wait "${pid}" 2>/dev/null || true
-    rm -rf "${work_dir}"
+    ftctl_vmware_mover_cleanup_nbdkit "${pid}" "${work_dir}"
     ftctl_vmware_mover_die 69 "nbdkit vddk socket did not become ready for ${label}"
   fi
 
-  nbd_source="json:{\"driver\":\"nbd\",\"server\":{\"type\":\"unix\",\"path\":\"${socket_path}\"}}"
-  if ! qemu-img convert -p -n -f raw -O "${target_format:-raw}" "${nbd_source}" "${target_uri}"; then
-    kill "${pid}" 2>/dev/null || true
-    wait "${pid}" 2>/dev/null || true
-    rm -rf "${work_dir}"
+  source_opts="$(ftctl_vmware_mover_source_image_opts "${socket_path}")"
+  if command -v timeout >/dev/null 2>&1; then
+    if ! timeout "${FTCTL_DR_VMWARE_QEMU_INFO_TIMEOUT}" qemu-img info --force-share --image-opts "${source_opts}" >/dev/null; then
+      ftctl_vmware_mover_cleanup_nbdkit "${pid}" "${work_dir}"
+      ftctl_vmware_mover_die 72 "DR_VMWARE_MOVER_SOURCE_GRAPH_INVALID: qemu-img cannot open VDDK NBD source for ${label}"
+    fi
+  elif ! qemu-img info --force-share --image-opts "${source_opts}" >/dev/null; then
+    ftctl_vmware_mover_cleanup_nbdkit "${pid}" "${work_dir}"
+    ftctl_vmware_mover_die 72 "DR_VMWARE_MOVER_SOURCE_GRAPH_INVALID: qemu-img cannot open VDDK NBD source for ${label}"
+  fi
+
+  if ! qemu-img convert --force-share -p -n --image-opts -O "${target_format:-raw}" "${source_opts}" "${target_uri}"; then
+    ftctl_vmware_mover_cleanup_nbdkit "${pid}" "${work_dir}"
     ftctl_vmware_mover_die 68 "qemu-img conversion failed for ${label}"
   fi
 
-  kill "${pid}" 2>/dev/null || true
-  wait "${pid}" 2>/dev/null || true
-  rm -rf "${work_dir}"
+  ftctl_vmware_mover_cleanup_nbdkit "${pid}" "${work_dir}"
 }
 
 main() {
@@ -227,7 +253,8 @@ main() {
   password_file="$(mktemp -p "${FTCTL_DR_VMWARE_MOVER_LOG_DIR}" vmware-password.XXXXXX)"
   chmod 0600 "${password_file}"
   printf '%s' "${password}" > "${password_file}"
-  trap 'rm -f "${password_file}"' EXIT
+  FTCTL_DR_VMWARE_PASSWORD_FILE="${password_file}"
+  trap 'rm -f "${FTCTL_DR_VMWARE_PASSWORD_FILE:-}"' EXIT
 
   rows="$(ftctl_vmware_mover_disk_plan "${disk_map}" "${target_disk_map}")"
   count="$(jq 'length' <<< "${rows}")"

@@ -7549,6 +7549,118 @@ JSON
   selftest_assert_contains "${out}" '"error_code":"DR_VMWARE_MOVER_UNAVAILABLE"' "vmware no mover error code"
 }
 
+selftest_case_dr_vmware_mover_uses_raw_over_nbd_image_opts() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR VMware mover uses raw-over-NBD image opts"
+
+  local fakebin="${SELFTEST_ROOT}/fakebin"
+  local call_log="${SELFTEST_ROOT}/vmware-mover-image-opts.log"
+  local credentials="${SELFTEST_ROOT}/vmware-credentials.json"
+  local disk_map="${SELFTEST_ROOT}/vmware-disks.json"
+  local target_map="${SELFTEST_ROOT}/ablestack-disks.json"
+  local vddk_dir="${SELFTEST_ROOT}/vddk"
+  mkdir -p "${fakebin}" "${vddk_dir}/lib64"
+  : > "${vddk_dir}/lib64/libvixDiskLib.so"
+  : > "${call_log}"
+
+  cat > "${fakebin}/nbdkit" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'NBDKIT:%s\n' "$*" >> "${FTCTL_FAKE_CALL_LOG}"
+if [[ "${1-}" == "--dump-plugin" ]]; then
+  printf 'name=vddk\n'
+  printf 'vddk_library_version=8.0.0\n'
+  exit 0
+fi
+socket_path=""
+while [[ "$#" -gt 0 ]]; do
+  if [[ "$1" == "--unix" ]]; then
+    socket_path="${2-}"
+    shift 2
+    continue
+  fi
+  shift
+done
+[[ -n "${socket_path}" ]] || exit 2
+exec python3 - "${socket_path}" <<'PY'
+import os
+import socket
+import sys
+import time
+
+path = sys.argv[1]
+try:
+    os.unlink(path)
+except FileNotFoundError:
+    pass
+server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+server.bind(path)
+server.listen(1)
+while True:
+    time.sleep(1)
+PY
+EOF
+  chmod +x "${fakebin}/nbdkit"
+
+  cat > "${fakebin}/qemu-img" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'QEMU_IMG:%s\n' "$*" >> "${FTCTL_FAKE_CALL_LOG}"
+exit 0
+EOF
+  chmod +x "${fakebin}/qemu-img"
+
+  cat > "${credentials}" <<JSON
+{
+  "credentials": {
+    "source": {
+      "endpoint": "10.10.21.10",
+      "principal": "administrator@ablecloud.local",
+      "auth": {"password": "secret"},
+      "tlsVerify": false,
+      "vddkLibdir": "${vddk_dir}"
+    }
+  }
+}
+JSON
+  cat > "${disk_map}" <<'JSON'
+{
+  "sourceVmRef": "vm-101",
+  "disks": [
+    {
+      "device": "disk0",
+      "sourceVmdkPath": "[datastore1] Rocky10/Rocky10.vmdk",
+      "targetFormat": "raw"
+    }
+  ]
+}
+JSON
+  cat > "${target_map}" <<'JSON'
+{
+  "disks": [
+    {
+      "targetPath": "rbd:rbd/target-root",
+      "targetFormat": "raw"
+    }
+  ]
+}
+JSON
+
+  FTCTL_FAKE_CALL_LOG="${call_log}" \
+  FTCTL_DR_DISK_MAP="${disk_map}" \
+  FTCTL_DR_TARGET_DISK_MAP="${target_map}" \
+  FTCTL_DR_CREDENTIALS_FILE="${credentials}" \
+  FTCTL_DR_VMWARE_MOVER_LOG_DIR="${SELFTEST_ROOT}/run/dr-runtime/mover" \
+  FTCTL_DR_VMWARE_QEMU_INFO_TIMEOUT=5 \
+  PATH="${fakebin}:$PATH" \
+    bash "${ROOT_DIR}/lib/ftctl/dr_vmware_mover.sh"
+
+  selftest_assert_file_contains "${call_log}" "QEMU_IMG:info --force-share --image-opts driver=raw,file.driver=nbd"
+  selftest_assert_file_contains "${call_log}" "QEMU_IMG:convert --force-share -p -n --image-opts -O raw driver=raw,file.driver=nbd"
+  selftest_assert_file_contains "${call_log}" "rbd:rbd/target-root"
+  selftest_assert_file_not_contains "${call_log}" "json:{"
+}
+
 selftest_main() {
   selftest_run_lint
   selftest_case_cluster_cli
@@ -7680,6 +7792,7 @@ selftest_main() {
   selftest_case_dr_runtime_failback_restores_source_after_reverse_checkpoint
   selftest_case_dr_runtime_reprotect_starts_reverse_protection_checkpoint
   selftest_case_dr_scheduler_vmware_requires_mover
+  selftest_case_dr_vmware_mover_uses_raw_over_nbd_image_opts
   selftest_case_events_json
   selftest_info "all checks passed"
 }

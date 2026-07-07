@@ -1401,6 +1401,7 @@ ftctl_dr_runtime_failover_worker() {
         69) error_code="DR_VMWARE_NBDKIT_FAILED" ;;
         70) error_code="DR_VDDK_LIBDIR_UNRESOLVED" ;;
         71) error_code="DR_VDDK_LIBRARY_LOAD_FAILED" ;;
+        72) error_code="DR_VMWARE_MOVER_SOURCE_GRAPH_INVALID" ;;
         66) error_code="DR_UNSUPPORTED_DIRECTION" ;;
         *) error_code="DR_FINAL_CHECKPOINT_FAILED" ;;
       esac
@@ -1614,6 +1615,7 @@ ftctl_dr_runtime_failback_worker() {
       69) error_code="DR_VMWARE_NBDKIT_FAILED" ;;
       70) error_code="DR_VDDK_LIBDIR_UNRESOLVED" ;;
       71) error_code="DR_VDDK_LIBRARY_LOAD_FAILED" ;;
+      72) error_code="DR_VMWARE_MOVER_SOURCE_GRAPH_INVALID" ;;
       66) error_code="DR_UNSUPPORTED_DIRECTION" ;;
       47) error_code="DR_FAILBACK_REQUIRES_TARGET_ACTIVE" ;;
       *) error_code="DR_FAILBACK_REVERSE_SYNC_FAILED" ;;
@@ -1772,6 +1774,7 @@ ftctl_dr_runtime_reprotect_worker() {
       69) error_code="DR_VMWARE_NBDKIT_FAILED" ;;
       70) error_code="DR_VDDK_LIBDIR_UNRESOLVED" ;;
       71) error_code="DR_VDDK_LIBRARY_LOAD_FAILED" ;;
+      72) error_code="DR_VMWARE_MOVER_SOURCE_GRAPH_INVALID" ;;
       66) error_code="DR_UNSUPPORTED_DIRECTION" ;;
       47) error_code="DR_REPROTECT_REQUIRES_TARGET_ACTIVE" ;;
       *) error_code="DR_REPROTECT_REVERSE_SYNC_FAILED" ;;
