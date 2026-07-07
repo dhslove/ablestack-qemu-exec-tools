@@ -538,7 +538,7 @@ ftctl_dr_vmware_replication_cycle() {
 
 ftctl_dr_vmware_sync_start() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" state_path="${4-}" wait_value="${5-}"
-  local disk_map capability_path manifest_path checkpoint_path count now vddk_ready missing_code
+  local disk_map capability_path manifest_path checkpoint_path count now vddk_ready missing_code target_provider disk_map_role
   : "${wait_value}"
 
   [[ -n "${profile_file}" && -f "${profile_file}" ]] || return 0
@@ -548,6 +548,12 @@ ftctl_dr_vmware_sync_start() {
   ftctl_ensure_dir "$(ftctl_dr_vmware_manifest_dir "${plan}")" "0755"
   ftctl_ensure_dir "$(ftctl_dr_vmware_checkpoint_dir "${plan}")" "0755"
   disk_map="$(ftctl_dr_vmware_disk_map_path "${plan}")"
+  target_provider="$(ftctl_dr_vmware_profile_value_upper "${profile_file}" "target.provider")"
+  if [[ "${target_provider}" == "ABLESTACK" ]]; then
+    disk_map_role="source"
+  else
+    disk_map_role="target"
+  fi
   capability_path="$(ftctl_dr_vmware_capability_path "${plan}")"
   manifest_path="$(ftctl_dr_vmware_manifest_path "${plan}" "${run}")"
   checkpoint_path="$(ftctl_dr_vmware_checkpoint_path "${plan}" "${run}")"
@@ -571,6 +577,8 @@ ftctl_dr_vmware_sync_start() {
       "accepted=false" \
       "error_code=${missing_code:-DR_MISSING_VDDK}" \
       "disk_map_path=${disk_map}" \
+      "source_disk_map_path=${disk_map}" \
+      "disk_map_role=${disk_map_role}" \
       "manifest_path=${manifest_path}" \
       "checkpoint_path=${checkpoint_path}" \
       "updated_at=${now}"
@@ -592,6 +600,8 @@ ftctl_dr_vmware_sync_start() {
       "accepted=false" \
       "error_code=DR_TARGET_MAPPING_INVALID" \
       "disk_map_path=${disk_map}" \
+      "source_disk_map_path=${disk_map}" \
+      "disk_map_role=${disk_map_role}" \
       "manifest_path=${manifest_path}" \
       "checkpoint_path=${checkpoint_path}" \
       "updated_at=${now}"
@@ -610,6 +620,8 @@ ftctl_dr_vmware_sync_start() {
     "step=vmware-driver-contract-ready" \
     "progress=5" \
     "disk_map_path=${disk_map}" \
+    "source_disk_map_path=${disk_map}" \
+    "disk_map_role=${disk_map_role}" \
     "manifest_path=${manifest_path}" \
     "checkpoint_path=${checkpoint_path}" \
     "last_source_checkpoint_at=${now}" \

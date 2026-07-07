@@ -163,3 +163,64 @@ Required Cloud contract:
 - Plan/run/step/replica/disk projection must move atomically to failure so UI cannot show `SYNCING` or `ACCEPTED` after FTCTL has failed.
 
 The paired Cloud-side design is documented in `docs/ftctl/536-cross-hypervisor-dr-terminal-projection-and-target-driver-contract-design-20260707.md` in the `ablestack-cloud` repository.
+
+## 2026-07-07 Serving process and source/target disk-map contract extension
+
+The follow-up VMware to ABLESTACK sync validation found a second structural
+failure mode after terminal projection had been added:
+
+- Cloud changed classes were deployed on disk, but an old Java process still
+  owned listener port `8080`.
+- FTCTL runtime state reported `disk_map_path=.../vmware-disks.json` while the
+  ABLESTACK target-preparation driver required the target contract in
+  `ablestack-disks.json`.
+- The UI/API therefore could show `SYNCING`/`ACCEPTED` even though the host run
+  had already reached `ERROR` with `DR_TARGET_DISK_TYPE_INVALID`.
+
+Required qemu/FTCTL updates:
+
+1. Keep `vmware-disks.json` and `ablestack-disks.json` as separate first-class
+   artifacts.
+2. Add `source_disk_map_path`, `target_disk_map_path`, and `disk_map_role` to
+   `runs/<run>.state`, `status.state`, and `dr-status --json` output.
+3. For an ABLESTACK target, compatibility `disk_map_path` must point to
+   `target_disk_map_path`.
+4. `ftctl_dr_vmware_sync_start` must write VMware source metadata without
+   overwriting the target map authority.
+5. `ftctl_dr_ablestack_sync_start` must canonicalize `profile.json` into
+   `ablestack-disks.json`, set it as the target map, and validate the map before
+   target materialization.
+6. VMware disk ids such as `2000` must be treated as source inventory refs, not
+   local qemu paths. Disk size must come from Cloud guided inventory,
+   VMware/VDDK metadata, or an explicit operator target-size override.
+7. Missing or inconsistent target disk type, target storage, target network,
+   target offering, or target disk size must fail preflight before the run is
+   considered ready for the next step.
+
+Implemented qemu/FTCTL changes:
+
+- `dr_runtime.sh` emits source/target disk-map metadata and preserves the
+  caller's `--config` path when spawning a background worker.
+- Foreground self-test overrides are explicit per action, so regression tests can
+  assert final state without changing production async behavior.
+- `dr_vmware.sh` writes VMware source disk inventory as source metadata and uses
+  ABLESTACK target disk metadata only when the target provider is ABLESTACK.
+- `dr_ablestack.sh` canonicalizes target placement into the target disk-map
+  contract, validates target type/storage/size before materialization, and
+  returns specific target-map error codes instead of accepting an impossible
+  sync run.
+- `ablestack_vm_ftctl_selftest.sh` includes target placement and target disk
+  offering data in ABLESTACK target profiles and verifies the missing-map case
+  as an immediate, explicit preflight failure.
+
+Required deployment validation:
+
+- After changed-class deployment, management `mold.service` `MainPID` must match
+  the PID owning listener port `8080`.
+- A stale serving process is a deployment failure, not a DR runtime failure.
+- DR retest must not start until the active API response exposes the latest
+  runtime/effective projection fields.
+
+The paired Cloud-side layered design is documented in
+`docs/ftctl/537-cross-hypervisor-dr-serving-process-and-disk-map-contract-design-20260707.md`
+in the `ablestack-cloud` repository.

@@ -747,7 +747,7 @@ selftest_case_blockcopy_progress_status() (
   selftest_assert_file_contains "$(ftctl_blockcopy_progress_path "${vm}")" '"nbd_endpoint":"10.0.0.12:10827/progress-vm-vda"'
   selftest_assert_file_contains "${FTCTL_EVENTS_LOG}" '"event":"blockcopy.progress"'
 
-  local out=""
+  local out="" rc=0
   out="$(ftctl_state_print_one "${vm}" "1")"
   selftest_assert_contains "${out}" '"sync_progress"' "status includes sync progress"
   selftest_assert_contains "${out}" '"copied_bytes":16106127360' "status includes copied bytes"
@@ -4324,7 +4324,7 @@ selftest_case_check_secondary_active_side() {
   local vm="failover-vm"
   local secondary_vm="i-2-309-VM"
   local fakebin="${SELFTEST_ROOT}/bin"
-  local out=""
+  local out="" rc=0
 
   mkdir -p "${fakebin}" "${SELFTEST_ROOT}/profiles"
   cat > "${fakebin}/virsh" <<'EOF'
@@ -6400,7 +6400,14 @@ EOF
   "runUuid": "run-step4",
   "direction": "KVM_TO_KVM",
   "source": {"provider": "ABLESTACK", "driver": "KVM_QMP"},
-  "target": {"provider": "ABLESTACK", "driver": "ABLESTACK"},
+  "target": {
+    "provider": "ABLESTACK",
+    "driver": "ABLESTACK",
+    "zoneId": "zone-1",
+    "storageRef": "${SELFTEST_ROOT}/target",
+    "serviceOfferingId": "service-offering-1",
+    "networks": [{"networkId": "network-1"}]
+  },
   "mapping": {
     "disks": [
       {
@@ -6409,14 +6416,15 @@ EOF
         "targetPath": "${SELFTEST_ROOT}/target/root.qcow2",
         "sourceFormat": "qcow2",
         "targetFormat": "qcow2",
-        "sizeBytes": 1048576
+        "sizeBytes": 1048576,
+        "targetDiskOfferingId": "disk-offering-1"
       }
     ]
   }
 }
 JSON
 
-  out="$(FTCTL_DR_SCHEDULER_DISABLE=1 PATH="${fakebin}:$PATH" bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-sync-start \
+  out="$(FTCTL_DR_SYNC_FOREGROUND=1 FTCTL_DR_SCHEDULER_DISABLE=1 PATH="${fakebin}:$PATH" bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-sync-start \
     --config "${SELFTEST_CONFIG}" \
     --plan plan-step4 \
     --run run-step4 \
@@ -6474,7 +6482,14 @@ EOF
   "runUuid": "run-step4-full",
   "direction": "KVM_TO_KVM",
   "source": {"provider": "ABLESTACK", "driver": "KVM_QMP"},
-  "target": {"provider": "ABLESTACK", "driver": "ABLESTACK"},
+  "target": {
+    "provider": "ABLESTACK",
+    "driver": "ABLESTACK",
+    "zoneId": "zone-1",
+    "storageRef": "${SELFTEST_ROOT}/target",
+    "serviceOfferingId": "service-offering-1",
+    "networks": [{"networkId": "network-1"}]
+  },
   "request": {"performFullSeed": true},
   "mapping": {
     "disks": [
@@ -6484,14 +6499,15 @@ EOF
         "targetPath": "${SELFTEST_ROOT}/target/root.qcow2",
         "sourceFormat": "qcow2",
         "targetFormat": "qcow2",
-        "sizeBytes": 1048576
+        "sizeBytes": 1048576,
+        "targetDiskOfferingId": "disk-offering-1"
       }
     ]
   }
 }
 JSON
 
-  out="$(FTCTL_DR_SCHEDULER_DISABLE=1 PATH="${fakebin}:$PATH" bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-sync-start \
+  out="$(FTCTL_DR_SYNC_FOREGROUND=1 FTCTL_DR_SCHEDULER_DISABLE=1 PATH="${fakebin}:$PATH" bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-sync-start \
     --config "${SELFTEST_CONFIG}" \
     --plan plan-step4-full \
     --run run-step4-full \
@@ -6514,7 +6530,7 @@ selftest_case_dr_ablestack_missing_disk_map_waits() {
   selftest_info "FTCTL_DR ABLESTACK missing disk map waits"
 
   local profile="${SELFTEST_ROOT}/dr-ablestack-missing-map-profile.json"
-  local out=""
+  local out="" rc=0
   cat > "${profile}" <<'JSON'
 {
   "version": 1,
@@ -6527,7 +6543,7 @@ selftest_case_dr_ablestack_missing_disk_map_waits() {
 }
 JSON
 
-  out="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-sync-start \
+  out="$(FTCTL_DR_SYNC_FOREGROUND=1 bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-sync-start \
     --config "${SELFTEST_CONFIG}" \
     --plan plan-step4-wait \
     --run run-step4-wait \
@@ -6535,11 +6551,14 @@ JSON
     --role coordinator \
     --mode planned \
     --wait=false \
-    --json)"
-  selftest_assert_contains "${out}" '"result":"accepted"' "missing map still accepted"
-  selftest_assert_contains "${out}" '"state":"SYNCING"' "missing map state"
+    --json)" || rc=$?
+  [[ "${rc}" != "0" ]] || selftest_fail "missing disk map sync should fail"
+  selftest_assert_contains "${out}" '"result":"error"' "missing map result"
+  selftest_assert_contains "${out}" '"accepted":false' "missing map accepted false"
+  selftest_assert_contains "${out}" '"state":"ERROR"' "missing map state"
   selftest_assert_contains "${out}" '"step":"ablestack-disk-map-pending"' "missing map step"
   selftest_assert_contains "${out}" '"driver_state":"WAITING_FOR_DISK_MAP"' "missing map driver state"
+  selftest_assert_contains "${out}" '"error_code":"DR_TARGET_DISK_MAPPING_INVALID"' "missing map error code"
 }
 
 selftest_case_dr_vmware_preflight_missing_vddk() {
@@ -6607,6 +6626,7 @@ selftest_case_dr_vmware_contract_ready() {
         "sourceVmdkPath": "[prod] vm-101/root.vmdk",
         "targetVmdkPath": "[dr] vm-201/root.vmdk",
         "sizeBytes": 1048576,
+        "targetDiskOfferingId": "disk-offering-1",
         "changeId": "52 00 01",
         "snapshotRef": "snap-1"
       }
@@ -6626,7 +6646,7 @@ JSON
   selftest_assert_contains "${out}" '"disk_count":1' "vmware preflight disk count"
   selftest_assert_contains "${out}" '"vddk_ready":true' "vmware preflight vddk ready"
 
-  out="$(FTCTL_DR_SCHEDULER_DISABLE=1 FTCTL_DR_VMWARE_FORCE_VDDK_READY=1 bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-sync-start \
+  out="$(FTCTL_DR_SYNC_FOREGROUND=1 FTCTL_DR_SCHEDULER_DISABLE=1 FTCTL_DR_VMWARE_FORCE_VDDK_READY=1 bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-sync-start \
     --config "${SELFTEST_CONFIG}" \
     --plan plan-vmware-ready \
     --run run-vmware-ready \
@@ -6668,7 +6688,7 @@ selftest_case_dr_vmware_missing_disk_map_config_incomplete() {
 }
 JSON
 
-  out="$(FTCTL_DR_SCHEDULER_DISABLE=1 FTCTL_DR_VMWARE_FORCE_VDDK_READY=1 bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-sync-start \
+  out="$(FTCTL_DR_SYNC_FOREGROUND=1 FTCTL_DR_SCHEDULER_DISABLE=1 FTCTL_DR_VMWARE_FORCE_VDDK_READY=1 bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-sync-start \
     --config "${SELFTEST_CONFIG}" \
     --plan plan-vmware-config-incomplete \
     --run run-vmware-config-incomplete \
@@ -6706,14 +6726,15 @@ selftest_case_dr_vmware_missing_vddk_blocks_sync() {
         "device": "scsi0:0",
         "sourceVmdkPath": "[prod] vm-101/root.vmdk",
         "targetVmdkPath": "[dr] vm-201/root.vmdk",
-        "sizeBytes": 1048576
+        "sizeBytes": 1048576,
+        "targetDiskOfferingId": "disk-offering-1"
       }
     ]
   }
 }
 JSON
 
-  out="$(FTCTL_DR_VMWARE_FORCE_MISSING_VDDK=1 bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-sync-start \
+  out="$(FTCTL_DR_SYNC_FOREGROUND=1 FTCTL_DR_VMWARE_FORCE_MISSING_VDDK=1 bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-sync-start \
     --config "${SELFTEST_CONFIG}" \
     --plan plan-vmware-missing \
     --run run-vmware-missing \
@@ -6768,7 +6789,14 @@ EOF
   "runUuid": "run-scheduler-ablestack",
   "direction": "KVM_TO_KVM",
   "source": {"provider": "ABLESTACK", "driver": "KVM_QMP"},
-  "target": {"provider": "ABLESTACK", "driver": "ABLESTACK"},
+  "target": {
+    "provider": "ABLESTACK",
+    "driver": "ABLESTACK",
+    "zoneId": "zone-1",
+    "storageRef": "${SELFTEST_ROOT}/target",
+    "serviceOfferingId": "service-offering-1",
+    "networks": [{"networkId": "network-1"}]
+  },
   "schedule": {"intervalSeconds": 0},
   "request": {"maxCycles": 2},
   "mapping": {
@@ -6779,14 +6807,15 @@ EOF
         "targetPath": "${SELFTEST_ROOT}/target/root.qcow2",
         "sourceFormat": "qcow2",
         "targetFormat": "qcow2",
-        "sizeBytes": 1048576
+        "sizeBytes": 1048576,
+        "targetDiskOfferingId": "disk-offering-1"
       }
     ]
   }
 }
 JSON
 
-  out="$(FTCTL_DR_SCHEDULER_FOREGROUND=1 PATH="${fakebin}:$PATH" bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-sync-start \
+  out="$(FTCTL_DR_SYNC_FOREGROUND=1 FTCTL_DR_SCHEDULER_FOREGROUND=1 PATH="${fakebin}:$PATH" bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-sync-start \
     --config "${SELFTEST_CONFIG}" \
     --plan plan-scheduler-ablestack \
     --run run-scheduler-ablestack \
@@ -6832,6 +6861,7 @@ selftest_case_dr_scheduler_vmware_mock_checkpoint_loop() {
         "sourceVmdkPath": "[prod] vm-101/root.vmdk",
         "targetVmdkPath": "[dr] vm-201/root.vmdk",
         "sizeBytes": 1048576,
+        "targetDiskOfferingId": "disk-offering-1",
         "changeId": "52 00 01",
         "snapshotRef": "snap-1"
       }
@@ -6894,7 +6924,14 @@ EOF
   "runUuid": "run-test-session",
   "direction": "KVM_TO_KVM",
   "source": {"provider": "ABLESTACK", "driver": "KVM_QMP"},
-  "target": {"provider": "ABLESTACK", "driver": "ABLESTACK"},
+  "target": {
+    "provider": "ABLESTACK",
+    "driver": "ABLESTACK",
+    "zoneId": "zone-1",
+    "storageRef": "${SELFTEST_ROOT}/target",
+    "serviceOfferingId": "service-offering-1",
+    "networks": [{"networkId": "network-1"}]
+  },
   "request": {
     "restorePointRef": "ftctl:${plan}:2",
     "networkMode": "isolated"
@@ -7030,14 +7067,21 @@ EOF
   "runUuid": "run-failover",
   "direction": "KVM_TO_KVM",
   "source": {"provider": "ABLESTACK", "driver": "KVM_QMP"},
-  "target": {"provider": "ABLESTACK", "driver": "ABLESTACK"},
+  "target": {
+    "provider": "ABLESTACK",
+    "driver": "ABLESTACK",
+    "zoneId": "zone-1",
+    "storageRef": "${SELFTEST_ROOT}/target",
+    "serviceOfferingId": "service-offering-1",
+    "networks": [{"networkId": "network-1"}]
+  },
   "request": {
     "mode": "planned",
     "finalSync": true
   },
   "mapping": {
     "disks": [
-      {"device": "vda", "sourcePath": "/src/root.qcow2", "targetPath": "${SELFTEST_ROOT}/target/root.qcow2", "sourceFormat": "qcow2", "targetFormat": "qcow2", "sizeBytes": 1048576}
+      {"device": "vda", "sourcePath": "/src/root.qcow2", "targetPath": "${SELFTEST_ROOT}/target/root.qcow2", "sourceFormat": "qcow2", "targetFormat": "qcow2", "sizeBytes": 1048576, "targetDiskOfferingId": "disk-offering-1"}
     ]
   }
 }
@@ -7154,10 +7198,17 @@ EOF
   "runUuid": "run-original",
   "direction": "KVM_TO_KVM",
   "source": {"provider": "ABLESTACK", "driver": "KVM_QMP"},
-  "target": {"provider": "ABLESTACK", "driver": "ABLESTACK"},
+  "target": {
+    "provider": "ABLESTACK",
+    "driver": "ABLESTACK",
+    "zoneId": "zone-1",
+    "storageRef": "${SELFTEST_ROOT}/target",
+    "serviceOfferingId": "service-offering-1",
+    "networks": [{"networkId": "network-1"}]
+  },
   "mapping": {
     "disks": [
-      {"device": "vda", "sourcePath": "${SELFTEST_ROOT}/source/root.qcow2", "targetPath": "${SELFTEST_ROOT}/target/root.qcow2", "sourceFormat": "qcow2", "targetFormat": "qcow2", "sizeBytes": 1048576}
+      {"device": "vda", "sourcePath": "${SELFTEST_ROOT}/source/root.qcow2", "targetPath": "${SELFTEST_ROOT}/target/root.qcow2", "sourceFormat": "qcow2", "targetFormat": "qcow2", "sizeBytes": 1048576, "targetDiskOfferingId": "disk-offering-1"}
     ]
   }
 }
@@ -7258,10 +7309,17 @@ EOF
   "runUuid": "run-original",
   "direction": "KVM_TO_KVM",
   "source": {"provider": "ABLESTACK", "driver": "KVM_QMP"},
-  "target": {"provider": "ABLESTACK", "driver": "ABLESTACK"},
+  "target": {
+    "provider": "ABLESTACK",
+    "driver": "ABLESTACK",
+    "zoneId": "zone-1",
+    "storageRef": "${SELFTEST_ROOT}/target",
+    "serviceOfferingId": "service-offering-1",
+    "networks": [{"networkId": "network-1"}]
+  },
   "mapping": {
     "disks": [
-      {"device": "vda", "sourcePath": "${SELFTEST_ROOT}/source/root.qcow2", "targetPath": "${SELFTEST_ROOT}/target/root.qcow2", "sourceFormat": "qcow2", "targetFormat": "qcow2", "sizeBytes": 1048576}
+      {"device": "vda", "sourcePath": "${SELFTEST_ROOT}/source/root.qcow2", "targetPath": "${SELFTEST_ROOT}/target/root.qcow2", "sourceFormat": "qcow2", "targetFormat": "qcow2", "sizeBytes": 1048576, "targetDiskOfferingId": "disk-offering-1"}
     ]
   }
 }
@@ -7343,7 +7401,8 @@ selftest_case_dr_scheduler_vmware_requires_mover() {
         "device": "scsi0:0",
         "sourceVmdkPath": "[prod] vm-101/root.vmdk",
         "targetVmdkPath": "[dr] vm-201/root.vmdk",
-        "sizeBytes": 1048576
+        "sizeBytes": 1048576,
+        "targetDiskOfferingId": "disk-offering-1"
       }
     ]
   }

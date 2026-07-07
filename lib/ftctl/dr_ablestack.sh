@@ -399,6 +399,66 @@ print(",".join(missing))
 PY
 }
 
+ftctl_dr_ablestack_disk_preflight_error() {
+  local disk_map="${1-}"
+  [[ -n "${disk_map}" && -f "${disk_map}" ]] || {
+    printf 'DR_TARGET_DISK_MAPPING_INVALID:disk_map_missing\n'
+    return 0
+  }
+  python3 - "${disk_map}" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    data = json.load(fh)
+
+def text(value):
+    return str(value or "").strip()
+
+source_provider = text(data.get("sourceProvider")).upper()
+target_provider = text(data.get("targetProvider")).upper()
+disks = data.get("disks") if isinstance(data.get("disks"), list) else []
+errors = []
+if target_provider == "ABLESTACK":
+    if not disks:
+        errors.append("DR_TARGET_DISK_MAPPING_INVALID:disks")
+    for index, disk in enumerate(disks):
+        if not isinstance(disk, dict):
+            errors.append(f"DR_TARGET_DISK_MAPPING_INVALID:{index}")
+            continue
+        target_type = text(disk.get("targetType")).lower()
+        target_storage_type = text(disk.get("targetStorageType")).upper()
+        target_path = text(disk.get("targetPath"))
+        target_name = text(disk.get("targetName"))
+        source_path = text(disk.get("sourcePath"))
+        try:
+            size = int(disk.get("sizeBytes") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        if not source_path or (not target_path and not target_name):
+            errors.append(f"DR_TARGET_DISK_MAPPING_INVALID:{index}")
+        if target_storage_type == "RBD" and target_type != "rbd":
+            errors.append(f"DR_TARGET_DISK_TYPE_INVALID:{index}")
+        if not target_type:
+            errors.append(f"DR_TARGET_DISK_TYPE_INVALID:{index}")
+        if source_provider == "VMWARE" and size <= 0:
+            errors.append(f"DR_TARGET_DISK_SIZE_UNRESOLVED:{index}")
+
+print(",".join(errors))
+PY
+}
+
+ftctl_dr_ablestack_disk_preflight_rc() {
+  local error_text="${1-}"
+  case "${error_text}" in
+    *DR_TARGET_DISK_SIZE_UNRESOLVED*) printf '33\n' ;;
+    *DR_TARGET_DISK_TYPE_INVALID*) printf '32\n' ;;
+    *DR_TARGET_STORAGE_UNRESOLVED*) printf '35\n' ;;
+    *DR_TARGET_DISK_MAPPING_INVALID*) printf '31\n' ;;
+    *) printf '31\n' ;;
+  esac
+}
+
 ftctl_dr_ablestack_disk_rows() {
   local disk_map="${1-}"
   [[ -n "${disk_map}" && -f "${disk_map}" ]] || return 1
@@ -528,6 +588,7 @@ ftctl_dr_ablestack_error_code_for_rc() {
     32) printf 'DR_TARGET_DISK_TYPE_INVALID\n' ;;
     33) printf 'DR_TARGET_DISK_SIZE_UNRESOLVED\n' ;;
     34) printf 'DR_TARGET_DISK_PREPARE_FAILED\n' ;;
+    35) printf 'DR_TARGET_STORAGE_UNRESOLVED\n' ;;
     *) printf 'DR_ABLESTACK_DRIVER_FAILED\n' ;;
   esac
 }
@@ -751,7 +812,7 @@ ftctl_dr_ablestack_profile_bool() {
 
 ftctl_dr_ablestack_sync_start() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" state_path="${4-}" wait_value="${5-}"
-  local disk_map manifest_path checkpoint_path count now source_provider target_provider missing_config rc
+  local disk_map manifest_path checkpoint_path count now source_provider target_provider missing_config preflight_error rc
 
   [[ -n "${profile_file}" && -f "${profile_file}" ]] || return 0
   ftctl_dr_ablestack_profile_involves_ablestack "${profile_file}" || return 0
@@ -767,24 +828,20 @@ ftctl_dr_ablestack_sync_start() {
 
   ftctl_dr_ablestack_canonicalize_profile "${profile_file}" "${disk_map}" || return $?
   count="$(ftctl_dr_ablestack_disk_count "${disk_map}")" || count="0"
+  ftctl_dr_runtime_path_set "${state_path}" \
+    "driver=ABLESTACK" \
+    "driver_state=TARGET_MAP_READY" \
+    "step=ablestack-target-map-ready" \
+    "progress=2" \
+    "disk_map_path=${disk_map}" \
+    "target_disk_map_path=${disk_map}" \
+    "disk_map_role=target" \
+    "target_disk_count=${count}" \
+    "target_disk_invalid_count=0" \
+    "updated_at=$(ftctl_now_iso8601)" || true
   if [[ "${target_provider}" != "ABLESTACK" ]]; then
     ftctl_log_event "dr-runtime" "dr.ablestack.source_metadata" "ok" "" "" \
       "plan=${plan} run=${run} source=${source_provider:-unknown} target=${target_provider:-unknown} disks=${count}"
-    return 0
-  fi
-
-  missing_config="$(ftctl_dr_ablestack_missing_config "${disk_map}" || true)"
-  if [[ -n "${missing_config}" ]]; then
-    ftctl_dr_runtime_path_set "${state_path}" \
-      "driver=ABLESTACK" \
-      "driver_state=CONFIG_INCOMPLETE" \
-      "state=CONFIG_INCOMPLETE" \
-      "step=ablestack-target-config-incomplete" \
-      "progress=1" \
-      "disk_map_path=${disk_map}" \
-      "last_error=DR_TARGET_MAPPING_INVALID:${missing_config}"
-    ftctl_log_event "dr-runtime" "dr.ablestack.config_incomplete" "warn" "" "" \
-      "plan=${plan} run=${run} reason=${missing_config}"
     return 0
   fi
 
@@ -794,10 +851,64 @@ ftctl_dr_ablestack_sync_start() {
       "driver_state=WAITING_FOR_DISK_MAP" \
       "step=ablestack-disk-map-pending" \
       "progress=1" \
-      "disk_map_path=${disk_map}"
+      "disk_map_path=${disk_map}" \
+      "target_disk_map_path=${disk_map}" \
+      "disk_map_role=target" \
+      "target_disk_count=0" \
+      "target_disk_invalid_count=1" \
+      "accepted=false" \
+      "error_code=DR_TARGET_DISK_MAPPING_INVALID" \
+      "error_message=missing explicit target disk map"
     ftctl_log_event "dr-runtime" "dr.ablestack.disk_map" "warn" "" "" \
       "plan=${plan} run=${run} reason=missing_explicit_disk_map"
-    return 0
+    return 31
+  fi
+
+  missing_config="$(ftctl_dr_ablestack_missing_config "${disk_map}" || true)"
+  if [[ -n "${missing_config}" ]]; then
+    rc=31
+    ftctl_dr_runtime_path_set "${state_path}" \
+      "driver=ABLESTACK" \
+      "driver_state=CONFIG_INCOMPLETE" \
+      "state=CONFIG_INCOMPLETE" \
+      "step=ablestack-target-config-incomplete" \
+      "progress=1" \
+      "disk_map_path=${disk_map}" \
+      "target_disk_map_path=${disk_map}" \
+      "disk_map_role=target" \
+      "target_disk_count=${count}" \
+      "target_disk_invalid_count=${count:-1}" \
+      "accepted=false" \
+      "error_code=DR_TARGET_MAPPING_INVALID" \
+      "error_message=${missing_config}" \
+      "last_error=DR_TARGET_MAPPING_INVALID:${missing_config}"
+    ftctl_log_event "dr-runtime" "dr.ablestack.config_incomplete" "warn" "" "" \
+      "plan=${plan} run=${run} reason=${missing_config}"
+    return "${rc}"
+  fi
+
+  preflight_error="$(ftctl_dr_ablestack_disk_preflight_error "${disk_map}" || true)"
+  if [[ -n "${preflight_error}" ]]; then
+    rc="$(ftctl_dr_ablestack_disk_preflight_rc "${preflight_error}")"
+    ftctl_dr_runtime_path_set "${state_path}" \
+      "driver=ABLESTACK" \
+      "driver_state=TARGET_MAP_INVALID" \
+      "state=ERROR" \
+      "step=ablestack-target-map-invalid" \
+      "progress=100" \
+      "disk_map_path=${disk_map}" \
+      "target_disk_map_path=${disk_map}" \
+      "disk_map_role=target" \
+      "target_disk_count=${count}" \
+      "target_disk_invalid_count=1" \
+      "accepted=false" \
+      "error_code=$(ftctl_dr_ablestack_error_code_for_rc "${rc}")" \
+      "error_message=${preflight_error}" \
+      "driver_exit_code=${rc}" \
+      "updated_at=$(ftctl_now_iso8601)" || true
+    ftctl_log_event "dr-runtime" "dr.ablestack.target_map_preflight" "fail" "" "${rc}" \
+      "plan=${plan} run=${run} reason=${preflight_error}"
+    return "${rc}"
   fi
 
   if [[ "${FTCTL_DR_ABLESTACK_FULL_SEED_ON_START}" == "1" ]] ||

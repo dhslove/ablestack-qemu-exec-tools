@@ -1897,7 +1897,8 @@ ftctl_dr_runtime_emit_state_json() {
   local command="${1-}" result="${2-ok}" plan="${3-}" run="${4-}" state_path="${5-}" events_offset="${6-}"
   local action state step progress external_job_ref error_code error_message driver_exit_code last_source last_target target_rpo updated accepted
   local runtime_exists profile_exists run_exists
-  local driver driver_state disk_map_path manifest_path checkpoint_path
+  local driver driver_state disk_map_path source_disk_map_path target_disk_map_path disk_map_role
+  local target_disk_count target_disk_invalid_count manifest_path checkpoint_path
   local scheduler_state worker_pid worker_state worker_started_at worker_updated_at worker_exit_code
   local retryable retry_after_sec lock_file holder_pid holder_command holder_age_sec
   local checkpoint_sequence restore_points_path dynamic_rpo
@@ -1936,6 +1937,11 @@ ftctl_dr_runtime_emit_state_json() {
   driver="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "driver")"
   driver_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "driver_state")"
   disk_map_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "disk_map_path")"
+  source_disk_map_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "source_disk_map_path")"
+  target_disk_map_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "target_disk_map_path")"
+  disk_map_role="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "disk_map_role")"
+  target_disk_count="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "target_disk_count")"
+  target_disk_invalid_count="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "target_disk_invalid_count")"
   manifest_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "manifest_path")"
   checkpoint_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "checkpoint_path")"
   scheduler_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "scheduler_state")"
@@ -2073,6 +2079,11 @@ ftctl_dr_runtime_emit_state_json() {
   ftctl_dr_runtime_json_string_field "driver" "${driver}"
   ftctl_dr_runtime_json_string_field "driver_state" "${driver_state}"
   ftctl_dr_runtime_json_string_field "disk_map_path" "${disk_map_path}"
+  ftctl_dr_runtime_json_string_field "source_disk_map_path" "${source_disk_map_path}"
+  ftctl_dr_runtime_json_string_field "target_disk_map_path" "${target_disk_map_path}"
+  ftctl_dr_runtime_json_string_field "disk_map_role" "${disk_map_role}"
+  ftctl_dr_runtime_json_number_field "target_disk_count" "${target_disk_count}"
+  ftctl_dr_runtime_json_number_field "target_disk_invalid_count" "${target_disk_invalid_count}"
   ftctl_dr_runtime_json_string_field "manifest_path" "${manifest_path}"
   ftctl_dr_runtime_json_string_field "checkpoint_path" "${checkpoint_path}"
   ftctl_dr_runtime_json_string_field "scheduler_state" "${scheduler_state}"
@@ -2312,6 +2323,24 @@ ftctl_dr_runtime_should_delegate_action() {
 
   [[ "${dry_run}" != "1" ]] || return 1
   [[ "${FTCTL_DR_RUNTIME_WORKER:-0}" != "1" ]] || return 1
+  case "${action}" in
+    dr-sync-start)
+      [[ "${FTCTL_DR_SYNC_FOREGROUND:-0}" != "1" ]] || return 1
+      [[ "${FTCTL_DR_SCHEDULER_FOREGROUND:-0}" != "1" ]] || return 1
+      ;;
+    dr-test-failover)
+      [[ "${FTCTL_DR_TEST_FAILOVER_FOREGROUND:-0}" != "1" ]] || return 1
+      ;;
+    dr-failover)
+      [[ "${FTCTL_DR_FAILOVER_FOREGROUND:-0}" != "1" ]] || return 1
+      ;;
+    dr-failback)
+      [[ "${FTCTL_DR_FAILBACK_FOREGROUND:-0}" != "1" ]] || return 1
+      ;;
+    dr-reprotect)
+      [[ "${FTCTL_DR_REPROTECT_FOREGROUND:-0}" != "1" ]] || return 1
+      ;;
+  esac
   wait_lower="$(printf '%s' "${wait_value}" | tr '[:upper:]' '[:lower:]')"
   [[ "${wait_lower}" == "false" || "${wait_lower}" == "0" || "${wait_lower}" == "no" ]] || return 1
 
@@ -2348,6 +2377,7 @@ ftctl_dr_runtime_start_background_worker() {
   ftctl_bin="${FTCTL_DR_RUNTIME_WORKER_COMMAND:-$(command -v ablestack_vm_ftctl 2>/dev/null || true)}"
   [[ -n "${ftctl_bin}" ]] || ftctl_bin="${0}"
   worker_cmd=("${ftctl_bin}" "${action}" "--plan" "${plan}" "--run" "${run}" "--profile-json" "${profile_path}" "--role" "${role:-coordinator}")
+  [[ -n "${FTCTL_CONFIG_PATH:-}" ]] && worker_cmd+=("--config" "${FTCTL_CONFIG_PATH}")
   [[ -n "${mode}" ]] && worker_cmd+=("--mode" "${mode}")
   [[ -n "${restore_point}" ]] && worker_cmd+=("--restore-point" "${restore_point}")
   [[ "${force}" == "1" ]] && worker_cmd+=("--force")
