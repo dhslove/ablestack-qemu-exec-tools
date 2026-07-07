@@ -283,6 +283,8 @@ ftctl_dr_scheduler_worker() {
     if [[ "${rc}" != "0" ]]; then
       case "${rc}" in
         65) error_code="DR_VMWARE_MOVER_UNAVAILABLE" ;;
+        68) error_code="DR_VMWARE_MOVER_FAILED" ;;
+        69) error_code="DR_VMWARE_NBDKIT_FAILED" ;;
         66) error_code="DR_UNSUPPORTED_DIRECTION" ;;
         *) error_code="DR_REPLICATION_CYCLE_FAILED" ;;
       esac

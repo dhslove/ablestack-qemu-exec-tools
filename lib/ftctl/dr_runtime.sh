@@ -1397,6 +1397,8 @@ ftctl_dr_runtime_failover_worker() {
     if [[ "${rc}" != "0" ]]; then
       case "${rc}" in
         65) error_code="DR_VMWARE_MOVER_UNAVAILABLE" ;;
+        68) error_code="DR_VMWARE_MOVER_FAILED" ;;
+        69) error_code="DR_VMWARE_NBDKIT_FAILED" ;;
         66) error_code="DR_UNSUPPORTED_DIRECTION" ;;
         *) error_code="DR_FINAL_CHECKPOINT_FAILED" ;;
       esac
@@ -1606,6 +1608,8 @@ ftctl_dr_runtime_failback_worker() {
   if [[ "${rc}" != "0" ]]; then
     case "${rc}" in
       65) error_code="DR_VMWARE_MOVER_UNAVAILABLE" ;;
+      68) error_code="DR_VMWARE_MOVER_FAILED" ;;
+      69) error_code="DR_VMWARE_NBDKIT_FAILED" ;;
       66) error_code="DR_UNSUPPORTED_DIRECTION" ;;
       47) error_code="DR_FAILBACK_REQUIRES_TARGET_ACTIVE" ;;
       *) error_code="DR_FAILBACK_REVERSE_SYNC_FAILED" ;;
@@ -1760,6 +1764,8 @@ ftctl_dr_runtime_reprotect_worker() {
   if [[ "${rc}" != "0" ]]; then
     case "${rc}" in
       65) error_code="DR_VMWARE_MOVER_UNAVAILABLE" ;;
+      68) error_code="DR_VMWARE_MOVER_FAILED" ;;
+      69) error_code="DR_VMWARE_NBDKIT_FAILED" ;;
       66) error_code="DR_UNSUPPORTED_DIRECTION" ;;
       47) error_code="DR_REPROTECT_REQUIRES_TARGET_ACTIVE" ;;
       *) error_code="DR_REPROTECT_REVERSE_SYNC_FAILED" ;;

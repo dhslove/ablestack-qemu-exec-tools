@@ -17,6 +17,27 @@
 
 FTCTL_DR_VMWARE_LOCAL_VMDK_CREATE="${FTCTL_DR_VMWARE_LOCAL_VMDK_CREATE:-0}"
 
+ftctl_dr_vmware_default_mover() {
+  local candidate
+  for candidate in \
+    "${FTCTL_LIB_BASE:-}/ftctl/dr_vmware_mover.sh" \
+    "/usr/local/lib/ablestack-qemu-exec-tools/ftctl/dr_vmware_mover.sh"; do
+    [[ -n "${candidate}" && -x "${candidate}" ]] || continue
+    printf '%s\n' "${candidate}"
+    return 0
+  done
+  return 1
+}
+
+ftctl_dr_vmware_effective_mover() {
+  if [[ -n "${FTCTL_DR_VMWARE_MOVER:-}" ]]; then
+    [[ -x "${FTCTL_DR_VMWARE_MOVER}" ]] || return 1
+    printf '%s\n' "${FTCTL_DR_VMWARE_MOVER}"
+    return 0
+  fi
+  ftctl_dr_vmware_default_mover
+}
+
 ftctl_dr_vmware_disk_map_path() {
   local plan="${1-}"
   printf '%s/vmware-disks.json\n' "$(ftctl_dr_runtime_plan_dir "${plan}")"
@@ -84,7 +105,7 @@ ftctl_dr_vmware_nbdkit_vddk_available() {
 
 ftctl_dr_vmware_write_capability() {
   local out_path="${1-}"
-  local govc="0" nbdkit="0" nbdkit_vddk="0" vmware_vdiskmanager="0" vddk_ready="0" missing_code=""
+  local govc="0" nbdkit="0" nbdkit_vddk="0" vmware_vdiskmanager="0" qemu_img="0" mover_ready="0" vddk_ready="0" missing_code="" mover_path=""
 
   [[ -n "${out_path}" ]] || return 2
   ftctl_ensure_dir "$(dirname "${out_path}")" "0755"
@@ -100,18 +121,32 @@ ftctl_dr_vmware_write_capability() {
     command -v nbdkit >/dev/null 2>&1 && nbdkit="1"
     ftctl_dr_vmware_nbdkit_vddk_available && nbdkit_vddk="1"
     command -v vmware-vdiskmanager >/dev/null 2>&1 && vmware_vdiskmanager="1"
+    command -v qemu-img >/dev/null 2>&1 && qemu_img="1"
     if [[ "${nbdkit_vddk}" == "1" || "${vmware_vdiskmanager}" == "1" ]]; then
       vddk_ready="1"
     fi
   fi
 
-  [[ "${vddk_ready}" == "1" ]] || missing_code="DR_MISSING_VDDK"
-  printf '{"govc":%s,"nbdkit":%s,"nbdkitVddk":%s,"vmwareVdiskmanager":%s,"vddkReady":%s,"missingCode":"%s"}\n' \
+  command -v qemu-img >/dev/null 2>&1 && qemu_img="1"
+  mover_path="$(ftctl_dr_vmware_effective_mover 2>/dev/null || true)"
+  [[ -n "${mover_path}" ]] && mover_ready="1"
+
+  if [[ "${vddk_ready}" != "1" ]]; then
+    missing_code="DR_MISSING_VDDK"
+  elif [[ "${qemu_img}" != "1" ]]; then
+    missing_code="DR_MISSING_QEMU_IMG"
+  elif [[ "${mover_ready}" != "1" ]]; then
+    missing_code="DR_VMWARE_MOVER_UNAVAILABLE"
+  fi
+  printf '{"govc":%s,"nbdkit":%s,"nbdkitVddk":%s,"vmwareVdiskmanager":%s,"qemuImg":%s,"vddkReady":%s,"moverReady":%s,"moverPath":"%s","missingCode":"%s"}\n' \
     "$(ftctl_dr_vmware_bool_json "${govc}")" \
     "$(ftctl_dr_vmware_bool_json "${nbdkit}")" \
     "$(ftctl_dr_vmware_bool_json "${nbdkit_vddk}")" \
     "$(ftctl_dr_vmware_bool_json "${vmware_vdiskmanager}")" \
+    "$(ftctl_dr_vmware_bool_json "${qemu_img}")" \
     "$(ftctl_dr_vmware_bool_json "${vddk_ready}")" \
+    "$(ftctl_dr_vmware_bool_json "${mover_ready}")" \
+    "$(ftctl__json_escape "${mover_path}")" \
     "$(ftctl__json_escape "${missing_code}")" > "${out_path}.tmp"
   mv -f "${out_path}.tmp" "${out_path}"
   chmod 0644 "${out_path}" 2>/dev/null || true
@@ -319,7 +354,7 @@ with open(disk_map_path, "r", encoding="utf-8") as fh:
     disk_map = json.load(fh)
 with open(capability_path, "r", encoding="utf-8") as fh:
     capability = json.load(fh)
-capable = bool(capability.get("vddkReady"))
+capable = bool(capability.get("vddkReady")) and bool(capability.get("qemuImg")) and bool(capability.get("moverReady"))
 error_code = "" if capable else (capability.get("missingCode") or "DR_MISSING_VDDK")
 summary = {
     "driver": "VMWARE",
@@ -333,7 +368,8 @@ summary = {
     "target_driver": disk_map.get("targetDriver", ""),
     "disk_count": int(disk_map.get("count") or 0),
     "requires_disk_map": bool(disk_map.get("requiresDiskMap")),
-    "vddk_ready": capable,
+    "vddk_ready": bool(capability.get("vddkReady")),
+    "mover_ready": bool(capability.get("moverReady")),
     "missing_code": error_code,
     "disk_map_path": disk_map_out,
     "capability_path": capability_out,
@@ -489,7 +525,7 @@ PY
 
 ftctl_dr_vmware_replication_cycle() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" sequence="${4-}" cycle_type="${5-}"
-  local disk_map capability_path manifest_path checkpoint_path cycle_run now mover_rc=0
+  local disk_map target_disk_map capability_path manifest_path checkpoint_path cycle_run now mover_path mover_rc=0
   local credentials_file=""
   local source_epoch target_epoch rpo="0"
 
@@ -500,20 +536,23 @@ ftctl_dr_vmware_replication_cycle() {
   manifest_path="$(ftctl_dr_vmware_manifest_path "${plan}" "${cycle_run}")"
   checkpoint_path="$(ftctl_dr_vmware_checkpoint_path "${plan}" "${cycle_run}")"
   [[ -f "${disk_map}" ]] || ftctl_dr_vmware_canonicalize_profile "${profile_file}" "${disk_map}" || return $?
+  target_disk_map="$(ftctl_dr_ablestack_disk_map_path "${plan}" 2>/dev/null || true)"
   [[ -f "${capability_path}" ]] || ftctl_dr_vmware_write_capability "${capability_path}" || return $?
 
-  if [[ -n "${FTCTL_DR_VMWARE_MOVER:-}" ]]; then
+  mover_path="$(ftctl_dr_vmware_effective_mover 2>/dev/null || true)"
+  if [[ -n "${mover_path}" ]]; then
     credentials_file="$(ftctl_dr_runtime_credential_path "${plan}" 2>/dev/null || true)"
     FTCTL_DR_PLAN_UUID="${plan}" \
     FTCTL_DR_RUN_UUID="${run}" \
     FTCTL_DR_CHECKPOINT_SEQUENCE="${sequence:-0}" \
     FTCTL_DR_CYCLE_TYPE="${cycle_type:-incremental}" \
     FTCTL_DR_DISK_MAP="${disk_map}" \
+    FTCTL_DR_TARGET_DISK_MAP="$([[ -f "${target_disk_map}" ]] && printf '%s' "${target_disk_map}")" \
     FTCTL_DR_CAPABILITY="${capability_path}" \
     FTCTL_DR_MANIFEST="${manifest_path}" \
     FTCTL_DR_CHECKPOINT="${checkpoint_path}" \
     FTCTL_DR_CREDENTIALS_FILE="$([[ -f "${credentials_file}" ]] && printf '%s' "${credentials_file}")" \
-      "${FTCTL_DR_VMWARE_MOVER}" || mover_rc=$?
+      "${mover_path}" || mover_rc=$?
     [[ "${mover_rc}" == "0" ]] || return "${mover_rc}"
   elif [[ "${FTCTL_DR_VMWARE_MOCK_CYCLE:-0}" == "1" ]]; then
     :
@@ -538,7 +577,7 @@ ftctl_dr_vmware_replication_cycle() {
 
 ftctl_dr_vmware_sync_start() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" state_path="${4-}" wait_value="${5-}"
-  local disk_map capability_path manifest_path checkpoint_path count now vddk_ready missing_code target_provider disk_map_role
+  local disk_map capability_path manifest_path checkpoint_path count now vddk_ready mover_ready qemu_img_ready missing_code target_provider disk_map_role
   : "${wait_value}"
 
   [[ -n "${profile_file}" && -f "${profile_file}" ]] || return 0
@@ -561,10 +600,12 @@ ftctl_dr_vmware_sync_start() {
   ftctl_dr_vmware_canonicalize_profile "${profile_file}" "${disk_map}" || return $?
   ftctl_dr_vmware_write_capability "${capability_path}" || return $?
   vddk_ready="$(ftctl_dr_vmware_capability_value "${capability_path}" "vddkReady" || true)"
+  mover_ready="$(ftctl_dr_vmware_capability_value "${capability_path}" "moverReady" || true)"
+  qemu_img_ready="$(ftctl_dr_vmware_capability_value "${capability_path}" "qemuImg" || true)"
   missing_code="$(ftctl_dr_vmware_capability_value "${capability_path}" "missingCode" || true)"
   count="$(ftctl_dr_vmware_disk_count "${disk_map}")" || count="0"
 
-  if [[ "${vddk_ready}" != "true" ]]; then
+  if [[ "${vddk_ready}" != "true" || "${mover_ready}" != "true" || "${qemu_img_ready}" != "true" ]]; then
     now="$(ftctl_now_iso8601)"
     ftctl_dr_vmware_write_manifest "${disk_map}" "${capability_path}" "${manifest_path}" "vmware-capability-missing" || true
     ftctl_dr_vmware_write_checkpoint "${disk_map}" "${manifest_path}" "${checkpoint_path}" "MISSING_VDDK" "${now}" "" "" || true
