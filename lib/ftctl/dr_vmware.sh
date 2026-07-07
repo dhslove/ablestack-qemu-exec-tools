@@ -53,6 +53,11 @@ ftctl_dr_vmware_capability_path() {
   printf '%s/vmware-capability.json\n' "$(ftctl_dr_runtime_plan_dir "${plan}")"
 }
 
+ftctl_dr_vmware_cbt_status_path() {
+  local plan="${1-}"
+  printf '%s/vmware-cbt.json\n' "$(ftctl_dr_runtime_plan_dir "${plan}")"
+}
+
 ftctl_dr_vmware_manifest_dir() {
   local plan="${1-}"
   printf '%s/manifests\n' "$(ftctl_dr_runtime_plan_dir "${plan}")"
@@ -237,6 +242,16 @@ def first_int(*values):
             continue
     return 0
 
+def first_any_int(*values):
+    for value in values:
+        if value is None or value == "":
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
 def value_at(data, *keys):
     if not isinstance(data, dict):
         return None
@@ -254,7 +269,26 @@ def normalize_disk(item, index):
     item = obj(item)
     source = obj(item.get("source"))
     target = obj(item.get("target"))
+    bus = first_any_int(
+        value_at(item, "controllerBusNumber", "controllerBus", "bus"),
+        value_at(source, "controllerBusNumber", "controllerBus", "bus"),
+    )
+    unit = first_any_int(
+        value_at(item, "unitNumber", "unit"),
+        value_at(source, "unitNumber", "unit"),
+    )
+    inferred_cbt_disk_id = f"scsi{bus}:{unit}" if bus is not None and unit is not None else ""
+    cbt_disk_id = first_str(
+        value_at(item, "cbtDiskId", "sourceCbtDiskId"),
+        value_at(source, "cbtDiskId", "device"),
+        inferred_cbt_disk_id,
+    )
+    source_disk_key = first_str(
+        value_at(item, "sourceDiskKey", "deviceKey", "key"),
+        value_at(source, "sourceDiskKey", "deviceKey", "key"),
+    )
     device = first_str(
+        cbt_disk_id,
         value_at(item, "device", "targetDevice", "diskTarget", "unitNumber", "key"),
         value_at(source, "device", "targetDevice", "unitNumber", "key"),
         value_at(target, "device", "targetDevice", "unitNumber", "key"),
@@ -270,6 +304,10 @@ def normalize_disk(item, index):
     )
     return {
         "device": device,
+        "cbtDiskId": cbt_disk_id,
+        "sourceDiskKey": source_disk_key,
+        "controllerBusNumber": bus if bus is not None else "",
+        "unitNumber": unit if unit is not None else "",
         "sourceDiskRef": source_disk_ref,
         "sourceVmdkPath": first_str(value_at(item, "sourceVmdkPath", "sourcePath"), value_at(source, "vmdkPath", "path"), source_disk_ref),
         "targetDiskRef": target_disk_ref,
@@ -549,6 +587,308 @@ PY
   done
 }
 
+ftctl_dr_vmware_cbt_error_code() {
+  case "${1-}" in
+    77) printf '%s\n' "DR_VMWARE_CBT_DISABLED" ;;
+    78) printf '%s\n' "DR_VMWARE_CBT_ENABLE_FAILED" ;;
+    79) printf '%s\n' "DR_VMWARE_CBT_VERIFY_FAILED" ;;
+    80) printf '%s\n' "DR_VMWARE_CBT_DISK_ID_UNRESOLVED" ;;
+    82) printf '%s\n' "DR_VMWARE_CBT_QUERY_FAILED" ;;
+    84) printf '%s\n' "DR_VMWARE_CBT_SNAPSHOT_CONFLICT" ;;
+    *) printf '%s\n' "DR_VMWARE_CBT_PREFLIGHT_FAILED" ;;
+  esac
+}
+
+ftctl_dr_vmware_ensure_cbt_enabled() {
+  local plan="${1-}" run="${2-}" profile_file="${3-}" disk_map="${4-}" cbt_status_path="${5-}"
+  local source_provider required auto_enable fail_snapshots
+
+  [[ -n "${profile_file}" && -f "${profile_file}" && -n "${disk_map}" && -f "${disk_map}" ]] || return 2
+  source_provider="$(ftctl_dr_vmware_profile_value_upper "${profile_file}" "source.provider")"
+  [[ "${source_provider}" == "VMWARE" ]] || return 0
+
+  if ftctl_dr_runtime_profile_bool_default "${profile_file}" "policy.cbtPolicy.required" "true"; then
+    required="true"
+  else
+    required="false"
+  fi
+  [[ "${required}" == "true" ]] || return 0
+  if ftctl_dr_runtime_profile_bool_default "${profile_file}" "policy.cbtPolicy.autoEnable" "true"; then
+    auto_enable="true"
+  else
+    auto_enable="false"
+  fi
+  if ftctl_dr_runtime_profile_bool_default "${profile_file}" "policy.cbtPolicy.failIfPreExistingSnapshots" "false"; then
+    fail_snapshots="true"
+  else
+    fail_snapshots="false"
+  fi
+
+  ftctl_ensure_dir "$(dirname "${cbt_status_path}")" "0755"
+  python3 - "${profile_file}" "${disk_map}" "${cbt_status_path}" "${auto_enable}" "${fail_snapshots}" "$(ftctl_now_iso8601)" <<'PY'
+import json
+import os
+import re
+import subprocess
+import sys
+from urllib.parse import urlparse, urlunparse
+
+profile_path, disk_map_path, out_path, auto_enable, fail_snapshots, now = sys.argv[1:7]
+auto_enable = str(auto_enable).lower() == "true"
+fail_snapshots = str(fail_snapshots).lower() == "true"
+
+with open(profile_path, "r", encoding="utf-8") as fh:
+    profile = json.load(fh)
+with open(disk_map_path, "r", encoding="utf-8") as fh:
+    disk_map = json.load(fh)
+
+def obj(value):
+    return value if isinstance(value, dict) else {}
+
+def arr(value):
+    return value if isinstance(value, list) else []
+
+def first_str(*values):
+    for value in values:
+        if value is None or isinstance(value, (dict, list)):
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
+
+def boolish(value):
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+def normalize_vcenter_url(value):
+    text = first_str(value)
+    if not text:
+        return ""
+    if "://" not in text:
+        text = "https://" + text
+    parsed = urlparse(text)
+    path = parsed.path or ""
+    if not path or path == "/":
+        path = "/sdk"
+    elif path.rstrip("/") in ("/rest", "/ui"):
+        path = "/sdk"
+    elif path.rstrip("/") not in ("/sdk",):
+        path = path.rstrip("/") + "/sdk" if not path.endswith("/sdk") else path
+    return urlunparse((parsed.scheme, parsed.netloc, path, "", "", ""))
+
+def get_ci(data, key):
+    if not isinstance(data, dict):
+        return None
+    if key in data:
+        return data.get(key)
+    lower = key.lower()
+    for k, v in data.items():
+        if str(k).lower() == lower:
+            return v
+    return None
+
+def nested_bool(data, *keys):
+    cur = data
+    for key in keys:
+        cur = get_ci(cur, key)
+        if cur is None:
+            return None
+    return boolish(cur)
+
+def collect_extra_config(data):
+    result = {}
+    def walk(value):
+        if isinstance(value, dict):
+            key = value.get("key") or value.get("Key")
+            val = value.get("value") if "value" in value else value.get("Value")
+            if key is not None:
+                result[str(key)] = val
+            for child in value.values():
+                walk(child)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child)
+    walk(data)
+    return result
+
+def find_vm_object(vm_info):
+    if not isinstance(vm_info, dict):
+        return {}
+    for key in ("virtualMachines", "VirtualMachines"):
+        items = vm_info.get(key)
+        if isinstance(items, list) and items:
+            return items[0] if isinstance(items[0], dict) else {}
+    return vm_info
+
+def has_snapshot(value):
+    if value in (None, "", [], {}):
+        return False
+    if isinstance(value, list):
+        return any(has_snapshot(item) for item in value)
+    if isinstance(value, dict):
+        if any(str(k).lower() in ("snapshot", "rootSnapshotList".lower(), "childSnapshotList".lower(), "children", "tree", "trees") and has_snapshot(v) for k, v in value.items()):
+            return True
+        if any(str(k).lower() in ("name", "snapshotname") for k in value):
+            return True
+        return any(has_snapshot(v) for v in value.values())
+    return False
+
+def disk_id_for(disk, index):
+    disk = obj(disk)
+    source = obj(disk.get("source"))
+    cbt = first_str(disk.get("cbtDiskId"), source.get("cbtDiskId"))
+    if re.match(r"^scsi[0-9]+:[0-9]+$", cbt):
+        return cbt
+    device = first_str(disk.get("device"), source.get("device"))
+    if re.match(r"^scsi[0-9]+:[0-9]+$", device):
+        return device
+    bus = first_str(disk.get("controllerBusNumber"), source.get("controllerBusNumber"), disk.get("controllerBus"), source.get("controllerBus"))
+    unit = first_str(disk.get("unitNumber"), source.get("unitNumber"), disk.get("unit"), source.get("unit"))
+    if bus.isdigit() and unit.isdigit():
+        return f"scsi{bus}:{unit}"
+    return ""
+
+credentials = obj(profile.get("credentials"))
+source_credential = obj(credentials.get("source"))
+auth = obj(source_credential.get("auth"))
+source = obj(profile.get("source"))
+endpoint = normalize_vcenter_url(first_str(source_credential.get("endpoint"), source.get("endpoint")))
+principal = first_str(source_credential.get("principal"), auth.get("username"), auth.get("user"), auth.get("principal"))
+password = first_str(auth.get("password"), source_credential.get("password"))
+tls_verify = source_credential.get("tlsVerify")
+vm_ref = first_str(disk_map.get("sourceVmRef"), source.get("externalRef"), source.get("vmRef"), source.get("name"), source.get("vmId"))
+
+disks = arr(disk_map.get("disks"))
+resolved = []
+unresolved = []
+for index, disk in enumerate(disks):
+    disk_id = disk_id_for(disk, index)
+    item = {
+        "index": index,
+        "label": first_str(obj(disk).get("label"), f"Disk {index + 1}"),
+        "sourceDiskRef": first_str(obj(disk).get("sourceDiskRef"), obj(obj(disk).get("source")).get("diskRef")),
+        "cbtDiskId": disk_id,
+    }
+    if disk_id:
+        resolved.append(item)
+    else:
+        unresolved.append(item)
+
+status = {
+    "driver": "VMWARE",
+    "phase": "cbt-preflight",
+    "checkedAt": now,
+    "vmRef": vm_ref,
+    "endpoint": endpoint,
+    "required": True,
+    "autoEnable": auto_enable,
+    "failIfPreExistingSnapshots": fail_snapshots,
+    "vmEnabled": False,
+    "enabled": False,
+    "enabledByFtctl": False,
+    "enableAttempted": False,
+    "disks": resolved,
+    "unresolvedDisks": unresolved,
+    "error_code": "",
+}
+
+def write_status(code=0, error_code=""):
+    status["error_code"] = error_code
+    tmp = out_path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(status, fh, sort_keys=True, separators=(",", ":"))
+        fh.write("\n")
+    os.replace(tmp, out_path)
+    sys.exit(code)
+
+if not endpoint or not principal or not password or not vm_ref:
+    status["message"] = "vCenter endpoint, username, password, or source VM reference is missing"
+    write_status(82, "DR_VMWARE_CBT_QUERY_FAILED")
+if unresolved:
+    status["message"] = "VMware CBT disk id was not resolved for one or more selected disks"
+    write_status(80, "DR_VMWARE_CBT_DISK_ID_UNRESOLVED")
+
+env = os.environ.copy()
+env.update({
+    "GOVC_URL": endpoint,
+    "GOVC_USERNAME": principal,
+    "GOVC_PASSWORD": password,
+    "GOVC_INSECURE": "0" if boolish(tls_verify) else "1",
+})
+
+def govc(args, check=True):
+    proc = subprocess.run(["govc"] + list(args), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if check and proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip() or proc.stdout.strip() or f"govc {' '.join(args)} failed")
+    return proc
+
+def read_state():
+    vm_proc = govc(["vm.info", "-json", vm_ref])
+    try:
+        vm_info = json.loads(vm_proc.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"govc vm.info returned invalid JSON: {exc}")
+    vm_obj = find_vm_object(vm_info)
+    extra = collect_extra_config(vm_obj)
+    vm_enabled = nested_bool(vm_obj, "config", "changeTrackingEnabled")
+    if vm_enabled is None:
+        vm_enabled = boolish(extra.get("ctkEnabled"))
+    disk_rows = []
+    all_disks_enabled = True
+    for disk in resolved:
+        key = disk["cbtDiskId"] + ".ctkEnabled"
+        disk_enabled = boolish(extra.get(key))
+        row = dict(disk)
+        row["ctkEnabled"] = disk_enabled
+        disk_rows.append(row)
+        all_disks_enabled = all_disks_enabled and disk_enabled
+    return vm_enabled, disk_rows, extra
+
+try:
+    vm_enabled, disk_rows, extra = read_state()
+    status["vmEnabled"] = bool(vm_enabled)
+    status["disks"] = disk_rows
+    status["enabled"] = bool(vm_enabled) and all(d.get("ctkEnabled") for d in disk_rows)
+    if status["enabled"]:
+        write_status(0, "")
+    if not auto_enable:
+        status["message"] = "VMware CBT is disabled and autoEnable is false"
+        write_status(77, "DR_VMWARE_CBT_DISABLED")
+    if fail_snapshots:
+        snap_proc = govc(["snapshot.tree", "-vm", vm_ref, "-json"], check=False)
+        if snap_proc.returncode == 0 and snap_proc.stdout.strip():
+            try:
+                status["hasPreExistingSnapshots"] = has_snapshot(json.loads(snap_proc.stdout))
+            except json.JSONDecodeError:
+                status["hasPreExistingSnapshots"] = False
+            if status["hasPreExistingSnapshots"]:
+                status["message"] = "VMware CBT enable requires snapshot cleanup before sync"
+                write_status(84, "DR_VMWARE_CBT_SNAPSHOT_CONFLICT")
+    status["enableAttempted"] = True
+    govc(["vm.change", "-vm", vm_ref, "-e", "ctkEnabled=true"])
+    for disk in resolved:
+        govc(["vm.change", "-vm", vm_ref, "-e", f"{disk['cbtDiskId']}.ctkEnabled=true"])
+    status["enabledByFtctl"] = True
+    vm_enabled, disk_rows, extra = read_state()
+    status["vmEnabled"] = bool(vm_enabled)
+    status["disks"] = disk_rows
+    status["enabled"] = bool(vm_enabled) and all(d.get("ctkEnabled") for d in disk_rows)
+    if status["enabled"]:
+        write_status(0, "")
+    status["message"] = "VMware CBT enable command completed but verification still failed"
+    write_status(79, "DR_VMWARE_CBT_VERIFY_FAILED")
+except RuntimeError as exc:
+    status["message"] = str(exc)
+    if status.get("enabledByFtctl"):
+        write_status(79, "DR_VMWARE_CBT_VERIFY_FAILED")
+    if status.get("enableAttempted"):
+        write_status(78, "DR_VMWARE_CBT_ENABLE_FAILED")
+    write_status(82, "DR_VMWARE_CBT_QUERY_FAILED")
+PY
+}
+
 ftctl_dr_vmware_replication_cycle() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" sequence="${4-}" cycle_type="${5-}"
   local disk_map target_disk_map capability_path manifest_path checkpoint_path cycle_run now mover_path mover_rc=0
@@ -603,7 +943,8 @@ ftctl_dr_vmware_replication_cycle() {
 
 ftctl_dr_vmware_sync_start() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" state_path="${4-}" wait_value="${5-}"
-  local disk_map capability_path manifest_path checkpoint_path count now vddk_ready mover_ready qemu_img_ready missing_code target_provider disk_map_role
+  local disk_map capability_path cbt_status_path manifest_path checkpoint_path count now vddk_ready mover_ready qemu_img_ready missing_code target_provider disk_map_role
+  local cbt_rc cbt_error
   : "${wait_value}"
 
   [[ -n "${profile_file}" && -f "${profile_file}" ]] || return 0
@@ -620,6 +961,7 @@ ftctl_dr_vmware_sync_start() {
     disk_map_role="target"
   fi
   capability_path="$(ftctl_dr_vmware_capability_path "${plan}")"
+  cbt_status_path="$(ftctl_dr_vmware_cbt_status_path "${plan}")"
   manifest_path="$(ftctl_dr_vmware_manifest_path "${plan}" "${run}")"
   checkpoint_path="$(ftctl_dr_vmware_checkpoint_path "${plan}" "${run}")"
 
@@ -677,6 +1019,33 @@ ftctl_dr_vmware_sync_start() {
     return 0
   fi
 
+  cbt_rc=0
+  ftctl_dr_vmware_ensure_cbt_enabled "${plan}" "${run}" "${profile_file}" "${disk_map}" "${cbt_status_path}" || cbt_rc=$?
+  if [[ "${cbt_rc}" != "0" ]]; then
+    now="$(ftctl_now_iso8601)"
+    cbt_error="$(ftctl_dr_vmware_cbt_error_code "${cbt_rc}")"
+    ftctl_dr_vmware_write_manifest "${disk_map}" "${capability_path}" "${manifest_path}" "vmware-cbt-preflight-failed" || true
+    ftctl_dr_vmware_write_checkpoint "${disk_map}" "${manifest_path}" "${checkpoint_path}" "CBT_PREFLIGHT_FAILED" "${now}" "" "" || true
+    ftctl_dr_runtime_path_set "${state_path}" \
+      "driver=VMWARE" \
+      "driver_state=CBT_PREFLIGHT_FAILED" \
+      "state=ERROR" \
+      "step=vmware-cbt-preflight" \
+      "progress=100" \
+      "accepted=false" \
+      "error_code=${cbt_error}" \
+      "disk_map_path=${disk_map}" \
+      "source_disk_map_path=${disk_map}" \
+      "disk_map_role=${disk_map_role}" \
+      "cbt_status_path=${cbt_status_path}" \
+      "manifest_path=${manifest_path}" \
+      "checkpoint_path=${checkpoint_path}" \
+      "updated_at=${now}"
+    ftctl_log_event "dr-runtime" "dr.vmware.cbt" "fail" "" "${cbt_rc}" \
+      "plan=${plan} run=${run} reason=${cbt_error} status=${cbt_status_path}"
+    return "${cbt_rc}"
+  fi
+
   ftctl_dr_vmware_prepare_local_vmdk_targets "${disk_map}" || return $?
   now="$(ftctl_now_iso8601)"
   ftctl_dr_vmware_write_manifest "${disk_map}" "${capability_path}" "${manifest_path}" "vmware-contract-ready" || return $?
@@ -689,6 +1058,7 @@ ftctl_dr_vmware_sync_start() {
     "disk_map_path=${disk_map}" \
     "source_disk_map_path=${disk_map}" \
     "disk_map_role=${disk_map_role}" \
+    "cbt_status_path=${cbt_status_path}" \
     "manifest_path=${manifest_path}" \
     "checkpoint_path=${checkpoint_path}" \
     "last_source_checkpoint_at=${now}" \
