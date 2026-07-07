@@ -222,7 +222,11 @@ def normalize_disk(item, index):
         f"disk{index}",
     )
     source_type = infer_disk_type(source_path)
-    target_type = infer_disk_type(target_path)
+    target_type = first_str(
+        value_at(item, "targetType", "type"),
+        value_at(target, "targetType", "type"),
+        infer_disk_type(target_path),
+    ).lower()
     if "RBD" in str(target_storage_type or "").upper() and target_path:
         target_type = "rbd"
     source_format = first_str(

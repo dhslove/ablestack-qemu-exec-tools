@@ -6561,6 +6561,54 @@ JSON
   selftest_assert_contains "${out}" '"error_code":"DR_TARGET_DISK_MAPPING_INVALID"' "missing map error code"
 }
 
+selftest_case_dr_ablestack_vmware_source_size_unresolved() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR ABLESTACK target rejects VMware source disk with unresolved size"
+
+  local profile="${SELFTEST_ROOT}/dr-ablestack-vmware-zero-size-profile.json"
+  local out="" rc=0
+  mkdir -p "${SELFTEST_ROOT}/target"
+  cat > "${profile}" <<JSON
+{
+  "version": 1,
+  "engine": "FTCTL_DR",
+  "planUuid": "plan-vmware-to-kvm-size",
+  "runUuid": "run-vmware-to-kvm-size",
+  "direction": "VMWARE_TO_KVM",
+  "source": {"provider": "VMWARE", "driver": "VMWARE_CBT"},
+  "target": {
+    "provider": "ABLESTACK",
+    "driver": "ABLESTACK",
+    "zoneId": "zone-1",
+    "storageRef": "${SELFTEST_ROOT}/target",
+    "serviceOfferingId": "service-offering-1",
+    "networks": [{"networkId": "network-1"}]
+  },
+  "mapping": {
+    "disks": [
+      {"device": "scsi0:0", "sourcePath": "2000", "targetPath": "${SELFTEST_ROOT}/target/root.qcow2", "targetFormat": "qcow2", "sizeBytes": 0, "targetDiskOfferingId": "disk-offering-1"}
+    ]
+  }
+}
+JSON
+
+  out="$(FTCTL_DR_SYNC_FOREGROUND=1 FTCTL_DR_VMWARE_FORCE_VDDK_READY=1 bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-sync-start \
+    --config "${SELFTEST_CONFIG}" \
+    --plan plan-vmware-to-kvm-size \
+    --run run-vmware-to-kvm-size \
+    --profile-json "${profile}" \
+    --role coordinator \
+    --mode planned \
+    --wait=false \
+    --json)" || rc=$?
+  [[ "${rc}" != "0" ]] || selftest_fail "VMware source disk with unresolved size should fail"
+  selftest_assert_contains "${out}" '"result":"error"' "unresolved size result"
+  selftest_assert_contains "${out}" '"state":"ERROR"' "unresolved size state"
+  selftest_assert_contains "${out}" '"step":"ablestack-target-map-invalid"' "unresolved size step"
+  selftest_assert_contains "${out}" '"error_code":"DR_TARGET_DISK_SIZE_UNRESOLVED"' "unresolved size error code"
+  selftest_assert_contains "${out}" '"target_disk_invalid_count":1' "unresolved size invalid disk count"
+}
+
 selftest_case_dr_vmware_preflight_missing_vddk() {
   selftest_reset_env
   selftest_info "FTCTL_DR VMware preflight reports missing VDDK"
@@ -7544,6 +7592,7 @@ selftest_main() {
   selftest_case_dr_ablestack_target_prepare
   selftest_case_dr_ablestack_full_seed_once
   selftest_case_dr_ablestack_missing_disk_map_waits
+  selftest_case_dr_ablestack_vmware_source_size_unresolved
   selftest_case_dr_vmware_preflight_missing_vddk
   selftest_case_dr_vmware_contract_ready
   selftest_case_dr_vmware_missing_disk_map_config_incomplete

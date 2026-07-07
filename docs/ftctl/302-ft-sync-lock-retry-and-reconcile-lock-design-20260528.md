@@ -224,3 +224,36 @@ Required deployment validation:
 The paired Cloud-side layered design is documented in
 `docs/ftctl/537-cross-hypervisor-dr-serving-process-and-disk-map-contract-design-20260707.md`
 in the `ablestack-cloud` repository.
+
+## 2026-07-07 VMware source disk size and projection follow-up
+
+The next VMware to ABLESTACK validation used plan
+`05527cbe-974e-4ca8-b65e-f844cb3420e7` and run
+`79f4a7b9-778b-4279-a4bd-3aa7af38ed53`. FTCTL correctly failed the run before
+target materialization:
+
+- `state=ERROR`
+- `step=ablestack-target-map-invalid`
+- `error_code=DR_TARGET_DISK_SIZE_UNRESOLVED`
+- `worker_state=FAILED`
+- `target_disk_invalid_count=1`
+- `vmware-disks.json` and `ablestack-disks.json` both had disk `2000` with
+  `sizeBytes=0`
+
+Required qemu/FTCTL contract extension:
+
+1. VMware source disks must carry a positive size before an ABLESTACK target
+   map can be considered execution-ready.
+2. `dr_vmware.sh` should classify missing source disk size as a source-map
+   readiness problem when it can detect it before the ABLESTACK target driver.
+3. `dr_ablestack.sh` must keep rejecting `VMWARE_TO_KVM` target maps with
+   `sizeBytes <= 0`; this is a correct final safety gate.
+4. RBD target storage should be normalized to `targetType=rbd` and canonical
+   raw block target semantics before materialization.
+5. `dr-status --plan --run --json` must expose the terminal error fields so
+   Cloud projection can atomically fail `dr_plan`, `dr_run`, `dr_replica`, and
+   `dr_replica_disk`.
+
+The paired Cloud-side design is documented in
+`docs/ftctl/538-cross-hypervisor-dr-vmware-to-kvm-disk-size-and-projection-hardening-design-20260707.md`
+in the `ablestack-cloud` repository.
