@@ -285,6 +285,8 @@ ftctl_dr_scheduler_worker() {
         65) error_code="DR_VMWARE_MOVER_UNAVAILABLE" ;;
         68) error_code="DR_VMWARE_MOVER_FAILED" ;;
         69) error_code="DR_VMWARE_NBDKIT_FAILED" ;;
+        70) error_code="DR_VDDK_LIBDIR_UNRESOLVED" ;;
+        71) error_code="DR_VDDK_LIBRARY_LOAD_FAILED" ;;
         66) error_code="DR_UNSUPPORTED_DIRECTION" ;;
         *) error_code="DR_REPLICATION_CYCLE_FAILED" ;;
       esac

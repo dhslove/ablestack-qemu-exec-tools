@@ -16,6 +16,11 @@
 # ---------------------------------------------------------------------
 
 FTCTL_DR_VMWARE_LOCAL_VMDK_CREATE="${FTCTL_DR_VMWARE_LOCAL_VMDK_CREATE:-0}"
+FTCTL_DR_VMWARE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "${FTCTL_DR_VMWARE_LIB_DIR}/dr_vddk.sh" ]]; then
+  # shellcheck source=/dev/null
+  source "${FTCTL_DR_VMWARE_LIB_DIR}/dr_vddk.sh"
+fi
 
 ftctl_dr_vmware_default_mover() {
   local candidate
@@ -99,13 +104,22 @@ ftctl_dr_vmware_bool_json() {
 }
 
 ftctl_dr_vmware_nbdkit_vddk_available() {
+  local libdir="${1-}"
   command -v nbdkit >/dev/null 2>&1 || return 1
+  if [[ -z "${libdir}" ]] && command -v ftctl_dr_vddk_resolve_libdir >/dev/null 2>&1; then
+    libdir="$(ftctl_dr_vddk_resolve_libdir "" 2>/dev/null || true)"
+  fi
+  if [[ -n "${libdir}" ]] && command -v ftctl_dr_vddk_nbdkit_loads >/dev/null 2>&1; then
+    ftctl_dr_vddk_nbdkit_loads "${libdir}"
+    return $?
+  fi
   nbdkit --dump-plugin vddk >/dev/null 2>&1 || nbdkit vddk --help >/dev/null 2>&1
 }
 
 ftctl_dr_vmware_write_capability() {
   local out_path="${1-}"
   local govc="0" nbdkit="0" nbdkit_vddk="0" vmware_vdiskmanager="0" qemu_img="0" mover_ready="0" vddk_ready="0" missing_code="" mover_path=""
+  local vddk_libdir="" vddk_library_version=""
 
   [[ -n "${out_path}" ]] || return 2
   ftctl_ensure_dir "$(dirname "${out_path}")" "0755"
@@ -119,10 +133,14 @@ ftctl_dr_vmware_write_capability() {
   else
     command -v govc >/dev/null 2>&1 && govc="1"
     command -v nbdkit >/dev/null 2>&1 && nbdkit="1"
-    ftctl_dr_vmware_nbdkit_vddk_available && nbdkit_vddk="1"
+    if command -v ftctl_dr_vddk_resolve_libdir >/dev/null 2>&1; then
+      vddk_libdir="$(ftctl_dr_vddk_resolve_libdir "" 2>/dev/null || true)"
+      [[ -n "${vddk_libdir}" ]] && vddk_library_version="$(ftctl_dr_vddk_library_version "${vddk_libdir}" 2>/dev/null || true)"
+    fi
+    ftctl_dr_vmware_nbdkit_vddk_available "${vddk_libdir}" && nbdkit_vddk="1"
     command -v vmware-vdiskmanager >/dev/null 2>&1 && vmware_vdiskmanager="1"
     command -v qemu-img >/dev/null 2>&1 && qemu_img="1"
-    if [[ "${nbdkit_vddk}" == "1" || "${vmware_vdiskmanager}" == "1" ]]; then
+    if [[ "${nbdkit_vddk}" == "1" ]]; then
       vddk_ready="1"
     fi
   fi
@@ -132,13 +150,19 @@ ftctl_dr_vmware_write_capability() {
   [[ -n "${mover_path}" ]] && mover_ready="1"
 
   if [[ "${vddk_ready}" != "1" ]]; then
-    missing_code="DR_MISSING_VDDK"
+    if [[ -z "${vddk_libdir}" ]]; then
+      missing_code="DR_VDDK_LIBDIR_UNRESOLVED"
+    elif [[ "${nbdkit}" == "1" ]]; then
+      missing_code="DR_VDDK_LIBRARY_LOAD_FAILED"
+    else
+      missing_code="DR_MISSING_VDDK"
+    fi
   elif [[ "${qemu_img}" != "1" ]]; then
     missing_code="DR_MISSING_QEMU_IMG"
   elif [[ "${mover_ready}" != "1" ]]; then
     missing_code="DR_VMWARE_MOVER_UNAVAILABLE"
   fi
-  printf '{"govc":%s,"nbdkit":%s,"nbdkitVddk":%s,"vmwareVdiskmanager":%s,"qemuImg":%s,"vddkReady":%s,"moverReady":%s,"moverPath":"%s","missingCode":"%s"}\n' \
+  printf '{"govc":%s,"nbdkit":%s,"nbdkitVddk":%s,"vmwareVdiskmanager":%s,"qemuImg":%s,"vddkReady":%s,"moverReady":%s,"vddkLibdir":"%s","vddkLibraryVersion":"%s","moverPath":"%s","missingCode":"%s"}\n' \
     "$(ftctl_dr_vmware_bool_json "${govc}")" \
     "$(ftctl_dr_vmware_bool_json "${nbdkit}")" \
     "$(ftctl_dr_vmware_bool_json "${nbdkit_vddk}")" \
@@ -146,6 +170,8 @@ ftctl_dr_vmware_write_capability() {
     "$(ftctl_dr_vmware_bool_json "${qemu_img}")" \
     "$(ftctl_dr_vmware_bool_json "${vddk_ready}")" \
     "$(ftctl_dr_vmware_bool_json "${mover_ready}")" \
+    "$(ftctl__json_escape "${vddk_libdir}")" \
+    "$(ftctl__json_escape "${vddk_library_version}")" \
     "$(ftctl__json_escape "${mover_path}")" \
     "$(ftctl__json_escape "${missing_code}")" > "${out_path}.tmp"
   mv -f "${out_path}.tmp" "${out_path}"

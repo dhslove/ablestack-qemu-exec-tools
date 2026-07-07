@@ -17,6 +17,12 @@
 
 set -euo pipefail
 
+FTCTL_DR_VMWARE_MOVER_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "${FTCTL_DR_VMWARE_MOVER_LIB_DIR}/dr_vddk.sh" ]]; then
+  # shellcheck source=/dev/null
+  source "${FTCTL_DR_VMWARE_MOVER_LIB_DIR}/dr_vddk.sh"
+fi
+
 FTCTL_DR_VMWARE_MOVER_LOG_DIR="${FTCTL_DR_VMWARE_MOVER_LOG_DIR:-/run/ablestack-vm-ftctl/dr-runtime/mover}"
 FTCTL_DR_VMWARE_NBDKIT_READY_TIMEOUT="${FTCTL_DR_VMWARE_NBDKIT_READY_TIMEOUT:-20}"
 
@@ -206,9 +212,17 @@ main() {
   password="$(ftctl_vmware_mover_json_value "${credentials_file}" '.credentials.source.auth.password // .credentials.source.password' '')"
   tls_verify="$(ftctl_vmware_mover_json_value "${credentials_file}" '.credentials.source.tlsVerify' 'false')"
   thumbprint="$(ftctl_vmware_mover_json_value "${credentials_file}" '.credentials.source.thumbprint // .credentials.source.tlsThumbprint' '')"
-  libdir="$(ftctl_vmware_mover_json_value "${credentials_file}" '.credentials.source.vddkLibdir // .credentials.source.libdir' '')"
+  if command -v ftctl_dr_vddk_resolve_libdir >/dev/null 2>&1; then
+    libdir="$(ftctl_dr_vddk_resolve_libdir "${credentials_file}" 2>/dev/null || true)"
+  else
+    libdir="$(ftctl_vmware_mover_json_value "${credentials_file}" '.credentials.source.vddkLibdir // .credentials.source.libdir' '')"
+  fi
 
   [[ -n "${password}" ]] || ftctl_vmware_mover_die 65 "source credential password is empty"
+  [[ -n "${libdir}" ]] || ftctl_vmware_mover_die 70 "DR_VDDK_LIBDIR_UNRESOLVED: usable VDDK library directory was not found"
+  if command -v ftctl_dr_vddk_nbdkit_loads >/dev/null 2>&1 && ! ftctl_dr_vddk_nbdkit_loads "${libdir}"; then
+    ftctl_vmware_mover_die 71 "DR_VDDK_LIBRARY_LOAD_FAILED: nbdkit cannot load VDDK library directory ${libdir}"
+  fi
   mkdir -p "${FTCTL_DR_VMWARE_MOVER_LOG_DIR}"
   password_file="$(mktemp -p "${FTCTL_DR_VMWARE_MOVER_LOG_DIR}" vmware-password.XXXXXX)"
   chmod 0600 "${password_file}"
