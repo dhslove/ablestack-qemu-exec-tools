@@ -126,3 +126,32 @@ Add selftests:
 | Probe | failure appears during convert | `qemu-img info --image-opts` validates before convert |
 | Error | generic `DR_VMWARE_MOVER_FAILED` | specific `DR_VMWARE_MOVER_SOURCE_GRAPH_INVALID` |
 | Target | existing RBD URI path | unchanged |
+
+## 7. Follow-up: VDDK Connect Contract
+
+The raw-over-NBD source graph is now valid, but a later VMware-to-ABLESTACK run
+failed with:
+
+```text
+VixDiskLib_ConnectEx: One of the parameters was invalid
+```
+
+That failure must not remain collapsed into the graph error. It indicates that
+VDDK rejected source connection parameters, such as vCenter endpoint, VM MoRef,
+disk path, snapshot reference, or credential data.
+
+The follow-up design is:
+
+```text
+433-ftctl-dr-vmware-vddk-connect-contract-design-20260708.md
+```
+
+Error code separation:
+
+| Exit | Error code | Meaning |
+| --- | --- | --- |
+| 72 | `DR_VMWARE_MOVER_SOURCE_GRAPH_INVALID` | QEMU source graph/probe is invalid |
+| 73 | `DR_VMWARE_VDDK_CONNECT_INVALID` | VDDK rejected connect parameters |
+| 74 | `DR_VMWARE_VDDK_EXPORT_UNAVAILABLE` | VDDK NBD export is unavailable |
+| 75 | `DR_VMWARE_VDDK_SOURCE_LOCKED` | powered-on source VMDK is locked because no run snapshot is used |
+| 76 | `DR_VMWARE_VDDK_OPEN_DENIED` | VDDK cannot open the requested VMDK path |

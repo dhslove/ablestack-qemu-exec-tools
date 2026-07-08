@@ -257,3 +257,35 @@ Required qemu/FTCTL contract extension:
 The paired Cloud-side design is documented in
 `docs/ftctl/538-cross-hypervisor-dr-vmware-to-kvm-disk-size-and-projection-hardening-design-20260707.md`
 in the `ablestack-cloud` repository.
+
+## 2026-07-07 VMware VDDK libdir preflight follow-up
+
+The later VMware to ABLESTACK validation used plan
+`8037c34e-5a50-4f4c-bc4e-16dfd54f00d1`. The target disk map and RBD target
+path were correct, but nbdkit failed because no effective VDDK libdir reached
+the mover:
+
+- `error_code=DR_VMWARE_NBDKIT_FAILED`
+- `worker_exit_code=69`
+- nbdkit attempted `/usr/lib64/vmware-vix-disklib`
+- usable ABLESTACK VDDK assets existed under
+  `/usr/share/ablestack/v2k/compat/*/vddk`
+
+Required qemu/FTCTL contract extension:
+
+1. Add a reusable VDDK libdir resolver for FTCTL DR.
+2. Resolve candidates from runtime credential, environment, profile.d,
+   `/opt/vmware-vix-disklib-distrib`, and ABLESTACK compat paths.
+3. Validate candidates with `nbdkit --dump-plugin vddk libdir=<path>`.
+4. Pass explicit `libdir=<resolved>` to `dr_vmware_mover.sh` nbdkit calls.
+5. Split errors into `DR_VDDK_LIBDIR_UNRESOLVED`,
+   `DR_VDDK_LIBRARY_LOAD_FAILED`, and `DR_VMWARE_NBDKIT_FAILED`.
+6. Run VMware data-plane preflight before ABLESTACK target storage
+   preparation.
+
+Detailed qemu/FTCTL design:
+`docs/ftctl/431-ftctl-dr-vmware-vddk-libdir-resolution-design-20260707.md`.
+
+The paired Cloud-side full-stack design is documented in
+`docs/ftctl/543-cross-hypervisor-dr-vddk-libdir-resolution-and-preflight-design-20260707.md`
+in the `ablestack-cloud` repository.

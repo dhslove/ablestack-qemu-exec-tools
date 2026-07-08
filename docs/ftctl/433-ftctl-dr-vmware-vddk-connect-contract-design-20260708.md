@@ -1075,3 +1075,199 @@ The validated preflight design is now reflected in the ftctl runtime path.
 No ftctl DB or profile schema change is required. The runtime contract remains:
 Cloud writes secrets to the runtime credential file, Agent preserves the path,
 and ftctl emits only redacted operational evidence.
+
+## 20. Live Source-Open Regression - 2026-07-08
+
+The next live plan confirmed that the CBT and credential loading fixes are not
+enough to declare the VMware-to-KVM sync path ready.
+
+Observed plan:
+
+| Item | Value |
+| --- | --- |
+| Plan UUID | `9e0aaaae-5d0f-4f12-9edf-49ad94f96056` |
+| Run UUID | `ed5519bb-0d77-4580-92af-f833346cd456` |
+| Worker host | `10.10.32.1` |
+| Direction | `VMWARE_TO_KVM` |
+| Source VM ref | `vm-4486` |
+| Source disk | `[3...-local-disk] test1/test1.vmdk` |
+| CBT status | enabled, disk resolved as `scsi0:0` |
+| Runtime state | `ERROR` |
+| Runtime step | `scheduler-failed` |
+| Worker exit | `72` |
+| Current error | `DR_VMWARE_MOVER_SOURCE_GRAPH_INVALID` |
+
+The runtime preflight was repeated manually on `10.10.32.1` with read-only
+`nbdkit vddk` and `qemu-img info --image-opts`. No conversion or target write
+was executed.
+
+| Probe | Result | Conclusion |
+| --- | --- | --- |
+| Current endpoint | endpoint is already host-shaped, `10.10.21.10` | endpoint URL normalization is not the current root cause |
+| Normalized endpoint | same `VixDiskLib_ConnectEx` failure | normalization is still useful but insufficient |
+| `vm` omitted | nbdkit fails: `missing parameter: vm` | source VM MoRef is mandatory |
+| `vm=moref=vm-4486`, `single-link=true` | `VixDiskLib_ConnectEx: One of the parameters was invalid` | VDDK rejects the current source-open contract |
+| `vm=moref=vm-4486`, no `single-link` | same failure | `single-link` is not the deciding factor |
+| `vm=vm-4486` | same failure | plain VM value does not fix the contract |
+
+This proves the next change must move from syntactic source graph validation to
+an explicit VDDK source-open contract. The engine must not wait until
+`qemu-img convert` to discover this; it must create or resolve the required
+snapshot view, verify source open with `qemu-img info`, and only then start any
+target write.
+
+## 21. Source-Open Preflight Code Design
+
+### 21.1 Mover parameter model
+
+Extend `ftctl_vmware_mover_convert_disk()` in
+`lib/ftctl/dr_vmware_mover.sh` so the caller can pass a snapshot reference and
+the base VMDK path resolved from VMware inventory.
+
+Target signature:
+
+```bash
+ftctl_vmware_mover_convert_disk() {
+  local source_vmdk="${1-}" source_vm_ref="${2-}" source_snapshot_ref="${3-}"
+  local target_uri="${4-}" target_format="${5-}" label="${6-}"
+  local endpoint="${7-}" username="${8-}" password_file="${9-}"
+  local tls_verify="${10-}" thumbprint="${11-}" libdir="${12-}"
+}
+```
+
+Rules:
+
+- `source_vmdk` must be the base backing VMDK path from vCenter inventory, not a
+  delta path created after the run snapshot.
+- `source_vm_ref` is required for remote VDDK opens.
+- `source_snapshot_ref` is required for powered-on source VM base transfer.
+- Endpoint normalization still runs before nbdkit, but a host-shaped endpoint
+  does not make the source-open contract complete.
+- All path values must be read from UTF-8 JSON or vCenter output; do not rebuild
+  datastore paths through locale-dependent shell transformations.
+
+### 21.2 Snapshot gate
+
+Add a pre-mover gate in `lib/ftctl/dr_vmware.sh`:
+
+```bash
+ftctl_dr_vmware_require_source_snapshot_for_open() {
+  local vm_power_state="${1-}" snapshot_ref="${2-}"
+  if [[ "${vm_power_state}" == "poweredOn" && -z "${snapshot_ref}" ]]; then
+    ftctl_dr_runtime_error 75 \
+      "DR_VMWARE_VDDK_SOURCE_LOCKED: source snapshot is required for powered-on VMware disk open"
+    return 75
+  fi
+}
+```
+
+The power-state reader must tolerate govc JSON schema differences by checking
+both upper-case and lower-case property paths, for example:
+
+```python
+power = first_str(
+    nested(vm, "Runtime", "PowerState"),
+    nested(vm, "runtime", "powerState"),
+    nested(vm, "summary", "runtime", "powerState"),
+)
+```
+
+### 21.3 Bounded source-open preflight
+
+Add a reusable mover helper:
+
+```bash
+ftctl_vmware_mover_probe_source_open() {
+  local socket_path="${1-}" label="${2-}" nbdkit_log="${3-}" qemu_log="${4-}"
+  local source_opts
+  source_opts="$(ftctl_vmware_mover_source_image_opts "${socket_path}")"
+  if ! timeout "${FTCTL_DR_VMWARE_QEMU_INFO_TIMEOUT:-20}" \
+      qemu-img info --force-share --image-opts "${source_opts}" \
+      >/dev/null 2>"${qemu_log}"; then
+    ftctl_vmware_mover_classify_source_open_failure \
+      "${label}" "${nbdkit_log}" "${qemu_log}"
+  fi
+}
+```
+
+Wrap the whole source-open probe with a wall-time guard in the caller:
+
+```bash
+timeout "${FTCTL_DR_VMWARE_SOURCE_OPEN_TIMEOUT:-60}" \
+  ftctl_vmware_mover_convert_disk ...
+```
+
+The live manual test showed that a shell/SSH-side hang is possible if the probe
+is not bounded end-to-end. Both `nbdkit` and `qemu-img` must be cleaned up
+through a trap.
+
+### 21.4 Error classifier
+
+The classifier must preserve specific operator meaning:
+
+```bash
+if grep -qi 'VixDiskLib_ConnectEx' <<< "${combined}"; then
+  ftctl_vmware_mover_die 73 \
+    "DR_VMWARE_VDDK_CONNECT_INVALID: VDDK rejected source connection parameters for ${label}"
+fi
+if grep -qi 'Requested export not available' <<< "${combined}"; then
+  ftctl_vmware_mover_die 74 \
+    "DR_VMWARE_VDDK_EXPORT_UNAVAILABLE: VDDK NBD export is unavailable for ${label}"
+fi
+if grep -qi 'DiskLib error 16392\|Failed to lock the file' <<< "${combined}"; then
+  ftctl_vmware_mover_die 75 \
+    "DR_VMWARE_VDDK_SOURCE_LOCKED: source VMDK is locked; create/use a run snapshot"
+fi
+if grep -qi 'access rights to this file\|Permission denied' <<< "${combined}"; then
+  ftctl_vmware_mover_die 76 \
+    "DR_VMWARE_VDDK_OPEN_DENIED: VDDK cannot open the requested VMDK path"
+fi
+```
+
+Order matters: if VDDK reports both `ConnectEx` and export unavailable, the
+primary code is `DR_VMWARE_VDDK_CONNECT_INVALID`; export unavailable is retained
+as secondary evidence in the sanitized log.
+
+## 22. Updated Layer Scope
+
+| Layer | Required change |
+| --- | --- |
+| FTCTL | Add snapshot-aware source-open preflight, wall-time timeout, cleanup trap, endpoint normalization, and VDDK-specific error classification. |
+| Agent | No new command. Preserve stdout/stderr and final JSON, but do not interpret VDDK error text. |
+| Cloud/API | No qemu-side schema change. Cloud must pass run snapshot policy and source identity; detailed API response hardening is covered in the Cloud companion design. |
+| DB | No qemu DB. Runtime JSON gains redacted `source_open` and `source_snapshot` fields. |
+
+Recommended runtime status extension:
+
+```json
+{
+  "source_open": {
+    "checked": true,
+    "ready": false,
+    "error_code": "DR_VMWARE_VDDK_CONNECT_INVALID",
+    "vmRef": "vm-4486",
+    "snapshotRefPresent": false,
+    "sourceVmdkPathPresent": true
+  }
+}
+```
+
+## 23. Current Error Cause And AS-IS / TO-BE
+
+Current root cause:
+
+```text
+The plan reached ftctl and CBT was ready, but the VMware mover tried to open
+the selected VMDK through VDDK without a complete snapshot-aware source-open
+contract. VDDK rejected the ConnectEx parameters. The engine mapped that to the
+older generic source graph error, hiding the real recovery direction.
+```
+
+| Area | AS-IS | TO-BE |
+| --- | --- | --- |
+| Source-open validation | `qemu-img info` runs after nbdkit starts, but all failures collapse to source graph invalid | Source-open preflight classifies VDDK connect/export/lock/open-denied failures before conversion |
+| Snapshot | Snapshot reference is not enforced for powered-on source open | FTCTL creates/resolves a run snapshot and passes `snapshot=<MoRef>` to nbdkit |
+| Endpoint | Endpoint is passed as-is | Endpoint is normalized, but source-open readiness does not rely on endpoint normalization alone |
+| Timeout | qemu probe has a timeout, but the whole preflight path can still hang around SSH/shell/process cleanup | Entire source-open probe is wall-time bounded and cleans nbdkit/qemu/temp files through trap |
+| Error code | `VixDiskLib_ConnectEx` appears as `DR_VMWARE_MOVER_SOURCE_GRAPH_INVALID` | `VixDiskLib_ConnectEx` maps to `DR_VMWARE_VDDK_CONNECT_INVALID` with sanitized evidence |
+| Runtime status | No structured source-open object | `source_open` and `source_snapshot` are exposed in redacted status JSON |

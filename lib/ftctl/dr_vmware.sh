@@ -58,6 +58,11 @@ ftctl_dr_vmware_cbt_status_path() {
   printf '%s/vmware-cbt.json\n' "$(ftctl_dr_runtime_plan_dir "${plan}")"
 }
 
+ftctl_dr_vmware_source_open_status_path() {
+  local plan="${1-}"
+  printf '%s/vmware-source-open.json\n' "$(ftctl_dr_runtime_plan_dir "${plan}")"
+}
+
 ftctl_dr_vmware_manifest_dir() {
   local plan="${1-}"
   printf '%s/manifests\n' "$(ftctl_dr_runtime_plan_dir "${plan}")"
@@ -1079,7 +1084,7 @@ PY
 
 ftctl_dr_vmware_replication_cycle() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" sequence="${4-}" cycle_type="${5-}"
-  local disk_map target_disk_map capability_path manifest_path checkpoint_path cycle_run now mover_path mover_rc=0
+  local disk_map target_disk_map capability_path manifest_path checkpoint_path source_open_status_path cycle_run now mover_path mover_rc=0
   local credentials_file=""
   local source_epoch target_epoch rpo="0"
 
@@ -1089,6 +1094,7 @@ ftctl_dr_vmware_replication_cycle() {
   capability_path="$(ftctl_dr_vmware_capability_path "${plan}")"
   manifest_path="$(ftctl_dr_vmware_manifest_path "${plan}" "${cycle_run}")"
   checkpoint_path="$(ftctl_dr_vmware_checkpoint_path "${plan}" "${cycle_run}")"
+  source_open_status_path="$(ftctl_dr_vmware_source_open_status_path "${plan}")"
   [[ -f "${disk_map}" ]] || ftctl_dr_vmware_canonicalize_profile "${profile_file}" "${disk_map}" || return $?
   target_disk_map="$(ftctl_dr_ablestack_disk_map_path "${plan}" 2>/dev/null || true)"
   [[ -f "${capability_path}" ]] || ftctl_dr_vmware_write_capability "${capability_path}" || return $?
@@ -1105,6 +1111,7 @@ ftctl_dr_vmware_replication_cycle() {
     FTCTL_DR_CAPABILITY="${capability_path}" \
     FTCTL_DR_MANIFEST="${manifest_path}" \
     FTCTL_DR_CHECKPOINT="${checkpoint_path}" \
+    FTCTL_DR_SOURCE_OPEN_STATUS_PATH="${source_open_status_path}" \
     FTCTL_DR_CREDENTIALS_FILE="$([[ -f "${credentials_file}" ]] && printf '%s' "${credentials_file}")" \
       "${mover_path}" || mover_rc=$?
     [[ "${mover_rc}" == "0" ]] || return "${mover_rc}"
@@ -1131,7 +1138,7 @@ ftctl_dr_vmware_replication_cycle() {
 
 ftctl_dr_vmware_sync_start() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" state_path="${4-}" wait_value="${5-}"
-  local disk_map capability_path cbt_status_path manifest_path checkpoint_path count now vddk_ready mover_ready qemu_img_ready missing_code target_provider disk_map_role
+  local disk_map capability_path cbt_status_path source_open_status_path manifest_path checkpoint_path count now vddk_ready mover_ready qemu_img_ready missing_code target_provider disk_map_role
   local cbt_rc cbt_error
   : "${wait_value}"
 
@@ -1150,6 +1157,7 @@ ftctl_dr_vmware_sync_start() {
   fi
   capability_path="$(ftctl_dr_vmware_capability_path "${plan}")"
   cbt_status_path="$(ftctl_dr_vmware_cbt_status_path "${plan}")"
+  source_open_status_path="$(ftctl_dr_vmware_source_open_status_path "${plan}")"
   manifest_path="$(ftctl_dr_vmware_manifest_path "${plan}" "${run}")"
   checkpoint_path="$(ftctl_dr_vmware_checkpoint_path "${plan}" "${run}")"
 
@@ -1176,6 +1184,7 @@ ftctl_dr_vmware_sync_start() {
       "disk_map_path=${disk_map}" \
       "source_disk_map_path=${disk_map}" \
       "disk_map_role=${disk_map_role}" \
+      "source_open_status_path=${source_open_status_path}" \
       "manifest_path=${manifest_path}" \
       "checkpoint_path=${checkpoint_path}" \
       "updated_at=${now}"
@@ -1199,6 +1208,7 @@ ftctl_dr_vmware_sync_start() {
       "disk_map_path=${disk_map}" \
       "source_disk_map_path=${disk_map}" \
       "disk_map_role=${disk_map_role}" \
+      "source_open_status_path=${source_open_status_path}" \
       "manifest_path=${manifest_path}" \
       "checkpoint_path=${checkpoint_path}" \
       "updated_at=${now}"
@@ -1226,6 +1236,7 @@ ftctl_dr_vmware_sync_start() {
       "source_disk_map_path=${disk_map}" \
       "disk_map_role=${disk_map_role}" \
       "cbt_status_path=${cbt_status_path}" \
+      "source_open_status_path=${source_open_status_path}" \
       "manifest_path=${manifest_path}" \
       "checkpoint_path=${checkpoint_path}" \
       "updated_at=${now}"
@@ -1247,6 +1258,7 @@ ftctl_dr_vmware_sync_start() {
     "source_disk_map_path=${disk_map}" \
     "disk_map_role=${disk_map_role}" \
     "cbt_status_path=${cbt_status_path}" \
+    "source_open_status_path=${source_open_status_path}" \
     "manifest_path=${manifest_path}" \
     "checkpoint_path=${checkpoint_path}" \
     "last_source_checkpoint_at=${now}" \
