@@ -21,6 +21,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 LIB_BASE=""
+SELFTEST_INSTALLED_CLI=""
 
 selftest_die_load() {
   printf '[SELFTEST][FAIL] %s\n' "$*" >&2
@@ -45,6 +46,15 @@ selftest_resolve_lib_base() {
 }
 
 selftest_resolve_lib_base
+
+if [[ ! -f "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" ]]; then
+  if SELFTEST_INSTALLED_CLI="$(command -v ablestack_vm_ftctl 2>/dev/null)" \
+      && [[ -x "${SELFTEST_INSTALLED_CLI}" ]]; then
+    :
+  else
+    SELFTEST_INSTALLED_CLI=""
+  fi
+fi
 
 # shellcheck source=/dev/null
 source "${LIB_BASE}/ftctl/common.sh"
@@ -89,9 +99,23 @@ source "${LIB_BASE}/ftctl/verify.sh"
 # shellcheck source=/dev/null
 source "${LIB_BASE}/ftctl/orchestrator.sh"
 
-SELFTEST_ROOT_DEFAULT="${ROOT_DIR}/build/ftctl_selftest"
+if [[ -n "${SELFTEST_INSTALLED_CLI}" ]]; then
+  SELFTEST_ROOT_DEFAULT="${TMPDIR:-/tmp}/ftctl_selftest"
+else
+  SELFTEST_ROOT_DEFAULT="${ROOT_DIR}/build/ftctl_selftest"
+fi
 SELFTEST_ROOT="${FTCTL_SELFTEST_ROOT:-${SELFTEST_ROOT_DEFAULT}}"
 SELFTEST_CONFIG="${SELFTEST_ROOT}/ftctl-test.conf"
+
+if [[ -n "${SELFTEST_INSTALLED_CLI}" ]]; then
+  ROOT_DIR="${SELFTEST_ROOT}/installed-root"
+  mkdir -p "${ROOT_DIR}/bin"
+  cat > "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" <<EOF
+#!/usr/bin/env bash
+exec "${SELFTEST_INSTALLED_CLI}" "\$@"
+EOF
+  chmod 0755 "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh"
+fi
 
 selftest_info() {
   printf '[SELFTEST] %s\n' "$*"
