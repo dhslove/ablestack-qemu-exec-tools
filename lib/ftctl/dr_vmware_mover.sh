@@ -27,6 +27,11 @@ FTCTL_DR_VMWARE_MOVER_LOG_DIR="${FTCTL_DR_VMWARE_MOVER_LOG_DIR:-/run/ablestack-v
 FTCTL_DR_VMWARE_NBDKIT_READY_TIMEOUT="${FTCTL_DR_VMWARE_NBDKIT_READY_TIMEOUT:-20}"
 FTCTL_DR_VMWARE_QEMU_INFO_TIMEOUT="${FTCTL_DR_VMWARE_QEMU_INFO_TIMEOUT:-20}"
 FTCTL_DR_VMWARE_SOURCE_OPEN_TIMEOUT="${FTCTL_DR_VMWARE_SOURCE_OPEN_TIMEOUT:-60}"
+FTCTL_DR_VMWARE_LAST_SNAPSHOT_REF=""
+FTCTL_DR_VMWARE_LAST_SNAPSHOT_RESOLVE_METHOD=""
+FTCTL_DR_VMWARE_SOURCE_OPEN_TLS_VERIFY=""
+FTCTL_DR_VMWARE_SOURCE_OPEN_THUMBPRINT_PRESENT=""
+FTCTL_DR_VMWARE_SOURCE_OPEN_THUMBPRINT_SOURCE=""
 
 ftctl_vmware_mover_die() {
   local rc="${1:-65}"
@@ -103,6 +108,60 @@ ftctl_vmware_mover_normalize_vcenter_server() {
   endpoint="${endpoint%%/client/api}"
   endpoint="${endpoint%%/}"
   printf '%s\n' "${endpoint}"
+}
+
+ftctl_vmware_mover_endpoint_connect_target() {
+  local endpoint="${1-}"
+  endpoint="$(ftctl_vmware_mover_normalize_vcenter_server "${endpoint}")"
+  endpoint="${endpoint%%/*}"
+  if [[ "${endpoint}" == *:* ]]; then
+    printf '%s\n' "${endpoint}"
+  else
+    printf '%s:443\n' "${endpoint}"
+  fi
+}
+
+ftctl_vmware_mover_fetch_vcenter_thumbprint() {
+  local endpoint="${1-}" connect_target fingerprint
+  connect_target="$(ftctl_vmware_mover_endpoint_connect_target "${endpoint}")"
+  [[ -n "${connect_target}" ]] || return 1
+  if command -v timeout >/dev/null 2>&1; then
+    fingerprint="$(timeout 15 openssl s_client -connect "${connect_target}" </dev/null 2>/dev/null \
+      | openssl x509 -fingerprint -sha1 -noout 2>/dev/null \
+      | sed -n 's/^.*Fingerprint=//Ip' \
+      | head -n 1 \
+      | tr '[:lower:]' '[:upper:]')" || true
+  else
+    fingerprint="$(openssl s_client -connect "${connect_target}" </dev/null 2>/dev/null \
+      | openssl x509 -fingerprint -sha1 -noout 2>/dev/null \
+      | sed -n 's/^.*Fingerprint=//Ip' \
+      | head -n 1 \
+      | tr '[:lower:]' '[:upper:]')" || true
+  fi
+  [[ -n "${fingerprint}" ]] || return 1
+  printf '%s\n' "${fingerprint}"
+}
+
+ftctl_vmware_mover_resolve_thumbprint() {
+  local endpoint="${1-}" tls_verify="${2-}" configured="${3-}" fetched
+  FTCTL_DR_VMWARE_SOURCE_OPEN_TLS_VERIFY="${tls_verify}"
+  FTCTL_DR_VMWARE_SOURCE_OPEN_THUMBPRINT_PRESENT="false"
+  FTCTL_DR_VMWARE_SOURCE_OPEN_THUMBPRINT_SOURCE="missing"
+  [[ "${tls_verify}" == "true" ]] && {
+    FTCTL_DR_VMWARE_SOURCE_OPEN_THUMBPRINT_SOURCE="tls-verify"
+    return 0
+  }
+  if [[ -n "${configured}" ]]; then
+    FTCTL_DR_VMWARE_SOURCE_OPEN_THUMBPRINT_PRESENT="true"
+    FTCTL_DR_VMWARE_SOURCE_OPEN_THUMBPRINT_SOURCE="runtime"
+    printf '%s\n' "${configured}"
+    return 0
+  fi
+  fetched="$(ftctl_vmware_mover_fetch_vcenter_thumbprint "${endpoint}" || true)"
+  [[ -n "${fetched}" ]] || return 1
+  FTCTL_DR_VMWARE_SOURCE_OPEN_THUMBPRINT_PRESENT="true"
+  FTCTL_DR_VMWARE_SOURCE_OPEN_THUMBPRINT_SOURCE="host-auto"
+  printf '%s\n' "${fetched}"
 }
 
 ftctl_vmware_mover_govc_url() {
@@ -249,14 +308,15 @@ ftctl_vmware_mover_wait_for_socket() {
 
 ftctl_vmware_mover_write_source_open_status() {
   local path="${FTCTL_DR_SOURCE_OPEN_STATUS_PATH:-}" ready="${1-}" error_code="${2-}" message="${3-}" vm_ref="${4-}" snapshot_ref="${5-}" source_vmdk="${6-}"
+  local tls_verify="${FTCTL_DR_VMWARE_SOURCE_OPEN_TLS_VERIFY:-}" thumbprint_present="${FTCTL_DR_VMWARE_SOURCE_OPEN_THUMBPRINT_PRESENT:-}" thumbprint_source="${FTCTL_DR_VMWARE_SOURCE_OPEN_THUMBPRINT_SOURCE:-}"
   [[ -n "${path}" ]] || return 0
   mkdir -p "$(dirname "${path}")"
-  python3 - "${path}" "${ready}" "${error_code}" "${message}" "${vm_ref}" "${snapshot_ref}" "${source_vmdk}" <<'PY'
+  python3 - "${path}" "${ready}" "${error_code}" "${message}" "${vm_ref}" "${snapshot_ref}" "${source_vmdk}" "${tls_verify}" "${thumbprint_present}" "${thumbprint_source}" <<'PY'
 import json
 import os
 import sys
 
-path, ready, error_code, message, vm_ref, snapshot_ref, source_vmdk = sys.argv[1:8]
+path, ready, error_code, message, vm_ref, snapshot_ref, source_vmdk, tls_verify, thumbprint_present, thumbprint_source = sys.argv[1:11]
 data = {
     "checked": True,
     "ready": str(ready).lower() == "true",
@@ -265,6 +325,45 @@ data = {
     "vmRef": vm_ref,
     "snapshotRefPresent": bool(snapshot_ref),
     "sourceVmdkPathPresent": bool(source_vmdk),
+}
+if tls_verify:
+    data["tlsVerify"] = str(tls_verify).lower() == "true"
+if thumbprint_present:
+    data["thumbprintPresent"] = str(thumbprint_present).lower() == "true"
+if thumbprint_source:
+    data["thumbprintSource"] = thumbprint_source
+tmp = path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as fh:
+    json.dump(data, fh, sort_keys=True, separators=(",", ":"))
+    fh.write("\n")
+os.replace(tmp, path)
+PY
+}
+
+ftctl_vmware_mover_write_source_snapshot_status() {
+  local path="${FTCTL_DR_SOURCE_SNAPSHOT_STATUS_PATH:-}" ready="${1-}" error_code="${2-}" message="${3-}" vm_ref="${4-}" snapshot_name="${5-}" snapshot_ref="${6-}" created="${7-}" cleanup_required="${8-}" resolve_method="${9-}"
+  [[ -n "${path}" ]] || return 0
+  mkdir -p "$(dirname "${path}")"
+  python3 - "${path}" "${ready}" "${error_code}" "${message}" "${vm_ref}" "${snapshot_name}" "${snapshot_ref}" "${created}" "${cleanup_required}" "${resolve_method}" <<'PY'
+import json
+import os
+import sys
+import time
+
+path, ready, error_code, message, vm_ref, snapshot_name, snapshot_ref, created, cleanup_required, resolve_method = sys.argv[1:11]
+data = {
+    "checked": True,
+    "ready": str(ready).lower() == "true",
+    "created": str(created).lower() == "true",
+    "cleanupRequired": str(cleanup_required).lower() == "true",
+    "error_code": error_code,
+    "message": message,
+    "vmRef": vm_ref,
+    "snapshotName": snapshot_name,
+    "snapshotRefPresent": bool(snapshot_ref),
+    "snapshotRef": snapshot_ref,
+    "resolveMethod": resolve_method,
+    "checkedAtEpochMs": int(time.time() * 1000),
 }
 tmp = path + ".tmp"
 with open(tmp, "w", encoding="utf-8") as fh:
@@ -284,6 +383,7 @@ ftctl_vmware_mover_convert_disk() {
   [[ -n "${endpoint}" ]] || ftctl_vmware_mover_die 65 "vCenter endpoint is empty"
   [[ -n "${username}" ]] || ftctl_vmware_mover_die 65 "vCenter username is empty"
   [[ -s "${password_file}" ]] || ftctl_vmware_mover_die 65 "vCenter password file is empty"
+  FTCTL_DR_VMWARE_SOURCE_OPEN_TLS_VERIFY="${tls_verify}"
   [[ -n "${source_vm_ref}" ]] || ftctl_vmware_mover_source_open_die 73 "DR_VMWARE_VDDK_CONNECT_INVALID" "source VM reference is empty for ${label}" "${source_vm_ref}" "${source_snapshot_ref}" "${source_vmdk}"
 
   if [[ "${FTCTL_DR_VMWARE_MOVER_DRY_RUN:-0}" == "1" ]]; then
@@ -298,6 +398,17 @@ ftctl_vmware_mover_convert_disk() {
   nbdkit_log="${FTCTL_DR_VMWARE_MOVER_LOG_DIR}/nbdkit-${safe_label}.log"
   qemu_info_log="${FTCTL_DR_VMWARE_MOVER_LOG_DIR}/qemu-img-info-${safe_label}.log"
   transports="${FTCTL_DR_VMWARE_VDDK_TRANSPORTS:-nbd:nbdssl}"
+  if [[ "${tls_verify}" != "true" ]]; then
+    thumbprint="$(ftctl_vmware_mover_resolve_thumbprint "${endpoint}" "${tls_verify}" "${thumbprint}" || true)"
+    if [[ -z "${thumbprint}" ]]; then
+      ftctl_vmware_mover_source_open_die 77 "DR_VMWARE_VDDK_THUMBPRINT_UNRESOLVED" \
+        "VDDK requires the vCenter thumbprint when TLS verification is disabled for ${label}" \
+        "${source_vm_ref}" "${source_snapshot_ref}" "${source_vmdk}"
+    fi
+  else
+    FTCTL_DR_VMWARE_SOURCE_OPEN_THUMBPRINT_PRESENT="$([[ -n "${thumbprint}" ]] && printf 'true' || printf 'false')"
+    FTCTL_DR_VMWARE_SOURCE_OPEN_THUMBPRINT_SOURCE="tls-verify"
+  fi
   local nbdkit_args=(
     --exit-with-parent
     --foreground
@@ -396,26 +507,83 @@ sys.exit(1)
 PY
 }
 
+ftctl_vmware_mover_snapshot_ref_from_object_collect() {
+  ftctl_vmware_mover_snapshot_ref_from_tree "$@"
+}
+
+ftctl_vmware_mover_resolve_run_snapshot_ref() {
+  local govc_bin="${1-}" endpoint="${2-}" username="${3-}" password_file="${4-}" tls_verify="${5-}" source_vm_ref="${6-}" snapshot_name="${7-}"
+  local object_collect_json snapshot_tree snapshot_ref
+
+  FTCTL_DR_VMWARE_LAST_SNAPSHOT_REF=""
+  FTCTL_DR_VMWARE_LAST_SNAPSHOT_RESOLVE_METHOD=""
+  [[ -x "${govc_bin}" && -n "${source_vm_ref}" && -n "${snapshot_name}" && -s "${password_file}" ]] || return 1
+
+  object_collect_json="$(mktemp -p "${FTCTL_DR_VMWARE_MOVER_LOG_DIR}" vmware-snapshot-object-collect.XXXXXX.json)"
+  if GOVC_URL="$(ftctl_vmware_mover_govc_url "${endpoint}")" \
+    GOVC_USERNAME="${username}" \
+    GOVC_PASSWORD="$(cat "${password_file}")" \
+    GOVC_INSECURE="$([[ "${tls_verify}" == "true" ]] && printf 'false' || printf 'true')" \
+      "${govc_bin}" object.collect -json "${source_vm_ref}" snapshot.rootSnapshotList > "${object_collect_json}" 2>/dev/null; then
+    snapshot_ref="$(ftctl_vmware_mover_snapshot_ref_from_object_collect "${object_collect_json}" "${snapshot_name}" || true)"
+    if [[ -n "${snapshot_ref}" ]]; then
+      FTCTL_DR_VMWARE_LAST_SNAPSHOT_REF="${snapshot_ref}"
+      FTCTL_DR_VMWARE_LAST_SNAPSHOT_RESOLVE_METHOD="object.collect:snapshot.rootSnapshotList"
+      rm -f "${object_collect_json}"
+      return 0
+    fi
+  fi
+  rm -f "${object_collect_json}"
+
+  snapshot_tree="$(mktemp -p "${FTCTL_DR_VMWARE_MOVER_LOG_DIR}" vmware-snapshot-tree.XXXXXX.json)"
+  if GOVC_URL="$(ftctl_vmware_mover_govc_url "${endpoint}")" \
+    GOVC_USERNAME="${username}" \
+    GOVC_PASSWORD="$(cat "${password_file}")" \
+    GOVC_INSECURE="$([[ "${tls_verify}" == "true" ]] && printf 'false' || printf 'true')" \
+      "${govc_bin}" snapshot.tree -vm "${source_vm_ref}" -json > "${snapshot_tree}" 2>/dev/null; then
+    snapshot_ref="$(ftctl_vmware_mover_snapshot_ref_from_tree "${snapshot_tree}" "${snapshot_name}" || true)"
+    if [[ -n "${snapshot_ref}" ]]; then
+      FTCTL_DR_VMWARE_LAST_SNAPSHOT_REF="${snapshot_ref}"
+      FTCTL_DR_VMWARE_LAST_SNAPSHOT_RESOLVE_METHOD="snapshot.tree"
+      rm -f "${snapshot_tree}"
+      return 0
+    fi
+  fi
+  rm -f "${snapshot_tree}"
+  return 1
+}
+
 ftctl_vmware_mover_create_run_snapshot() {
   local govc_bin="${1-}" endpoint="${2-}" username="${3-}" password_file="${4-}" tls_verify="${5-}" source_vm_ref="${6-}" snapshot_name="${7-}"
-  local snapshot_tree snapshot_ref
-  [[ -x "${govc_bin}" ]] || return 1
-  [[ -n "${source_vm_ref}" && -n "${snapshot_name}" ]] || return 1
-  snapshot_tree="$(mktemp -p "${FTCTL_DR_VMWARE_MOVER_LOG_DIR}" vmware-snapshot-tree.XXXXXX.json)"
-  GOVC_URL="$(ftctl_vmware_mover_govc_url "${endpoint}")" \
-  GOVC_USERNAME="${username}" \
-  GOVC_PASSWORD="$(cat "${password_file}")" \
-  GOVC_INSECURE="$([[ "${tls_verify}" == "true" ]] && printf 'false' || printf 'true')" \
-    "${govc_bin}" snapshot.create -vm "${source_vm_ref}" -m=false -q=false "${snapshot_name}" >/dev/null
-  GOVC_URL="$(ftctl_vmware_mover_govc_url "${endpoint}")" \
-  GOVC_USERNAME="${username}" \
-  GOVC_PASSWORD="$(cat "${password_file}")" \
-  GOVC_INSECURE="$([[ "${tls_verify}" == "true" ]] && printf 'false' || printf 'true')" \
-    "${govc_bin}" snapshot.tree -vm "${source_vm_ref}" -json > "${snapshot_tree}"
-  snapshot_ref="$(ftctl_vmware_mover_snapshot_ref_from_tree "${snapshot_tree}" "${snapshot_name}" || true)"
-  rm -f "${snapshot_tree}"
-  [[ -n "${snapshot_ref}" ]] || return 1
-  printf '%s\n' "${snapshot_ref}"
+  [[ -x "${govc_bin}" ]] || return 73
+  [[ -n "${source_vm_ref}" && -n "${snapshot_name}" ]] || return 73
+  if ! GOVC_URL="$(ftctl_vmware_mover_govc_url "${endpoint}")" \
+    GOVC_USERNAME="${username}" \
+    GOVC_PASSWORD="$(cat "${password_file}")" \
+    GOVC_INSECURE="$([[ "${tls_verify}" == "true" ]] && printf 'false' || printf 'true')" \
+      "${govc_bin}" snapshot.create -vm "${source_vm_ref}" -m=false -q=false "${snapshot_name}" >/dev/null; then
+    ftctl_vmware_mover_write_source_snapshot_status false "DR_VMWARE_VDDK_CONNECT_INVALID" \
+      "Failed to create VMware source snapshot" "${source_vm_ref}" "${snapshot_name}" "" false false ""
+    return 73
+  fi
+
+  FTCTL_DR_VMWARE_GOVC_BIN_EFFECTIVE="${govc_bin}"
+  FTCTL_DR_VMWARE_SOURCE_VM_REF_EFFECTIVE="${source_vm_ref}"
+  FTCTL_DR_VMWARE_RUN_SNAPSHOT_NAME="${snapshot_name}"
+  FTCTL_DR_VMWARE_RUN_SNAPSHOT_CREATED="true"
+
+  if ! ftctl_vmware_mover_resolve_run_snapshot_ref "${govc_bin}" "${endpoint}" "${username}" "${password_file}" "${tls_verify}" "${source_vm_ref}" "${snapshot_name}"; then
+    ftctl_vmware_mover_write_source_snapshot_status false "DR_VMWARE_SNAPSHOT_REF_UNRESOLVED" \
+      "VMware source snapshot was created, but its MoRef could not be resolved" \
+      "${source_vm_ref}" "${snapshot_name}" "" true true ""
+    return 81
+  fi
+
+  FTCTL_DR_VMWARE_RUN_SNAPSHOT_REF="${FTCTL_DR_VMWARE_LAST_SNAPSHOT_REF}"
+  ftctl_vmware_mover_write_source_snapshot_status true "" \
+    "VMware source snapshot was created and resolved" \
+    "${source_vm_ref}" "${snapshot_name}" "${FTCTL_DR_VMWARE_LAST_SNAPSHOT_REF}" true false \
+    "${FTCTL_DR_VMWARE_LAST_SNAPSHOT_RESOLVE_METHOD}"
 }
 
 ftctl_vmware_mover_remove_run_snapshot() {
@@ -446,7 +614,7 @@ ftctl_vmware_mover_cleanup() {
 main() {
   local disk_map="${FTCTL_DR_DISK_MAP:-}" target_disk_map="${FTCTL_DR_TARGET_DISK_MAP:-}" credentials_file="${FTCTL_DR_CREDENTIALS_FILE:-}"
   local endpoint username password tls_verify thumbprint libdir plan_json password_file rows row count i
-  local govc_bin source_vm_ref_for_snapshot snapshot_name snapshot_ref snapshot_created="false"
+  local govc_bin source_vm_ref_for_snapshot snapshot_name snapshot_ref snapshot_created="false" mover_rc=0
 
   [[ -n "${disk_map}" && -f "${disk_map}" ]] || ftctl_vmware_mover_die 65 "FTCTL_DR_DISK_MAP is required"
   [[ -n "${credentials_file}" && -f "${credentials_file}" ]] || ftctl_vmware_mover_die 65 "FTCTL_DR_CREDENTIALS_FILE is required"
@@ -492,14 +660,16 @@ main() {
     govc_bin="$(ftctl_vmware_mover_resolve_govc_bin "${credentials_file}" "${libdir}")"
     [[ -n "${govc_bin}" ]] || ftctl_vmware_mover_die 73 "DR_VMWARE_VDDK_CONNECT_INVALID: govc binary is required to create VMware source snapshot"
     snapshot_name="ftctl-dr-${FTCTL_DR_RUN_UUID:-$(date +%s)}-source"
-    snapshot_ref="$(ftctl_vmware_mover_create_run_snapshot "${govc_bin}" "${endpoint}" "${username}" "${password_file}" "${tls_verify}" "${source_vm_ref_for_snapshot}" "${snapshot_name}")" \
-      || ftctl_vmware_mover_die 73 "DR_VMWARE_VDDK_CONNECT_INVALID: failed to create or resolve VMware source snapshot"
+    mover_rc=0
+    ftctl_vmware_mover_create_run_snapshot "${govc_bin}" "${endpoint}" "${username}" "${password_file}" "${tls_verify}" "${source_vm_ref_for_snapshot}" "${snapshot_name}" || mover_rc=$?
+    if [[ "${mover_rc}" != "0" ]]; then
+      if [[ "${mover_rc}" == "81" ]]; then
+        ftctl_vmware_mover_die 81 "DR_VMWARE_SNAPSHOT_REF_UNRESOLVED: VMware source snapshot was created but its MoRef could not be resolved"
+      fi
+      ftctl_vmware_mover_die "${mover_rc:-73}" "DR_VMWARE_VDDK_CONNECT_INVALID: failed to create VMware source snapshot"
+    fi
+    snapshot_ref="${FTCTL_DR_VMWARE_LAST_SNAPSHOT_REF}"
     snapshot_created="true"
-    FTCTL_DR_VMWARE_GOVC_BIN_EFFECTIVE="${govc_bin}"
-    FTCTL_DR_VMWARE_SOURCE_VM_REF_EFFECTIVE="${source_vm_ref_for_snapshot}"
-    FTCTL_DR_VMWARE_RUN_SNAPSHOT_NAME="${snapshot_name}"
-    FTCTL_DR_VMWARE_RUN_SNAPSHOT_REF="${snapshot_ref}"
-    FTCTL_DR_VMWARE_RUN_SNAPSHOT_CREATED="true"
   fi
 
   i=0

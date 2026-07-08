@@ -7814,6 +7814,23 @@ exit 0
 EOF
   chmod +x "${fakebin}/qemu-img"
 
+  cat > "${fakebin}/openssl" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'OPENSSL:%s\n' "$*" >> "${FTCTL_FAKE_CALL_LOG}"
+if [[ "${1-}" == "s_client" ]]; then
+  printf '-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----\n'
+  exit 0
+fi
+if [[ "${1-}" == "x509" ]]; then
+  cat >/dev/null || true
+  printf 'sha1 Fingerprint=AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD\n'
+  exit 0
+fi
+exit 1
+EOF
+  chmod +x "${fakebin}/openssl"
+
   cat > "${credentials}" <<JSON
 {
   "credentials": {
@@ -7855,12 +7872,14 @@ JSON
   FTCTL_DR_TARGET_DISK_MAP="${target_map}" \
   FTCTL_DR_CREDENTIALS_FILE="${credentials}" \
   FTCTL_DR_VMWARE_MOVER_LOG_DIR="${SELFTEST_ROOT}/run/dr-runtime/mover" \
+  FTCTL_DR_VMWARE_CREATE_RUN_SNAPSHOT=0 \
   FTCTL_DR_VMWARE_QEMU_INFO_TIMEOUT=5 \
   PATH="${fakebin}:$PATH" \
     bash "${ROOT_DIR}/lib/ftctl/dr_vmware_mover.sh"
 
   selftest_assert_file_contains "${call_log}" "QEMU_IMG:info --force-share --image-opts driver=raw,file.driver=nbd"
   selftest_assert_file_contains "${call_log}" "QEMU_IMG:convert --force-share -p -n --image-opts -O raw driver=raw,file.driver=nbd"
+  selftest_assert_file_contains "${call_log}" "thumbprint=AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD"
   selftest_assert_file_contains "${call_log}" "rbd:rbd/target-root"
   selftest_assert_file_not_contains "${call_log}" "json:{"
 }

@@ -1436,6 +1436,8 @@ ftctl_dr_runtime_failover_worker() {
         74) error_code="DR_VMWARE_VDDK_EXPORT_UNAVAILABLE" ;;
         75) error_code="DR_VMWARE_VDDK_SOURCE_LOCKED" ;;
         76) error_code="DR_VMWARE_VDDK_OPEN_DENIED" ;;
+        77) error_code="DR_VMWARE_VDDK_THUMBPRINT_UNRESOLVED" ;;
+        81) error_code="DR_VMWARE_SNAPSHOT_REF_UNRESOLVED" ;;
         66) error_code="DR_UNSUPPORTED_DIRECTION" ;;
         *) error_code="DR_FINAL_CHECKPOINT_FAILED" ;;
       esac
@@ -1654,6 +1656,8 @@ ftctl_dr_runtime_failback_worker() {
       74) error_code="DR_VMWARE_VDDK_EXPORT_UNAVAILABLE" ;;
       75) error_code="DR_VMWARE_VDDK_SOURCE_LOCKED" ;;
       76) error_code="DR_VMWARE_VDDK_OPEN_DENIED" ;;
+      77) error_code="DR_VMWARE_VDDK_THUMBPRINT_UNRESOLVED" ;;
+      81) error_code="DR_VMWARE_SNAPSHOT_REF_UNRESOLVED" ;;
       66) error_code="DR_UNSUPPORTED_DIRECTION" ;;
       47) error_code="DR_FAILBACK_REQUIRES_TARGET_ACTIVE" ;;
       *) error_code="DR_FAILBACK_REVERSE_SYNC_FAILED" ;;
@@ -1817,6 +1821,8 @@ ftctl_dr_runtime_reprotect_worker() {
       74) error_code="DR_VMWARE_VDDK_EXPORT_UNAVAILABLE" ;;
       75) error_code="DR_VMWARE_VDDK_SOURCE_LOCKED" ;;
       76) error_code="DR_VMWARE_VDDK_OPEN_DENIED" ;;
+      77) error_code="DR_VMWARE_VDDK_THUMBPRINT_UNRESOLVED" ;;
+      81) error_code="DR_VMWARE_SNAPSHOT_REF_UNRESOLVED" ;;
       66) error_code="DR_UNSUPPORTED_DIRECTION" ;;
       47) error_code="DR_REPROTECT_REQUIRES_TARGET_ACTIVE" ;;
       *) error_code="DR_REPROTECT_REVERSE_SYNC_FAILED" ;;
@@ -1955,7 +1961,7 @@ ftctl_dr_runtime_emit_state_json() {
   local action state step progress external_job_ref error_code error_message driver_exit_code last_source last_target target_rpo updated accepted
   local runtime_exists profile_exists run_exists
   local driver driver_state disk_map_path source_disk_map_path target_disk_map_path disk_map_role
-  local target_disk_count target_disk_invalid_count manifest_path checkpoint_path cbt_status_path source_open_status_path
+  local target_disk_count target_disk_invalid_count manifest_path checkpoint_path cbt_status_path source_open_status_path source_snapshot_status_path
   local scheduler_state worker_pid worker_state worker_started_at worker_updated_at worker_exit_code
   local retryable retry_after_sec lock_file holder_pid holder_command holder_age_sec
   local checkpoint_sequence restore_points_path dynamic_rpo
@@ -2003,6 +2009,7 @@ ftctl_dr_runtime_emit_state_json() {
   checkpoint_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "checkpoint_path")"
   cbt_status_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "cbt_status_path")"
   source_open_status_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "source_open_status_path")"
+  source_snapshot_status_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "source_snapshot_status_path")"
   scheduler_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "scheduler_state")"
   worker_pid="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "worker_pid")"
   worker_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "worker_state")"
@@ -2149,6 +2156,8 @@ ftctl_dr_runtime_emit_state_json() {
   ftctl_dr_runtime_json_file_field_redacted "cbt_status" "${cbt_status_path}"
   ftctl_dr_runtime_json_string_field "source_open_status_path" "${source_open_status_path}"
   ftctl_dr_runtime_json_file_field_redacted "source_open" "${source_open_status_path}"
+  ftctl_dr_runtime_json_string_field "source_snapshot_status_path" "${source_snapshot_status_path}"
+  ftctl_dr_runtime_json_file_field_redacted "source_snapshot" "${source_snapshot_status_path}"
   ftctl_dr_runtime_json_string_field "scheduler_state" "${scheduler_state}"
   ftctl_dr_runtime_json_number_field "worker_pid" "${worker_pid}"
   ftctl_dr_runtime_json_string_field "worker_state" "${worker_state}"

@@ -292,6 +292,8 @@ ftctl_dr_scheduler_worker() {
         74) error_code="DR_VMWARE_VDDK_EXPORT_UNAVAILABLE" ;;
         75) error_code="DR_VMWARE_VDDK_SOURCE_LOCKED" ;;
         76) error_code="DR_VMWARE_VDDK_OPEN_DENIED" ;;
+        77) error_code="DR_VMWARE_VDDK_THUMBPRINT_UNRESOLVED" ;;
+        81) error_code="DR_VMWARE_SNAPSHOT_REF_UNRESOLVED" ;;
         66) error_code="DR_UNSUPPORTED_DIRECTION" ;;
         *) error_code="DR_REPLICATION_CYCLE_FAILED" ;;
       esac
