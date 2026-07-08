@@ -107,7 +107,8 @@ fi
 SELFTEST_ROOT="${FTCTL_SELFTEST_ROOT:-${SELFTEST_ROOT_DEFAULT}}"
 SELFTEST_CONFIG="${SELFTEST_ROOT}/ftctl-test.conf"
 
-if [[ -n "${SELFTEST_INSTALLED_CLI}" ]]; then
+selftest_prepare_installed_cli_wrapper() {
+  [[ -n "${SELFTEST_INSTALLED_CLI}" ]] || return 0
   ROOT_DIR="${SELFTEST_ROOT}/installed-root"
   mkdir -p "${ROOT_DIR}/bin"
   cat > "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" <<EOF
@@ -115,7 +116,9 @@ if [[ -n "${SELFTEST_INSTALLED_CLI}" ]]; then
 exec "${SELFTEST_INSTALLED_CLI}" "\$@"
 EOF
   chmod 0755 "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh"
-fi
+}
+
+selftest_prepare_installed_cli_wrapper
 
 selftest_info() {
   printf '[SELFTEST] %s\n' "$*"
@@ -274,6 +277,7 @@ selftest_mock_xcolo_primary_role_diagnostics_ok() {
 
 selftest_prepare_config_file() {
   mkdir -p "${SELFTEST_ROOT}"
+  selftest_prepare_installed_cli_wrapper
   cat > "${SELFTEST_CONFIG}" <<EOF
 FTCTL_RUN_DIR="${SELFTEST_ROOT}/run"
 FTCTL_LOG_DIR="${SELFTEST_ROOT}/log"
