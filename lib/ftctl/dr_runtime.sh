@@ -373,6 +373,36 @@ ftctl_dr_runtime_json_number_field() {
   fi
 }
 
+ftctl_dr_runtime_json_file_field_redacted() {
+  local key="${1-}" path="${2-}"
+  [[ -n "${key}" && -n "${path}" && -f "${path}" ]] || return 0
+  python3 - "${key}" "${path}" <<'PY' || true
+import json
+import sys
+
+SECRET_PARTS = ("password", "secret", "token", "apikey", "api_key", "credential")
+
+def redact(value):
+    if isinstance(value, dict):
+        out = {}
+        for key, item in value.items():
+            lower = str(key).lower()
+            if any(part in lower for part in SECRET_PARTS):
+                out[key] = "REDACTED"
+            else:
+                out[key] = redact(item)
+        return out
+    if isinstance(value, list):
+        return [redact(item) for item in value]
+    return value
+
+field, path = sys.argv[1], sys.argv[2]
+with open(path, "r", encoding="utf-8") as fh:
+    data = json.load(fh)
+print("," + json.dumps(field, separators=(",", ":")) + ":" + json.dumps(redact(data), sort_keys=True, separators=(",", ":")), end="")
+PY
+}
+
 ftctl_dr_runtime_rpo_from_target_at() {
   local target_at="${1-}"
   local target_epoch now_epoch
@@ -1913,7 +1943,7 @@ ftctl_dr_runtime_emit_state_json() {
   local action state step progress external_job_ref error_code error_message driver_exit_code last_source last_target target_rpo updated accepted
   local runtime_exists profile_exists run_exists
   local driver driver_state disk_map_path source_disk_map_path target_disk_map_path disk_map_role
-  local target_disk_count target_disk_invalid_count manifest_path checkpoint_path
+  local target_disk_count target_disk_invalid_count manifest_path checkpoint_path cbt_status_path
   local scheduler_state worker_pid worker_state worker_started_at worker_updated_at worker_exit_code
   local retryable retry_after_sec lock_file holder_pid holder_command holder_age_sec
   local checkpoint_sequence restore_points_path dynamic_rpo
@@ -1959,6 +1989,7 @@ ftctl_dr_runtime_emit_state_json() {
   target_disk_invalid_count="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "target_disk_invalid_count")"
   manifest_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "manifest_path")"
   checkpoint_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "checkpoint_path")"
+  cbt_status_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "cbt_status_path")"
   scheduler_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "scheduler_state")"
   worker_pid="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "worker_pid")"
   worker_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "worker_state")"
@@ -2101,6 +2132,8 @@ ftctl_dr_runtime_emit_state_json() {
   ftctl_dr_runtime_json_number_field "target_disk_invalid_count" "${target_disk_invalid_count}"
   ftctl_dr_runtime_json_string_field "manifest_path" "${manifest_path}"
   ftctl_dr_runtime_json_string_field "checkpoint_path" "${checkpoint_path}"
+  ftctl_dr_runtime_json_string_field "cbt_status_path" "${cbt_status_path}"
+  ftctl_dr_runtime_json_file_field_redacted "cbt_status" "${cbt_status_path}"
   ftctl_dr_runtime_json_string_field "scheduler_state" "${scheduler_state}"
   ftctl_dr_runtime_json_number_field "worker_pid" "${worker_pid}"
   ftctl_dr_runtime_json_string_field "worker_state" "${worker_state}"

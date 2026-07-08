@@ -601,7 +601,7 @@ ftctl_dr_vmware_cbt_error_code() {
 
 ftctl_dr_vmware_ensure_cbt_enabled() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" disk_map="${4-}" cbt_status_path="${5-}"
-  local source_provider required auto_enable fail_snapshots
+  local source_provider required auto_enable fail_snapshots credentials_file
 
   [[ -n "${profile_file}" && -f "${profile_file}" && -n "${disk_map}" && -f "${disk_map}" ]] || return 2
   source_provider="$(ftctl_dr_vmware_profile_value_upper "${profile_file}" "source.provider")"
@@ -625,15 +625,17 @@ ftctl_dr_vmware_ensure_cbt_enabled() {
   fi
 
   ftctl_ensure_dir "$(dirname "${cbt_status_path}")" "0755"
-  python3 - "${profile_file}" "${disk_map}" "${cbt_status_path}" "${auto_enable}" "${fail_snapshots}" "$(ftctl_now_iso8601)" <<'PY'
+  credentials_file="$(ftctl_dr_runtime_credential_path "${plan}" 2>/dev/null || true)"
+  python3 - "${profile_file}" "${disk_map}" "${cbt_status_path}" "$([[ -f "${credentials_file}" ]] && printf '%s' "${credentials_file}")" "${auto_enable}" "${fail_snapshots}" "$(ftctl_now_iso8601)" <<'PY'
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from urllib.parse import urlparse, urlunparse
 
-profile_path, disk_map_path, out_path, auto_enable, fail_snapshots, now = sys.argv[1:7]
+profile_path, disk_map_path, out_path, credentials_path, auto_enable, fail_snapshots, now = sys.argv[1:8]
 auto_enable = str(auto_enable).lower() == "true"
 fail_snapshots = str(fail_snapshots).lower() == "true"
 
@@ -641,6 +643,10 @@ with open(profile_path, "r", encoding="utf-8") as fh:
     profile = json.load(fh)
 with open(disk_map_path, "r", encoding="utf-8") as fh:
     disk_map = json.load(fh)
+credential_payload = {}
+if credentials_path and os.path.exists(credentials_path):
+    with open(credentials_path, "r", encoding="utf-8") as fh:
+        credential_payload = json.load(fh)
 
 def obj(value):
     return value if isinstance(value, dict) else {}
@@ -661,6 +667,17 @@ def boolish(value):
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+def deep_merge(base, override):
+    result = dict(base or {})
+    if not isinstance(override, dict):
+        return result
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
 
 def normalize_vcenter_url(value):
     text = first_str(value)
@@ -688,6 +705,14 @@ def get_ci(data, key):
         if str(k).lower() == lower:
             return v
     return None
+
+def path_ci(data, *keys):
+    cur = data
+    for key in keys:
+        cur = get_ci(cur, key)
+        if cur is None:
+            return None
+    return cur
 
 def nested_bool(data, *keys):
     cur = data
@@ -722,6 +747,105 @@ def find_vm_object(vm_info):
             return items[0] if isinstance(items[0], dict) else {}
     return vm_info
 
+def collect_vm_devices(vm_obj):
+    devices = path_ci(vm_obj, "config", "hardware", "device")
+    if isinstance(devices, list):
+        return [item for item in devices if isinstance(item, dict)]
+    found = []
+    def walk(value):
+        if isinstance(value, dict):
+            maybe = get_ci(value, "device")
+            if isinstance(maybe, list) and any(isinstance(item, dict) and get_ci(item, "key") is not None for item in maybe):
+                found.extend(item for item in maybe if isinstance(item, dict))
+            for child in value.values():
+                walk(child)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child)
+    walk(vm_obj)
+    return found
+
+def device_type(device):
+    return first_str(get_ci(device, "type"), get_ci(device, "Type"), get_ci(device, "_typeName"), get_ci(device, "dynamicType"), get_ci(device, "class"))
+
+def device_label(device):
+    return first_str(path_ci(device, "deviceInfo", "label"), path_ci(device, "DeviceInfo", "Label"), get_ci(device, "label"), get_ci(device, "name"))
+
+def backing_path(device):
+    return first_str(path_ci(device, "backing", "fileName"), path_ci(device, "Backing", "FileName"), path_ci(device, "backing", "FileName"))
+
+def int_or_none(value):
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+def is_scsi_controller(device):
+    dtype = device_type(device).lower()
+    label = device_label(device).lower()
+    has_bus = int_or_none(get_ci(device, "busNumber")) is not None
+    return has_bus and (
+        ("scsi" in dtype and "controller" in dtype)
+        or "scsi" in label
+        or get_ci(device, "sharedBus") is not None
+    )
+
+def is_virtual_disk(device):
+    dtype = device_type(device).lower()
+    if "virtualdisk" in dtype or dtype.endswith(".disk"):
+        return True
+    return get_ci(device, "controllerKey") is not None and int_or_none(get_ci(device, "unitNumber")) is not None and bool(backing_path(device))
+
+def normalize_cbt_disk_id_from_vm(vm_obj, disk, item):
+    devices = collect_vm_devices(vm_obj)
+    controllers = {}
+    for device in devices:
+        if not is_scsi_controller(device):
+            continue
+        key = first_str(get_ci(device, "key"), get_ci(device, "Key"))
+        bus = int_or_none(first_str(get_ci(device, "busNumber"), get_ci(device, "BusNumber")))
+        if key and bus is not None:
+            controllers[key] = bus
+
+    disk = obj(disk)
+    source = obj(disk.get("source"))
+    wanted_key = first_str(
+        disk.get("sourceDiskKey"), source.get("sourceDiskKey"), disk.get("deviceKey"), source.get("deviceKey"),
+        disk.get("diskKey"), source.get("diskKey"), disk.get("key"), source.get("key"),
+        disk.get("sourcePath") if str(disk.get("sourcePath") or "").isdigit() else "",
+        item.get("sourceDiskKey"),
+    )
+    wanted_path = first_str(
+        disk.get("sourceDiskRef"), source.get("sourceDiskRef"), disk.get("sourceVmdkPath"), source.get("sourceVmdkPath"),
+        disk.get("sourcePath") if not str(disk.get("sourcePath") or "").isdigit() else "",
+        item.get("sourceDiskRef"),
+    )
+    wanted_label = first_str(disk.get("label"), source.get("label"), item.get("label"))
+
+    for device in devices:
+        if not is_virtual_disk(device):
+            continue
+        key = first_str(get_ci(device, "key"), get_ci(device, "Key"))
+        label = device_label(device)
+        path = backing_path(device)
+        key_match = bool(wanted_key and key == wanted_key)
+        path_match = bool(wanted_path and path == wanted_path)
+        label_match = bool(wanted_label and label == wanted_label)
+        if not (key_match or path_match or label_match):
+            continue
+        controller_key = first_str(get_ci(device, "controllerKey"), get_ci(device, "ControllerKey"))
+        unit = int_or_none(first_str(get_ci(device, "unitNumber"), get_ci(device, "UnitNumber")))
+        bus = controllers.get(controller_key)
+        if bus is None or unit is None:
+            continue
+        item["sourceDiskKey"] = first_str(item.get("sourceDiskKey"), key)
+        item["sourceDiskRef"] = first_str(item.get("sourceDiskRef"), path)
+        item["resolution"] = "vm-device-graph"
+        return f"scsi{bus}:{unit}"
+    return ""
+
 def has_snapshot(value):
     if value in (None, "", [], {}):
         return False
@@ -750,12 +874,48 @@ def disk_id_for(disk, index):
         return f"scsi{bus}:{unit}"
     return ""
 
-credentials = obj(profile.get("credentials"))
-source_credential = obj(credentials.get("source"))
+def resolve_govc_bin(source_credential):
+    candidates = []
+    env_bin = os.environ.get("FTCTL_DR_VMWARE_GOVC_BIN")
+    if env_bin:
+        candidates.append(env_bin)
+    for key in ("govcPath", "govcBin"):
+        value = first_str(source_credential.get(key))
+        if value:
+            candidates.append(value)
+    vddk_libdir = first_str(source_credential.get("vddkLibdir"), source_credential.get("libdir"))
+    if vddk_libdir:
+        compat_root = os.path.dirname(os.path.abspath(vddk_libdir))
+        candidates.append(os.path.join(compat_root, "bin", "govc"))
+        candidates.append(os.path.join(os.path.dirname(compat_root), "bin", "govc"))
+    version = first_str(source_credential.get("vddkVersion"), source_credential.get("version"))
+    if version:
+        normalized = version.replace(".", "")
+        if normalized == "8":
+            normalized = "80"
+        candidates.append(f"/usr/share/ablestack/v2k/compat/vsphere{normalized}/bin/govc")
+    path_bin = shutil.which("govc")
+    if path_bin:
+        candidates.append(path_bin)
+    candidates.extend(("/usr/local/bin/govc", "/usr/bin/govc"))
+    seen = set()
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return ""
+
+profile_credentials = obj(profile.get("credentials"))
+profile_source_credential = obj(profile_credentials.get("source"))
+runtime_credentials = obj(credential_payload.get("credentials"))
+runtime_source_credential = obj(runtime_credentials.get("source"))
+source_credential = deep_merge(profile_source_credential, runtime_source_credential)
 auth = obj(source_credential.get("auth"))
 source = obj(profile.get("source"))
 endpoint = normalize_vcenter_url(first_str(source_credential.get("endpoint"), source.get("endpoint")))
-principal = first_str(source_credential.get("principal"), auth.get("username"), auth.get("user"), auth.get("principal"))
+principal = first_str(source_credential.get("principal"), source_credential.get("username"), auth.get("username"), auth.get("user"), auth.get("principal"))
 password = first_str(auth.get("password"), source_credential.get("password"))
 tls_verify = source_credential.get("tlsVerify")
 vm_ref = first_str(disk_map.get("sourceVmRef"), source.get("externalRef"), source.get("vmRef"), source.get("name"), source.get("vmId"))
@@ -768,7 +928,8 @@ for index, disk in enumerate(disks):
     item = {
         "index": index,
         "label": first_str(obj(disk).get("label"), f"Disk {index + 1}"),
-        "sourceDiskRef": first_str(obj(disk).get("sourceDiskRef"), obj(obj(disk).get("source")).get("diskRef")),
+        "sourceDiskKey": first_str(obj(disk).get("sourceDiskKey"), obj(obj(disk).get("source")).get("sourceDiskKey"), obj(disk).get("deviceKey"), obj(obj(disk).get("source")).get("deviceKey")),
+        "sourceDiskRef": first_str(obj(disk).get("sourceDiskRef"), obj(disk).get("sourceVmdkPath"), obj(disk).get("sourcePath"), obj(obj(disk).get("source")).get("diskRef")),
         "cbtDiskId": disk_id,
     }
     if disk_id:
@@ -806,30 +967,38 @@ def write_status(code=0, error_code=""):
 if not endpoint or not principal or not password or not vm_ref:
     status["message"] = "vCenter endpoint, username, password, or source VM reference is missing"
     write_status(82, "DR_VMWARE_CBT_QUERY_FAILED")
-if unresolved:
-    status["message"] = "VMware CBT disk id was not resolved for one or more selected disks"
-    write_status(80, "DR_VMWARE_CBT_DISK_ID_UNRESOLVED")
+
+govc_bin = resolve_govc_bin(source_credential)
+if not govc_bin:
+    status["message"] = "govc binary was not found in compatibility bundle or PATH"
+    write_status(82, "DR_VMWARE_CBT_QUERY_FAILED")
+status["govcBin"] = govc_bin
 
 env = os.environ.copy()
 env.update({
     "GOVC_URL": endpoint,
     "GOVC_USERNAME": principal,
     "GOVC_PASSWORD": password,
-    "GOVC_INSECURE": "0" if boolish(tls_verify) else "1",
+    "GOVC_INSECURE": "false" if boolish(tls_verify) else "true",
 })
 
 def govc(args, check=True):
-    proc = subprocess.run(["govc"] + list(args), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    proc = subprocess.run([govc_bin] + list(args), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if check and proc.returncode != 0:
         raise RuntimeError(proc.stderr.strip() or proc.stdout.strip() or f"govc {' '.join(args)} failed")
     return proc
 
-def read_state():
+def read_vm_info():
     vm_proc = govc(["vm.info", "-json", vm_ref])
     try:
         vm_info = json.loads(vm_proc.stdout or "{}")
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"govc vm.info returned invalid JSON: {exc}")
+    return vm_info
+
+def read_state(vm_info=None):
+    if vm_info is None:
+        vm_info = read_vm_info()
     vm_obj = find_vm_object(vm_info)
     extra = collect_extra_config(vm_obj)
     vm_enabled = nested_bool(vm_obj, "config", "changeTrackingEnabled")
@@ -847,7 +1016,26 @@ def read_state():
     return vm_enabled, disk_rows, extra
 
 try:
-    vm_enabled, disk_rows, extra = read_state()
+    govc(["about"])
+    initial_vm_info = read_vm_info()
+    if unresolved:
+        vm_obj = find_vm_object(initial_vm_info)
+        still_unresolved = []
+        for item in list(unresolved):
+            disk = disks[item["index"]]
+            disk_id = normalize_cbt_disk_id_from_vm(vm_obj, disk, item)
+            if disk_id:
+                item["cbtDiskId"] = disk_id
+                resolved.append(item)
+            else:
+                still_unresolved.append(item)
+        unresolved = still_unresolved
+        status["disks"] = resolved
+        status["unresolvedDisks"] = unresolved
+    if unresolved:
+        status["message"] = "VMware CBT disk id was not resolved for one or more selected disks"
+        write_status(80, "DR_VMWARE_CBT_DISK_ID_UNRESOLVED")
+    vm_enabled, disk_rows, extra = read_state(initial_vm_info)
     status["vmEnabled"] = bool(vm_enabled)
     status["disks"] = disk_rows
     status["enabled"] = bool(vm_enabled) and all(d.get("ctkEnabled") for d in disk_rows)

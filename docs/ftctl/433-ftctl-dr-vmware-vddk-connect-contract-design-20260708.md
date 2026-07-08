@@ -713,3 +713,365 @@ Implemented in `lib/ftctl/dr_vmware.sh`:
 - A fake `govc` smoke verified that disabled CBT triggers the expected
   `vm.change -e ctkEnabled=true` and `vm.change -e scsi0:0.ctkEnabled=true`
   calls before the contract-ready step.
+
+## 17. Live Preflight Regression - 2026-07-08
+
+Runtime validation against the current test plan showed that the vCenter side is
+reachable and the selected VM is CBT-ready, but FTCTL fails before it can use
+that state.
+
+Observed plan:
+
+| Item | Value |
+| --- | --- |
+| Plan UUID | `bb4a6719-13c7-49de-a8ce-f5e04ff640a7` |
+| Direction | `VMWARE_TO_KVM` |
+| Source VM ref | `vm-4486` |
+| Coordinator/worker host | `10.10.32.1` |
+| Plan state | `ERROR` |
+| Run step | `runtime-projection` |
+| Error code | `DR_VMWARE_CBT_QUERY_FAILED` |
+| FTCTL step | `vmware-cbt-preflight` |
+| FTCTL worker exit code | `82` |
+
+Runtime files showed this split:
+
+- `profile.json` contains the non-secret DR topology, source VM reference, and
+  disk mapping.
+- `credentials.json` contains the vCenter endpoint, principal, password,
+  TLS policy, VDDK library path, and VDDK version.
+- `vmware-cbt.json` reported
+  `vCenter endpoint, username, password, or source VM reference is missing`.
+
+The message is a false negative. A direct preflight on `10.10.32.1` using the
+runtime credential contract succeeded:
+
+| Check | Result |
+| --- | --- |
+| `govc about` | vCenter `8.0.1`, build `21560480` |
+| `govc vm.info -json vm-4486` | succeeded |
+| VM name | `Rokcy10-1` |
+| VM CBT | `changeTrackingEnabled=true` |
+| Disk key | `2000` |
+| Disk backing | `[3...-localdisk] test1/test1.vmdk` |
+| Resolved CBT disk id | `scsi0:0` |
+| Disk CBT | `ctkEnabled=TRUE`, `scsi0:0.ctkEnabled=TRUE` |
+
+The executable check also showed that `govc` is not on the default PATH of the
+worker hosts. The usable binary is delivered through the compatibility bundle:
+
+```text
+/usr/share/ablestack/v2k/compat/vsphere80/bin/govc
+```
+
+Conclusion:
+
+- The current failure is not a vCenter reachability failure.
+- The current failure is not a CBT-disabled failure.
+- The qemu-side CBT preflight currently reads only `profile.credentials.source`
+  and does not load the separate runtime `credentials.json` contract.
+- The qemu-side CBT preflight also assumes `govc` is on PATH, which is not true
+  on the current worker hosts.
+- The disk mapping can arrive with only the vCenter disk key and backing path;
+  FTCTL must be able to normalize that into the CBT disk id `scsiX:Y`.
+
+## 18. Remediation Design - Credentials, govc, And Disk Identity
+
+This remediation is qemu/FTCTL-scoped. It does not require a new Cloud DB
+schema, and it must preserve the rule that secrets are not copied into
+`profile.json`, logs, status JSON, or UI payloads.
+
+### 18.1 Credential loading contract
+
+Add a single FTCTL helper used by all VMware CBT/VDDK paths:
+
+```bash
+ftctl_dr_vmware_load_source_credentials() {
+  local profile_file="${1:?profile file required}"
+  local credentials_file="${2:-${FTCTL_DR_CREDENTIALS_FILE:-}}"
+  python3 - "$profile_file" "$credentials_file" <<'PY'
+import json
+import os
+import sys
+
+profile_path, credentials_path = sys.argv[1], sys.argv[2]
+with open(profile_path, encoding="utf-8") as fh:
+    profile = json.load(fh)
+
+merged = {}
+
+def deep_merge(dst, src):
+    for key, value in (src or {}).items():
+        if isinstance(value, dict) and isinstance(dst.get(key), dict):
+            deep_merge(dst[key], value)
+        else:
+            dst[key] = value
+
+deep_merge(merged, profile.get("credentials", {}).get("source", {}))
+
+if credentials_path and os.path.exists(credentials_path):
+    with open(credentials_path, encoding="utf-8") as fh:
+        credentials = json.load(fh)
+    deep_merge(merged, credentials.get("credentials", {}).get("source", {}))
+
+source = profile.get("source", {})
+merged.setdefault("endpoint", source.get("endpoint") or source.get("apiEndpoint"))
+merged.setdefault("externalRef", source.get("externalRef"))
+
+print(json.dumps(merged, separators=(",", ":")))
+PY
+}
+```
+
+Rules:
+
+- `FTCTL_DR_CREDENTIALS_FILE` is the preferred runtime source for secrets.
+- `profile.credentials.source` remains supported only for backward
+  compatibility and test fixtures.
+- The credential file values override profile values because they are the
+  runtime authority.
+- The helper must return a redaction-safe object to shell callers only when the
+  caller immediately uses it; it must not write the password to status files.
+- Any status or event record must redact `password`, `secret`, `token`,
+  `apiKey`, and compatible aliases.
+
+### 18.2 govc resolver
+
+All qemu-side VMware helpers must call a resolver instead of hard-coding
+`govc`.
+
+```bash
+ftctl_dr_vmware_resolve_govc_bin() {
+  local credentials_json="${1:?credentials json required}"
+  python3 - "$credentials_json" <<'PY'
+import json
+import os
+import shutil
+import sys
+
+creds = json.loads(sys.argv[1] or "{}")
+candidates = []
+
+env_bin = os.environ.get("FTCTL_DR_VMWARE_GOVC_BIN")
+if env_bin:
+    candidates.append(env_bin)
+
+for key in ("govcPath", "govcBin"):
+    if creds.get(key):
+        candidates.append(creds[key])
+
+vddk_libdir = creds.get("vddkLibdir")
+if vddk_libdir:
+    compat_root = os.path.dirname(os.path.abspath(vddk_libdir))
+    candidates.append(os.path.join(compat_root, "bin", "govc"))
+    candidates.append(os.path.join(os.path.dirname(compat_root), "bin", "govc"))
+
+version = str(creds.get("vddkVersion") or "").strip()
+if version:
+    normalized = version.replace(".", "")
+    if normalized == "8":
+        normalized = "80"
+    candidates.append(f"/usr/share/ablestack/v2k/compat/vsphere{normalized}/bin/govc")
+
+path_bin = shutil.which("govc")
+if path_bin:
+    candidates.append(path_bin)
+
+candidates.extend([
+    "/usr/local/bin/govc",
+    "/usr/bin/govc",
+])
+
+seen = set()
+for candidate in candidates:
+    if not candidate or candidate in seen:
+        continue
+    seen.add(candidate)
+    if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+        print(candidate)
+        sys.exit(0)
+
+sys.exit(1)
+PY
+}
+```
+
+Resolver order:
+
+1. `FTCTL_DR_VMWARE_GOVC_BIN`
+2. `credentials.source.govcPath` or `credentials.source.govcBin`
+3. `credentials.source.vddkLibdir` adjacent compatibility bundle
+4. `credentials.source.vddkVersion` compatibility bundle
+5. PATH
+6. common system locations
+
+The CBT preflight must run a cheap `govc about` with the selected binary before
+querying VM hardware. If no binary is found or `govc about` fails, return
+`DR_VMWARE_CBT_QUERY_FAILED` with a redacted message that names the missing
+binary or connection category, not the password.
+
+### 18.3 VMware credential environment
+
+Build a `govc` environment from the merged credential object:
+
+```bash
+ftctl_dr_vmware_govc_env_file() {
+  local credentials_json="${1:?credentials json required}"
+  local env_file="${2:?env file required}"
+  python3 - "$credentials_json" "$env_file" <<'PY'
+import json
+import os
+import shlex
+import sys
+
+creds = json.loads(sys.argv[1] or "{}")
+env_file = sys.argv[2]
+
+endpoint = creds.get("endpoint") or creds.get("url")
+principal = creds.get("principal") or creds.get("username")
+password = ((creds.get("auth") or {}).get("password")
+            or creds.get("password"))
+tls_verify = bool(creds.get("tlsVerify"))
+
+if not endpoint or not principal or not password:
+    raise SystemExit(82)
+
+url = endpoint
+if not url.startswith(("http://", "https://")):
+    url = "https://" + url
+if not url.endswith("/sdk"):
+    url = url.rstrip("/") + "/sdk"
+
+lines = [
+    "export GOVC_URL=" + shlex.quote(url),
+    "export GOVC_USERNAME=" + shlex.quote(principal),
+    "export GOVC_PASSWORD=" + shlex.quote(password),
+    "export GOVC_INSECURE=" + shlex.quote("false" if tls_verify else "true"),
+]
+with open(env_file, "w", encoding="utf-8") as fh:
+    fh.write("\n".join(lines) + "\n")
+os.chmod(env_file, 0o600)
+PY
+}
+```
+
+The environment file must be created under the plan runtime directory with
+`0600` permissions and removed during cleanup when possible.
+
+### 18.4 CBT disk id normalization
+
+The disk map may contain any subset of these fields:
+
+```json
+{
+  "sourceDiskKey": "2000",
+  "sourceDiskRef": "[datastore] vm/vm.vmdk",
+  "controllerKey": "1000",
+  "controllerBusNumber": 0,
+  "unitNumber": 0,
+  "cbtDiskId": ""
+}
+```
+
+FTCTL must normalize it before CBT checks:
+
+```python
+def normalize_cbt_disk_id(vm_devices, disk_mapping):
+    existing = str(disk_mapping.get("cbtDiskId") or "")
+    if re.match(r"^scsi\d+:\d+$", existing):
+        return existing
+
+    controllers = {
+        str(d.key): d.busNumber
+        for d in vm_devices
+        if d.type in ("VirtualLsiLogicController",
+                      "VirtualLsiLogicSASController",
+                      "ParaVirtualSCSIController")
+    }
+
+    for disk in vm_devices:
+        if disk.type != "VirtualDisk":
+            continue
+        key_match = str(disk.key) == str(disk_mapping.get("sourceDiskKey") or disk_mapping.get("diskRef") or "")
+        path_match = disk.backing.fileName == disk_mapping.get("sourceDiskRef")
+        label_match = disk.deviceInfo.label == disk_mapping.get("sourceDiskLabel")
+        if not (key_match or path_match or label_match):
+            continue
+        bus = controllers.get(str(disk.controllerKey))
+        if bus is None or disk.unitNumber is None:
+            break
+        return f"scsi{bus}:{disk.unitNumber}"
+
+    raise DrError("DR_VMWARE_CBT_DISK_ID_UNRESOLVED")
+```
+
+When normalization succeeds, write both the original and normalized identity to
+`vmware-cbt.json`:
+
+```json
+{
+  "diskRef": "2000",
+  "sourceDiskKey": "2000",
+  "sourceDiskRef": "[3...-localdisk] test1/test1.vmdk",
+  "cbtDiskId": "scsi0:0",
+  "resolution": "vm-device-graph"
+}
+```
+
+### 18.5 Updated CBT preflight sequence
+
+```text
+load profile.json
+load credentials.json from FTCTL_DR_CREDENTIALS_FILE
+merge source credentials without persisting secrets
+resolve govc binary
+create temporary govc env file with 0600 permissions
+run govc about
+run govc vm.info -json <source.externalRef>
+normalize selected disk identities to scsiX:Y
+read VM and disk CBT state
+if CBT disabled and autoEnable=true:
+  run govc vm.change -vm <ref> -e ctkEnabled=true
+  run govc vm.change -vm <ref> -e <scsiX:Y>.ctkEnabled=true per selected disk
+verify CBT state again
+write redacted vmware-cbt.json
+continue to snapshot/changeId baseline
+```
+
+### 18.6 Layer impact
+
+| Layer | Change |
+| --- | --- |
+| UI | No blocking UI flow change. Display the more specific CBT preflight message from run details when available. |
+| API/Backend | No schema change. Continue writing secrets only to `credentials.json`; ensure the agent command exports `FTCTL_DR_CREDENTIALS_FILE`. |
+| Agent | No business logic change. Preserve runtime credential path, `0600` file permissions, and redacted logs. |
+| FTCTL | Required: credential-file loader, govc resolver, govc env builder, disk id normalizer, and redacted CBT status. |
+| DB | No schema change. Existing run/step details can carry redacted CBT status and error code. |
+
+### 18.7 Acceptance criteria
+
+- A plan whose runtime credentials are stored only in `credentials.json` passes
+  the CBT preflight.
+- Worker hosts without PATH-level `govc` can use
+  `/usr/share/ablestack/v2k/compat/vsphere80/bin/govc`.
+- Disk key `2000` for VM `vm-4486` normalizes to `scsi0:0`.
+- `vmware-cbt.json` never contains plaintext credentials.
+- A real CBT-disabled VM is enabled only when `autoEnable=true`.
+- A real unresolved disk fails with `DR_VMWARE_CBT_DISK_ID_UNRESOLVED`, not the
+  generic missing-credential message.
+
+## 19. Implementation Update - 2026-07-08
+
+The validated preflight design is now reflected in the ftctl runtime path.
+
+| Area | Implemented behavior |
+| --- | --- |
+| Runtime credential loading | `ftctl_dr_vmware_ensure_cbt_enabled` reads the runtime credential file resolved by `ftctl_dr_runtime_credential_path` and merges it over profile-level source credentials. |
+| govc resolution | The CBT preflight resolves `govc` from explicit config, VDDK compat bundle paths such as `/usr/share/ablestack/v2k/compat/vsphere80/bin/govc`, PATH, and common system locations. |
+| CBT disk identity | VMware disk key/path/label is normalized to `scsiX:Y` using the VM hardware device graph before CBT status is evaluated. |
+| Redacted status projection | `dr-status --json` includes the redacted `cbt_status` object from `vmware-cbt.json`, including `enabled`, `cbtDiskId`, `message`, `govcBin`, and `checkedAtEpochMs` when available. |
+| Selftest coverage | A selftest validates that a profile without embedded credentials succeeds when runtime `credentials.json` contains the vCenter credential and compat `govc` path. |
+
+No ftctl DB or profile schema change is required. The runtime contract remains:
+Cloud writes secrets to the runtime credential file, Agent preserves the path,
+and ftctl emits only redacted operational evidence.

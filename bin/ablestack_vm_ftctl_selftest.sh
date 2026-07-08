@@ -6719,7 +6719,15 @@ selftest_case_dr_vmware_contract_ready() {
   selftest_info "FTCTL_DR VMware contract-ready metadata path"
 
   local profile="${SELFTEST_ROOT}/dr-vmware-contract-profile.json"
+  local fakebin="${SELFTEST_ROOT}/fakebin"
   local out="" manifest="" checkpoint=""
+  mkdir -p "${fakebin}"
+  cat > "${fakebin}/qemu-img" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+exit 0
+EOF
+  chmod +x "${fakebin}/qemu-img"
   cat > "${profile}" <<'JSON'
 {
   "version": 1,
@@ -6737,6 +6745,11 @@ selftest_case_dr_vmware_contract_ready() {
     "provider": "VMWARE",
     "driver": "VMWARE_VDDK",
     "vmId": "vm-201"
+  },
+  "policy": {
+    "cbtPolicy": {
+      "required": false
+    }
   },
   "mapping": {
     "targetStorageRef": "ds-dr",
@@ -6758,7 +6771,7 @@ selftest_case_dr_vmware_contract_ready() {
 }
 JSON
 
-  out="$(FTCTL_DR_VMWARE_FORCE_VDDK_READY=1 bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-plan-apply \
+  out="$(FTCTL_DR_VMWARE_FORCE_VDDK_READY=1 PATH="${fakebin}:$PATH" bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-plan-apply \
     --config "${SELFTEST_CONFIG}" \
     --plan plan-vmware-ready \
     --profile-json "${profile}" \
@@ -6769,7 +6782,7 @@ JSON
   selftest_assert_contains "${out}" '"disk_count":1' "vmware preflight disk count"
   selftest_assert_contains "${out}" '"vddk_ready":true' "vmware preflight vddk ready"
 
-  out="$(FTCTL_DR_SYNC_FOREGROUND=1 FTCTL_DR_SCHEDULER_DISABLE=1 FTCTL_DR_VMWARE_FORCE_VDDK_READY=1 bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-sync-start \
+  out="$(FTCTL_DR_SYNC_FOREGROUND=1 FTCTL_DR_SCHEDULER_DISABLE=1 FTCTL_DR_VMWARE_FORCE_VDDK_READY=1 PATH="${fakebin}:$PATH" bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-sync-start \
     --config "${SELFTEST_CONFIG}" \
     --plan plan-vmware-ready \
     --run run-vmware-ready \
@@ -6791,6 +6804,161 @@ JSON
   selftest_assert_file_contains "${manifest}" '"networkRef":"net-dr"'
   selftest_assert_file_contains "${manifest}" '"changeId":"52 00 01"'
   selftest_assert_file_contains "${checkpoint}" '"state":"VMWARE_CONTRACT_READY"'
+}
+
+selftest_case_dr_vmware_cbt_preflight_uses_runtime_credentials_file() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR VMware CBT preflight uses runtime credentials file"
+
+  local profile="${SELFTEST_ROOT}/dr-vmware-cbt-runtime-credential-profile.json"
+  local plan_dir="${SELFTEST_ROOT}/run/dr-runtime/plans/plan-vmware-cbt-runtime-credential"
+  local credentials="${plan_dir}/credentials.json"
+  local compat_root="${SELFTEST_ROOT}/compat/vsphere80"
+  local govc_bin="${compat_root}/bin/govc"
+  local fakebin="${SELFTEST_ROOT}/fakebin"
+  local call_log="${SELFTEST_ROOT}/govc-cbt-runtime-credential.log"
+  local out="" cbt_status=""
+
+  mkdir -p "${plan_dir}" "${compat_root}/bin" "${compat_root}/vddk" "${fakebin}"
+  : > "${call_log}"
+  cat > "${fakebin}/qemu-img" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+exit 0
+EOF
+  chmod +x "${fakebin}/qemu-img"
+  cat > "${govc_bin}" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'GOVC:%s\n' "$*" >> "${FTCTL_FAKE_GOVC_LOG}"
+case "${1-}" in
+  about)
+    printf 'Name: VMware vCenter Server\n'
+    printf 'Version: 8.0.1\n'
+    exit 0
+    ;;
+  vm.info)
+    cat <<'JSON'
+{
+  "VirtualMachines": [
+    {
+      "Config": {
+        "ChangeTrackingEnabled": true,
+        "Hardware": {
+          "Device": [
+            {
+              "Key": 1000,
+              "BusNumber": 0,
+              "SharedBus": "noSharing",
+              "DeviceInfo": {"Label": "SCSI controller 0"}
+            },
+            {
+              "Key": 2000,
+              "ControllerKey": 1000,
+              "UnitNumber": 0,
+              "Backing": {"FileName": "[datastore] Rocky10/Rocky10.vmdk"},
+              "DeviceInfo": {"Label": "Hard disk 1"}
+            }
+          ]
+        },
+        "ExtraConfig": [
+          {"Key": "ctkEnabled", "Value": "TRUE"},
+          {"Key": "scsi0:0.ctkEnabled", "Value": "TRUE"}
+        ]
+      }
+    }
+  ]
+}
+JSON
+    exit 0
+    ;;
+  snapshot.tree)
+    printf '{"Elements":[]}\n'
+    exit 0
+    ;;
+  vm.change)
+    exit 0
+    ;;
+esac
+exit 2
+EOF
+  chmod +x "${govc_bin}"
+
+  cat > "${credentials}" <<JSON
+{
+  "version": 1,
+  "credentials": {
+    "source": {
+      "endpoint": "10.10.21.10",
+      "principal": "administrator@ablecloud.local",
+      "auth": {"password": "secret"},
+      "tlsVerify": false,
+      "vddkLibdir": "${compat_root}/vddk",
+      "vddkVersion": "8"
+    }
+  }
+}
+JSON
+  chmod 0600 "${credentials}"
+
+  cat > "${profile}" <<'JSON'
+{
+  "version": 1,
+  "engine": "FTCTL_DR",
+  "planUuid": "plan-vmware-cbt-runtime-credential",
+  "runUuid": "run-vmware-cbt-runtime-credential",
+  "direction": "VMWARE_TO_VMWARE",
+  "source": {
+    "provider": "VMWARE",
+    "driver": "VMWARE_CBT",
+    "externalRef": "vm-4486"
+  },
+  "target": {
+    "provider": "VMWARE",
+    "driver": "VMWARE_VDDK",
+    "vmId": "vm-201"
+  },
+  "mapping": {
+    "targetStorageRef": "ds-dr",
+    "targetFolderPath": "/DR",
+    "targetComputeRef": "rp-dr",
+    "targetNetworkRef": "net-dr",
+    "disks": [
+      {
+        "sourceDiskKey": "2000",
+        "sourceVmdkPath": "[datastore] Rocky10/Rocky10.vmdk",
+        "targetVmdkPath": "[dr] vm-201/root.vmdk",
+        "sizeBytes": 1048576,
+        "targetDiskOfferingId": "disk-offering-1",
+        "changeId": "52 00 01",
+        "snapshotRef": "snap-1"
+      }
+    ]
+  }
+}
+JSON
+
+  out="$(FTCTL_FAKE_GOVC_LOG="${call_log}" FTCTL_DR_SYNC_FOREGROUND=1 FTCTL_DR_SCHEDULER_DISABLE=1 FTCTL_DR_VMWARE_FORCE_VDDK_READY=1 PATH="${fakebin}:$PATH" bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-sync-start \
+    --config "${SELFTEST_CONFIG}" \
+    --plan plan-vmware-cbt-runtime-credential \
+    --run run-vmware-cbt-runtime-credential \
+    --profile-json "${profile}" \
+    --role coordinator \
+    --mode planned \
+    --wait=false \
+    --json)"
+
+  selftest_assert_contains "${out}" '"result":"accepted"' "vmware cbt runtime credential accepted"
+  selftest_assert_contains "${out}" '"step":"vmware-driver-contract-ready"' "vmware cbt runtime credential step"
+  selftest_assert_contains "${out}" '"cbt_status":' "vmware cbt status projected"
+  selftest_assert_contains "${out}" '"cbtDiskId":"scsi0:0"' "vmware cbt status disk id projected"
+  selftest_assert_file_contains "${call_log}" "GOVC:about"
+  selftest_assert_file_contains "${call_log}" "GOVC:vm.info -json vm-4486"
+  cbt_status="${plan_dir}/vmware-cbt.json"
+  selftest_assert_file_contains "${cbt_status}" '"enabled":true'
+  selftest_assert_file_contains "${cbt_status}" '"cbtDiskId":"scsi0:0"'
+  selftest_assert_file_contains "${cbt_status}" '"resolution":"vm-device-graph"'
+  selftest_assert_file_not_contains "${cbt_status}" "secret"
 }
 
 selftest_case_dr_vmware_missing_disk_map_config_incomplete() {
@@ -6833,7 +7001,15 @@ selftest_case_dr_vmware_missing_vddk_blocks_sync() {
   selftest_info "FTCTL_DR VMware missing VDDK blocks sync start"
 
   local profile="${SELFTEST_ROOT}/dr-vmware-missing-vddk-profile.json"
+  local fakebin="${SELFTEST_ROOT}/fakebin"
   local out="" rc=0
+  mkdir -p "${fakebin}"
+  cat > "${fakebin}/qemu-img" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+exit 0
+EOF
+  chmod +x "${fakebin}/qemu-img"
   cat > "${profile}" <<'JSON'
 {
   "version": 1,
@@ -6857,7 +7033,7 @@ selftest_case_dr_vmware_missing_vddk_blocks_sync() {
 }
 JSON
 
-  out="$(FTCTL_DR_SYNC_FOREGROUND=1 FTCTL_DR_VMWARE_FORCE_MISSING_VDDK=1 bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-sync-start \
+  out="$(FTCTL_DR_SYNC_FOREGROUND=1 FTCTL_DR_VMWARE_FORCE_MISSING_VDDK=1 PATH="${fakebin}:$PATH" bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-sync-start \
     --config "${SELFTEST_CONFIG}" \
     --plan plan-vmware-missing \
     --run run-vmware-missing \
@@ -6871,7 +7047,7 @@ JSON
   selftest_assert_contains "${out}" '"accepted":false' "vmware missing sync accepted false"
   selftest_assert_contains "${out}" '"state":"ERROR"' "vmware missing sync state"
   selftest_assert_contains "${out}" '"step":"vmware-capability-missing"' "vmware missing sync step"
-  selftest_assert_contains "${out}" '"error_code":"DR_MISSING_VDDK"' "vmware missing sync error code"
+  selftest_assert_contains "${out}" '"error_code":"DR_VDDK_LIBDIR_UNRESOLVED"' "vmware missing sync error code"
   selftest_assert_contains "${out}" '"driver_state":"MISSING_VDDK"' "vmware missing sync driver state"
 }
 
@@ -7783,6 +7959,7 @@ selftest_main() {
   selftest_case_dr_ablestack_vmware_source_size_unresolved
   selftest_case_dr_vmware_preflight_missing_vddk
   selftest_case_dr_vmware_contract_ready
+  selftest_case_dr_vmware_cbt_preflight_uses_runtime_credentials_file
   selftest_case_dr_vmware_missing_disk_map_config_incomplete
   selftest_case_dr_vmware_missing_vddk_blocks_sync
   selftest_case_dr_scheduler_ablestack_checkpoint_loop
