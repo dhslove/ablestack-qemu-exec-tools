@@ -240,6 +240,7 @@ Commands:
                      Mark Cloud target VM/volume materialization complete
   dr-release         Release DR runtime state
   dr-status          Show DR runtime status for a plan/run
+  dr-capabilities    Show FTCTL_DR runtime command capabilities
   dr-cancel          Cancel a DR runtime run
   config             Manage cluster/host inventory
 
@@ -324,7 +325,7 @@ parse_args() {
         print_version
         exit "${EXIT_OK}"
         ;;
-      protect|protect-start|status|reconcile|failover|failover-prepare|failback|failback-sync|failback-finalize|failback-reprotect|unprotect|fence-confirm|fence-clear|pause-protection|resume-protection|preflight-remote|dr-key-ensure|dr-key-install|dr-key-remove|check|health|events|snapshot|dr-plan-apply|dr-sync-start|dr-sync-pause|dr-sync-resume|dr-test-failover|dr-test-cleanup|dr-failover|dr-failback|dr-reprotect|dr-target-materialized|dr-release|dr-status|dr-cancel|config)
+      protect|protect-start|status|reconcile|failover|failover-prepare|failback|failback-sync|failback-finalize|failback-reprotect|unprotect|fence-confirm|fence-clear|pause-protection|resume-protection|preflight-remote|dr-key-ensure|dr-key-install|dr-key-remove|check|health|events|snapshot|dr-plan-apply|dr-sync-start|dr-sync-pause|dr-sync-resume|dr-test-failover|dr-test-cleanup|dr-failover|dr-failback|dr-reprotect|dr-target-materialized|dr-release|dr-status|dr-capabilities|dr-cancel|config)
         [[ -z "${CLI_COMMAND}" ]] || {
           echo "ERROR: multiple commands specified" >&2
           exit "${EXIT_USAGE}"
@@ -615,7 +616,9 @@ apply_common_config() {
   ftctl_config_apply_cli "${CLI_CONFIG_PATH}" "${CLI_POLICY}" "${CLI_DRY_RUN}"
   ftctl_config_load_file "${FTCTL_CONFIG_PATH}"
   ftctl_config_finalize_paths
-  ftctl_ensure_runtime_dirs
+  if [[ "${CLI_COMMAND}" != "dr-capabilities" ]]; then
+    ftctl_ensure_runtime_dirs
+  fi
   if ftctl_command_requires_lock "${CLI_COMMAND}" "${CLI_ACTION}"; then
     ftctl_lock_acquire || exit $?
   fi
@@ -673,6 +676,9 @@ dispatch() {
       ;;
     dr-status)
       ftctl_dr_runtime_status "${CLI_PLAN}" "${CLI_RUN}" "${CLI_EVENTS_OFFSET}" "${CLI_JSON}"
+      ;;
+    dr-capabilities)
+      ftctl_dr_runtime_capabilities "${CLI_JSON}"
       ;;
     dr-cancel)
       ftctl_dr_runtime_cancel "${CLI_PLAN}" "${CLI_RUN}" "${CLI_FORCE}" "${CLI_JSON}"

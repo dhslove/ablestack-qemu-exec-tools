@@ -2823,6 +2823,44 @@ ftctl_dr_runtime_target_materialized() {
   fi
 }
 
+ftctl_dr_runtime_capabilities() {
+  local json="${1-0}" version="${PROG_VERSION:-unknown}"
+  local schema="20260709"
+  local commands=(
+    "dr-plan-apply"
+    "dr-sync-start"
+    "dr-sync-pause"
+    "dr-sync-resume"
+    "dr-test-failover"
+    "dr-test-cleanup"
+    "dr-failover"
+    "dr-failback"
+    "dr-reprotect"
+    "dr-target-materialized"
+    "dr-release"
+    "dr-status"
+    "dr-cancel"
+  )
+  local first="1" command
+
+  if [[ "${json}" == "1" ]]; then
+    printf '{"command":"dr-capabilities","result":"ok","ftctl_version":"%s","runtime_schema_version":"%s","supported_commands":[' \
+      "$(ftctl__json_escape "${version}")" "$(ftctl__json_escape "${schema}")"
+    for command in "${commands[@]}"; do
+      [[ "${first}" == "1" ]] || printf ','
+      first="0"
+      printf '"%s"' "$(ftctl__json_escape "${command}")"
+    done
+    printf '],"supported_features":["async-run","status-projection","target-materialized-notify","target-materialized-idempotent"]}\n'
+    return 0
+  fi
+
+  printf 'FTCTL_DR capabilities (version=%s schema=%s)\n' "${version}" "${schema}"
+  for command in "${commands[@]}"; do
+    printf '  %s\n' "${command}"
+  done
+}
+
 ftctl_dr_runtime_status() {
   local plan="${1-}" run="${2-}" events_offset="${3-0}" json="${4-0}"
   local path result="ok"
