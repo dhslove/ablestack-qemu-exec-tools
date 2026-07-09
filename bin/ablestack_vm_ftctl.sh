@@ -93,6 +93,12 @@ CLI_PROFILE_JSON=""
 CLI_RESTORE_POINT=""
 CLI_EVENTS_OFFSET=""
 CLI_WAIT_VALUE=""
+CLI_TARGET_VM_ID=""
+CLI_TARGET_EXTERNAL_REF=""
+CLI_TARGET_VM_NAME=""
+CLI_TARGET_NETWORK_ID=""
+CLI_TARGET_VOLUME_MAP_JSON=""
+CLI_TARGET_READY_RPO_SECONDS=""
 
 FTCTL_LIB_BASE=""
 
@@ -230,6 +236,8 @@ Commands:
   dr-failover        Accept a DR failover session
   dr-failback        Accept a DR failback session
   dr-reprotect       Accept a DR reprotect session
+  dr-target-materialized
+                     Mark Cloud target VM/volume materialization complete
   dr-release         Release DR runtime state
   dr-status          Show DR runtime status for a plan/run
   dr-cancel          Cancel a DR runtime run
@@ -316,7 +324,7 @@ parse_args() {
         print_version
         exit "${EXIT_OK}"
         ;;
-      protect|protect-start|status|reconcile|failover|failover-prepare|failback|failback-sync|failback-finalize|failback-reprotect|unprotect|fence-confirm|fence-clear|pause-protection|resume-protection|preflight-remote|dr-key-ensure|dr-key-install|dr-key-remove|check|health|events|snapshot|dr-plan-apply|dr-sync-start|dr-sync-pause|dr-sync-resume|dr-test-failover|dr-test-cleanup|dr-failover|dr-failback|dr-reprotect|dr-release|dr-status|dr-cancel|config)
+      protect|protect-start|status|reconcile|failover|failover-prepare|failback|failback-sync|failback-finalize|failback-reprotect|unprotect|fence-confirm|fence-clear|pause-protection|resume-protection|preflight-remote|dr-key-ensure|dr-key-install|dr-key-remove|check|health|events|snapshot|dr-plan-apply|dr-sync-start|dr-sync-pause|dr-sync-resume|dr-test-failover|dr-test-cleanup|dr-failover|dr-failback|dr-reprotect|dr-target-materialized|dr-release|dr-status|dr-cancel|config)
         [[ -z "${CLI_COMMAND}" ]] || {
           echo "ERROR: multiple commands specified" >&2
           exit "${EXIT_USAGE}"
@@ -549,6 +557,30 @@ parse_args() {
         CLI_RUN="${2-}"
         shift 2
         ;;
+      --target-vm-id)
+        CLI_TARGET_VM_ID="${2-}"
+        shift 2
+        ;;
+      --target-external-ref)
+        CLI_TARGET_EXTERNAL_REF="${2-}"
+        shift 2
+        ;;
+      --target-vm-name)
+        CLI_TARGET_VM_NAME="${2-}"
+        shift 2
+        ;;
+      --target-network-id)
+        CLI_TARGET_NETWORK_ID="${2-}"
+        shift 2
+        ;;
+      --target-volume-map-json)
+        CLI_TARGET_VOLUME_MAP_JSON="${2-}"
+        shift 2
+        ;;
+      --target-ready-rpo-seconds)
+        CLI_TARGET_READY_RPO_SECONDS="${2-}"
+        shift 2
+        ;;
       --profile-json)
         CLI_PROFILE_JSON="${2-}"
         shift 2
@@ -634,6 +666,10 @@ dispatch() {
     dr-sync-start|dr-sync-pause|dr-sync-resume|dr-test-failover|dr-test-cleanup|dr-failover|dr-failback|dr-reprotect|dr-release)
       ftctl_dr_runtime_action "${CLI_COMMAND}" "${CLI_PLAN}" "${CLI_RUN}" "${CLI_PROFILE_JSON}" "${CLI_ROLE}" \
         "${CLI_MODE}" "${CLI_RESTORE_POINT}" "${CLI_FORCE}" "${CLI_DRY_RUN}" "${CLI_WAIT_VALUE}" "${CLI_JSON}"
+      ;;
+    dr-target-materialized)
+      ftctl_dr_runtime_target_materialized "${CLI_PLAN}" "${CLI_RUN}" "${CLI_TARGET_VM_ID}" "${CLI_TARGET_EXTERNAL_REF}" \
+        "${CLI_TARGET_VM_NAME}" "${CLI_TARGET_NETWORK_ID}" "${CLI_TARGET_VOLUME_MAP_JSON}" "${CLI_TARGET_READY_RPO_SECONDS}" "${CLI_JSON}"
       ;;
     dr-status)
       ftctl_dr_runtime_status "${CLI_PLAN}" "${CLI_RUN}" "${CLI_EVENTS_OFFSET}" "${CLI_JSON}"

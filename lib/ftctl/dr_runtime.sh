@@ -2759,6 +2759,70 @@ ftctl_dr_runtime_action() {
   fi
 }
 
+ftctl_dr_runtime_target_materialized() {
+  local plan="${1-}" run="${2-}" target_vm_id="${3-}" target_external_ref="${4-}" target_vm_name="${5-}" target_network_id="${6-}"
+  local target_volume_map_json="${7-}" target_ready_rpo_seconds="${8-}" json="${9-0}"
+  local run_path status_path now updates
+
+  ftctl_dr_runtime_require_plan "${plan}" || return 2
+  ftctl_dr_runtime_require_run "${run}" || return 2
+  if [[ -z "${target_vm_id}${target_external_ref}" ]]; then
+    [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_error_json "dr-target-materialized" "${plan}" "${run}" "target_reference_required" "target VM id or external ref is required" 2
+    [[ "${json}" == "1" ]] || printf 'dr-target-materialized: plan=%s run=%s target reference is required\n' "${plan}" "${run}" >&2
+    return 2
+  fi
+
+  ftctl_dr_runtime_ensure_plan_dirs "${plan}"
+  run_path="$(ftctl_dr_runtime_run_path "${plan}" "${run}")"
+  status_path="$(ftctl_dr_runtime_status_path "${plan}")"
+  if [[ ! -f "${run_path}" ]]; then
+    if [[ -f "${status_path}" ]]; then
+      cp -f "${status_path}" "${run_path}"
+    else
+      ftctl_dr_runtime_write_state "${run_path}" "${plan}" "${run}" "dr-target-materialized" "READY" "target-ready" "100" "${run}" ""
+    fi
+  fi
+
+  now="$(ftctl_now_iso8601)"
+  updates=(
+    "action=dr-target-materialized"
+    "state=READY"
+    "step=target-ready"
+    "progress=100"
+    "accepted=true"
+    "target_vm_id=${target_vm_id}"
+    "target_external_ref=${target_external_ref}"
+    "target_vm_name=${target_vm_name}"
+    "target_network_id=${target_network_id}"
+    "target_volume_map_json=${target_volume_map_json}"
+    "target_vm_present=true"
+    "target_storage_present=true"
+    "target_network_present=true"
+    "restore_point_present=true"
+    "target_materialized=true"
+    "worker_state=SUCCEEDED"
+    "worker_exit_code=0"
+    "worker_updated_at=${now}"
+    "retryable=false"
+    "retry_after_sec="
+    "error_code="
+    "error_message="
+    "updated_at=${now}"
+  )
+  [[ -n "${target_ready_rpo_seconds}" ]] && updates+=("target_ready_rpo_seconds=${target_ready_rpo_seconds}")
+  ftctl_dr_runtime_path_set "${run_path}" "${updates[@]}" || return 2
+  cp -f "${run_path}" "${status_path}"
+  chmod 0644 "${status_path}" 2>/dev/null || true
+  ftctl_log_event "dr-runtime" "dr.target.materialized" "ok" "" "" \
+    "plan=${plan} run=${run} target_vm_id=${target_vm_id:-} target_external_ref=${target_external_ref:-}"
+
+  if [[ "${json}" == "1" ]]; then
+    ftctl_dr_runtime_emit_state_json "dr-target-materialized" "ok" "${plan}" "${run}" "${run_path}" "0"
+  else
+    printf 'dr-target-materialized: plan=%s run=%s target=%s state=READY\n' "${plan}" "${run}" "${target_vm_id:-${target_external_ref}}"
+  fi
+}
+
 ftctl_dr_runtime_status() {
   local plan="${1-}" run="${2-}" events_offset="${3-0}" json="${4-0}"
   local path result="ok"
