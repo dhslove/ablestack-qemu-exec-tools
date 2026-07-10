@@ -1980,6 +1980,8 @@ ftctl_dr_runtime_emit_state_json() {
   local reprotect_manifest_path reprotect_checkpoint_path reprotect_requested_at reprotect_completed_at
   local reprotect_rto_actual_seconds reverse_direction reverse_profile_path reverse_restore_points_path reprotect_worker_pid
   local target_vm_id target_external_ref target_materialized target_vm_present target_storage_present target_network_present restore_point_present
+  local profile_path source_firmware source_secure_boot source_hardware_fingerprint
+  local target_boot_type target_boot_mode target_io_policy target_iothreads
 
   action="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "action")"
   state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "state")"
@@ -1995,8 +1997,18 @@ ftctl_dr_runtime_emit_state_json() {
   updated="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "updated_at")"
   accepted="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "accepted")"
   [[ -f "${state_path}" ]] && runtime_exists="true" || runtime_exists="false"
-  [[ -f "$(ftctl_dr_runtime_profile_path "${plan}")" ]] && profile_exists="true" || profile_exists="false"
+  profile_path="$(ftctl_dr_runtime_profile_path "${plan}")"
+  [[ -f "${profile_path}" ]] && profile_exists="true" || profile_exists="false"
   [[ -n "${run}" && -f "$(ftctl_dr_runtime_run_path "${plan}" "${run}")" ]] && run_exists="true" || run_exists="false"
+  if [[ "${profile_exists}" == "true" ]]; then
+    source_firmware="$(jq -r '.mapping.source.hardware.firmware // empty' "${profile_path}" 2>/dev/null || true)"
+    source_secure_boot="$(jq -r '.mapping.source.hardware.secureBoot // empty' "${profile_path}" 2>/dev/null || true)"
+    source_hardware_fingerprint="$(jq -r '.mapping.source.hardware.fingerprint // empty' "${profile_path}" 2>/dev/null || true)"
+    target_boot_type="$(jq -r '.mapping.target.hardware.bootType // empty' "${profile_path}" 2>/dev/null || true)"
+    target_boot_mode="$(jq -r '.mapping.target.hardware.bootMode // empty' "${profile_path}" 2>/dev/null || true)"
+    target_io_policy="$(jq -r '.mapping.target.hardware.ioPolicy // empty' "${profile_path}" 2>/dev/null || true)"
+    target_iothreads="$(jq -r '.mapping.target.hardware.ioThreadsEnabled // empty' "${profile_path}" 2>/dev/null || true)"
+  fi
   driver="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "driver")"
   driver_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "driver_state")"
   disk_map_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "disk_map_path")"
@@ -2138,6 +2150,13 @@ ftctl_dr_runtime_emit_state_json() {
   printf ',"restore_point_present":%s' "${restore_point_present}"
   ftctl_dr_runtime_json_string_field "target_vm_id" "${target_vm_id}"
   ftctl_dr_runtime_json_string_field "target_external_ref" "${target_external_ref}"
+  ftctl_dr_runtime_json_string_field "source_firmware" "${source_firmware}"
+  [[ "${source_secure_boot}" == "true" || "${source_secure_boot}" == "false" ]] && printf ',"source_secure_boot":%s' "${source_secure_boot}"
+  ftctl_dr_runtime_json_string_field "source_hardware_fingerprint" "${source_hardware_fingerprint}"
+  ftctl_dr_runtime_json_string_field "target_boot_type" "${target_boot_type}"
+  ftctl_dr_runtime_json_string_field "target_boot_mode" "${target_boot_mode}"
+  ftctl_dr_runtime_json_string_field "target_io_policy" "${target_io_policy}"
+  [[ "${target_iothreads}" == "true" || "${target_iothreads}" == "false" ]] && printf ',"target_iothreads":%s' "${target_iothreads}"
   ftctl_dr_runtime_json_string_field "error_code" "${error_code}"
   ftctl_dr_runtime_json_string_field "error_message" "${error_message}"
   ftctl_dr_runtime_json_number_field "driver_exit_code" "${driver_exit_code}"
@@ -2825,7 +2844,7 @@ ftctl_dr_runtime_target_materialized() {
 
 ftctl_dr_runtime_capabilities() {
   local json="${1-0}" version="${PROG_VERSION:-unknown}"
-  local schema="20260709"
+  local schema="20260710" action_contract="2026-07-10"
   local commands=(
     "dr-plan-apply"
     "dr-sync-start"
@@ -2844,14 +2863,14 @@ ftctl_dr_runtime_capabilities() {
   local first="1" command
 
   if [[ "${json}" == "1" ]]; then
-    printf '{"command":"dr-capabilities","result":"ok","ftctl_version":"%s","runtime_schema_version":"%s","supported_commands":[' \
-      "$(ftctl__json_escape "${version}")" "$(ftctl__json_escape "${schema}")"
+    printf '{"command":"dr-capabilities","result":"ok","ftctl_version":"%s","runtime_schema_version":"%s","action_contract_version":"%s","supported_commands":[' \
+      "$(ftctl__json_escape "${version}")" "$(ftctl__json_escape "${schema}")" "$(ftctl__json_escape "${action_contract}")"
     for command in "${commands[@]}"; do
       [[ "${first}" == "1" ]] || printf ','
       first="0"
       printf '"%s"' "$(ftctl__json_escape "${command}")"
     done
-    printf '],"supported_features":["async-run","status-projection","target-materialized-notify","target-materialized-idempotent"]}\n'
+    printf '],"supported_features":["async-run","status-projection","target-materialized-notify","target-materialized-idempotent","hardware-contract-projection"]}\n'
     return 0
   fi
 

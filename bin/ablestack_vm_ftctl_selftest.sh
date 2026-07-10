@@ -6274,6 +6274,23 @@ selftest_case_dr_runtime_profile_status_cancel() {
   "runUuid": "run-step3",
   "direction": "KVM_TO_VMWARE",
   "activeSide": "SOURCE",
+  "mapping": {
+    "source": {
+      "hardware": {
+        "firmware": "EFI",
+        "secureBoot": true,
+        "fingerprint": "sha256:test-source-hardware"
+      }
+    },
+    "target": {
+      "hardware": {
+        "bootType": "UEFI",
+        "bootMode": "SECURE",
+        "ioPolicy": "io_uring",
+        "ioThreadsEnabled": true
+      }
+    }
+  },
   "request": {
     "mode": "planned",
     "remoteMoldSecretKey": "plain-secret"
@@ -6319,6 +6336,13 @@ JSON
   selftest_assert_contains "${status}" '"state":"SYNCING"' "status state"
   selftest_assert_contains "${status}" '"progress":1' "status progress"
   selftest_assert_contains "${status}" '"events_offset":' "status event offset"
+  selftest_assert_contains "${status}" '"source_firmware":"EFI"' "status source firmware"
+  selftest_assert_contains "${status}" '"source_secure_boot":true' "status source secure boot"
+  selftest_assert_contains "${status}" '"source_hardware_fingerprint":"sha256:test-source-hardware"' "status source hardware fingerprint"
+  selftest_assert_contains "${status}" '"target_boot_type":"UEFI"' "status target boot type"
+  selftest_assert_contains "${status}" '"target_boot_mode":"SECURE"' "status target boot mode"
+  selftest_assert_contains "${status}" '"target_io_policy":"io_uring"' "status target io policy"
+  selftest_assert_contains "${status}" '"target_iothreads":true' "status target iothreads"
 
   canceled="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-cancel \
     --config "${SELFTEST_CONFIG}" \
