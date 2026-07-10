@@ -1969,6 +1969,11 @@ ftctl_dr_runtime_emit_state_json() {
   local scheduler_state worker_pid worker_state worker_started_at worker_updated_at worker_exit_code
   local retryable retry_after_sec lock_file holder_pid holder_command holder_age_sec
   local checkpoint_sequence restore_points_path dynamic_rpo
+  local current_checkpoint_sequence current_checkpoint_cycle_type current_checkpoint_ref current_checkpoint_state
+  local latest_completed_checkpoint_sequence latest_completed_checkpoint_cycle_type latest_completed_checkpoint_ref latest_completed_checkpoint_state
+  local latest_completed_source_checkpoint_at latest_completed_target_durable_at latest_completed_target_ready_rpo_seconds
+  local latest_completed_manifest_path latest_completed_checkpoint_path
+  local -a completed_checkpoint_fields=()
   local test_session_id test_session_state test_restore_point_ref test_restore_point_sequence
   local test_manifest_path test_checkpoint_path
   local test_artifacts_state test_artifacts_path test_artifact_count
@@ -2040,6 +2045,57 @@ ftctl_dr_runtime_emit_state_json() {
   holder_age_sec="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "holder_age_sec")"
   checkpoint_sequence="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "checkpoint_sequence")"
   restore_points_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "restore_points_path")"
+  [[ -n "${restore_points_path}" ]] || restore_points_path="$(ftctl_dr_runtime_plan_dir "${plan}")/restore-points.jsonl"
+  current_checkpoint_sequence="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "current_checkpoint_sequence")"
+  current_checkpoint_cycle_type="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "current_checkpoint_cycle_type")"
+  current_checkpoint_ref="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "current_checkpoint_ref")"
+  current_checkpoint_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "current_checkpoint_state")"
+  latest_completed_checkpoint_sequence="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_checkpoint_sequence")"
+  latest_completed_checkpoint_cycle_type="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_checkpoint_cycle_type")"
+  latest_completed_checkpoint_ref="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_checkpoint_ref")"
+  latest_completed_checkpoint_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_checkpoint_state")"
+  latest_completed_source_checkpoint_at="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_source_checkpoint_at")"
+  latest_completed_target_durable_at="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_target_durable_at")"
+  latest_completed_target_ready_rpo_seconds="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_target_ready_rpo_seconds")"
+  latest_completed_manifest_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_manifest_path")"
+  latest_completed_checkpoint_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_checkpoint_path")"
+  if [[ -z "${latest_completed_checkpoint_sequence}" && -s "${restore_points_path}" ]]; then
+    mapfile -t completed_checkpoint_fields < <(python3 - "${restore_points_path}" <<'PY' 2>/dev/null
+import json
+import sys
+
+latest = None
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    for line in fh:
+        try:
+            candidate = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        if candidate.get("checkpointSequence") is not None:
+            latest = candidate
+if latest:
+    for key in (
+        "checkpointSequence", "cycleType", "checkpointRef", "state",
+        "sourceCheckpointAt", "targetDurableAt", "targetReadyRpoSeconds",
+        "manifest", "checkpoint",
+    ):
+        value = latest.get(key)
+        print("" if value is None else value)
+PY
+    )
+    if (( ${#completed_checkpoint_fields[@]} >= 9 )); then
+      latest_completed_checkpoint_sequence="${completed_checkpoint_fields[0]}"
+      latest_completed_checkpoint_cycle_type="${completed_checkpoint_fields[1]}"
+      latest_completed_checkpoint_ref="${completed_checkpoint_fields[2]}"
+      latest_completed_checkpoint_state="${completed_checkpoint_fields[3]:-READY}"
+      latest_completed_source_checkpoint_at="${completed_checkpoint_fields[4]}"
+      latest_completed_target_durable_at="${completed_checkpoint_fields[5]}"
+      latest_completed_target_ready_rpo_seconds="${completed_checkpoint_fields[6]}"
+      latest_completed_manifest_path="${completed_checkpoint_fields[7]}"
+      latest_completed_checkpoint_path="${completed_checkpoint_fields[8]}"
+    fi
+  fi
+  [[ -n "${current_checkpoint_sequence}" ]] || current_checkpoint_sequence="${checkpoint_sequence}"
   test_session_id="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "test_session_id")"
   test_session_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "test_session_state")"
   test_restore_point_ref="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "test_restore_point_ref")"
@@ -2194,6 +2250,19 @@ ftctl_dr_runtime_emit_state_json() {
   ftctl_dr_runtime_json_string_field "holder_command" "${holder_command}"
   ftctl_dr_runtime_json_number_field "holder_age_sec" "${holder_age_sec}"
   ftctl_dr_runtime_json_number_field "checkpoint_sequence" "${checkpoint_sequence}"
+  ftctl_dr_runtime_json_number_field "current_checkpoint_sequence" "${current_checkpoint_sequence}"
+  ftctl_dr_runtime_json_string_field "current_checkpoint_cycle_type" "${current_checkpoint_cycle_type}"
+  ftctl_dr_runtime_json_string_field "current_checkpoint_ref" "${current_checkpoint_ref}"
+  ftctl_dr_runtime_json_string_field "current_checkpoint_state" "${current_checkpoint_state}"
+  ftctl_dr_runtime_json_number_field "latest_completed_checkpoint_sequence" "${latest_completed_checkpoint_sequence}"
+  ftctl_dr_runtime_json_string_field "latest_completed_checkpoint_cycle_type" "${latest_completed_checkpoint_cycle_type}"
+  ftctl_dr_runtime_json_string_field "latest_completed_checkpoint_ref" "${latest_completed_checkpoint_ref}"
+  ftctl_dr_runtime_json_string_field "latest_completed_checkpoint_state" "${latest_completed_checkpoint_state}"
+  ftctl_dr_runtime_json_string_field "latest_completed_source_checkpoint_at" "${latest_completed_source_checkpoint_at}"
+  ftctl_dr_runtime_json_string_field "latest_completed_target_durable_at" "${latest_completed_target_durable_at}"
+  ftctl_dr_runtime_json_number_field "latest_completed_target_ready_rpo_seconds" "${latest_completed_target_ready_rpo_seconds}"
+  ftctl_dr_runtime_json_string_field "latest_completed_manifest_path" "${latest_completed_manifest_path}"
+  ftctl_dr_runtime_json_string_field "latest_completed_checkpoint_path" "${latest_completed_checkpoint_path}"
   ftctl_dr_runtime_json_string_field "restore_points_path" "${restore_points_path}"
   ftctl_dr_runtime_json_string_field "test_session_id" "${test_session_id}"
   ftctl_dr_runtime_json_string_field "test_session_state" "${test_session_state}"

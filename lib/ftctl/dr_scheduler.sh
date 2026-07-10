@@ -318,6 +318,10 @@ ftctl_dr_scheduler_worker() {
       "checkpoint_sequence=${sequence}" \
       "checkpoint_cycle_type=${cycle_type}" \
       "checkpoint_ref=${checkpoint_ref}" \
+      "current_checkpoint_sequence=${sequence}" \
+      "current_checkpoint_cycle_type=${cycle_type}" \
+      "current_checkpoint_ref=${checkpoint_ref}" \
+      "current_checkpoint_state=TRANSFERRING" \
       "updated_at=${now}" || true
 
     rc=0
@@ -346,6 +350,10 @@ ftctl_dr_scheduler_worker() {
         "progress=100" \
         "accepted=false" \
         "scheduler_state=ERROR" \
+        "current_checkpoint_sequence=${sequence}" \
+        "current_checkpoint_cycle_type=${cycle_type}" \
+        "current_checkpoint_ref=${checkpoint_ref}" \
+        "current_checkpoint_state=FAILED" \
         "error_code=${error_code}" \
         "updated_at=${now}" || true
       ftctl_log_event "dr-runtime" "dr.scheduler.cycle" "fail" "" "${rc}" \
@@ -372,6 +380,19 @@ ftctl_dr_scheduler_worker() {
       "checkpoint_sequence=${sequence}" \
       "checkpoint_cycle_type=${cycle_type}" \
       "checkpoint_ref=${checkpoint_ref}" \
+      "current_checkpoint_sequence=${sequence}" \
+      "current_checkpoint_cycle_type=${cycle_type}" \
+      "current_checkpoint_ref=${checkpoint_ref}" \
+      "current_checkpoint_state=COMPLETED" \
+      "latest_completed_checkpoint_sequence=${sequence}" \
+      "latest_completed_checkpoint_cycle_type=${cycle_type}" \
+      "latest_completed_checkpoint_ref=${checkpoint_ref}" \
+      "latest_completed_checkpoint_state=READY" \
+      "latest_completed_source_checkpoint_at=${source_at}" \
+      "latest_completed_target_durable_at=${target_at}" \
+      "latest_completed_target_ready_rpo_seconds=${rpo}" \
+      "latest_completed_manifest_path=${manifest_path}" \
+      "latest_completed_checkpoint_path=${checkpoint_path}" \
       "manifest_path=${manifest_path}" \
       "checkpoint_path=${checkpoint_path}" \
       "restore_points_path=${restore_points_path}" \
