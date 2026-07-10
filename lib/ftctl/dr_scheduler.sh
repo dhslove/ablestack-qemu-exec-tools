@@ -152,6 +152,7 @@ record = {
     "planUuid": plan,
     "runUuid": run,
     "checkpointSequence": int(sequence),
+    "checkpointRef": f"ftctl:{plan}:{run}:{sequence}",
     "cycleType": cycle_type,
     "driver": driver,
     "manifest": manifest_path,
@@ -216,15 +217,52 @@ ftctl_dr_scheduler_sleep_or_stop() {
   return 0
 }
 
+ftctl_dr_scheduler_last_sequence() {
+  local restore_points_path="${1-}" plan="${2-}" run="${3-}"
+  [[ -f "${restore_points_path}" ]] || {
+    printf '0\n'
+    return 0
+  }
+  python3 - "${restore_points_path}" "${plan}" "${run}" <<'PY'
+import json
+import sys
+
+path, plan, run = sys.argv[1:4]
+latest = 0
+with open(path, "r", encoding="utf-8") as fh:
+    for line in fh:
+        try:
+            record = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        if record.get("planUuid") != plan or record.get("runUuid") != run:
+            continue
+        try:
+            latest = max(latest, int(record.get("checkpointSequence") or 0))
+        except (TypeError, ValueError):
+            pass
+print(latest)
+PY
+}
+
+ftctl_dr_scheduler_iso_from_epoch() {
+  local epoch="${1-}"
+  [[ "${epoch}" =~ ^[0-9]+$ ]] || return 1
+  date -u -d "@${epoch}" '+%Y-%m-%dT%H:%M:%SZ'
+}
+
 ftctl_dr_scheduler_worker() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" state_path="${4-}" status_path="${5-}"
   local pid_path restore_points_path interval max_cycles sequence=0 command cycle_type source_provider target_provider driver
-  local output rc manifest_path checkpoint_path source_at target_at rpo now error_code
+  local output rc manifest_path checkpoint_path source_at target_at rpo now error_code checkpoint_ref
+  local cycle_started_epoch next_cycle_epoch next_cycle_at wait_seconds
 
   [[ -n "${plan}" && -n "${run}" && -f "${profile_file}" && -f "${state_path}" ]] || return 2
   ftctl_ensure_dir "$(ftctl_dr_scheduler_dir "${plan}")" "0755"
   pid_path="$(ftctl_dr_scheduler_pid_path "${plan}" "${run}")"
   restore_points_path="$(ftctl_dr_scheduler_restore_points_path "${plan}")"
+  sequence="$(ftctl_dr_scheduler_last_sequence "${restore_points_path}" "${plan}" "${run}" || printf '0')"
+  [[ "${sequence}" =~ ^[0-9]+$ ]] || sequence=0
   interval="$(ftctl_dr_scheduler_interval "${profile_file}")"
   max_cycles="$(ftctl_dr_scheduler_max_cycles "${profile_file}")"
   source_provider="$(ftctl_dr_scheduler_profile_provider "${profile_file}" source)"
@@ -269,6 +307,8 @@ ftctl_dr_scheduler_worker() {
 
     sequence=$((sequence + 1))
     cycle_type="$(ftctl_dr_scheduler_cycle_type "${sequence}")"
+    checkpoint_ref="ftctl:${plan}:${run}:${sequence}"
+    cycle_started_epoch="$(date +%s)"
     now="$(ftctl_now_iso8601)"
     ftctl_dr_scheduler_update_state "${state_path}" "${status_path}" \
       "state=SYNCING" \
@@ -276,6 +316,8 @@ ftctl_dr_scheduler_worker() {
       "progress=40" \
       "scheduler_state=RUNNING" \
       "checkpoint_sequence=${sequence}" \
+      "checkpoint_cycle_type=${cycle_type}" \
+      "checkpoint_ref=${checkpoint_ref}" \
       "updated_at=${now}" || true
 
     rc=0
@@ -328,6 +370,8 @@ ftctl_dr_scheduler_worker() {
       "driver=${driver}" \
       "driver_state=CHECKPOINT_READY" \
       "checkpoint_sequence=${sequence}" \
+      "checkpoint_cycle_type=${cycle_type}" \
+      "checkpoint_ref=${checkpoint_ref}" \
       "manifest_path=${manifest_path}" \
       "checkpoint_path=${checkpoint_path}" \
       "restore_points_path=${restore_points_path}" \
@@ -350,7 +394,15 @@ ftctl_dr_scheduler_worker() {
       break
     fi
 
-    ftctl_dr_scheduler_sleep_or_stop "${plan}" "${interval}" || true
+    next_cycle_epoch=$((cycle_started_epoch + interval))
+    wait_seconds=$((next_cycle_epoch - $(date +%s)))
+    (( wait_seconds < 0 )) && wait_seconds=0
+    next_cycle_at="$(ftctl_dr_scheduler_iso_from_epoch "${next_cycle_epoch}" 2>/dev/null || true)"
+    ftctl_dr_scheduler_update_state "${state_path}" "${status_path}" \
+      "next_cycle_at=${next_cycle_at}" \
+      "next_cycle_wait_seconds=${wait_seconds}" \
+      "updated_at=$(ftctl_now_iso8601)" || true
+    ftctl_dr_scheduler_sleep_or_stop "${plan}" "${wait_seconds}" || true
   done
 
   rm -f "${pid_path}" 2>/dev/null || true

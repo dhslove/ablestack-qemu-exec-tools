@@ -7184,6 +7184,7 @@ JSON
   selftest_assert_eq "$(wc -l < "${restore_points}" | tr -d '[:space:]')" "2" "restore point count"
   selftest_assert_file_contains "${restore_points}" '"cycleType":"full-seed"'
   selftest_assert_file_contains "${restore_points}" '"cycleType":"incremental"'
+  selftest_assert_file_contains "${restore_points}" '"checkpointRef":"ftctl:plan-scheduler-ablestack:run-scheduler-ablestack:2"'
   convert_count="$(grep -c -- "convert --force-share -p -n -S" "${call_log}")"
   selftest_assert_eq "${convert_count}" "2" "scheduler convert count"
 }
@@ -7203,6 +7204,7 @@ selftest_case_dr_scheduler_vmware_mock_checkpoint_loop() {
   "direction": "VMWARE_TO_VMWARE",
   "source": {"provider": "VMWARE", "driver": "VMWARE_CBT", "vmId": "vm-101", "vcenterRef": "vc-a"},
   "target": {"provider": "VMWARE", "driver": "VMWARE_VDDK", "vmId": "vm-201", "datastoreRef": "ds-dr"},
+  "policy": {"cbtPolicy": {"required": false}},
   "schedule": {"intervalSeconds": 0},
   "request": {"maxCycles": 2},
   "mapping": {
@@ -7237,6 +7239,7 @@ JSON
   restore_points="${SELFTEST_ROOT}/run/dr-runtime/plans/plan-scheduler-vmware/restore-points.jsonl"
   selftest_assert_eq "$(wc -l < "${restore_points}" | tr -d '[:space:]')" "2" "vmware restore point count"
   selftest_assert_file_contains "${restore_points}" '"cycleType":"incremental"'
+  selftest_assert_file_contains "${restore_points}" '"checkpointRef":"ftctl:plan-scheduler-vmware:run-scheduler-vmware:2"'
   checkpoint="${SELFTEST_ROOT}/run/dr-runtime/plans/plan-scheduler-vmware/checkpoints/run-scheduler-vmware-cycle-2-vmware-checkpoint.json"
   selftest_assert_file_contains "${checkpoint}" '"state":"TARGET_READY"'
   selftest_assert_file_contains "${SELFTEST_ROOT}/run/dr-runtime/plans/plan-scheduler-vmware/manifests/run-scheduler-vmware-cycle-2-vmware-manifest.json" '"phase":"vmware-incremental-complete"'
@@ -7284,7 +7287,7 @@ EOF
     "networks": [{"networkId": "network-1"}]
   },
   "request": {
-    "restorePointRef": "ftctl:${plan}:2",
+    "restorePointRef": "ftctl:${plan}:run-sync:2",
     "networkMode": "isolated"
   },
   "mapping": {
@@ -7335,13 +7338,13 @@ EOF
     --plan "${plan}" \
     --run run-test-session \
     --profile-json "${profile}" \
-    --restore-point "ftctl:${plan}:2" \
+    --restore-point "ftctl:${plan}:run-sync:2" \
     --json)"
   selftest_assert_contains "${out}" '"result":"accepted"' "test failover accepted"
   selftest_assert_contains "${out}" '"state":"TESTING"' "test failover state"
   selftest_assert_contains "${out}" '"step":"test-session-ready"' "test failover step"
   selftest_assert_contains "${out}" '"test_session_state":"READY"' "test session ready"
-  selftest_assert_contains "${out}" '"test_restore_point_ref":"ftctl:plan-test-session:2"' "test restore point ref"
+  selftest_assert_contains "${out}" '"test_restore_point_ref":"ftctl:plan-test-session:run-sync:2"' "test restore point ref"
   selftest_assert_contains "${out}" '"test_restore_point_sequence":2' "test restore point sequence"
   selftest_assert_contains "${out}" '"test_artifacts_state":"CREATED"' "test artifact state"
   selftest_assert_contains "${out}" '"test_artifact_count":1' "test artifact count"
@@ -7485,7 +7488,7 @@ EOF
   selftest_assert_contains "${out}" '"state":"FAILED_OVER"' "planned failover final state"
   selftest_assert_contains "${out}" '"step":"active-side-switch"' "planned failover final step"
   selftest_assert_contains "${out}" '"failover_mode":"planned"' "planned failover mode"
-  selftest_assert_contains "${out}" '"failover_restore_point_ref":"ftctl:plan-failover:3"' "planned failover restore point ref"
+  selftest_assert_contains "${out}" '"failover_restore_point_ref":"ftctl:plan-failover:run-failover:3"' "planned failover restore point ref"
   selftest_assert_contains "${out}" '"failover_restore_point_sequence":3' "planned failover restore point sequence"
   selftest_assert_contains "${out}" '"active_side":"TARGET"' "planned failover active side"
   selftest_assert_contains "${out}" '"target_power_state":"POWER_ON_DELEGATED"' "planned failover target power delegated"

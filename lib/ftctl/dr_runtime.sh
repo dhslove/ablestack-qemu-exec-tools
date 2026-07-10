@@ -784,12 +784,12 @@ def read_restore_points(path):
     return records
 
 def record_ref(record):
-    explicit = record.get("sourceSnapshotRef") or record.get("restorePointRef")
+    explicit = record.get("checkpointRef") or record.get("sourceSnapshotRef") or record.get("restorePointRef")
     if explicit:
         return str(explicit)
     sequence = record.get("checkpointSequence")
     if sequence is not None:
-        return f"ftctl:{plan}:{sequence}"
+        return f"ftctl:{plan}:{record.get('runUuid') or run}:{sequence}"
     checkpoint = record.get("checkpoint")
     if checkpoint:
         return str(checkpoint)
@@ -809,11 +809,13 @@ def matches(record, selector):
         return False
     candidates = {
         record_ref(record),
+        f"ftctl:{plan}:{record.get('checkpointSequence', '')}",
         str(record.get("checkpointSequence", "")),
         str(record.get("checkpoint", "")),
         str(record.get("manifest", "")),
         str(record.get("sourceSnapshotRef", "")),
         str(record.get("restorePointRef", "")),
+        str(record.get("checkpointRef", "")),
     }
     return str(selector) in candidates
 
@@ -1185,12 +1187,12 @@ def read_restore_points(path):
     return records
 
 def record_ref(record):
-    explicit = record.get("sourceSnapshotRef") or record.get("restorePointRef")
+    explicit = record.get("checkpointRef") or record.get("sourceSnapshotRef") or record.get("restorePointRef")
     if explicit:
         return str(explicit)
     sequence = record.get("checkpointSequence")
     if sequence is not None:
-        return f"ftctl:{plan}:{sequence}"
+        return f"ftctl:{plan}:{record.get('runUuid') or run}:{sequence}"
     checkpoint = record.get("checkpoint")
     if checkpoint:
         return str(checkpoint)
@@ -1210,11 +1212,13 @@ def matches(record, selector):
         return False
     candidates = {
         record_ref(record),
+        f"ftctl:{plan}:{record.get('checkpointSequence', '')}",
         str(record.get("checkpointSequence", "")),
         str(record.get("checkpoint", "")),
         str(record.get("manifest", "")),
         str(record.get("sourceSnapshotRef", "")),
         str(record.get("restorePointRef", "")),
+        str(record.get("checkpointRef", "")),
     }
     return str(selector) in candidates
 
@@ -1560,7 +1564,7 @@ runtime = read_state(run_path)
 profile = read_json(profile_file)
 reverse = read_json(reverse_profile)
 sequence = runtime.get("checkpoint_sequence") or ""
-restore_ref = f"ftctl:{plan}:{sequence}" if sequence else f"ftctl:{plan}:latest"
+restore_ref = runtime.get("checkpoint_ref") or (f"ftctl:{plan}:{run}:{sequence}" if sequence else f"ftctl:{plan}:latest")
 session = {
     "version": 1,
     "planUuid": plan,

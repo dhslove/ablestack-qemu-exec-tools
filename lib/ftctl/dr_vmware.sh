@@ -1091,7 +1091,7 @@ ftctl_dr_vmware_replication_cycle() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" sequence="${4-}" cycle_type="${5-}"
   local disk_map target_disk_map capability_path manifest_path checkpoint_path source_open_status_path source_snapshot_status_path cycle_run now mover_path mover_rc=0
   local credentials_file=""
-  local source_epoch target_epoch rpo="0"
+  local source_at target_at snapshot_epoch_ms snapshot_source_at source_epoch target_epoch rpo="0"
 
   [[ -n "${plan}" && -n "${run}" && -n "${profile_file}" ]] || return 2
   cycle_run="${run}-cycle-${sequence:-0}"
@@ -1104,9 +1104,12 @@ ftctl_dr_vmware_replication_cycle() {
   [[ -f "${disk_map}" ]] || ftctl_dr_vmware_canonicalize_profile "${profile_file}" "${disk_map}" || return $?
   target_disk_map="$(ftctl_dr_ablestack_disk_map_path "${plan}" 2>/dev/null || true)"
   [[ -f "${capability_path}" ]] || ftctl_dr_vmware_write_capability "${capability_path}" || return $?
+  source_at="$(ftctl_now_iso8601)"
 
   mover_path="$(ftctl_dr_vmware_effective_mover 2>/dev/null || true)"
-  if [[ -n "${mover_path}" ]]; then
+  if [[ "${FTCTL_DR_VMWARE_MOCK_CYCLE:-0}" == "1" ]]; then
+    :
+  elif [[ -n "${mover_path}" ]]; then
     credentials_file="$(ftctl_dr_runtime_credential_path "${plan}" 2>/dev/null || true)"
     FTCTL_DR_PLAN_UUID="${plan}" \
     FTCTL_DR_RUN_UUID="${run}" \
@@ -1122,22 +1125,27 @@ ftctl_dr_vmware_replication_cycle() {
     FTCTL_DR_CREDENTIALS_FILE="$([[ -f "${credentials_file}" ]] && printf '%s' "${credentials_file}")" \
       "${mover_path}" || mover_rc=$?
     [[ "${mover_rc}" == "0" ]] || return "${mover_rc}"
-  elif [[ "${FTCTL_DR_VMWARE_MOCK_CYCLE:-0}" == "1" ]]; then
-    :
   else
     ftctl_log_event "dr-runtime" "dr.vmware.mover" "fail" "" "65" \
       "plan=${plan} run=${run} reason=DR_VMWARE_MOVER_UNAVAILABLE"
     return 65
   fi
 
-  now="$(ftctl_now_iso8601)"
+  target_at="$(ftctl_now_iso8601)"
   ftctl_dr_vmware_write_manifest "${disk_map}" "${capability_path}" "${manifest_path}" "vmware-${cycle_type:-incremental}-complete" || return $?
-  source_epoch="$(ftctl_iso_to_epoch "${now}" 2>/dev/null || printf '0')"
-  target_epoch="$(ftctl_iso_to_epoch "${now}" 2>/dev/null || printf '0')"
+  if [[ -f "${source_snapshot_status_path}" ]]; then
+    snapshot_epoch_ms="$(jq -r '.checkedAtEpochMs // empty' "${source_snapshot_status_path}" 2>/dev/null || true)"
+    if [[ "${snapshot_epoch_ms}" =~ ^[0-9]+$ ]]; then
+      snapshot_source_at="$(date -u -d "@$((snapshot_epoch_ms / 1000))" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || true)"
+      [[ -n "${snapshot_source_at}" ]] && source_at="${snapshot_source_at}"
+    fi
+  fi
+  source_epoch="$(ftctl_iso_to_epoch "${source_at}" 2>/dev/null || printf '0')"
+  target_epoch="$(ftctl_iso_to_epoch "${target_at}" 2>/dev/null || printf '0')"
   if [[ "${source_epoch}" =~ ^[0-9]+$ && "${target_epoch}" =~ ^[0-9]+$ && "${target_epoch}" -ge "${source_epoch}" ]]; then
     rpo="$((target_epoch - source_epoch))"
   fi
-  ftctl_dr_vmware_write_checkpoint "${disk_map}" "${manifest_path}" "${checkpoint_path}" "TARGET_READY" "${now}" "${now}" "${rpo}" || return $?
+  ftctl_dr_vmware_write_checkpoint "${disk_map}" "${manifest_path}" "${checkpoint_path}" "TARGET_READY" "${source_at}" "${target_at}" "${rpo}" || return $?
   ftctl_log_event "dr-runtime" "dr.vmware.cycle" "ok" "" "" \
     "plan=${plan} run=${run} sequence=${sequence:-0} type=${cycle_type:-incremental} checkpoint=${checkpoint_path} rpo=${rpo}"
   printf '%s\t%s\n' "${manifest_path}" "${checkpoint_path}"

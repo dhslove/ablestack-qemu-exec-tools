@@ -843,6 +843,7 @@ ftctl_dr_ablestack_full_seed_once() {
   local out="" err="" rc=0 source_at target_at source_epoch target_epoch rpo="0"
 
   ftctl_dr_ablestack_prepare_targets "${plan}" "${run}" "${profile_file}" "${disk_map}" "${manifest_path}" "${checkpoint_path}" || return $?
+  source_at="$(ftctl_now_iso8601)"
   while IFS= read -r disk_json; do
     device="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" device)"
     source_path="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" sourcePath)"
@@ -869,7 +870,6 @@ ftctl_dr_ablestack_full_seed_once() {
     [[ "${rc}" == "0" ]] || return "${rc}"
   done < <(ftctl_dr_ablestack_disk_rows "${disk_map}")
 
-  source_at="$(ftctl_now_iso8601)"
   target_at="$(ftctl_now_iso8601)"
   source_epoch="$(ftctl_iso_to_epoch "${source_at}" 2>/dev/null || printf '0')"
   target_epoch="$(ftctl_iso_to_epoch "${target_at}" 2>/dev/null || printf '0')"
