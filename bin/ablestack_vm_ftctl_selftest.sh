@@ -93,6 +93,8 @@ source "${LIB_BASE}/ftctl/dr_vmware.sh"
 # shellcheck source=/dev/null
 source "${LIB_BASE}/ftctl/dr_scheduler.sh"
 # shellcheck source=/dev/null
+source "${LIB_BASE}/ftctl/guestprep.sh"
+# shellcheck source=/dev/null
 source "${LIB_BASE}/ftctl/dr_runtime.sh"
 # shellcheck source=/dev/null
 source "${LIB_BASE}/ftctl/verify.sh"
@@ -7311,6 +7313,44 @@ JSON
   selftest_assert_file_contains "${SELFTEST_ROOT}/run/dr-runtime/plans/plan-scheduler-vmware/manifests/run-scheduler-vmware-cycle-2-vmware-manifest.json" '"phase":"vmware-incremental-complete"'
 }
 
+selftest_case_dr_guestprep_manifest_preserves_vmware_boot_contract() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR guest preparation preserves VMware EFI and Secure Boot metadata"
+
+  local session="${SELFTEST_ROOT}/dr-guestprep-session.json"
+  local manifest="${SELFTEST_ROOT}/dr-guestprep-manifest.json"
+  cat > "${session}" <<'JSON'
+{
+  "planUuid": "plan-guestprep",
+  "runUuid": "run-guestprep",
+  "request": {"networkMode": "ISOLATED"},
+  "profile": {
+    "mapping": {
+      "source": {
+        "hardware": {"firmware": "efi", "secureBoot": true, "cpu": 4, "memoryMb": 8192},
+        "workload": {"name": "Rocky10-1", "guestFamily": "linux", "guestId": "rockylinux64Guest"}
+      },
+      "target": {"hardware": {"bootType": "UEFI", "bootMode": "SECURE"}, "cpuNumber": 4, "memory": 8192}
+    }
+  },
+  "testArtifacts": {
+    "path": "/var/lib/ablestack/ftctl/test/plan-guestprep",
+    "records": [
+      {"device": "sda", "state": "CREATED", "type": "rbd-clone", "clone": "rbd:rbd/plan-guestprep-test", "sizeBytes": 21474836480}
+    ]
+  }
+}
+JSON
+
+  ftctl_guestprep_write_manifest "${session}" "${manifest}" "ftctl-dr-test-plan-guestprep"
+  selftest_assert_eq "$(jq -r '.source.vm.firmware' "${manifest}")" "efi" "guestprep firmware"
+  selftest_assert_eq "$(jq -r '.source.vm.secure_boot' "${manifest}")" "true" "guestprep secure boot"
+  selftest_assert_eq "$(jq -r '.source.vm.cpu' "${manifest}")" "4" "guestprep cpu"
+  selftest_assert_eq "$(jq -r '.source.vm.memory_mb' "${manifest}")" "8192" "guestprep memory"
+  selftest_assert_eq "$(jq -r '.target.storage.type' "${manifest}")" "rbd" "guestprep RBD target"
+  selftest_assert_eq "$(jq -r '.disks[0].transfer.target_path' "${manifest}")" "rbd:rbd/plan-guestprep-test" "guestprep target disk"
+}
+
 selftest_case_dr_runtime_test_failover_cleanup() {
   selftest_reset_env
   selftest_info "FTCTL_DR test failover selects restore point and cleanup returns READY"
@@ -7356,6 +7396,7 @@ EOF
     "restorePointRef": "ftctl:${plan}:run-sync:2",
     "networkMode": "isolated"
   },
+  "policy": {"testExecutionMode": "METADATA_ONLY"},
   "mapping": {
     "disks": [
       {"device": "vda", "sourcePath": "/src/root.qcow2", "targetPath": "${SELFTEST_ROOT}/target/root.qcow2", "targetFormat": "qcow2"}
@@ -8105,6 +8146,7 @@ selftest_main() {
   selftest_case_dr_vmware_missing_vddk_blocks_sync
   selftest_case_dr_scheduler_ablestack_checkpoint_loop
   selftest_case_dr_scheduler_vmware_mock_checkpoint_loop
+  selftest_case_dr_guestprep_manifest_preserves_vmware_boot_contract
   selftest_case_dr_runtime_test_failover_cleanup
   selftest_case_dr_runtime_planned_failover_promotes_latest_checkpoint
   selftest_case_dr_runtime_failback_restores_source_after_reverse_checkpoint

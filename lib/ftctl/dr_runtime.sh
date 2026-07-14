@@ -885,7 +885,9 @@ session = {
         "source": profile.get("source"),
         "target": profile.get("target"),
         "mapping": profile.get("mapping"),
+        "policy": profile.get("policy"),
     },
+    "request": request,
     "checkpoint": checkpoint,
 }
 os.makedirs(os.path.dirname(session_path), exist_ok=True)
@@ -927,6 +929,7 @@ PY
     "step=test-session-ready" \
     "progress=100" \
     "test_session_id=${test_session_id}" \
+    "test_session_path=${session_path}" \
     "test_session_state=READY" \
     "test_restore_point_ref=${test_restore_point_ref}" \
     "test_restore_point_sequence=${test_restore_point_sequence}" \
@@ -954,6 +957,7 @@ ftctl_dr_runtime_cleanup_test_session() {
 import json
 import os
 import shutil
+import subprocess
 import sys
 
 plan, run, active_path, session_path, selection_path, now = sys.argv[1:7]
@@ -964,6 +968,38 @@ if os.path.exists(active_path):
 restore = session.get("restorePoint") if isinstance(session.get("restorePoint"), dict) else {}
 artifacts = session.get("testArtifacts") if isinstance(session.get("testArtifacts"), dict) else {}
 artifact_path = artifacts.get("path") if isinstance(artifacts, dict) else ""
+test_domain = session.get("testDomain") if isinstance(session.get("testDomain"), dict) else {}
+domain_name = test_domain.get("name") if isinstance(test_domain, dict) else ""
+if domain_name:
+    subprocess.run(["virsh", "destroy", str(domain_name)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(["virsh", "undefine", str(domain_name), "--nvram"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(["virsh", "undefine", str(domain_name)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+for record in artifacts.get("records", []) if isinstance(artifacts, dict) else []:
+    if not isinstance(record, dict) or record.get("type") != "rbd-clone":
+        continue
+    mapped = record.get("mappedDevice")
+    clone = str(record.get("clone") or "")
+    backing = str(record.get("backing") or "")
+    snapshot = str(record.get("snapshot") or "")
+    if mapped:
+        subprocess.run(["rbd", "unmap", str(mapped)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    manifest_path = session.get("guestPreparation", {}).get("manifest") if isinstance(session.get("guestPreparation"), dict) else None
+    if manifest_path and os.path.exists(manifest_path):
+        try:
+            manifest = json.load(open(manifest_path, "r", encoding="utf-8"))
+            runtime = manifest.get("runtime") if isinstance(manifest.get("runtime"), dict) else {}
+            rbd_runtime = runtime.get("rbd") if isinstance(runtime.get("rbd"), dict) else {}
+            for device in rbd_runtime.get("mapped", []) if isinstance(rbd_runtime.get("mapped"), list) else []:
+                if device:
+                    subprocess.run(["rbd", "unmap", str(device)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except (OSError, ValueError, TypeError):
+            pass
+    if clone.startswith("rbd:"):
+        subprocess.run(["rbd", "rm", clone[4:]], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if backing.startswith("rbd:") and snapshot:
+        snap_ref = backing[4:] + "@" + snapshot
+        subprocess.run(["rbd", "snap", "unprotect", snap_ref], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["rbd", "snap", "rm", snap_ref], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 session_id = session.get("sessionId") or f"{plan}:{run}"
 session["state"] = "CLEANED"
 session["cleanupRunUuid"] = run
@@ -1065,6 +1101,17 @@ records = []
 state = "NO_DISKS"
 os.makedirs(artifacts_dir, exist_ok=True)
 
+def rbd_spec(value):
+    text = str(value or "")
+    if text.startswith("rbd:"):
+        return text[4:]
+    if text.startswith("/dev/rbd/"):
+        return text[len("/dev/rbd/"):]
+    return ""
+
+def safe_key(value):
+    return "".join(ch if ch.isalnum() else "-" for ch in str(value)).strip("-")[:36]
+
 if target_provider == "VMWARE":
     state = "METADATA_ONLY"
 else:
@@ -1081,6 +1128,39 @@ else:
             continue
         device = str(disk.get("device") or f"disk{index}").replace("/", "_").replace(" ", "_")
         target_format = str(disk.get("targetFormat") or disk.get("format") or "qcow2")
+        source_rbd = rbd_spec(target_path)
+        if source_rbd:
+            if shutil.which("rbd") is None:
+                sys.stderr.write("ERROR: rbd is required to create ABLESTACK test clones\n")
+                sys.exit(46)
+            if "/" not in source_rbd:
+                sys.stderr.write(f"ERROR: invalid RBD target path {target_path}\n")
+                sys.exit(46)
+            pool, image = source_rbd.split("/", 1)
+            suffix = safe_key(session.get("runUuid") or now)
+            snapshot = f"ftctl-dr-test-{suffix}"
+            clone_image = f"{image}-ftctl-test-{suffix}"
+            clone_spec = f"{pool}/{clone_image}"
+            snap_spec = f"{source_rbd}@{snapshot}"
+            subprocess.run(["rbd", "snap", "create", snap_spec], check=True)
+            subprocess.run(["rbd", "snap", "protect", snap_spec], check=True)
+            try:
+                subprocess.run(["rbd", "clone", snap_spec, clone_spec], check=True)
+            except Exception:
+                subprocess.run(["rbd", "snap", "unprotect", snap_spec], check=False)
+                subprocess.run(["rbd", "snap", "rm", snap_spec], check=False)
+                raise
+            records.append({
+                "device": disk.get("device") or f"disk{index}",
+                "state": "CREATED",
+                "type": "rbd-clone",
+                "backing": f"rbd:{source_rbd}",
+                "snapshot": snapshot,
+                "clone": f"rbd:{clone_spec}",
+                "path": f"rbd:{clone_spec}",
+                "sizeBytes": disk.get("sizeBytes") or disk.get("capacityBytes") or 0,
+            })
+            continue
         overlay_path = os.path.join(artifacts_dir, f"{device}.qcow2")
         command = [qemu_img, "create", "-f", "qcow2", "-F", target_format, "-b", str(target_path), overlay_path]
         subprocess.run(command, check=True)
@@ -1090,6 +1170,7 @@ else:
             "type": "qcow2-overlay",
             "backing": target_path,
             "path": overlay_path,
+            "sizeBytes": disk.get("sizeBytes") or disk.get("capacityBytes") or 0,
             "command": command,
         })
     state = "CREATED" if any(record.get("state") == "CREATED" for record in records) else "NO_MATERIALIZED_DISKS"
@@ -1131,7 +1212,7 @@ ftctl_dr_runtime_finalize_failover() {
   local failover_session_id failover_restore_point_ref failover_restore_point_sequence
   local failover_manifest_path failover_checkpoint_path failover_requested_at restore_point_locked_at
   local target_promote_started_at target_power_on_at failover_completed_at rto_actual_seconds
-  local last_source last_target target_rpo target_power_state target_promotion_state
+  local last_source last_target target_rpo target_power_state target_promotion_state failover_runtime_state active_side
 
   ftctl_dr_runtime_ensure_plan_dirs "${plan}"
   session_path="$(ftctl_dr_runtime_failover_session_path "${plan}" "${run}")"
@@ -1285,21 +1366,24 @@ checkpoint_path = selected.get("checkpoint") or state.get("checkpoint_path")
 requested_at = state.get("failover_requested_at") or now
 session_id = f"{plan}:{run}"
 restore_ref = record_ref(selected)
-target_power_state = "POWER_ON_DELEGATED"
-target_promotion_state = "PROMOTED"
+cutover_ready = str(profile.get("direction") or "").upper() == "VMWARE_TO_KVM"
+runtime_state = "CUTOVER_READY" if cutover_ready else "FAILED_OVER"
+active_side = "SOURCE" if cutover_ready else "TARGET"
+target_power_state = "POWERED_OFF" if cutover_ready else "POWER_ON_DELEGATED"
+target_promotion_state = "CUTOVER_READY" if cutover_ready else "PROMOTED"
 session = {
     "version": 1,
     "planUuid": plan,
     "runUuid": run,
     "sessionId": session_id,
-    "state": "FAILED_OVER",
+    "state": runtime_state,
     "mode": mode or "planned",
-    "activeSide": "TARGET",
+    "activeSide": active_side,
     "startedAt": requested_at,
     "restorePointLockedAt": now,
     "targetPromoteStartedAt": now,
-    "targetPowerOnAt": now,
-    "completedAt": now,
+    "targetPowerOnAt": None if cutover_ready else now,
+    "completedAt": None if cutover_ready else now,
     "rtoActualSeconds": seconds_between(requested_at, now),
     "restorePoint": {
         "ref": restore_ref,
@@ -1339,10 +1423,11 @@ with open(selection_path, "w", encoding="utf-8") as fh:
     fh.write(f"failover_requested_at={requested_at}\n")
     fh.write(f"restore_point_locked_at={now}\n")
     fh.write(f"target_promote_started_at={now}\n")
-    fh.write(f"target_power_on_at={now}\n")
-    fh.write(f"failover_completed_at={now}\n")
+    fh.write(f"target_power_on_at={'' if cutover_ready else now}\n")
+    fh.write(f"failover_completed_at={'' if cutover_ready else now}\n")
     fh.write(f"rto_actual_seconds={seconds_between(requested_at, now)}\n")
-    fh.write("active_side=TARGET\n")
+    fh.write(f"failover_runtime_state={runtime_state}\n")
+    fh.write(f"active_side={active_side}\n")
     fh.write(f"target_power_state={target_power_state}\n")
     fh.write(f"target_promotion_state={target_promotion_state}\n")
     fh.write(f"last_source_checkpoint_at={source_at or ''}\n")
@@ -1372,11 +1457,15 @@ PY
   restore_points_path="$(ftctl_dr_runtime_state_get_from_path "${selection_path}" "restore_points_path")"
   target_power_state="$(ftctl_dr_runtime_state_get_from_path "${selection_path}" "target_power_state")"
   target_promotion_state="$(ftctl_dr_runtime_state_get_from_path "${selection_path}" "target_promotion_state")"
+  failover_runtime_state="$(ftctl_dr_runtime_state_get_from_path "${selection_path}" "failover_runtime_state")"
+  active_side="$(ftctl_dr_runtime_state_get_from_path "${selection_path}" "active_side")"
+  [[ -n "${failover_runtime_state}" ]] || failover_runtime_state="FAILED_OVER"
+  [[ -n "${active_side}" ]] || active_side="TARGET"
   rm -f "${selection_path}" 2>/dev/null || true
 
   ftctl_dr_runtime_path_set "${run_path}" \
-    "state=FAILED_OVER" \
-    "step=active-side-switch" \
+    "state=${failover_runtime_state}" \
+    "step=$( [[ "${failover_runtime_state}" == "CUTOVER_READY" ]] && printf 'cutover-ready' || printf 'active-side-switch' )" \
     "progress=100" \
     "scheduler_state=STOPPED" \
     "failover_session_id=${failover_session_id}" \
@@ -1391,7 +1480,7 @@ PY
     "target_power_on_at=${target_power_on_at}" \
     "failover_completed_at=${failover_completed_at}" \
     "rto_actual_seconds=${rto_actual_seconds}" \
-    "active_side=TARGET" \
+    "active_side=${active_side}" \
     "target_power_state=${target_power_state}" \
     "target_promotion_state=${target_promotion_state}" \
     "last_source_checkpoint_at=${last_source}" \
@@ -1458,6 +1547,47 @@ ftctl_dr_runtime_failover_worker() {
       return "${rc}"
     fi
   fi
+
+  local cutover_workdir direction
+  direction="$(jq -r '.direction // ""' "${profile_file}" 2>/dev/null || true)"
+  if [[ "${direction}" == "VMWARE_TO_KVM" ]]; then
+    cutover_workdir="$(ftctl_dr_runtime_failover_dir "${plan}")/$(ftctl_dr_runtime_key "${run}")-guestprep"
+    ftctl_dr_runtime_path_set "${run_path}" \
+      "state=RUNNING" \
+      "step=guest-preparation" \
+      "progress=80" \
+      "guest_prep_state=RUNNING" \
+      "updated_at=$(ftctl_now_iso8601)" || true
+    cp -f "${run_path}" "${status_path}" 2>/dev/null || true
+    ftctl_guestprep_prepare_cutover_target "${profile_file}" "${run_path}" "${cutover_workdir}" || rc=$?
+  else
+    ftctl_dr_runtime_path_set "${run_path}" \
+      "state=CUTOVER_READY" \
+      "step=guest-preparation-not-required" \
+      "progress=90" \
+      "guest_prep_state=NOT_REQUIRED" \
+      "updated_at=$(ftctl_now_iso8601)" || true
+  fi
+  if [[ "${rc}" != "0" ]]; then
+    case "${rc}" in
+      47) error_code="DR_GUEST_PREP_RUNTIME_UNAVAILABLE" ;;
+      48) error_code="DR_GUEST_OS_UNSUPPORTED" ;;
+      *) error_code="DR_GUEST_PREPARATION_FAILED" ;;
+    esac
+    ftctl_dr_runtime_path_set "${run_path}" \
+      "state=ERROR" \
+      "step=guest-preparation-failed" \
+      "progress=100" \
+      "accepted=false" \
+      "guest_prep_state=FAILED" \
+      "error_code=${error_code}" \
+      "updated_at=$(ftctl_now_iso8601)" || true
+    cp -f "${run_path}" "${status_path}" 2>/dev/null || true
+    ftctl_log_event "dr-runtime" "dr.failover.guestprep" "fail" "" "${error_code}" \
+      "plan=${plan} run=${run} mode=${mode} rc=${rc}"
+    return "${rc}"
+  fi
+  cp -f "${run_path}" "${status_path}" 2>/dev/null || true
 
   ftctl_dr_runtime_finalize_failover "${plan}" "${run}" "${profile_file}" "${restore_point}" "${mode}" "${run_path}" "${status_path}" || rc=$?
   if [[ "${rc}" != "0" ]]; then
@@ -1976,13 +2106,14 @@ ftctl_dr_runtime_emit_state_json() {
   local latest_completed_source_checkpoint_at latest_completed_target_durable_at latest_completed_target_ready_rpo_seconds
   local latest_completed_manifest_path latest_completed_checkpoint_path
   local -a completed_checkpoint_fields=()
-  local test_session_id test_session_state test_restore_point_ref test_restore_point_sequence
+  local test_session_id test_session_path test_session_state test_restore_point_ref test_restore_point_sequence
   local test_manifest_path test_checkpoint_path
   local test_artifacts_state test_artifacts_path test_artifact_count
   local failover_session_id failover_mode failover_restore_point_ref failover_restore_point_sequence
   local failover_manifest_path failover_checkpoint_path failover_requested_at restore_point_locked_at
   local target_promote_started_at target_power_on_at failover_completed_at rto_actual_seconds
   local active_side target_power_state target_promotion_state failover_worker_pid
+  local guest_prep_state guest_family guestprep_manifest_path test_domain_name test_domain_state test_boot_validation_mode
   local failback_session_id failback_mode failback_restore_point_ref failback_restore_point_sequence
   local failback_manifest_path failback_checkpoint_path failback_requested_at reverse_sync_started_at
   local reverse_target_ready_at source_promote_started_at source_power_on_at failback_completed_at
@@ -2109,6 +2240,7 @@ PY
   fi
   [[ -n "${current_checkpoint_sequence}" ]] || current_checkpoint_sequence="${checkpoint_sequence}"
   test_session_id="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "test_session_id")"
+  test_session_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "test_session_path")"
   test_session_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "test_session_state")"
   test_restore_point_ref="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "test_restore_point_ref")"
   test_restore_point_sequence="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "test_restore_point_sequence")"
@@ -2117,6 +2249,12 @@ PY
   test_artifacts_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "test_artifacts_state")"
   test_artifacts_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "test_artifacts_path")"
   test_artifact_count="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "test_artifact_count")"
+  guest_prep_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "guest_prep_state")"
+  guest_family="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "guest_family")"
+  guestprep_manifest_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "guestprep_manifest_path")"
+  test_domain_name="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "test_domain_name")"
+  test_domain_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "test_domain_state")"
+  test_boot_validation_mode="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "test_boot_validation_mode")"
   failover_session_id="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "failover_session_id")"
   failover_mode="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "failover_mode")"
   failover_restore_point_ref="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "failover_restore_point_ref")"
@@ -2287,6 +2425,8 @@ PY
   ftctl_dr_runtime_json_string_field "latest_completed_checkpoint_path" "${latest_completed_checkpoint_path}"
   ftctl_dr_runtime_json_string_field "restore_points_path" "${restore_points_path}"
   ftctl_dr_runtime_json_string_field "test_session_id" "${test_session_id}"
+  ftctl_dr_runtime_json_string_field "test_session_path" "${test_session_path}"
+  ftctl_dr_runtime_json_file_field_redacted "test_session" "${test_session_path}"
   ftctl_dr_runtime_json_string_field "test_session_state" "${test_session_state}"
   ftctl_dr_runtime_json_string_field "test_restore_point_ref" "${test_restore_point_ref}"
   ftctl_dr_runtime_json_number_field "test_restore_point_sequence" "${test_restore_point_sequence}"
@@ -2295,6 +2435,12 @@ PY
   ftctl_dr_runtime_json_string_field "test_artifacts_state" "${test_artifacts_state}"
   ftctl_dr_runtime_json_string_field "test_artifacts_path" "${test_artifacts_path}"
   ftctl_dr_runtime_json_number_field "test_artifact_count" "${test_artifact_count}"
+  ftctl_dr_runtime_json_string_field "guest_prep_state" "${guest_prep_state}"
+  ftctl_dr_runtime_json_string_field "guest_family" "${guest_family}"
+  ftctl_dr_runtime_json_string_field "guestprep_manifest_path" "${guestprep_manifest_path}"
+  ftctl_dr_runtime_json_string_field "test_domain_name" "${test_domain_name}"
+  ftctl_dr_runtime_json_string_field "test_domain_state" "${test_domain_state}"
+  ftctl_dr_runtime_json_string_field "test_boot_validation_mode" "${test_boot_validation_mode}"
   ftctl_dr_runtime_json_string_field "failover_session_id" "${failover_session_id}"
   ftctl_dr_runtime_json_string_field "failover_mode" "${failover_mode}"
   ftctl_dr_runtime_json_string_field "failover_restore_point_ref" "${failover_restore_point_ref}"
@@ -2696,6 +2842,9 @@ ftctl_dr_runtime_action() {
       ftctl_dr_runtime_prepare_test_session "${plan}" "${run}" "${profile_file}" "${restore_point}" "${run_path}" "${status_path}" || rc=$?
       if [[ "${rc}" == "0" ]]; then
         ftctl_dr_runtime_materialize_test_artifacts "${plan}" "${run}" "$(ftctl_dr_runtime_test_session_path "${plan}" "${run}")" "${run_path}" || rc=$?
+      fi
+      if [[ "${rc}" == "0" ]]; then
+        ftctl_guestprep_prepare_and_start "$(ftctl_dr_runtime_test_session_path "${plan}" "${run}")" "${run_path}" || rc=$?
         cp -f "$(ftctl_dr_runtime_test_session_path "${plan}" "${run}")" "$(ftctl_dr_runtime_active_test_session_path "${plan}")" 2>/dev/null || true
         test_sequence="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "test_restore_point_sequence")"
         checkpoint_lease_path="$(ftctl_dr_scheduler_checkpoint_lease_acquire "${plan}" "${test_sequence}" "${run}" "$(ftctl_dr_runtime_state_get_from_path "${run_path}" "test_restore_point_ref")")"
@@ -2706,11 +2855,21 @@ ftctl_dr_runtime_action() {
           "updated_at=$(ftctl_now_iso8601)" || true
       fi
       if [[ "${rc}" != "0" ]]; then
+        if [[ "${rc}" -ge 46 ]]; then
+          ftctl_dr_runtime_cleanup_test_session "${plan}" "${run}" "${run_path}" "${status_path}" >/dev/null 2>&1 || true
+        fi
         error_code="DR_RESTORE_POINT_NOT_FOUND"
         [[ "${rc}" == "45" ]] && error_code="DR_TARGET_NOT_READY"
         [[ "${rc}" == "46" ]] && error_code="DR_TEST_MATERIALIZATION_FAILED"
+        [[ "${rc}" == "47" ]] && error_code="DR_GUEST_PREP_RUNTIME_UNAVAILABLE"
+        [[ "${rc}" == "48" ]] && error_code="DR_GUEST_OS_UNSUPPORTED"
+        [[ "${rc}" == "49" ]] && error_code="DR_GUEST_PREPARATION_FAILED"
+        [[ "${rc}" == "50" ]] && error_code="DR_TEST_DOMAIN_DEFINE_FAILED"
+        [[ "${rc}" == "51" ]] && error_code="DR_TEST_BOOT_TIMEOUT"
+        [[ "${rc}" == "52" ]] && error_code="DR_TEST_QGA_UNAVAILABLE"
         local failed_step="test-session-restore-point-missing"
         [[ "${rc}" == "46" ]] && failed_step="test-materialization-failed"
+        [[ "${rc}" -ge 47 ]] && failed_step="test-guest-preparation-failed"
         ftctl_dr_runtime_path_set "${run_path}" \
           "state=ERROR" \
           "step=${failed_step}" \
@@ -3038,7 +3197,7 @@ ftctl_dr_runtime_capabilities() {
       first="0"
       printf '"%s"' "$(ftctl__json_escape "${command}")"
     done
-    printf '],"supported_features":["async-run","status-projection","target-materialized-notify","target-materialized-idempotent","hardware-contract-projection","control-protocol-v2","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease"]}\n'
+    printf '],"supported_features":["async-run","status-projection","target-materialized-notify","target-materialized-idempotent","hardware-contract-projection","control-protocol-v2","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","guest-preparation-v1","test-domain-lifecycle-v1","cutover-ready-v1"]}\n'
     return 0
   fi
 
