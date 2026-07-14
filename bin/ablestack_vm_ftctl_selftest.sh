@@ -6378,6 +6378,7 @@ selftest_case_dr_runtime_control_actions() {
     "mode": "planned"
   }
 }
+
 JSON
 
   bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-sync-start \
@@ -6413,6 +6414,63 @@ JSON
     --json)"
   selftest_assert_contains "${out}" '"state":"RELEASED"' "release state"
   selftest_assert_contains "${out}" '"step":"release-completed"' "release step"
+}
+
+selftest_case_dr_plan_scoped_control_protocol() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR plan-scoped control protocol and checkpoint lease"
+
+  local plan="plan-control-v2" run="run-control-v2"
+  local plan_dir="${SELFTEST_ROOT}/run/dr-runtime/plans/${plan}"
+  local scheduler_dir="${plan_dir}/scheduler"
+  local run_path="${plan_dir}/runs/${run}.state"
+  local status_path="${plan_dir}/status.state"
+  local generation="" lease_path="" ack_pid="" capabilities=""
+
+  if ftctl_command_requires_lock "dr-test-failover" ""; then
+    selftest_fail "DR test failover must not use the legacy global lock"
+  fi
+  if ftctl_command_requires_lock "dr-sync-start" ""; then
+    selftest_fail "DR scheduler must not hold the legacy global lock"
+  fi
+
+  mkdir -p "${scheduler_dir}" "$(dirname "${run_path}")"
+  cat > "${run_path}" <<EOF
+plan=${plan}
+run=${run}
+state=SYNCING
+scheduler_state=RUNNING
+EOF
+  cp -f "${run_path}" "${status_path}"
+
+  (
+    local control_path control_generation
+    control_path="$(ftctl_dr_scheduler_control_path "${plan}")"
+    while [[ ! -f "${control_path}" ]]; do sleep 1; done
+    control_generation="$(ftctl_state_read_kv "${control_path}" generation)"
+    ftctl_dr_scheduler_control_ack "${plan}" "${control_generation}" "PAUSED" "IDLE" "${run}"
+  ) &
+  ack_pid="$!"
+  printf '%s\n' "${ack_pid}" > "$(ftctl_dr_scheduler_pid_path "${plan}" "${run}")"
+  generation="$(ftctl_dr_scheduler_request_and_wait "${plan}" pause PAUSED test-failover "${run}" true)"
+  wait "${ack_pid}"
+
+  selftest_assert_eq "${generation}" "1" "first control generation"
+  selftest_assert_file_contains "$(ftctl_dr_scheduler_control_path "${plan}")" "version=2"
+  selftest_assert_file_contains "$(ftctl_dr_scheduler_control_path "${plan}")" "generation=1"
+  selftest_assert_file_contains "$(ftctl_dr_scheduler_control_ack_path "${plan}")" "state=PAUSED"
+  selftest_assert_file_contains "$(ftctl_dr_scheduler_control_ack_path "${plan}")" "cycle_state=IDLE"
+
+  lease_path="$(ftctl_dr_scheduler_checkpoint_lease_acquire "${plan}" 7 "${run}" "ftctl:${plan}:${run}:7")"
+  selftest_assert_file_contains "${lease_path}" "state=LEASED"
+  selftest_assert_file_contains "${lease_path}" "checkpoint_sequence=7"
+  ftctl_dr_scheduler_checkpoint_lease_release "${plan}" 7
+  [[ ! -e "${lease_path}" ]] || selftest_fail "checkpoint lease should be released"
+
+  capabilities="$(ftctl_dr_runtime_capabilities 1)"
+  selftest_assert_contains "${capabilities}" '"runtime_schema_version":"20260714"' "control schema version"
+  selftest_assert_contains "${capabilities}" '"control-protocol-v2"' "control protocol capability"
+  selftest_assert_contains "${capabilities}" '"checkpoint-lease"' "checkpoint lease capability"
 }
 
 selftest_case_dr_ablestack_target_prepare() {
@@ -8034,6 +8092,7 @@ selftest_main() {
   selftest_case_cloud_managed_rollback_cleanup_does_not_restart_secondary
   selftest_case_dr_runtime_profile_status_cancel
   selftest_case_dr_runtime_control_actions
+  selftest_case_dr_plan_scoped_control_protocol
   selftest_case_dr_ablestack_target_prepare
   selftest_case_dr_ablestack_rbd_target_prepare_preserves_empty_source_format
   selftest_case_dr_ablestack_full_seed_once

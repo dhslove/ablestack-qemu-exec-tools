@@ -118,9 +118,10 @@ ftctl_command_requires_lock() {
     status|check|health|events|protect-start|preflight-remote|dr-key-ensure|dr-key-install|dr-key-remove|dr-status|dr-capabilities|dr-target-materialized)
       return 1
       ;;
-    dr-plan-apply)
-      [[ "${CLI_DRY_RUN:-0}" == "1" ]] && return 1
-      return 0
+    dr-plan-apply|dr-sync-start|dr-sync-pause|dr-sync-resume|dr-test-failover|dr-test-cleanup|dr-failover|dr-failback|dr-reprotect|dr-release|dr-cancel)
+      # DR commands coordinate through plan-scoped transition/cycle locks. The
+      # legacy global lock is retained for FT/HA commands only.
+      return 1
       ;;
     config)
       case "${action}" in

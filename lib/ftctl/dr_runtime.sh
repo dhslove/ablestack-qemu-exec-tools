@@ -1967,6 +1967,8 @@ ftctl_dr_runtime_emit_state_json() {
   local driver driver_state disk_map_path source_disk_map_path target_disk_map_path disk_map_role
   local target_disk_count target_disk_invalid_count manifest_path checkpoint_path cbt_status_path source_open_status_path source_snapshot_status_path
   local scheduler_state worker_pid worker_state worker_started_at worker_updated_at worker_exit_code
+  local control_protocol_version control_generation control_ack_generation control_state cycle_state
+  local transition_state transition_action transition_quiesced_at checkpoint_lease_state checkpoint_lease_path
   local retryable retry_after_sec lock_file holder_pid holder_command holder_age_sec
   local checkpoint_sequence restore_points_path dynamic_rpo
   local current_checkpoint_sequence current_checkpoint_cycle_type current_checkpoint_ref current_checkpoint_state
@@ -2032,6 +2034,16 @@ ftctl_dr_runtime_emit_state_json() {
   source_open_status_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "source_open_status_path")"
   source_snapshot_status_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "source_snapshot_status_path")"
   scheduler_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "scheduler_state")"
+  control_protocol_version="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "control_protocol_version")"
+  control_generation="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "control_generation")"
+  control_ack_generation="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "control_ack_generation")"
+  control_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "control_state")"
+  cycle_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "cycle_state")"
+  transition_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "transition_state")"
+  transition_action="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "transition_action")"
+  transition_quiesced_at="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "transition_quiesced_at")"
+  checkpoint_lease_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "checkpoint_lease_state")"
+  checkpoint_lease_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "checkpoint_lease_path")"
   worker_pid="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "worker_pid")"
   worker_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "worker_state")"
   worker_started_at="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "worker_started_at")"
@@ -2238,6 +2250,16 @@ PY
   ftctl_dr_runtime_json_string_field "source_snapshot_status_path" "${source_snapshot_status_path}"
   ftctl_dr_runtime_json_file_field_redacted "source_snapshot" "${source_snapshot_status_path}"
   ftctl_dr_runtime_json_string_field "scheduler_state" "${scheduler_state}"
+  ftctl_dr_runtime_json_number_field "control_protocol_version" "${control_protocol_version}"
+  ftctl_dr_runtime_json_number_field "control_generation" "${control_generation}"
+  ftctl_dr_runtime_json_number_field "control_ack_generation" "${control_ack_generation}"
+  ftctl_dr_runtime_json_string_field "control_state" "${control_state}"
+  ftctl_dr_runtime_json_string_field "cycle_state" "${cycle_state}"
+  ftctl_dr_runtime_json_string_field "transition_state" "${transition_state}"
+  ftctl_dr_runtime_json_string_field "transition_action" "${transition_action}"
+  ftctl_dr_runtime_json_string_field "transition_quiesced_at" "${transition_quiesced_at}"
+  ftctl_dr_runtime_json_string_field "checkpoint_lease_state" "${checkpoint_lease_state}"
+  ftctl_dr_runtime_json_string_field "checkpoint_lease_path" "${checkpoint_lease_path}"
   ftctl_dr_runtime_json_number_field "worker_pid" "${worker_pid}"
   ftctl_dr_runtime_json_string_field "worker_state" "${worker_state}"
   ftctl_dr_runtime_json_string_field "worker_started_at" "${worker_started_at}"
@@ -2504,12 +2526,14 @@ ftctl_dr_runtime_should_delegate_action() {
     dr-reprotect)
       [[ "${FTCTL_DR_REPROTECT_FOREGROUND:-0}" != "1" ]] || return 1
       ;;
+    dr-sync-pause|dr-sync-resume|dr-test-cleanup|dr-release)
+      ;;
   esac
   wait_lower="$(printf '%s' "${wait_value}" | tr '[:upper:]' '[:lower:]')"
   [[ "${wait_lower}" == "false" || "${wait_lower}" == "0" || "${wait_lower}" == "no" ]] || return 1
 
   case "${action}" in
-    dr-sync-start|dr-test-failover|dr-failover|dr-failback|dr-reprotect) return 0 ;;
+    dr-sync-start|dr-sync-pause|dr-sync-resume|dr-test-failover|dr-test-cleanup|dr-failover|dr-failback|dr-reprotect|dr-release) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -2583,7 +2607,7 @@ ftctl_dr_runtime_mark_worker_terminal() {
 ftctl_dr_runtime_action() {
   local action="${1-}" plan="${2-}" run="${3-}" profile_file="${4-}" role="${5-}" mode="${6-}" restore_point="${7-}" force="${8-0}" dry_run="${9-0}" wait_value="${10-}" json="${11-0}"
   local state_tuple state step progress run_path status_path external_ref rc error_code
-  local target_vm_id target_external_ref
+  local target_vm_id target_external_ref checkpoint_lease_path test_sequence
 
   ftctl_dr_runtime_require_plan "${plan}" || return 2
   ftctl_dr_runtime_require_run "${run}" || return 2
@@ -2649,10 +2673,37 @@ ftctl_dr_runtime_action() {
       ;;
     dr-test-failover)
       rc=0
+      if command -v ftctl_dr_scheduler_transition_begin >/dev/null 2>&1; then
+        ftctl_dr_scheduler_transition_begin "${plan}" "${run}" "${action}" "${run_path}" "${status_path}" || rc=$?
+      fi
+      if [[ "${rc}" != "0" ]]; then
+        error_code="DR_SYNC_QUIESCE_TIMEOUT"
+        [[ "${rc}" == "20" ]] && error_code="DR_TRANSITION_BUSY_RETRYABLE"
+        ftctl_dr_runtime_path_set "${run_path}" \
+          "state=ERROR" \
+          "step=test-quiesce-failed" \
+          "progress=100" \
+          "accepted=false" \
+          "retryable=$([[ "${rc}" == "20" ]] && printf true || printf false)" \
+          "retry_after_sec=$([[ "${rc}" == "20" ]] && printf 2 || printf '')" \
+          "error_code=${error_code}" \
+          "updated_at=$(ftctl_now_iso8601)" || true
+        cp -f "${run_path}" "${status_path}" 2>/dev/null || true
+        ftctl_dr_runtime_mark_worker_terminal "${run_path}" "${status_path}" "FAILED" "${rc}" "${error_code}" "$([[ "${rc}" == "20" ]] && printf true || printf false)" "$([[ "${rc}" == "20" ]] && printf 2 || printf '')"
+        [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_state_json "${action}" "error" "${plan}" "${run}" "${run_path}" "0"
+        return "${rc}"
+      fi
       ftctl_dr_runtime_prepare_test_session "${plan}" "${run}" "${profile_file}" "${restore_point}" "${run_path}" "${status_path}" || rc=$?
       if [[ "${rc}" == "0" ]]; then
         ftctl_dr_runtime_materialize_test_artifacts "${plan}" "${run}" "$(ftctl_dr_runtime_test_session_path "${plan}" "${run}")" "${run_path}" || rc=$?
         cp -f "$(ftctl_dr_runtime_test_session_path "${plan}" "${run}")" "$(ftctl_dr_runtime_active_test_session_path "${plan}")" 2>/dev/null || true
+        test_sequence="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "test_restore_point_sequence")"
+        checkpoint_lease_path="$(ftctl_dr_scheduler_checkpoint_lease_acquire "${plan}" "${test_sequence}" "${run}" "$(ftctl_dr_runtime_state_get_from_path "${run_path}" "test_restore_point_ref")")"
+        ftctl_dr_runtime_path_set "${run_path}" \
+          "checkpoint_lease_state=LEASED" \
+          "checkpoint_lease_path=${checkpoint_lease_path}" \
+          "transition_state=TEST_ACTIVE" \
+          "updated_at=$(ftctl_now_iso8601)" || true
       fi
       if [[ "${rc}" != "0" ]]; then
         error_code="DR_RESTORE_POINT_NOT_FOUND"
@@ -2671,6 +2722,9 @@ ftctl_dr_runtime_action() {
         chmod 0644 "${status_path}" 2>/dev/null || true
         ftctl_log_event "dr-runtime" "dr.test.failover" "fail" "" "${error_code}" \
           "plan=${plan} run=${run} restore_point=${restore_point:-} rc=${rc}"
+        command -v ftctl_dr_scheduler_resume_after_transition >/dev/null 2>&1 && \
+          ftctl_dr_scheduler_resume_after_transition "${plan}" "${run}" "test-failover-rollback" "${run_path}" "${status_path}" || true
+        command -v ftctl_dr_scheduler_transition_end >/dev/null 2>&1 && ftctl_dr_scheduler_transition_end "${plan}"
         if [[ "${json}" == "1" ]]; then
           ftctl_dr_runtime_emit_state_json "${action}" "error" "${plan}" "${run}" "${run_path}" "0"
         else
@@ -2678,11 +2732,33 @@ ftctl_dr_runtime_action() {
         fi
         return "${rc}"
       fi
+      command -v ftctl_dr_scheduler_transition_end >/dev/null 2>&1 && ftctl_dr_scheduler_transition_end "${plan}"
       ftctl_log_event "dr-runtime" "dr.test.failover" "ok" "" "" \
         "plan=${plan} run=${run} restore_point=$(ftctl_dr_runtime_state_get_from_path "${run_path}" "test_restore_point_ref")"
       ;;
     dr-test-cleanup)
       rc=0
+      if command -v ftctl_dr_scheduler_transition_begin >/dev/null 2>&1; then
+        ftctl_dr_scheduler_transition_begin "${plan}" "${run}" "${action}" "${run_path}" "${status_path}" || rc=$?
+      fi
+      if [[ "${rc}" != "0" ]]; then
+        error_code="DR_SYNC_QUIESCE_TIMEOUT"
+        [[ "${rc}" == "20" ]] && error_code="DR_TRANSITION_BUSY_RETRYABLE"
+        ftctl_dr_runtime_path_set "${run_path}" \
+          "state=ERROR" \
+          "step=test-cleanup-quiesce-failed" \
+          "progress=100" \
+          "accepted=false" \
+          "retryable=$([[ "${rc}" == "20" ]] && printf true || printf false)" \
+          "retry_after_sec=$([[ "${rc}" == "20" ]] && printf 2 || printf '')" \
+          "error_code=${error_code}" \
+          "updated_at=$(ftctl_now_iso8601)" || true
+        cp -f "${run_path}" "${status_path}" 2>/dev/null || true
+        ftctl_dr_runtime_mark_worker_terminal "${run_path}" "${status_path}" "FAILED" "${rc}" "${error_code}" "$([[ "${rc}" == "20" ]] && printf true || printf false)" "$([[ "${rc}" == "20" ]] && printf 2 || printf '')"
+        command -v ftctl_dr_scheduler_transition_end >/dev/null 2>&1 && ftctl_dr_scheduler_transition_end "${plan}"
+        [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_state_json "${action}" "error" "${plan}" "${run}" "${run_path}" "0"
+        return "${rc}"
+      fi
       ftctl_dr_runtime_cleanup_test_session "${plan}" "${run}" "${run_path}" "${status_path}" || rc=$?
       if [[ "${rc}" != "0" ]]; then
         ftctl_dr_runtime_path_set "${run_path}" \
@@ -2696,11 +2772,30 @@ ftctl_dr_runtime_action() {
         chmod 0644 "${status_path}" 2>/dev/null || true
         ftctl_log_event "dr-runtime" "dr.test.cleanup" "fail" "" "${rc}" \
           "plan=${plan} run=${run}"
+        command -v ftctl_dr_scheduler_transition_end >/dev/null 2>&1 && ftctl_dr_scheduler_transition_end "${plan}"
         if [[ "${json}" == "1" ]]; then
           ftctl_dr_runtime_emit_state_json "${action}" "error" "${plan}" "${run}" "${run_path}" "0"
         else
           printf '%s: plan=%s run=%s cleanup failed rc=%s\n' "${action}" "${plan}" "${run}" "${rc}" >&2
         fi
+        return "${rc}"
+      fi
+      test_sequence="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "test_restore_point_sequence")"
+      [[ -n "${test_sequence}" ]] && ftctl_dr_scheduler_checkpoint_lease_release "${plan}" "${test_sequence}"
+      ftctl_dr_runtime_path_set "${run_path}" "checkpoint_lease_state=RELEASED" "checkpoint_lease_path=" || true
+      if command -v ftctl_dr_scheduler_resume_after_transition >/dev/null 2>&1; then
+        ftctl_dr_scheduler_resume_after_transition "${plan}" "${run}" "test-cleanup" "${run_path}" "${status_path}" || rc=$?
+      fi
+      command -v ftctl_dr_scheduler_transition_end >/dev/null 2>&1 && ftctl_dr_scheduler_transition_end "${plan}"
+      if [[ "${rc}" != "0" ]]; then
+        ftctl_dr_runtime_path_set "${run_path}" \
+          "state=ERROR" \
+          "step=test-cleanup-resume-failed" \
+          "accepted=false" \
+          "error_code=DR_SYNC_RESUME_TIMEOUT" \
+          "updated_at=$(ftctl_now_iso8601)" || true
+        cp -f "${run_path}" "${status_path}" 2>/dev/null || true
+        [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_state_json "${action}" "error" "${plan}" "${run}" "${run_path}" "0"
         return "${rc}"
       fi
       ftctl_log_event "dr-runtime" "dr.test.cleanup" "ok" "" "" \
@@ -2917,7 +3012,7 @@ ftctl_dr_runtime_target_materialized() {
 
 ftctl_dr_runtime_capabilities() {
   local json="${1-0}" version="${PROG_VERSION:-unknown}"
-  local schema="20260710" action_contract="2026-07-10"
+  local schema="20260714" action_contract="2026-07-14"
   local commands=(
     "dr-plan-apply"
     "dr-sync-start"
@@ -2943,7 +3038,7 @@ ftctl_dr_runtime_capabilities() {
       first="0"
       printf '"%s"' "$(ftctl__json_escape "${command}")"
     done
-    printf '],"supported_features":["async-run","status-projection","target-materialized-notify","target-materialized-idempotent","hardware-contract-projection"]}\n'
+    printf '],"supported_features":["async-run","status-projection","target-materialized-notify","target-materialized-idempotent","hardware-contract-projection","control-protocol-v2","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease"]}\n'
     return 0
   fi
 
