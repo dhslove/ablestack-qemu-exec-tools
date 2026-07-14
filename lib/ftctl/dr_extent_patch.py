@@ -1,0 +1,122 @@
+#!/usr/bin/env python3
+# ---------------------------------------------------------------------
+# Copyright 2026 ABLECLOUD
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ---------------------------------------------------------------------
+
+import argparse
+import fcntl
+import json
+import os
+import struct
+import sys
+import time
+from typing import Dict, Iterable, List
+
+
+BLKGETSIZE64 = 0x80081272
+
+
+def device_size(fd: int) -> int:
+    try:
+        result = fcntl.ioctl(fd, BLKGETSIZE64, struct.pack("Q", 0))
+        return int(struct.unpack("Q", result)[0])
+    except OSError:
+        return int(os.lseek(fd, 0, os.SEEK_END))
+
+
+def normalize(areas: Iterable[Dict[str, int]], upper_bound: int) -> List[Dict[str, int]]:
+    ordered = []
+    for raw in areas:
+        offset = int(raw.get("offset", -1))
+        length = int(raw.get("length", -1))
+        if offset < 0 or length < 0 or offset + length > upper_bound:
+            raise ValueError(f"invalid CBT extent offset={offset} length={length} size={upper_bound}")
+        if length:
+            ordered.append((offset, offset + length))
+    ordered.sort()
+    merged: List[List[int]] = []
+    for start, end in ordered:
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return [{"offset": start, "length": end - start} for start, end in merged]
+
+
+def copy_extents(source: str, target: str, areas: List[Dict[str, int]], chunk: int) -> Dict[str, int]:
+    source_fd = os.open(source, os.O_RDONLY)
+    target_fd = os.open(target, os.O_RDWR)
+    started = time.monotonic_ns()
+    bytes_read = 0
+    bytes_written = 0
+    try:
+        source_size = device_size(source_fd)
+        target_size = device_size(target_fd)
+        upper_bound = min(source_size, target_size)
+        normalized = normalize(areas, upper_bound)
+        for extent in normalized:
+            offset = extent["offset"]
+            remaining = extent["length"]
+            while remaining:
+                amount = min(remaining, chunk)
+                data = os.pread(source_fd, amount, offset)
+                if len(data) != amount:
+                    raise IOError(f"short source read at {offset}: expected={amount} actual={len(data)}")
+                bytes_read += len(data)
+                written = 0
+                while written < len(data):
+                    count = os.pwrite(target_fd, data[written:], offset + written)
+                    if count <= 0:
+                        raise IOError(f"short target write at {offset + written}")
+                    written += count
+                    bytes_written += count
+                offset += amount
+                remaining -= amount
+        os.fsync(target_fd)
+        duration_ms = max(1, (time.monotonic_ns() - started) // 1_000_000)
+        return {
+            "changedExtentCount": len(normalized),
+            "changedBytes": sum(item["length"] for item in normalized),
+            "sourceReadBytes": bytes_read,
+            "targetWrittenBytes": bytes_written,
+            "transferPayloadBytes": bytes_read,
+            "durationMs": duration_ms,
+            "throughputBps": (bytes_read * 1000) // duration_ms,
+        }
+    finally:
+        os.close(target_fd)
+        os.close(source_fd)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--source", required=True)
+    parser.add_argument("--target", required=True)
+    parser.add_argument("--areas-json", required=True)
+    parser.add_argument("--chunk", type=int, default=8 * 1024 * 1024)
+    args = parser.parse_args()
+    with open(args.areas_json, "r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    result = copy_extents(args.source, args.target, payload.get("areas") or [], max(4096, args.chunk))
+    print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception as error:
+        print(f"DR_CBT_PATCH_FAILED: {error}", file=sys.stderr)
+        sys.exit(86)

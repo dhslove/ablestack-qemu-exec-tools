@@ -78,6 +78,18 @@ ftctl_dr_vmware_checkpoint_dir() {
   printf '%s/checkpoints\n' "$(ftctl_dr_runtime_plan_dir "${plan}")"
 }
 
+ftctl_dr_vmware_cycle_metrics_dir() {
+  local plan="${1-}"
+  printf '%s/cycle-metrics\n' "$(ftctl_dr_runtime_plan_dir "${plan}")"
+}
+
+ftctl_dr_vmware_cycle_metrics_path() {
+  local plan="${1-}" run="${2-}"
+  printf '%s/%s.json\n' \
+    "$(ftctl_dr_vmware_cycle_metrics_dir "${plan}")" \
+    "$(ftctl_dr_runtime_key "${run:-current}")"
+}
+
 ftctl_dr_vmware_manifest_path() {
   local plan="${1-}" run="${2-}"
   printf '%s/%s-vmware-manifest.json\n' \
@@ -494,14 +506,14 @@ ftctl_dr_vmware_preflight_json() {
 }
 
 ftctl_dr_vmware_write_manifest() {
-  local disk_map="${1-}" capability_path="${2-}" manifest_path="${3-}" phase="${4-}"
+  local disk_map="${1-}" capability_path="${2-}" manifest_path="${3-}" phase="${4-}" metrics_path="${5-}"
   ftctl_ensure_dir "$(dirname "${manifest_path}")" "0755"
-  python3 - "${disk_map}" "${capability_path}" "${manifest_path}" "${phase}" "$(ftctl_now_iso8601)" <<'PY'
+  python3 - "${disk_map}" "${capability_path}" "${manifest_path}" "${phase}" "$(ftctl_now_iso8601)" "${metrics_path}" <<'PY'
 import json
 import os
 import sys
 
-disk_map_path, capability_path, manifest_path, phase, now = sys.argv[1:6]
+disk_map_path, capability_path, manifest_path, phase, now, metrics_path = sys.argv[1:7]
 with open(disk_map_path, "r", encoding="utf-8") as fh:
     disk_map = json.load(fh)
 with open(capability_path, "r", encoding="utf-8") as fh:
@@ -529,6 +541,9 @@ manifest = {
     "count": int(disk_map.get("count") or 0),
     "disks": disk_map.get("disks") or [],
 }
+if metrics_path and os.path.exists(metrics_path):
+    with open(metrics_path, "r", encoding="utf-8") as fh:
+        manifest["cycleMetrics"] = json.load(fh)
 tmp = manifest_path + ".tmp"
 with open(tmp, "w", encoding="utf-8") as fh:
     json.dump(manifest, fh, sort_keys=True, separators=(",", ":"))
@@ -538,14 +553,14 @@ PY
 }
 
 ftctl_dr_vmware_write_checkpoint() {
-  local disk_map="${1-}" manifest_path="${2-}" checkpoint_path="${3-}" state="${4-}" source_at="${5-}" target_at="${6-}" rpo="${7-}"
+  local disk_map="${1-}" manifest_path="${2-}" checkpoint_path="${3-}" state="${4-}" source_at="${5-}" target_at="${6-}" rpo="${7-}" metrics_path="${8-}"
   ftctl_ensure_dir "$(dirname "${checkpoint_path}")" "0755"
-  python3 - "${disk_map}" "${manifest_path}" "${checkpoint_path}" "${state}" "${source_at}" "${target_at}" "${rpo}" <<'PY'
+  python3 - "${disk_map}" "${manifest_path}" "${checkpoint_path}" "${state}" "${source_at}" "${target_at}" "${rpo}" "${metrics_path}" <<'PY'
 import json
 import os
 import sys
 
-disk_map_path, manifest_path, checkpoint_path, state, source_at, target_at, rpo = sys.argv[1:8]
+disk_map_path, manifest_path, checkpoint_path, state, source_at, target_at, rpo, metrics_path = sys.argv[1:9]
 with open(disk_map_path, "r", encoding="utf-8") as fh:
     disk_map = json.load(fh)
 manifest = {}
@@ -567,6 +582,21 @@ checkpoint = {
     "targetProvider": disk_map.get("targetProvider", ""),
     "disks": manifest.get("disks", disk_map.get("disks", [])),
 }
+cycle_metrics = manifest.get("cycleMetrics") or {}
+if not cycle_metrics and metrics_path and os.path.exists(metrics_path):
+    with open(metrics_path, "r", encoding="utf-8") as fh:
+        cycle_metrics = json.load(fh)
+if cycle_metrics:
+    checkpoint["cycleMetrics"] = cycle_metrics
+    checkpoint["cycleMetricsPath"] = metrics_path
+    for key in (
+        "cycleUuid", "cycleToken", "sequence", "requestedMode", "effectiveMode",
+        "incrementalVerified", "metricsEstimated", "baselineGeneration", "cycleCommitState",
+        "virtualBytes", "changedBytes", "sourceReadBytes", "targetWrittenBytes",
+        "transferPayloadBytes", "changedExtentCount", "durationMs", "throughputBps",
+    ):
+        if key in cycle_metrics:
+            checkpoint[key] = cycle_metrics[key]
 tmp = checkpoint_path + ".tmp"
 with open(tmp, "w", encoding="utf-8") as fh:
     json.dump(checkpoint, fh, sort_keys=True, separators=(",", ":"))
@@ -1089,7 +1119,7 @@ PY
 
 ftctl_dr_vmware_replication_cycle() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" sequence="${4-}" cycle_type="${5-}"
-  local disk_map target_disk_map capability_path manifest_path checkpoint_path source_open_status_path source_snapshot_status_path cycle_run now mover_path mover_rc=0
+  local disk_map target_disk_map capability_path manifest_path checkpoint_path metrics_path source_open_status_path source_snapshot_status_path cycle_run now mover_path mover_rc=0
   local credentials_file=""
   local source_at target_at snapshot_epoch_ms snapshot_source_at source_epoch target_epoch rpo="0"
 
@@ -1099,6 +1129,7 @@ ftctl_dr_vmware_replication_cycle() {
   capability_path="$(ftctl_dr_vmware_capability_path "${plan}")"
   manifest_path="$(ftctl_dr_vmware_manifest_path "${plan}" "${cycle_run}")"
   checkpoint_path="$(ftctl_dr_vmware_checkpoint_path "${plan}" "${cycle_run}")"
+  metrics_path="$(ftctl_dr_vmware_cycle_metrics_path "${plan}" "${cycle_run}")"
   source_open_status_path="$(ftctl_dr_vmware_source_open_status_path "${plan}")"
   source_snapshot_status_path="$(ftctl_dr_vmware_source_snapshot_status_path "${plan}")"
   [[ -f "${disk_map}" ]] || ftctl_dr_vmware_canonicalize_profile "${profile_file}" "${disk_map}" || return $?
@@ -1120,6 +1151,7 @@ ftctl_dr_vmware_replication_cycle() {
     FTCTL_DR_CAPABILITY="${capability_path}" \
     FTCTL_DR_MANIFEST="${manifest_path}" \
     FTCTL_DR_CHECKPOINT="${checkpoint_path}" \
+    FTCTL_DR_CYCLE_METRICS_PATH="${metrics_path}" \
     FTCTL_DR_SOURCE_OPEN_STATUS_PATH="${source_open_status_path}" \
     FTCTL_DR_SOURCE_SNAPSHOT_STATUS_PATH="${source_snapshot_status_path}" \
     FTCTL_DR_CREDENTIALS_FILE="$([[ -f "${credentials_file}" ]] && printf '%s' "${credentials_file}")" \
@@ -1132,7 +1164,7 @@ ftctl_dr_vmware_replication_cycle() {
   fi
 
   target_at="$(ftctl_now_iso8601)"
-  ftctl_dr_vmware_write_manifest "${disk_map}" "${capability_path}" "${manifest_path}" "vmware-${cycle_type:-incremental}-complete" || return $?
+  ftctl_dr_vmware_write_manifest "${disk_map}" "${capability_path}" "${manifest_path}" "vmware-${cycle_type:-incremental}-complete" "${metrics_path}" || return $?
   if [[ -f "${source_snapshot_status_path}" ]]; then
     snapshot_epoch_ms="$(jq -r '.checkedAtEpochMs // empty' "${source_snapshot_status_path}" 2>/dev/null || true)"
     if [[ "${snapshot_epoch_ms}" =~ ^[0-9]+$ ]]; then
@@ -1145,7 +1177,7 @@ ftctl_dr_vmware_replication_cycle() {
   if [[ "${source_epoch}" =~ ^[0-9]+$ && "${target_epoch}" =~ ^[0-9]+$ && "${target_epoch}" -ge "${source_epoch}" ]]; then
     rpo="$((target_epoch - source_epoch))"
   fi
-  ftctl_dr_vmware_write_checkpoint "${disk_map}" "${manifest_path}" "${checkpoint_path}" "TARGET_READY" "${source_at}" "${target_at}" "${rpo}" || return $?
+  ftctl_dr_vmware_write_checkpoint "${disk_map}" "${manifest_path}" "${checkpoint_path}" "TARGET_READY" "${source_at}" "${target_at}" "${rpo}" "${metrics_path}" || return $?
   ftctl_log_event "dr-runtime" "dr.vmware.cycle" "ok" "" "" \
     "plan=${plan} run=${run} sequence=${sequence:-0} type=${cycle_type:-incremental} checkpoint=${checkpoint_path} rpo=${rpo}"
   printf '%s\t%s\n' "${manifest_path}" "${checkpoint_path}"

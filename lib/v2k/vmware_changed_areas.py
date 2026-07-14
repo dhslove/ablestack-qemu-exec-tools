@@ -194,6 +194,13 @@ def _disk_key_for_scsi(vm: vim.VirtualMachine, disk_id: str) -> Tuple[int, vim.v
 
 
 def _disk_for_scsi_in_devices(devices, disk_id: str) -> Tuple[int, vim.vm.device.VirtualDisk]:
+    if str(disk_id or "").isdigit():
+        wanted_key = int(disk_id)
+        for dev in devices:
+            if isinstance(dev, vim.vm.device.VirtualDisk) and int(dev.key) == wanted_key:
+                return wanted_key, dev
+        raise SystemExit(f"VirtualDisk not found for device key {disk_id} in snapshot/vm devices")
+
     m = re.match(r"^scsi(\d+):(\d+)$", disk_id)
     if not m:
         raise SystemExit(f"Unsupported disk-id format: {disk_id}")
@@ -258,7 +265,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--vm", required=True)
     ap.add_argument("--snapshot", required=True)
-    ap.add_argument("--disk-id", required=True, help="Disk identifier like scsi0:0")
+    ap.add_argument("--disk-id", required=True, help="Disk identifier like scsi0:0 or VMware device key 2000")
     # NOTE:
     # - transfer_patch.sh will now enforce that incremental/final patch must have a valid change-id.
     # - We still keep this tool defensive: if change-id is "*" or empty, return empty areas to avoid

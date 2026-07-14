@@ -49,7 +49,9 @@ install -m 0755 bin/ablestack_vm_ftctl_firewalld.sh %{buildroot}/usr/local/bin/a
 
 install -d %{buildroot}/usr/local/lib/ablestack-qemu-exec-tools/ftctl
 cp -a lib/ftctl/* %{buildroot}/usr/local/lib/ablestack-qemu-exec-tools/ftctl/
+install -m 0755 lib/v2k/vmware_changed_areas.py %{buildroot}/usr/local/lib/ablestack-qemu-exec-tools/ftctl/dr_vmware_changed_areas.py
 find %{buildroot}/usr/local/lib/ablestack-qemu-exec-tools/ftctl -type f -name "*.sh" -exec chmod 0755 {} \;
+find %{buildroot}/usr/local/lib/ablestack-qemu-exec-tools/ftctl -type f -name "*.py" -exec chmod 0755 {} \;
 
 install -d %{buildroot}/etc/ablestack
 install -m 0644 etc/ablestack-vm-ftctl.conf %{buildroot}/etc/ablestack/ablestack-vm-ftctl.conf

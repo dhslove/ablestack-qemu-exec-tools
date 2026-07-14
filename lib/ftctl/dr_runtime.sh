@@ -2105,6 +2105,10 @@ ftctl_dr_runtime_emit_state_json() {
   local latest_completed_checkpoint_sequence latest_completed_checkpoint_cycle_type latest_completed_checkpoint_ref latest_completed_checkpoint_state
   local latest_completed_source_checkpoint_at latest_completed_target_durable_at latest_completed_target_ready_rpo_seconds
   local latest_completed_manifest_path latest_completed_checkpoint_path
+  local latest_completed_effective_mode latest_completed_incremental_verified latest_completed_metrics_estimated latest_completed_virtual_bytes
+  local latest_completed_changed_bytes latest_completed_source_read_bytes latest_completed_target_written_bytes
+  local latest_completed_transfer_payload_bytes latest_completed_changed_extent_count latest_completed_duration_ms
+  local latest_completed_throughput_bps latest_completed_baseline_generation latest_completed_cycle_token latest_completed_cycle_metrics_path
   local -a completed_checkpoint_fields=()
   local test_session_id test_session_path test_session_state test_restore_point_ref test_restore_point_sequence
   local test_manifest_path test_checkpoint_path
@@ -2202,6 +2206,20 @@ ftctl_dr_runtime_emit_state_json() {
   latest_completed_target_ready_rpo_seconds="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_target_ready_rpo_seconds")"
   latest_completed_manifest_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_manifest_path")"
   latest_completed_checkpoint_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_checkpoint_path")"
+  latest_completed_effective_mode="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_effective_mode")"
+  latest_completed_incremental_verified="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_incremental_verified")"
+  latest_completed_metrics_estimated="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_metrics_estimated")"
+  latest_completed_virtual_bytes="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_virtual_bytes")"
+  latest_completed_changed_bytes="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_changed_bytes")"
+  latest_completed_source_read_bytes="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_source_read_bytes")"
+  latest_completed_target_written_bytes="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_target_written_bytes")"
+  latest_completed_transfer_payload_bytes="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_transfer_payload_bytes")"
+  latest_completed_changed_extent_count="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_changed_extent_count")"
+  latest_completed_duration_ms="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_duration_ms")"
+  latest_completed_throughput_bps="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_throughput_bps")"
+  latest_completed_baseline_generation="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_baseline_generation")"
+  latest_completed_cycle_token="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_cycle_token")"
+  latest_completed_cycle_metrics_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_cycle_metrics_path")"
   if [[ -z "${latest_completed_checkpoint_sequence}" && -s "${restore_points_path}" ]]; then
     mapfile -t completed_checkpoint_fields < <(python3 - "${restore_points_path}" <<'PY' 2>/dev/null
 import json
@@ -2423,6 +2441,21 @@ PY
   ftctl_dr_runtime_json_number_field "latest_completed_target_ready_rpo_seconds" "${latest_completed_target_ready_rpo_seconds}"
   ftctl_dr_runtime_json_string_field "latest_completed_manifest_path" "${latest_completed_manifest_path}"
   ftctl_dr_runtime_json_string_field "latest_completed_checkpoint_path" "${latest_completed_checkpoint_path}"
+  ftctl_dr_runtime_json_string_field "latest_completed_effective_mode" "${latest_completed_effective_mode}"
+  [[ -n "${latest_completed_incremental_verified}" ]] && printf ',"latest_completed_incremental_verified":%s' "${latest_completed_incremental_verified}"
+  [[ -n "${latest_completed_metrics_estimated}" ]] && printf ',"latest_completed_metrics_estimated":%s' "${latest_completed_metrics_estimated}"
+  ftctl_dr_runtime_json_number_field "latest_completed_virtual_bytes" "${latest_completed_virtual_bytes}"
+  ftctl_dr_runtime_json_number_field "latest_completed_changed_bytes" "${latest_completed_changed_bytes}"
+  ftctl_dr_runtime_json_number_field "latest_completed_source_read_bytes" "${latest_completed_source_read_bytes}"
+  ftctl_dr_runtime_json_number_field "latest_completed_target_written_bytes" "${latest_completed_target_written_bytes}"
+  ftctl_dr_runtime_json_number_field "latest_completed_transfer_payload_bytes" "${latest_completed_transfer_payload_bytes}"
+  ftctl_dr_runtime_json_number_field "latest_completed_changed_extent_count" "${latest_completed_changed_extent_count}"
+  ftctl_dr_runtime_json_number_field "latest_completed_duration_ms" "${latest_completed_duration_ms}"
+  ftctl_dr_runtime_json_number_field "latest_completed_throughput_bps" "${latest_completed_throughput_bps}"
+  ftctl_dr_runtime_json_number_field "latest_completed_baseline_generation" "${latest_completed_baseline_generation}"
+  ftctl_dr_runtime_json_string_field "latest_completed_cycle_token" "${latest_completed_cycle_token}"
+  ftctl_dr_runtime_json_string_field "latest_completed_cycle_metrics_path" "${latest_completed_cycle_metrics_path}"
+  ftctl_dr_runtime_json_file_field_redacted "latest_completed_cycle_metrics" "${latest_completed_cycle_metrics_path}"
   ftctl_dr_runtime_json_string_field "restore_points_path" "${restore_points_path}"
   ftctl_dr_runtime_json_string_field "test_session_id" "${test_session_id}"
   ftctl_dr_runtime_json_string_field "test_session_path" "${test_session_path}"

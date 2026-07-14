@@ -361,6 +361,17 @@ record = {
     "state": checkpoint.get("state"),
     "recordedAt": now,
 }
+metrics = checkpoint.get("cycleMetrics") or {}
+if metrics:
+    record["cycleMetrics"] = metrics
+    for key in (
+        "cycleUuid", "cycleToken", "requestedMode", "effectiveMode",
+        "incrementalVerified", "baselineGeneration", "cycleCommitState",
+        "virtualBytes", "changedBytes", "sourceReadBytes", "targetWrittenBytes",
+        "transferPayloadBytes", "changedExtentCount", "durationMs", "throughputBps",
+    ):
+        if key in metrics:
+            record[key] = metrics[key]
 with open(restore_path, "a", encoding="utf-8") as fh:
     fh.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
 PY
@@ -453,6 +464,7 @@ ftctl_dr_scheduler_worker() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" state_path="${4-}" status_path="${5-}"
   local pid_path restore_points_path interval max_cycles sequence=0 command cycle_type source_provider target_provider driver
   local output rc manifest_path checkpoint_path source_at target_at rpo now error_code checkpoint_ref
+  local effective_mode incremental_verified metrics_estimated virtual_bytes changed_bytes source_read_bytes target_written_bytes transfer_payload_bytes changed_extent_count duration_ms throughput_bps baseline_generation cycle_token cycle_metrics_path
   local cycle_started_epoch next_cycle_epoch next_cycle_at wait_seconds control_generation
 
   [[ -n "${plan}" && -n "${run}" && -f "${profile_file}" && -f "${state_path}" ]] || return 2
@@ -573,7 +585,13 @@ ftctl_dr_scheduler_worker() {
         75) error_code="DR_VMWARE_VDDK_SOURCE_LOCKED" ;;
         76) error_code="DR_VMWARE_VDDK_OPEN_DENIED" ;;
         77) error_code="DR_VMWARE_VDDK_THUMBPRINT_UNRESOLVED" ;;
+        80) error_code="DR_VMWARE_CBT_DISK_ID_UNRESOLVED" ;;
         81) error_code="DR_VMWARE_SNAPSHOT_REF_UNRESOLVED" ;;
+        82) error_code="DR_CBT_QUERY_FAILED" ;;
+        83) error_code="DR_CBT_BASELINE_INVALID" ;;
+        84) error_code="DR_CBT_EXTENT_INVALID" ;;
+        85) error_code="DR_CBT_RESEED_REQUIRED" ;;
+        86) error_code="DR_CBT_PATCH_FAILED" ;;
         66) error_code="DR_UNSUPPORTED_DIRECTION" ;;
         *) error_code="DR_REPLICATION_CYCLE_FAILED" ;;
       esac
@@ -602,6 +620,20 @@ ftctl_dr_scheduler_worker() {
     source_at="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "sourceCheckpointAt" || true)"
     target_at="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "targetDurableAt" || true)"
     rpo="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "targetReadyRpoSeconds" || true)"
+    effective_mode="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "effectiveMode" || true)"
+    incremental_verified="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "incrementalVerified" || true)"
+    metrics_estimated="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "metricsEstimated" || true)"
+    virtual_bytes="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "virtualBytes" || true)"
+    changed_bytes="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "changedBytes" || true)"
+    source_read_bytes="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "sourceReadBytes" || true)"
+    target_written_bytes="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "targetWrittenBytes" || true)"
+    transfer_payload_bytes="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "transferPayloadBytes" || true)"
+    changed_extent_count="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "changedExtentCount" || true)"
+    duration_ms="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "durationMs" || true)"
+    throughput_bps="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "throughputBps" || true)"
+    baseline_generation="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "baselineGeneration" || true)"
+    cycle_token="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "cycleToken" || true)"
+    cycle_metrics_path="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "cycleMetricsPath" || true)"
     ftctl_dr_scheduler_append_restore_point "${restore_points_path}" "${plan}" "${run}" "${sequence}" "${cycle_type}" "${driver}" "${manifest_path}" "${checkpoint_path}" || return $?
     now="$(ftctl_now_iso8601)"
     ftctl_dr_scheduler_update_state "${state_path}" "${status_path}" \
@@ -635,6 +667,20 @@ ftctl_dr_scheduler_worker() {
       "last_source_checkpoint_at=${source_at}" \
       "last_target_durable_at=${target_at}" \
       "target_ready_rpo_seconds=${rpo}" \
+      "latest_completed_effective_mode=${effective_mode}" \
+      "latest_completed_incremental_verified=${incremental_verified}" \
+      "latest_completed_metrics_estimated=${metrics_estimated}" \
+      "latest_completed_virtual_bytes=${virtual_bytes}" \
+      "latest_completed_changed_bytes=${changed_bytes}" \
+      "latest_completed_source_read_bytes=${source_read_bytes}" \
+      "latest_completed_target_written_bytes=${target_written_bytes}" \
+      "latest_completed_transfer_payload_bytes=${transfer_payload_bytes}" \
+      "latest_completed_changed_extent_count=${changed_extent_count}" \
+      "latest_completed_duration_ms=${duration_ms}" \
+      "latest_completed_throughput_bps=${throughput_bps}" \
+      "latest_completed_baseline_generation=${baseline_generation}" \
+      "latest_completed_cycle_token=${cycle_token}" \
+      "latest_completed_cycle_metrics_path=${cycle_metrics_path}" \
       "error_code=" \
       "updated_at=${now}" || true
     ftctl_log_event "dr-runtime" "dr.scheduler.cycle" "ok" "" "" \

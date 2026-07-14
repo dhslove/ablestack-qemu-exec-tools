@@ -92,6 +92,142 @@ ftctl_vmware_mover_source_image_opts() {
   printf 'driver=raw,file.driver=nbd,file.server.type=unix,file.server.path=%s\n' "${escaped_socket}"
 }
 
+ftctl_vmware_mover_resolve_cbt_python() {
+  local libdir="${1-}" compat_root candidate
+  if [[ -n "${FTCTL_DR_VMWARE_CBT_PYTHON:-}" && -x "${FTCTL_DR_VMWARE_CBT_PYTHON}" ]]; then
+    printf '%s\n' "${FTCTL_DR_VMWARE_CBT_PYTHON}"
+    return 0
+  fi
+  if [[ -n "${libdir}" ]]; then
+    compat_root="$(cd "${libdir}/.." 2>/dev/null && pwd || true)"
+    for candidate in "${compat_root}/venv/bin/python" "${compat_root}/venv/bin/python3"; do
+      [[ -x "${candidate}" ]] || continue
+      "${candidate}" -c 'import pyVmomi' >/dev/null 2>&1 || continue
+      printf '%s\n' "${candidate}"
+      return 0
+    done
+  fi
+  if python3 -c 'import pyVmomi' >/dev/null 2>&1; then
+    command -v python3
+    return 0
+  fi
+  return 1
+}
+
+ftctl_vmware_mover_query_cbt() {
+  local endpoint="${1-}" username="${2-}" password_file="${3-}" tls_verify="${4-}" libdir="${5-}"
+  local vm_ref="${6-}" snapshot_name="${7-}" disk_id="${8-}" previous_change_id="${9-}" output_path="${10-}"
+  local python_bin helper
+  python_bin="$(ftctl_vmware_mover_resolve_cbt_python "${libdir}" || true)"
+  helper="${FTCTL_DR_VMWARE_CBT_QUERY_HELPER:-${FTCTL_DR_VMWARE_MOVER_LIB_DIR}/dr_vmware_changed_areas.py}"
+  [[ -n "${python_bin}" ]] || ftctl_vmware_mover_die 82 "DR_CBT_QUERY_FAILED: pyVmomi runtime was not found"
+  [[ -f "${helper}" ]] || ftctl_vmware_mover_die 82 "DR_CBT_QUERY_FAILED: CBT query helper was not found"
+  [[ -n "${vm_ref}" && -n "${snapshot_name}" && -n "${disk_id}" ]] || \
+    ftctl_vmware_mover_die 80 "DR_VMWARE_CBT_DISK_ID_UNRESOLVED: VM, snapshot, or disk identifier is empty"
+  VCENTER_HOST="$(ftctl_vmware_mover_govc_url "${endpoint}")" \
+  VCENTER_USER="${username}" \
+  VCENTER_PASS="$(cat "${password_file}")" \
+  VCENTER_INSECURE="$([[ "${tls_verify}" == "true" ]] && printf 0 || printf 1)" \
+    "${python_bin}" "${helper}" --vm "${vm_ref}" --snapshot "${snapshot_name}" \
+      --disk-id "${disk_id}" --change-id "${previous_change_id}" > "${output_path}" || \
+    ftctl_vmware_mover_die 82 "DR_CBT_QUERY_FAILED: QueryChangedDiskAreas failed for ${disk_id}"
+  jq -e '.new_change_id != null and .new_change_id != ""' "${output_path}" >/dev/null || \
+    ftctl_vmware_mover_die 83 "DR_CBT_BASELINE_INVALID: VMware did not return a new changeId for ${disk_id}"
+}
+
+ftctl_vmware_mover_free_nbd() {
+  local excluded="${1-}" dev name
+  modprobe nbd max_part=16 >/dev/null 2>&1 || true
+  for dev in /dev/nbd{0..31}; do
+    [[ -b "${dev}" && "${dev}" != "${excluded}" ]] || continue
+    name="${dev#/dev/}"
+    if [[ ! -s "/sys/class/block/${name}/pid" ]]; then
+      printf '%s\n' "${dev}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+ftctl_vmware_mover_patch_disk() {
+  local source_vmdk="${1-}" source_vm_ref="${2-}" source_snapshot_ref="${3-}" target_uri="${4-}" target_format="${5-}" label="${6-}"
+  local endpoint="${7-}" username="${8-}" password_file="${9-}" tls_verify="${10-}" thumbprint="${11-}" libdir="${12-}"
+  local areas_path="${13-}" metrics_path="${14-}" work_dir socket_path pid="" source_opts safe_label nbdkit_log qemu_info_log transports
+  local source_dev="" target_dev="" patch_helper lock_file="${FTCTL_DR_VMWARE_NBD_LOCK:-/run/ablestack-vm-ftctl/dr-runtime/nbd.lock}"
+
+  [[ -s "${areas_path}" ]] || ftctl_vmware_mover_die 84 "DR_CBT_EXTENT_INVALID: changed-area payload is missing for ${label}"
+  work_dir="$(mktemp -d -t ftctl.vmware.patch.XXXXXX)"
+  socket_path="${work_dir}/vddk.sock"
+  safe_label="$(ftctl_vmware_mover_safe_label "${label}")"
+  nbdkit_log="${FTCTL_DR_VMWARE_MOVER_LOG_DIR}/nbdkit-patch-${safe_label}.log"
+  qemu_info_log="${FTCTL_DR_VMWARE_MOVER_LOG_DIR}/qemu-img-patch-info-${safe_label}.log"
+  transports="${FTCTL_DR_VMWARE_VDDK_TRANSPORTS:-nbd:nbdssl}"
+  endpoint="$(ftctl_vmware_mover_normalize_vcenter_server "${endpoint}")"
+  if [[ "${tls_verify}" != "true" ]]; then
+    thumbprint="$(ftctl_vmware_mover_resolve_thumbprint "${endpoint}" "${tls_verify}" "${thumbprint}" || true)"
+    [[ -n "${thumbprint}" ]] || ftctl_vmware_mover_die 77 "DR_VMWARE_VDDK_THUMBPRINT_UNRESOLVED: thumbprint is missing for ${label}"
+  fi
+  local nbdkit_args=(--exit-with-parent --foreground --unix "${socket_path}" -r vddk
+    "server=${endpoint}" "user=${username}" "password=+${password_file}" "file=${source_vmdk}" "single-link=true")
+  [[ -n "${source_vm_ref}" ]] && nbdkit_args+=("vm=moref=${source_vm_ref}")
+  [[ -n "${source_snapshot_ref}" ]] && nbdkit_args+=("snapshot=${source_snapshot_ref}")
+  [[ -n "${transports}" ]] && nbdkit_args+=("transports=${transports}")
+  [[ -n "${thumbprint}" && "${tls_verify}" != "true" ]] && nbdkit_args+=("thumbprint=${thumbprint}")
+  [[ -n "${libdir}" && -d "${libdir}" ]] && nbdkit_args+=("libdir=${libdir}")
+  nbdkit "${nbdkit_args[@]}" >"${nbdkit_log}" 2>&1 &
+  pid=$!
+  if ! ftctl_vmware_mover_wait_for_socket "${socket_path}" "${pid}" "${FTCTL_DR_VMWARE_NBDKIT_READY_TIMEOUT}"; then
+    ftctl_vmware_mover_cleanup_nbdkit "${pid}" "${work_dir}"
+    ftctl_vmware_mover_classify_source_open_failure "${label}" "${nbdkit_log}" "${qemu_info_log}" "${source_vm_ref}" "${source_snapshot_ref}" "${source_vmdk}"
+  fi
+  source_opts="$(ftctl_vmware_mover_source_image_opts "${socket_path}")"
+  qemu-img info --force-share --image-opts "${source_opts}" >/dev/null 2>"${qemu_info_log}" || {
+    ftctl_vmware_mover_cleanup_nbdkit "${pid}" "${work_dir}"
+    ftctl_vmware_mover_classify_source_open_failure "${label}" "${nbdkit_log}" "${qemu_info_log}" "${source_vm_ref}" "${source_snapshot_ref}" "${source_vmdk}"
+  }
+
+  mkdir -p "$(dirname "${lock_file}")"
+  exec 9>"${lock_file}"
+  flock -x 9
+  source_dev="$(ftctl_vmware_mover_free_nbd || true)"
+  if [[ -z "${source_dev}" ]]; then
+    flock -u 9
+    ftctl_vmware_mover_cleanup_nbdkit "${pid}" "${work_dir}"
+    ftctl_vmware_mover_die 86 "DR_CBT_PATCH_FAILED: no free source NBD device"
+  fi
+  if ! nbd-client -u -N default "${socket_path}" "${source_dev}" >/dev/null; then
+    flock -u 9
+    ftctl_vmware_mover_cleanup_nbdkit "${pid}" "${work_dir}"
+    ftctl_vmware_mover_die 86 "DR_CBT_PATCH_FAILED: source NBD attach failed"
+  fi
+  target_dev="$(ftctl_vmware_mover_free_nbd "${source_dev}" || true)"
+  if [[ -z "${target_dev}" ]]; then
+    nbd-client -d "${source_dev}" >/dev/null 2>&1 || true
+    flock -u 9
+    ftctl_vmware_mover_cleanup_nbdkit "${pid}" "${work_dir}"
+    ftctl_vmware_mover_die 86 "DR_CBT_PATCH_FAILED: no free target NBD device"
+  fi
+  if ! qemu-nbd --connect="${target_dev}" --format="${target_format:-raw}" "${target_uri}" >/dev/null; then
+    nbd-client -d "${source_dev}" >/dev/null 2>&1 || true
+    flock -u 9
+    ftctl_vmware_mover_cleanup_nbdkit "${pid}" "${work_dir}"
+    ftctl_vmware_mover_die 86 "DR_CBT_PATCH_FAILED: target NBD attach failed"
+  fi
+  flock -u 9
+
+  patch_helper="${FTCTL_DR_VMWARE_EXTENT_PATCH_HELPER:-${FTCTL_DR_VMWARE_MOVER_LIB_DIR}/dr_extent_patch.py}"
+  if ! python3 "${patch_helper}" --source "${source_dev}" --target "${target_dev}" --areas-json "${areas_path}" > "${metrics_path}"; then
+    qemu-nbd --disconnect "${target_dev}" >/dev/null 2>&1 || true
+    nbd-client -d "${source_dev}" >/dev/null 2>&1 || true
+    ftctl_vmware_mover_cleanup_nbdkit "${pid}" "${work_dir}"
+    ftctl_vmware_mover_die 86 "DR_CBT_PATCH_FAILED: extent apply failed for ${label}"
+  fi
+  blockdev --flushbufs "${target_dev}" >/dev/null 2>&1 || true
+  qemu-nbd --disconnect "${target_dev}" >/dev/null 2>&1 || true
+  nbd-client -d "${source_dev}" >/dev/null 2>&1 || true
+  ftctl_vmware_mover_cleanup_nbdkit "${pid}" "${work_dir}"
+}
+
 ftctl_vmware_mover_safe_label() {
   local value="${1:-disk}"
   value="${value//[^A-Za-z0-9_.-]/_}"
@@ -283,6 +419,10 @@ for index in range(count):
         "sourceVmdk": first(source.get("sourceOpenVmdk"), source.get("sourceOpenVmdkPath"), source.get("sourceVmdkPath"), source.get("sourceDiskRef"), source.get("sourcePath")),
         "sourceVmRef": first(source.get("sourceVmRef"), vmware.get("sourceVmRef")),
         "sourceSnapshotRef": first(source.get("sourceSnapshotRef"), source.get("snapshotRef"), source.get("snapshot"), vmware.get("sourceSnapshotRef")),
+        "sourceSnapshotName": first(source.get("sourceSnapshotName"), source.get("snapshotName"), vmware.get("sourceSnapshotName")),
+        "cbtDiskId": first(source.get("cbtDiskId"), source.get("sourceDiskKey"), source.get("device")),
+        "previousChangeId": first(source.get("changeId"), source.get("cbtChangeId")),
+        "virtualBytes": first(source.get("sizeBytes"), dest.get("sizeBytes")),
         "targetPath": first(dest.get("targetPath"), source.get("targetPath"), source.get("targetDiskRef"), source.get("targetVmdkPath")),
         "targetName": first(dest.get("targetName"), source.get("targetName"), source.get("targetDiskRef")),
         "targetStoragePath": first(dest.get("targetStoragePath"), target.get("target", {}).get("storagePath") if isinstance(target.get("target"), dict) else ""),
@@ -611,10 +751,88 @@ ftctl_vmware_mover_cleanup() {
   rm -f "${FTCTL_DR_VMWARE_PASSWORD_FILE:-}"
 }
 
+ftctl_vmware_mover_commit_cycle_metrics() {
+  local disk_map="${1-}" results_path="${2-}" metrics_path="${3-}" plan="${4-}" run="${5-}" sequence="${6-}" requested_mode="${7-}"
+  python3 - "${disk_map}" "${results_path}" "${metrics_path}" "${plan}" "${run}" "${sequence}" "${requested_mode}" <<'PY'
+import json
+import os
+import sys
+import time
+import uuid
+
+disk_map_path, results_path, metrics_path, plan, run, sequence, requested_mode = sys.argv[1:8]
+with open(disk_map_path, "r", encoding="utf-8") as handle:
+    disk_map = json.load(handle)
+with open(results_path, "r", encoding="utf-8") as handle:
+    disks = json.load(handle)
+
+generation = int(sequence or 0)
+for result in disks:
+    index = int(result["diskIndex"])
+    if index >= len(disk_map.get("disks") or []):
+        raise SystemExit(f"disk result index is out of range: {index}")
+    disk = disk_map["disks"][index]
+    disk["changeId"] = result["newChangeId"]
+    disk["cbtChangeId"] = result["newChangeId"]
+    disk["baselineGeneration"] = generation
+    disk["lastSyncSequence"] = generation
+    disk["baselineState"] = "LOCAL_DURABLE"
+
+disk_tmp = disk_map_path + ".tmp"
+with open(disk_tmp, "w", encoding="utf-8") as handle:
+    json.dump(disk_map, handle, sort_keys=True, separators=(",", ":"))
+    handle.write("\n")
+os.replace(disk_tmp, disk_map_path)
+
+effective_modes = {str(item.get("effectiveMode") or "") for item in disks}
+if effective_modes == {"NO_CHANGE"}:
+    effective_mode = "NO_CHANGE"
+elif requested_mode in ("FULL_SEED", "FULL_RESEED"):
+    effective_mode = requested_mode
+else:
+    effective_mode = "CBT_INCREMENTAL"
+incremental_verified = bool(disks) and all(bool(item.get("incrementalVerified")) for item in disks)
+if effective_mode in ("FULL_SEED", "FULL_RESEED"):
+    incremental_verified = False
+
+sum_fields = (
+    "virtualBytes", "changedBytes", "sourceReadBytes", "targetWrittenBytes",
+    "transferPayloadBytes", "changedExtentCount", "durationMs"
+)
+metrics = {field: sum(int(item.get(field) or 0) for item in disks) for field in sum_fields}
+duration_ms = max((int(item.get("durationMs") or 0) for item in disks), default=0)
+metrics["durationMs"] = duration_ms
+metrics["throughputBps"] = (metrics["sourceReadBytes"] * 1000 // duration_ms) if duration_ms else 0
+metrics.update({
+    "schemaVersion": 1,
+    "cycleUuid": str(uuid.uuid5(uuid.NAMESPACE_URL, f"ablestack-dr:{plan}:{sequence}")),
+    "cycleToken": f"{plan}:{sequence}",
+    "planUuid": plan,
+    "runUuid": run,
+    "sequence": generation,
+    "requestedMode": requested_mode,
+    "effectiveMode": effective_mode,
+    "incrementalVerified": incremental_verified,
+    "metricsEstimated": any(bool(item.get("metricsEstimated")) for item in disks),
+    "baselineGeneration": generation,
+    "cycleCommitState": "LOCAL_DURABLE",
+    "targetDurableAtEpochMs": int(time.time() * 1000),
+    "disks": disks,
+})
+os.makedirs(os.path.dirname(metrics_path), exist_ok=True)
+metrics_tmp = metrics_path + ".tmp"
+with open(metrics_tmp, "w", encoding="utf-8") as handle:
+    json.dump(metrics, handle, sort_keys=True, separators=(",", ":"))
+    handle.write("\n")
+os.replace(metrics_tmp, metrics_path)
+PY
+}
+
 main() {
   local disk_map="${FTCTL_DR_DISK_MAP:-}" target_disk_map="${FTCTL_DR_TARGET_DISK_MAP:-}" credentials_file="${FTCTL_DR_CREDENTIALS_FILE:-}"
-  local endpoint username password tls_verify thumbprint libdir plan_json password_file rows row count i
+  local endpoint username password tls_verify thumbprint libdir password_file rows row count i
   local govc_bin source_vm_ref_for_snapshot snapshot_name snapshot_ref snapshot_created="false" mover_rc=0
+  local cycle_type requested_mode metrics_path results_path result_tmp query_path patch_metrics_path
 
   [[ -n "${disk_map}" && -f "${disk_map}" ]] || ftctl_vmware_mover_die 65 "FTCTL_DR_DISK_MAP is required"
   [[ -n "${credentials_file}" && -f "${credentials_file}" ]] || ftctl_vmware_mover_die 65 "FTCTL_DR_CREDENTIALS_FILE is required"
@@ -654,12 +872,22 @@ main() {
   rows="$(ftctl_vmware_mover_disk_plan "${disk_map}" "${target_disk_map}")"
   count="$(jq 'length' <<< "${rows}")"
   [[ "${count}" =~ ^[1-9][0-9]*$ ]] || ftctl_vmware_mover_die 65 "no VMware disk rows to move"
+  cycle_type="${FTCTL_DR_CYCLE_TYPE:-full-seed}"
+  case "${cycle_type}" in
+    full-seed) requested_mode="FULL_SEED" ;;
+    full-reseed) requested_mode="FULL_RESEED" ;;
+    *) requested_mode="CBT_INCREMENTAL" ;;
+  esac
+  metrics_path="${FTCTL_DR_CYCLE_METRICS_PATH:-${FTCTL_DR_VMWARE_MOVER_LOG_DIR}/cycle-${FTCTL_DR_CHECKPOINT_SEQUENCE:-0}.json}"
+  results_path="$(mktemp -p "${FTCTL_DR_VMWARE_MOVER_LOG_DIR}" vmware-cycle-results.XXXXXX.json)"
+  printf '[]\n' > "${results_path}"
   snapshot_ref="$(jq -r '[.[].sourceSnapshotRef // ""] | map(select(. != "")) | .[0] // ""' <<< "${rows}")"
+  snapshot_name="$(jq -r '[.[].sourceSnapshotName // ""] | map(select(. != "")) | .[0] // ""' <<< "${rows}")"
   source_vm_ref_for_snapshot="$(jq -r '[.[].sourceVmRef // ""] | map(select(. != "")) | .[0] // ""' <<< "${rows}")"
   if [[ -z "${snapshot_ref}" && -n "${source_vm_ref_for_snapshot}" && "${FTCTL_DR_VMWARE_CREATE_RUN_SNAPSHOT:-1}" == "1" ]]; then
     govc_bin="$(ftctl_vmware_mover_resolve_govc_bin "${credentials_file}" "${libdir}")"
     [[ -n "${govc_bin}" ]] || ftctl_vmware_mover_die 73 "DR_VMWARE_VDDK_CONNECT_INVALID: govc binary is required to create VMware source snapshot"
-    snapshot_name="ftctl-dr-${FTCTL_DR_RUN_UUID:-$(date +%s)}-source"
+    snapshot_name="ftctl-dr-${FTCTL_DR_RUN_UUID:-$(date +%s)}-cycle-${FTCTL_DR_CHECKPOINT_SEQUENCE:-0}"
     mover_rc=0
     ftctl_vmware_mover_create_run_snapshot "${govc_bin}" "${endpoint}" "${username}" "${password_file}" "${tls_verify}" "${source_vm_ref_for_snapshot}" "${snapshot_name}" || mover_rc=$?
     if [[ "${mover_rc}" != "0" ]]; then
@@ -676,21 +904,64 @@ main() {
   while [[ "${i}" -lt "${count}" ]]; do
     row="$(jq -c ".[$i]" <<< "${rows}")"
     local label source_vmdk source_vm_ref source_snapshot_ref target_path target_name target_storage_path target_uri target_format
+    local cbt_disk_id previous_change_id new_change_id virtual_bytes areas_count changed_bytes effective_mode incremental_verified
     label="$(jq -r '.label // ""' <<< "${row}")"
     source_vmdk="$(jq -r '.sourceVmdk // ""' <<< "${row}")"
     source_vm_ref="$(jq -r '.sourceVmRef // ""' <<< "${row}")"
     source_snapshot_ref="$(jq -r '.sourceSnapshotRef // ""' <<< "${row}")"
     [[ -n "${source_snapshot_ref}" ]] || source_snapshot_ref="${snapshot_ref}"
+    cbt_disk_id="$(jq -r '.cbtDiskId // ""' <<< "${row}")"
+    previous_change_id="$(jq -r '.previousChangeId // ""' <<< "${row}")"
+    virtual_bytes="$(jq -r '.virtualBytes // 0' <<< "${row}")"
     target_path="$(jq -r '.targetPath // ""' <<< "${row}")"
     target_name="$(jq -r '.targetName // ""' <<< "${row}")"
     target_storage_path="$(jq -r '.targetStoragePath // ""' <<< "${row}")"
     target_uri="$(ftctl_vmware_mover_target_uri "${target_path}" "${target_storage_path}" "${target_name}")"
     target_format="$(jq -r '.targetFormat // "raw"' <<< "${row}")"
-    printf 'VMware DR mover: %s snapshot=%s -> %s\n' "${source_vmdk}" "${source_snapshot_ref:-none}" "${target_uri}" >&2
-    ftctl_vmware_mover_convert_disk "${source_vmdk}" "${source_vm_ref}" "${source_snapshot_ref}" "${target_uri}" "${target_format:-raw}" "${label:-disk${i}}" \
-      "${endpoint}" "${username}" "${password_file}" "${tls_verify}" "${thumbprint}" "${libdir}"
+    [[ -n "${snapshot_name}" ]] || ftctl_vmware_mover_die 82 "DR_CBT_QUERY_FAILED: VMware snapshot name is unavailable"
+    if [[ "${requested_mode}" == "CBT_INCREMENTAL" && -z "${previous_change_id}" ]]; then
+      ftctl_vmware_mover_die 85 "DR_CBT_RESEED_REQUIRED: committed changeId is missing for ${label:-disk${i}}"
+    fi
+    query_path="$(mktemp -p "${FTCTL_DR_VMWARE_MOVER_LOG_DIR}" vmware-cbt-query-${i}.XXXXXX.json)"
+    ftctl_vmware_mover_query_cbt "${endpoint}" "${username}" "${password_file}" "${tls_verify}" "${libdir}" \
+      "${source_vm_ref}" "${snapshot_name}" "${cbt_disk_id}" \
+      "$([[ "${requested_mode}" == "CBT_INCREMENTAL" ]] && printf '%s' "${previous_change_id}")" "${query_path}"
+    new_change_id="$(jq -r '.new_change_id // ""' "${query_path}")"
+    source_vmdk="$(jq -r '.vmdk_path // ""' "${query_path}")"
+    areas_count="$(jq -r '(.areas // []) | length' "${query_path}")"
+    changed_bytes="$(jq -r '[.areas[]?.length] | add // 0' "${query_path}")"
+    patch_metrics_path="$(mktemp -p "${FTCTL_DR_VMWARE_MOVER_LOG_DIR}" vmware-patch-metrics-${i}.XXXXXX.json)"
+    if [[ "${requested_mode}" == "FULL_SEED" || "${requested_mode}" == "FULL_RESEED" ]]; then
+      printf 'VMware DR mover full copy: %s snapshot=%s -> %s\n' "${source_vmdk}" "${source_snapshot_ref:-none}" "${target_uri}" >&2
+      ftctl_vmware_mover_convert_disk "${source_vmdk}" "${source_vm_ref}" "${source_snapshot_ref}" "${target_uri}" "${target_format:-raw}" "${label:-disk${i}}" \
+        "${endpoint}" "${username}" "${password_file}" "${tls_verify}" "${thumbprint}" "${libdir}"
+      effective_mode="${requested_mode}"
+      incremental_verified="false"
+      jq -cn --argjson size "${virtual_bytes:-0}" '{changedExtentCount:1,changedBytes:$size,sourceReadBytes:$size,targetWrittenBytes:$size,transferPayloadBytes:$size,durationMs:0,throughputBps:0,metricsEstimated:true}' > "${patch_metrics_path}"
+    elif [[ "${areas_count}" == "0" ]]; then
+      effective_mode="NO_CHANGE"
+      incremental_verified="true"
+      printf '{"changedExtentCount":0,"changedBytes":0,"sourceReadBytes":0,"targetWrittenBytes":0,"transferPayloadBytes":0,"durationMs":0,"throughputBps":0,"metricsEstimated":false}\n' > "${patch_metrics_path}"
+    else
+      effective_mode="CBT_INCREMENTAL"
+      incremental_verified="true"
+      printf 'VMware DR mover CBT patch: disk=%s extents=%s bytes=%s -> %s\n' "${label:-disk${i}}" "${areas_count}" "${changed_bytes}" "${target_uri}" >&2
+      ftctl_vmware_mover_patch_disk "${source_vmdk}" "${source_vm_ref}" "${source_snapshot_ref}" "${target_uri}" "${target_format:-raw}" "${label:-disk${i}}" \
+        "${endpoint}" "${username}" "${password_file}" "${tls_verify}" "${thumbprint}" "${libdir}" "${query_path}" "${patch_metrics_path}"
+    fi
+    result_tmp="$(mktemp -p "${FTCTL_DR_VMWARE_MOVER_LOG_DIR}" vmware-cycle-result.XXXXXX.json)"
+    jq -cn --argjson index "${i}" --arg label "${label:-disk${i}}" --arg requested "${requested_mode}" \
+      --arg effective "${effective_mode}" --arg previous "${previous_change_id}" --arg next "${new_change_id}" \
+      --argjson virtual "${virtual_bytes:-0}" --argjson verified "${incremental_verified}" --slurpfile metric "${patch_metrics_path}" \
+      '{diskIndex:$index,diskLabel:$label,requestedMode:$requested,effectiveMode:$effective,previousChangeId:$previous,newChangeId:$next,virtualBytes:$virtual,incrementalVerified:$verified} + $metric[0]' > "${result_tmp}"
+    jq --slurpfile item "${result_tmp}" '. + $item' "${results_path}" > "${results_path}.tmp"
+    mv -f "${results_path}.tmp" "${results_path}"
+    rm -f "${query_path}" "${patch_metrics_path}" "${result_tmp}"
     i=$((i + 1))
   done
+  ftctl_vmware_mover_commit_cycle_metrics "${disk_map}" "${results_path}" "${metrics_path}" \
+    "${FTCTL_DR_PLAN_UUID:-}" "${FTCTL_DR_RUN_UUID:-}" "${FTCTL_DR_CHECKPOINT_SEQUENCE:-0}" "${requested_mode}"
+  rm -f "${results_path}"
 }
 
 main "$@"
