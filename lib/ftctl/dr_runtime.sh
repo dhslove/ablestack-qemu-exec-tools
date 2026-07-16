@@ -2169,8 +2169,8 @@ ftctl_dr_runtime_emit_state_json() {
   local reprotect_manifest_path reprotect_checkpoint_path reprotect_requested_at reprotect_completed_at
   local reprotect_rto_actual_seconds reverse_direction reverse_profile_path reverse_restore_points_path reprotect_worker_pid
   local target_vm_id target_external_ref target_materialized target_vm_present target_storage_present target_network_present restore_point_present
-  local profile_path source_firmware source_secure_boot source_hardware_fingerprint
-  local target_boot_type target_boot_mode target_io_policy target_iothreads
+  local profile_path source_firmware="" source_secure_boot="" source_hardware_fingerprint=""
+  local target_boot_type="" target_boot_mode="" target_io_policy="" target_iothreads=""
 
   action="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "action")"
   state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "state")"

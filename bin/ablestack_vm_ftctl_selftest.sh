@@ -6389,6 +6389,15 @@ JSON
     --json)"
   selftest_assert_contains "${status}" '"state":"CANCELED"' "status canceled"
   selftest_assert_contains "${status}" '"progress":100' "cancel progress"
+
+  rm -f "${SELFTEST_ROOT}/run/dr-runtime/plans/plan-step3/profile.json"
+  status="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-status \
+    --config "${SELFTEST_CONFIG}" \
+    --plan plan-step3 \
+    --run run-step3 \
+    --events-limit 0 \
+    --json)"
+  python3 -c 'import json,sys; value=json.load(sys.stdin); assert value["profile_exists"] is False; assert value["source_firmware"] == ""; assert value["target_io_policy"] == ""' <<< "${status}"
 }
 
 selftest_case_dr_runtime_control_actions() {
