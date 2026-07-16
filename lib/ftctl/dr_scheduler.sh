@@ -317,19 +317,32 @@ ftctl_dr_scheduler_update_state() {
 }
 
 ftctl_dr_scheduler_checkpoint_value() {
-  local checkpoint_path="${1-}" field="${2-}"
+  local checkpoint_path="${1-}" field="${2-}" expected_type="${3-string}"
   [[ -n "${checkpoint_path}" && -f "${checkpoint_path}" ]] || return 1
-  python3 - "${checkpoint_path}" "${field}" <<'PY' 2>/dev/null
+  python3 - "${checkpoint_path}" "${field}" "${expected_type}" <<'PY' 2>/dev/null
 import json
 import sys
 
 with open(sys.argv[1], "r", encoding="utf-8") as fh:
     data = json.load(fh)
 value = data.get(sys.argv[2])
+expected = sys.argv[3]
 if value is None:
     print("")
+elif expected == "boolean":
+    if not isinstance(value, bool):
+        raise SystemExit(65)
+    print("true" if value else "false")
+elif expected == "integer":
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise SystemExit(65)
+    print(value)
+elif expected == "string":
+    if not isinstance(value, str):
+        raise SystemExit(65)
+    print(value)
 else:
-    print(str(value))
+    raise SystemExit(65)
 PY
 }
 
@@ -647,17 +660,17 @@ ftctl_dr_scheduler_worker() {
     target_at="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "targetDurableAt" || true)"
     rpo="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "targetReadyRpoSeconds" || true)"
     effective_mode="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "effectiveMode" || true)"
-    incremental_verified="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "incrementalVerified" || true)"
-    metrics_estimated="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "metricsEstimated" || true)"
-    virtual_bytes="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "virtualBytes" || true)"
-    changed_bytes="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "changedBytes" || true)"
-    source_read_bytes="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "sourceReadBytes" || true)"
-    target_written_bytes="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "targetWrittenBytes" || true)"
-    transfer_payload_bytes="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "transferPayloadBytes" || true)"
-    changed_extent_count="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "changedExtentCount" || true)"
-    duration_ms="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "durationMs" || true)"
-    throughput_bps="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "throughputBps" || true)"
-    baseline_generation="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "baselineGeneration" || true)"
+    incremental_verified="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "incrementalVerified" boolean || true)"
+    metrics_estimated="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "metricsEstimated" boolean || true)"
+    virtual_bytes="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "virtualBytes" integer || true)"
+    changed_bytes="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "changedBytes" integer || true)"
+    source_read_bytes="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "sourceReadBytes" integer || true)"
+    target_written_bytes="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "targetWrittenBytes" integer || true)"
+    transfer_payload_bytes="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "transferPayloadBytes" integer || true)"
+    changed_extent_count="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "changedExtentCount" integer || true)"
+    duration_ms="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "durationMs" integer || true)"
+    throughput_bps="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "throughputBps" integer || true)"
+    baseline_generation="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "baselineGeneration" integer || true)"
     cycle_token="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "cycleToken" || true)"
     cycle_metrics_path="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "cycleMetricsPath" || true)"
     ftctl_dr_scheduler_append_restore_point "${restore_points_path}" "${plan}" "${run}" "${sequence}" "${cycle_type}" "${driver}" "${manifest_path}" "${checkpoint_path}" || return $?

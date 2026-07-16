@@ -92,6 +92,7 @@ CLI_RUN=""
 CLI_PROFILE_JSON=""
 CLI_RESTORE_POINT=""
 CLI_EVENTS_OFFSET=""
+CLI_EVENTS_LIMIT="20"
 CLI_WAIT_VALUE=""
 CLI_TARGET_VM_ID=""
 CLI_TARGET_EXTERNAL_REF=""
@@ -280,6 +281,7 @@ Global options:
                      Cloud-provided FTCTL_DR profile JSON
       --restore-point ID
       --events-offset N
+      --events-limit N
       --wait VALUE    DR command wait policy; --wait=false returns after accept
       --secondary-vm-name NAME
       --active-side SIDE
@@ -597,6 +599,10 @@ parse_args() {
         CLI_EVENTS_OFFSET="${2-}"
         shift 2
         ;;
+      --events-limit)
+        CLI_EVENTS_LIMIT="${2-}"
+        shift 2
+        ;;
       --wait)
         CLI_WAIT_VALUE="${2-}"
         shift 2
@@ -678,7 +684,7 @@ dispatch() {
         "${CLI_TARGET_VM_NAME}" "${CLI_TARGET_NETWORK_ID}" "${CLI_TARGET_VOLUME_MAP_JSON}" "${CLI_TARGET_READY_RPO_SECONDS}" "${CLI_JSON}"
       ;;
     dr-status)
-      ftctl_dr_runtime_status "${CLI_PLAN}" "${CLI_RUN}" "${CLI_EVENTS_OFFSET}" "${CLI_JSON}"
+      ftctl_dr_runtime_status "${CLI_PLAN}" "${CLI_RUN}" "${CLI_EVENTS_OFFSET}" "${CLI_EVENTS_LIMIT}" "${CLI_JSON}"
       ;;
     dr-capabilities)
       ftctl_dr_runtime_capabilities "${CLI_JSON}"

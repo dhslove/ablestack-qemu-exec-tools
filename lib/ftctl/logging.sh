@@ -67,7 +67,7 @@ ftctl_log_event() {
   local vm="${4-}"
   local rc="${5-}"
   local details_kv="${6-}"
-  local ts scan_id json details_json parent event_seq
+  local ts scan_id json details_json parent event_seq token detail_key detail_value plan_uuid plan_key plan_log
 
   ts="$(ftctl_now_iso8601)"
   scan_id="$(ftctl_get_scan_id)"
@@ -104,4 +104,25 @@ ftctl_log_event() {
   json+="}"
 
   printf "%s\n" "${json}" >> "${FTCTL_EVENTS_LOG}"
+
+  # DR status consumes a plan-owned stream. Keep the global log for existing
+  # operators, but never make a DR plan read unrelated VM/plan events.
+  if [[ "${stage}" == "dr-runtime" && -n "${FTCTL_RUN_DIR:-}" ]]; then
+    plan_uuid=""
+    for token in ${details_kv}; do
+      detail_key="${token%%=*}"
+      detail_value="${token#*=}"
+      if [[ "${detail_key}" == "plan" ]]; then
+        plan_uuid="${detail_value}"
+        break
+      fi
+    done
+    if [[ -n "${plan_uuid}" ]]; then
+      plan_key="$(printf '%s' "${plan_uuid}" | tr -c 'A-Za-z0-9._-' '_')"
+      plan_log="${FTCTL_RUN_DIR}/dr-runtime/plans/${plan_key}/events.jsonl"
+      mkdir -p "$(dirname "${plan_log}")" 2>/dev/null || true
+      printf "%s\n" "${json}" >> "${plan_log}"
+      chmod 0644 "${plan_log}" 2>/dev/null || true
+    fi
+  fi
 }

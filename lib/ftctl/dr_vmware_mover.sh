@@ -571,29 +571,58 @@ PY
 }
 
 ftctl_vmware_mover_write_source_snapshot_status() {
-  local path="${FTCTL_DR_SOURCE_SNAPSHOT_STATUS_PATH:-}" ready="${1-}" error_code="${2-}" message="${3-}" vm_ref="${4-}" snapshot_name="${5-}" snapshot_ref="${6-}" created="${7-}" cleanup_required="${8-}" resolve_method="${9-}"
+  local path="${FTCTL_DR_SOURCE_SNAPSHOT_STATUS_PATH:-}" ready="${1-}" error_code="${2-}" message="${3-}" vm_ref="${4-}" snapshot_name="${5-}" snapshot_ref="${6-}" created="${7-}" cleanup_required="${8-}" resolve_method="${9-}" lifecycle_state="${10-}" last_snapshot_ref="${11-}"
+  [[ -n "${last_snapshot_ref}" ]] || last_snapshot_ref="${snapshot_ref}"
   [[ -n "${path}" ]] || return 0
   mkdir -p "$(dirname "${path}")"
-  python3 - "${path}" "${ready}" "${error_code}" "${message}" "${vm_ref}" "${snapshot_name}" "${snapshot_ref}" "${created}" "${cleanup_required}" "${resolve_method}" <<'PY'
+  python3 - "${path}" "${ready}" "${error_code}" "${message}" "${vm_ref}" "${snapshot_name}" "${snapshot_ref}" "${created}" "${cleanup_required}" "${resolve_method}" "${lifecycle_state}" "${last_snapshot_ref}" <<'PY'
 import json
 import os
 import sys
 import time
 
-path, ready, error_code, message, vm_ref, snapshot_name, snapshot_ref, created, cleanup_required, resolve_method = sys.argv[1:11]
+path, ready, error_code, message, vm_ref, snapshot_name, snapshot_ref, created, cleanup_required, resolve_method, lifecycle_state, last_snapshot_ref = sys.argv[1:13]
+now_ms = int(time.time() * 1000)
+previous = {}
+try:
+    with open(path, "r", encoding="utf-8") as fh:
+        value = json.load(fh)
+        if isinstance(value, dict):
+            previous = value
+except (OSError, ValueError):
+    pass
+if not lifecycle_state:
+    lifecycle_state = "ACTIVE" if snapshot_ref else ("CLEANUP_FAILED" if str(cleanup_required).lower() == "true" else "CLEANED")
+active = lifecycle_state in ("CREATING", "ACTIVE", "COMMITTED", "CLEANUP_PENDING", "CLEANUP_FAILED") and bool(snapshot_ref)
+created_at_ms = previous.get("createdAtEpochMs")
+if lifecycle_state in ("CREATING", "ACTIVE") and (not created_at_ms or previous.get("lastSnapshotRef") != last_snapshot_ref):
+    created_at_ms = now_ms
+if not last_snapshot_ref:
+    last_snapshot_ref = str(previous.get("lastSnapshotRef") or "")
+if not snapshot_name:
+    snapshot_name = str(previous.get("lastSnapshotName") or "")
 data = {
     "checked": True,
     "ready": str(ready).lower() == "true",
     "created": str(created).lower() == "true",
     "cleanupRequired": str(cleanup_required).lower() == "true",
+    "lifecycleState": lifecycle_state,
     "error_code": error_code,
     "message": message,
     "vmRef": vm_ref,
     "snapshotName": snapshot_name,
-    "snapshotRefPresent": bool(snapshot_ref),
-    "snapshotRef": snapshot_ref,
+    "snapshotRefPresent": active,
+    "snapshotRef": snapshot_ref if active else "",
+    "activeSnapshotRefPresent": active,
+    "activeSnapshotRef": snapshot_ref if active else "",
+    "lastSnapshotRef": last_snapshot_ref,
+    "lastSnapshotName": snapshot_name,
     "resolveMethod": resolve_method,
-    "checkedAtEpochMs": int(time.time() * 1000),
+    "createdAtEpochMs": created_at_ms,
+    "checkedAtEpochMs": now_ms,
+    "cleanedAtEpochMs": now_ms if lifecycle_state == "CLEANED" else None,
+    "cleanupErrorCode": error_code if lifecycle_state == "CLEANUP_FAILED" else "",
+    "cleanupMessage": message if lifecycle_state == "CLEANUP_FAILED" else "",
 }
 tmp = path + ".tmp"
 with open(tmp, "w", encoding="utf-8") as fh:
@@ -787,6 +816,13 @@ ftctl_vmware_mover_create_run_snapshot() {
   local govc_bin="${1-}" endpoint="${2-}" username="${3-}" password_file="${4-}" tls_verify="${5-}" source_vm_ref="${6-}" snapshot_name="${7-}"
   [[ -x "${govc_bin}" ]] || return 73
   [[ -n "${source_vm_ref}" && -n "${snapshot_name}" ]] || return 73
+  if [[ -n "${FTCTL_DR_SOURCE_SNAPSHOT_STATUS_PATH:-}" && -f "${FTCTL_DR_SOURCE_SNAPSHOT_STATUS_PATH}" ]] \
+    && jq -e '.cleanupRequired == true and (.lifecycleState == "CLEANUP_FAILED" or .lifecycleState == "CLEANUP_PENDING")' \
+      "${FTCTL_DR_SOURCE_SNAPSHOT_STATUS_PATH}" >/dev/null 2>&1; then
+    ftctl_vmware_mover_write_source_snapshot_status false "DR_VMWARE_SNAPSHOT_CLEANUP_PENDING" \
+      "Previous VMware source snapshot cleanup is not complete" "${source_vm_ref}" "${snapshot_name}" "" false true "" "CLEANUP_FAILED" ""
+    return 82
+  fi
   if ! GOVC_URL="$(ftctl_vmware_mover_govc_url "${endpoint}")" \
     GOVC_USERNAME="${username}" \
     GOVC_PASSWORD="$(cat "${password_file}")" \
@@ -805,7 +841,7 @@ ftctl_vmware_mover_create_run_snapshot() {
   if ! ftctl_vmware_mover_resolve_run_snapshot_ref "${govc_bin}" "${endpoint}" "${username}" "${password_file}" "${tls_verify}" "${source_vm_ref}" "${snapshot_name}"; then
     ftctl_vmware_mover_write_source_snapshot_status false "DR_VMWARE_SNAPSHOT_REF_UNRESOLVED" \
       "VMware source snapshot was created, but its MoRef could not be resolved" \
-      "${source_vm_ref}" "${snapshot_name}" "" true true ""
+      "${source_vm_ref}" "${snapshot_name}" "" true true "" "CLEANUP_FAILED" ""
     return 81
   fi
 
@@ -813,32 +849,55 @@ ftctl_vmware_mover_create_run_snapshot() {
   ftctl_vmware_mover_write_source_snapshot_status true "" \
     "VMware source snapshot was created and resolved" \
     "${source_vm_ref}" "${snapshot_name}" "${FTCTL_DR_VMWARE_LAST_SNAPSHOT_REF}" true false \
-    "${FTCTL_DR_VMWARE_LAST_SNAPSHOT_RESOLVE_METHOD}"
+    "${FTCTL_DR_VMWARE_LAST_SNAPSHOT_RESOLVE_METHOD}" "ACTIVE" "${FTCTL_DR_VMWARE_LAST_SNAPSHOT_REF}"
 }
 
 ftctl_vmware_mover_remove_run_snapshot() {
   local govc_bin="${1-}" endpoint="${2-}" username="${3-}" password_file="${4-}" tls_verify="${5-}" source_vm_ref="${6-}" snapshot_name="${7-}"
   [[ -x "${govc_bin}" && -n "${source_vm_ref}" && -n "${snapshot_name}" ]] || return 0
   [[ -s "${password_file}" ]] || return 0
-  GOVC_URL="$(ftctl_vmware_mover_govc_url "${endpoint}")" \
-  GOVC_USERNAME="${username}" \
-  GOVC_PASSWORD="$(cat "${password_file}")" \
-  GOVC_INSECURE="$([[ "${tls_verify}" == "true" ]] && printf 'false' || printf 'true')" \
-    "${govc_bin}" snapshot.remove -vm "${source_vm_ref}" "${snapshot_name}" >/dev/null 2>&1 || true
+  if ! GOVC_URL="$(ftctl_vmware_mover_govc_url "${endpoint}")" \
+    GOVC_USERNAME="${username}" \
+    GOVC_PASSWORD="$(cat "${password_file}")" \
+    GOVC_INSECURE="$([[ "${tls_verify}" == "true" ]] && printf 'false' || printf 'true')" \
+      timeout "${FTCTL_DR_VMWARE_SNAPSHOT_CLEANUP_TIMEOUT:-60}" "${govc_bin}" snapshot.remove -vm "${source_vm_ref}" "${snapshot_name}" >/dev/null 2>&1; then
+    return 1
+  fi
+  if ftctl_vmware_mover_resolve_run_snapshot_ref "${govc_bin}" "${endpoint}" "${username}" "${password_file}" "${tls_verify}" "${source_vm_ref}" "${snapshot_name}"; then
+    return 1
+  fi
+  return 0
 }
 
 ftctl_vmware_mover_cleanup() {
+  local last_ref="${FTCTL_DR_VMWARE_RUN_SNAPSHOT_REF:-}" cleanup_rc=0
   if [[ "${FTCTL_DR_VMWARE_RUN_SNAPSHOT_CREATED:-false}" == "true" ]]; then
-    ftctl_vmware_mover_remove_run_snapshot \
+    ftctl_vmware_mover_write_source_snapshot_status true "" \
+      "VMware source snapshot cleanup is pending" \
+      "${FTCTL_DR_VMWARE_SOURCE_VM_REF_EFFECTIVE:-}" "${FTCTL_DR_VMWARE_RUN_SNAPSHOT_NAME:-}" "${last_ref}" true true \
+      "${FTCTL_DR_VMWARE_LAST_SNAPSHOT_RESOLVE_METHOD:-}" "CLEANUP_PENDING" "${last_ref}"
+    if ftctl_vmware_mover_remove_run_snapshot \
       "${FTCTL_DR_VMWARE_GOVC_BIN_EFFECTIVE:-}" \
       "${FTCTL_DR_VMWARE_ENDPOINT_EFFECTIVE:-}" \
       "${FTCTL_DR_VMWARE_USERNAME_EFFECTIVE:-}" \
       "${FTCTL_DR_VMWARE_PASSWORD_FILE:-}" \
       "${FTCTL_DR_VMWARE_TLS_VERIFY_EFFECTIVE:-false}" \
       "${FTCTL_DR_VMWARE_SOURCE_VM_REF_EFFECTIVE:-}" \
-      "${FTCTL_DR_VMWARE_RUN_SNAPSHOT_NAME:-}"
+      "${FTCTL_DR_VMWARE_RUN_SNAPSHOT_NAME:-}"; then
+      ftctl_vmware_mover_write_source_snapshot_status true "" \
+        "VMware source snapshot cleanup completed" \
+        "${FTCTL_DR_VMWARE_SOURCE_VM_REF_EFFECTIVE:-}" "${FTCTL_DR_VMWARE_RUN_SNAPSHOT_NAME:-}" "" true false \
+        "${FTCTL_DR_VMWARE_LAST_SNAPSHOT_RESOLVE_METHOD:-}" "CLEANED" "${last_ref}"
+    else
+      cleanup_rc=1
+      ftctl_vmware_mover_write_source_snapshot_status false "DR_VMWARE_SNAPSHOT_CLEANUP_FAILED" \
+        "VMware source snapshot cleanup failed" \
+        "${FTCTL_DR_VMWARE_SOURCE_VM_REF_EFFECTIVE:-}" "${FTCTL_DR_VMWARE_RUN_SNAPSHOT_NAME:-}" "${last_ref}" true true \
+        "${FTCTL_DR_VMWARE_LAST_SNAPSHOT_RESOLVE_METHOD:-}" "CLEANUP_FAILED" "${last_ref}"
+    fi
   fi
   rm -f "${FTCTL_DR_VMWARE_PASSWORD_FILE:-}"
+  return "${cleanup_rc}"
 }
 
 ftctl_vmware_mover_commit_cycle_metrics() {

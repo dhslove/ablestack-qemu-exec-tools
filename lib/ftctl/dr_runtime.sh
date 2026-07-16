@@ -148,9 +148,17 @@ ftctl_dr_runtime_ensure_plan_dirs() {
   ftctl_ensure_dir "$(ftctl_dr_runtime_reverse_profile_dir "${plan}")" "0755"
 }
 
+ftctl_dr_runtime_plan_events_path() {
+  local plan="${1-}" key
+  key="$(ftctl_dr_runtime_key "${plan}")"
+  printf '%s/dr-runtime/plans/%s/events.jsonl\n' "${FTCTL_RUN_DIR}" "${key}"
+}
+
 ftctl_dr_runtime_events_offset() {
-  if [[ -f "${FTCTL_EVENTS_LOG}" ]]; then
-    wc -l < "${FTCTL_EVENTS_LOG}" | tr -d '[:space:]'
+  local plan="${1-}" events_path
+  events_path="$(ftctl_dr_runtime_plan_events_path "${plan}")"
+  if [[ -f "${events_path}" ]]; then
+    wc -l < "${events_path}" | tr -d '[:space:]'
   else
     printf '0\n'
   fi
@@ -371,6 +379,24 @@ ftctl_dr_runtime_json_number_field() {
   else
     printf ',"%s":null' "${key}"
   fi
+}
+
+ftctl_dr_runtime_json_boolean_field() {
+  local key="${1-}" value="${2-}"
+  case "${value,,}" in
+    true|1|yes)
+      printf ',"%s":true' "${key}"
+      ;;
+    false|0|no)
+      printf ',"%s":false' "${key}"
+      ;;
+    "")
+      return 0
+      ;;
+    *)
+      return 65
+      ;;
+  esac
 }
 
 ftctl_dr_runtime_json_file_field_redacted() {
@@ -2063,35 +2089,52 @@ ftctl_dr_runtime_start_reprotect() {
 }
 
 ftctl_dr_runtime_emit_events_since() {
-  local offset="${1-}"
-  local current line first="1" count="0" max_events start_line global_line
+  local plan="${1-}" offset="${2-0}" limit="${3-20}" events_path
   [[ "${offset}" =~ ^[0-9]+$ ]] || offset="0"
-  current="$(ftctl_dr_runtime_events_offset)"
-  printf ',"events_offset":%s' "${current}"
-  printf ',"events":['
-  if [[ -f "${FTCTL_EVENTS_LOG}" ]]; then
-    max_events="${FTCTL_DR_STATUS_MAX_EVENTS:-100}"
-    [[ "${max_events}" =~ ^[0-9]+$ ]] || max_events="100"
-    (( max_events > 0 )) || max_events="100"
-    start_line="1"
-    if [[ "${current}" =~ ^[0-9]+$ ]] && (( current > max_events )); then
-      start_line=$((current - max_events + 1))
-    fi
-    while IFS= read -r line; do
-      count=$((count + 1))
-      global_line=$((start_line + count - 1))
-      (( global_line > offset )) || continue
-      [[ -n "${line}" ]] || continue
-      [[ "${first}" == "1" ]] || printf ','
-      first="0"
-      printf '%s' "${line}"
-    done < <(tail -n "${max_events}" "${FTCTL_EVENTS_LOG}" 2>/dev/null || true)
-  fi
-  printf ']'
+  [[ "${limit}" =~ ^[0-9]+$ ]] || limit="20"
+  (( limit <= 100 )) || limit="100"
+  events_path="$(ftctl_dr_runtime_plan_events_path "${plan}")"
+  python3 - "${events_path}" "${offset}" "${limit}" <<'PY'
+import json
+import os
+import sys
+
+path, offset, limit = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+lines = []
+if os.path.isfile(path):
+    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        lines = fh.readlines()
+current = len(lines)
+candidates = list(enumerate(lines, start=1))
+candidates = [(seq, line) for seq, line in candidates if seq > offset]
+truncated = limit == 0 and bool(candidates)
+if limit > 0 and len(candidates) > limit:
+    candidates = candidates[-limit:]
+    truncated = True
+events = []
+invalid = 0
+for seq, line in candidates:
+    try:
+        value = json.loads(line)
+        if not isinstance(value, dict):
+            raise ValueError("event is not an object")
+        events.append(value)
+    except Exception:
+        invalid += 1
+payload = {
+    "events_offset": current,
+    "events_next_offset": current,
+    "events_truncated": truncated,
+    "events_invalid_count": invalid,
+    "events": events,
+}
+encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+sys.stdout.write("," + encoded[1:-1])
+PY
 }
 
 ftctl_dr_runtime_emit_state_json() {
-  local command="${1-}" result="${2-ok}" plan="${3-}" run="${4-}" state_path="${5-}" events_offset="${6-}"
+  local command="${1-}" result="${2-ok}" plan="${3-}" run="${4-}" state_path="${5-}" events_offset="${6-}" events_limit="${7-20}"
   local action state step progress external_job_ref error_code error_message failed_component data_commit_state data_copied metadata_committed target_durable cycle_retry_mode driver_exit_code last_source last_target target_rpo updated accepted
   local runtime_exists profile_exists run_exists
   local driver driver_state disk_map_path source_disk_map_path target_disk_map_path disk_map_role
@@ -2377,27 +2420,27 @@ PY
   ftctl_dr_runtime_json_string_field "last_source_checkpoint_at" "${last_source}"
   ftctl_dr_runtime_json_string_field "last_target_durable_at" "${last_target}"
   ftctl_dr_runtime_json_number_field "target_ready_rpo_seconds" "${target_rpo}"
-  printf ',"target_materialized":%s' "${target_materialized}"
-  printf ',"target_vm_present":%s' "${target_vm_present}"
-  printf ',"target_storage_present":%s' "${target_storage_present}"
-  printf ',"target_network_present":%s' "${target_network_present}"
-  printf ',"restore_point_present":%s' "${restore_point_present}"
+  ftctl_dr_runtime_json_boolean_field "target_materialized" "${target_materialized}" || return $?
+  ftctl_dr_runtime_json_boolean_field "target_vm_present" "${target_vm_present}" || return $?
+  ftctl_dr_runtime_json_boolean_field "target_storage_present" "${target_storage_present}" || return $?
+  ftctl_dr_runtime_json_boolean_field "target_network_present" "${target_network_present}" || return $?
+  ftctl_dr_runtime_json_boolean_field "restore_point_present" "${restore_point_present}" || return $?
   ftctl_dr_runtime_json_string_field "target_vm_id" "${target_vm_id}"
   ftctl_dr_runtime_json_string_field "target_external_ref" "${target_external_ref}"
   ftctl_dr_runtime_json_string_field "source_firmware" "${source_firmware}"
-  [[ "${source_secure_boot}" == "true" || "${source_secure_boot}" == "false" ]] && printf ',"source_secure_boot":%s' "${source_secure_boot}"
+  ftctl_dr_runtime_json_boolean_field "source_secure_boot" "${source_secure_boot}" || return $?
   ftctl_dr_runtime_json_string_field "source_hardware_fingerprint" "${source_hardware_fingerprint}"
   ftctl_dr_runtime_json_string_field "target_boot_type" "${target_boot_type}"
   ftctl_dr_runtime_json_string_field "target_boot_mode" "${target_boot_mode}"
   ftctl_dr_runtime_json_string_field "target_io_policy" "${target_io_policy}"
-  [[ "${target_iothreads}" == "true" || "${target_iothreads}" == "false" ]] && printf ',"target_iothreads":%s' "${target_iothreads}"
+  ftctl_dr_runtime_json_boolean_field "target_iothreads" "${target_iothreads}" || return $?
   ftctl_dr_runtime_json_string_field "error_code" "${error_code}"
   ftctl_dr_runtime_json_string_field "error_message" "${error_message}"
   ftctl_dr_runtime_json_string_field "failed_component" "${failed_component:-ftctl}"
   ftctl_dr_runtime_json_string_field "data_commit_state" "${data_commit_state}"
-  [[ "${data_copied}" == "true" || "${data_copied}" == "false" ]] && printf ',"data_copied":%s' "${data_copied}"
-  [[ "${metadata_committed}" == "true" || "${metadata_committed}" == "false" ]] && printf ',"metadata_committed":%s' "${metadata_committed}"
-  [[ "${target_durable}" == "true" || "${target_durable}" == "false" ]] && printf ',"target_durable":%s' "${target_durable}"
+  ftctl_dr_runtime_json_boolean_field "data_copied" "${data_copied}" || return $?
+  ftctl_dr_runtime_json_boolean_field "metadata_committed" "${metadata_committed}" || return $?
+  ftctl_dr_runtime_json_boolean_field "target_durable" "${target_durable}" || return $?
   ftctl_dr_runtime_json_string_field "cycle_retry_mode" "${cycle_retry_mode}"
   ftctl_dr_runtime_json_number_field "driver_exit_code" "${driver_exit_code}"
   ftctl_dr_runtime_json_string_field "updated_at" "${updated}"
@@ -2433,7 +2476,7 @@ PY
   ftctl_dr_runtime_json_string_field "worker_started_at" "${worker_started_at}"
   ftctl_dr_runtime_json_string_field "worker_updated_at" "${worker_updated_at}"
   ftctl_dr_runtime_json_number_field "worker_exit_code" "${worker_exit_code}"
-  [[ -n "${retryable}" ]] && printf ',"retryable":%s' "${retryable}"
+  ftctl_dr_runtime_json_boolean_field "retryable" "${retryable}" || return $?
   ftctl_dr_runtime_json_number_field "retry_after_sec" "${retry_after_sec}"
   ftctl_dr_runtime_json_string_field "lock_file" "${lock_file}"
   ftctl_dr_runtime_json_number_field "holder_pid" "${holder_pid}"
@@ -2454,8 +2497,8 @@ PY
   ftctl_dr_runtime_json_string_field "latest_completed_manifest_path" "${latest_completed_manifest_path}"
   ftctl_dr_runtime_json_string_field "latest_completed_checkpoint_path" "${latest_completed_checkpoint_path}"
   ftctl_dr_runtime_json_string_field "latest_completed_effective_mode" "${latest_completed_effective_mode}"
-  [[ -n "${latest_completed_incremental_verified}" ]] && printf ',"latest_completed_incremental_verified":%s' "${latest_completed_incremental_verified}"
-  [[ -n "${latest_completed_metrics_estimated}" ]] && printf ',"latest_completed_metrics_estimated":%s' "${latest_completed_metrics_estimated}"
+  ftctl_dr_runtime_json_boolean_field "latest_completed_incremental_verified" "${latest_completed_incremental_verified}" || return $?
+  ftctl_dr_runtime_json_boolean_field "latest_completed_metrics_estimated" "${latest_completed_metrics_estimated}" || return $?
   ftctl_dr_runtime_json_number_field "latest_completed_virtual_bytes" "${latest_completed_virtual_bytes}"
   ftctl_dr_runtime_json_number_field "latest_completed_changed_bytes" "${latest_completed_changed_bytes}"
   ftctl_dr_runtime_json_number_field "latest_completed_source_read_bytes" "${latest_completed_source_read_bytes}"
@@ -2536,7 +2579,7 @@ PY
   else
     printf ',"accepted":true'
   fi
-  ftctl_dr_runtime_emit_events_since "${events_offset}"
+  ftctl_dr_runtime_emit_events_since "${plan}" "${events_offset}" "${events_limit:-20}"
   printf ',"exit_code":0}\n'
 }
 
@@ -3253,8 +3296,8 @@ ftctl_dr_runtime_capabilities() {
 }
 
 ftctl_dr_runtime_status() {
-  local plan="${1-}" run="${2-}" events_offset="${3-0}" json="${4-0}"
-  local path result="ok"
+  local plan="${1-}" run="${2-}" events_offset="${3-0}" events_limit="${4-20}" json="${5-0}"
+  local path result="ok" payload payload_bytes max_payload_bytes
 
   ftctl_dr_runtime_require_plan "${plan}" || return 2
   if [[ -n "${run}" && -f "$(ftctl_dr_runtime_run_path "${plan}" "${run}")" ]]; then
@@ -3272,7 +3315,7 @@ ftctl_dr_runtime_status() {
       if [[ "${json}" == "1" ]]; then
         printf '{"command":"dr-status","result":"not_found","plan_uuid":"%s","state":"UNKNOWN","step":"not-found","progress":0,"accepted":false,"error_code":"not_found","events_offset":%s,"exit_code":2}\n' \
           "$(ftctl__json_escape "${plan}")" \
-          "$(ftctl_dr_runtime_events_offset)"
+          "$(ftctl_dr_runtime_events_offset "${plan}")"
       else
         printf 'dr-status: plan=%s not found\n' "${plan}" >&2
       fi
@@ -3282,7 +3325,18 @@ ftctl_dr_runtime_status() {
 
   [[ -n "${run}" && ! -f "$(ftctl_dr_runtime_run_path "${plan}" "${run}")" ]] && result="run_not_found"
   if [[ "${json}" == "1" ]]; then
-    ftctl_dr_runtime_emit_state_json "dr-status" "${result}" "${plan}" "${run}" "${path}" "${events_offset}"
+    payload="$(ftctl_dr_runtime_emit_state_json "dr-status" "${result}" "${plan}" "${run}" "${path}" "${events_offset}" "${events_limit}")" || payload=""
+    max_payload_bytes="${FTCTL_DR_STATUS_MAX_BYTES:-262144}"
+    [[ "${max_payload_bytes}" =~ ^[1-9][0-9]*$ ]] || max_payload_bytes="262144"
+    payload_bytes="$(printf '%s' "${payload}" | wc -c | tr -d '[:space:]')"
+    if [[ -n "${payload}" && "${payload_bytes}" =~ ^[0-9]+$ && "${payload_bytes}" -le "${max_payload_bytes}" ]] \
+      && printf '%s' "${payload}" | python3 -c 'import json,sys; value=json.load(sys.stdin); raise SystemExit(0 if isinstance(value, dict) else 1)' 2>/dev/null; then
+      printf '%s\n' "${payload}"
+    else
+      printf '{"command":"dr-status","result":"error","plan_uuid":"%s","run_uuid":"%s","state":"ERROR","step":"status-validation","progress":0,"accepted":false,"error_code":"DR_STATUS_JSON_INVALID","error_message":"FTCTL DR status failed strict JSON validation","events_offset":%s,"events":[],"exit_code":65}\n' \
+        "$(ftctl__json_escape "${plan}")" "$(ftctl__json_escape "${run}")" "$(ftctl_dr_runtime_events_offset "${plan}")"
+      return 65
+    fi
   else
     printf 'dr-status: plan=%s state=%s step=%s progress=%s\n' \
       "${plan}" \

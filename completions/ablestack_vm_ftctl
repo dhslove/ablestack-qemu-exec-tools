@@ -33,7 +33,7 @@ _ablestack_vm_ftctl()
     -h --help -V --version
     --vm --mode --peer --profile --config --policy
     --dry-run --json --force
-    --plan --run --profile-json --restore-point --events-offset --wait
+    --plan --run --profile-json --restore-point --events-offset --events-limit --wait
     --cluster-name --local-host-id --host-id --role
     --management-ip --libvirt-uri --blockcopy-ip
     --xcolo-control-ip --xcolo-data-ip
@@ -79,7 +79,7 @@ _ablestack_vm_ftctl()
       COMPREPLY=( $(compgen -W "manual-block ssh peer-virsh-destroy ipmi redfish" -- "${cur}") )
       return 0
       ;;
-    --vm|--peer|--profile|--policy|--plan|--run|--restore-point|--events-offset|--wait|--cluster-name|--local-host-id|--host-id|--management-ip|--libvirt-uri|--blockcopy-ip|--xcolo-control-ip|--xcolo-data-ip|--secondary-vm-name|--fencing-ipmi-primary-host|--fencing-ipmi-primary-port|--fencing-ipmi-primary-user|--fencing-ipmi-primary-password|--fencing-ipmi-primary-interface|--fencing-ipmi-secondary-host|--fencing-ipmi-secondary-port|--fencing-ipmi-secondary-user|--fencing-ipmi-secondary-password|--fencing-ipmi-secondary-interface|--secondary-target-dir|--remote-nbd-export-addr|--xcolo-proxy-endpoint|--xcolo-nbd-endpoint|--xcolo-migrate-uri)
+    --vm|--peer|--profile|--policy|--plan|--run|--restore-point|--events-offset|--events-limit|--wait|--cluster-name|--local-host-id|--host-id|--management-ip|--libvirt-uri|--blockcopy-ip|--xcolo-control-ip|--xcolo-data-ip|--secondary-vm-name|--fencing-ipmi-primary-host|--fencing-ipmi-primary-port|--fencing-ipmi-primary-user|--fencing-ipmi-primary-password|--fencing-ipmi-primary-interface|--fencing-ipmi-secondary-host|--fencing-ipmi-secondary-port|--fencing-ipmi-secondary-user|--fencing-ipmi-secondary-password|--fencing-ipmi-secondary-interface|--secondary-target-dir|--remote-nbd-export-addr|--xcolo-proxy-endpoint|--xcolo-nbd-endpoint|--xcolo-migrate-uri)
       return 0
       ;;
   esac
@@ -139,7 +139,7 @@ _ablestack_vm_ftctl()
       COMPREPLY=( $(compgen -W "--plan --run --profile-json --role --mode --restore-point --force --dry-run --wait --json --config --policy" -- "${cur}") )
       ;;
     dr-status)
-      COMPREPLY=( $(compgen -W "--plan --run --events-offset --json --config --policy" -- "${cur}") )
+      COMPREPLY=( $(compgen -W "--plan --run --events-offset --events-limit --json --config --policy" -- "${cur}") )
       ;;
     dr-capabilities)
       COMPREPLY=( $(compgen -W "--json --config --policy" -- "${cur}") )

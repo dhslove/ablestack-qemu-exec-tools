@@ -6333,11 +6333,15 @@ JSON
     --plan plan-step3 \
     --run run-step3 \
     --events-offset 0 \
+    --events-limit 20 \
     --json)"
+  python3 -c 'import json,sys; value=json.load(sys.stdin); assert isinstance(value, dict)' <<< "${status}"
   selftest_assert_contains "${status}" '"command":"dr-status"' "status command"
   selftest_assert_contains "${status}" '"state":"SYNCING"' "status state"
   selftest_assert_contains "${status}" '"progress":1' "status progress"
   selftest_assert_contains "${status}" '"events_offset":' "status event offset"
+  selftest_assert_contains "${status}" '"events_next_offset":' "status next event offset"
+  selftest_assert_contains "${status}" '"events_truncated":' "status event truncation marker"
   selftest_assert_contains "${status}" '"source_firmware":"EFI"' "status source firmware"
   selftest_assert_contains "${status}" '"source_secure_boot":true' "status source secure boot"
   selftest_assert_contains "${status}" '"source_hardware_fingerprint":"sha256:test-source-hardware"' "status source hardware fingerprint"
@@ -6345,6 +6349,29 @@ JSON
   selftest_assert_contains "${status}" '"target_boot_mode":"SECURE"' "status target boot mode"
   selftest_assert_contains "${status}" '"target_io_policy":"io_uring"' "status target io policy"
   selftest_assert_contains "${status}" '"target_iothreads":true' "status target iothreads"
+
+  ftctl_log_event "dr-runtime" "dr.foreign" "ok" "" "" \
+    "plan=plan-foreign run=run-foreign"
+  status="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-status \
+    --config "${SELFTEST_CONFIG}" \
+    --plan plan-step3 \
+    --run run-step3 \
+    --events-offset 0 \
+    --events-limit 20 \
+    --json)"
+  selftest_assert_not_contains "${status}" 'plan-foreign' "status excludes foreign plan events"
+
+  ftctl_dr_runtime_path_set "$(ftctl_dr_runtime_run_path plan-step3 run-step3)" \
+    "latest_completed_incremental_verified=True" \
+    "latest_completed_metrics_estimated=False" \
+    "retryable=True"
+  status="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-status \
+    --config "${SELFTEST_CONFIG}" \
+    --plan plan-step3 \
+    --run run-step3 \
+    --events-limit 0 \
+    --json)"
+  python3 -c 'import json,sys; value=json.load(sys.stdin); assert value["latest_completed_incremental_verified"] is True; assert value["latest_completed_metrics_estimated"] is False; assert value["retryable"] is True; assert value["events"] == []' <<< "${status}"
 
   canceled="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-cancel \
     --config "${SELFTEST_CONFIG}" \
