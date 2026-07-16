@@ -44,6 +44,96 @@ ftctl_vmware_mover_require() {
   command -v "$1" >/dev/null 2>&1 || ftctl_vmware_mover_die "${2:-65}" "required command not found: $1"
 }
 
+ftctl_vmware_mover_write_cycle_journal() {
+  local journal_path="${1-}" state="${2-}" retry_mode="${3-}" error_code="${4-}" error_message="${5-}" results_path="${6-}"
+  [[ -n "${journal_path}" ]] || return 0
+  python3 - "${journal_path}" "${state}" "${retry_mode}" "${error_code}" "${error_message}" "${results_path}" \
+    "${FTCTL_DR_PLAN_UUID:-}" "${FTCTL_DR_RUN_UUID:-}" "${FTCTL_DR_CHECKPOINT_SEQUENCE:-0}" <<'PY'
+import json
+import os
+import sys
+import time
+
+path, state, retry_mode, error_code, error_message, results_path, plan, run, sequence = sys.argv[1:10]
+results = []
+if results_path and os.path.isfile(results_path):
+    try:
+        with open(results_path, "r", encoding="utf-8") as handle:
+            value = json.load(handle)
+            if isinstance(value, list):
+                results = value
+    except (OSError, ValueError, TypeError):
+        results = []
+payload = {
+    "schemaVersion": 1,
+    "planUuid": plan,
+    "runUuid": run,
+    "sequence": int(sequence or 0),
+    "state": state,
+    "retryMode": retry_mode,
+    "errorCode": error_code,
+    "errorMessage": error_message,
+    "dataCopied": state in ("DATA_COPIED", "METADATA_PREPARED", "LOCAL_DURABLE", "LOCAL_COMMIT_FAILED"),
+    "metadataCommitted": state == "LOCAL_DURABLE",
+    "targetDurable": state == "LOCAL_DURABLE",
+    "completedDiskCount": len(results),
+    "disks": results,
+    "updatedAtEpochMs": int(time.time() * 1000),
+}
+os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+tmp = path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as handle:
+    json.dump(payload, handle, sort_keys=True, separators=(",", ":"))
+    handle.write("\n")
+    handle.flush()
+    os.fsync(handle.fileno())
+os.replace(tmp, path)
+PY
+}
+
+ftctl_vmware_mover_build_disk_result() {
+  local index="${1-}" disk_label="${2-}" requested="${3-}" effective="${4-}" previous="${5-}" next="${6-}"
+  local virtual_bytes="${7-0}" incremental_verified="${8-false}" metric_path="${9-}" output_path="${10-}"
+  python3 - "${index}" "${disk_label}" "${requested}" "${effective}" "${previous}" "${next}" \
+    "${virtual_bytes}" "${incremental_verified}" "${metric_path}" "${output_path}" <<'PY'
+import json
+import os
+import sys
+
+index, disk_label, requested, effective, previous, next_id, virtual_bytes, verified, metric_path, output_path = sys.argv[1:11]
+with open(metric_path, "r", encoding="utf-8") as handle:
+    metric = json.load(handle)
+if not isinstance(metric, dict):
+    raise SystemExit("cycle metric must be a JSON object")
+required_metrics = (
+    "changedExtentCount", "changedBytes", "sourceReadBytes", "targetWrittenBytes",
+    "transferPayloadBytes", "durationMs", "throughputBps",
+)
+for key in required_metrics:
+    value = metric.get(key)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise SystemExit(f"invalid cycle metric {key}: {value!r}")
+result = {
+    "diskIndex": int(index),
+    "diskLabel": disk_label,
+    "requestedMode": requested,
+    "effectiveMode": effective,
+    "previousChangeId": previous,
+    "newChangeId": next_id,
+    "virtualBytes": int(virtual_bytes or 0),
+    "incrementalVerified": verified.lower() == "true",
+}
+result.update(metric)
+tmp = output_path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as handle:
+    json.dump(result, handle, sort_keys=True, separators=(",", ":"))
+    handle.write("\n")
+    handle.flush()
+    os.fsync(handle.fileno())
+os.replace(tmp, output_path)
+PY
+}
+
 ftctl_vmware_mover_json_value() {
   local path="${1-}" expr="${2-}" default_value="${3-}"
   [[ -n "${path}" && -f "${path}" ]] || {
@@ -762,9 +852,28 @@ import uuid
 
 disk_map_path, results_path, metrics_path, plan, run, sequence, requested_mode = sys.argv[1:8]
 with open(disk_map_path, "r", encoding="utf-8") as handle:
-    disk_map = json.load(handle)
+    original_disk_map = json.load(handle)
 with open(results_path, "r", encoding="utf-8") as handle:
     disks = json.load(handle)
+
+if not isinstance(disks, list) or not disks:
+    raise SystemExit("cycle result list is empty")
+required_result_fields = (
+    "diskIndex", "newChangeId", "virtualBytes", "changedBytes", "sourceReadBytes",
+    "targetWrittenBytes", "transferPayloadBytes", "changedExtentCount", "durationMs",
+)
+for result in disks:
+    if not isinstance(result, dict):
+        raise SystemExit("cycle result must be a JSON object")
+    missing = [key for key in required_result_fields if key not in result]
+    if missing:
+        raise SystemExit("cycle result is missing fields: " + ",".join(missing))
+    for key in required_result_fields[2:]:
+        value = result.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise SystemExit(f"invalid cycle result {key}: {value!r}")
+
+disk_map = json.loads(json.dumps(original_disk_map))
 
 generation = int(sequence or 0)
 for result in disks:
@@ -777,12 +886,6 @@ for result in disks:
     disk["baselineGeneration"] = generation
     disk["lastSyncSequence"] = generation
     disk["baselineState"] = "LOCAL_DURABLE"
-
-disk_tmp = disk_map_path + ".tmp"
-with open(disk_tmp, "w", encoding="utf-8") as handle:
-    json.dump(disk_map, handle, sort_keys=True, separators=(",", ":"))
-    handle.write("\n")
-os.replace(disk_tmp, disk_map_path)
 
 effective_modes = {str(item.get("effectiveMode") or "") for item in disks}
 if effective_modes == {"NO_CHANGE"}:
@@ -819,12 +922,21 @@ metrics.update({
     "targetDurableAtEpochMs": int(time.time() * 1000),
     "disks": disks,
 })
-os.makedirs(os.path.dirname(metrics_path), exist_ok=True)
+os.makedirs(os.path.dirname(metrics_path) or ".", exist_ok=True)
 metrics_tmp = metrics_path + ".tmp"
 with open(metrics_tmp, "w", encoding="utf-8") as handle:
     json.dump(metrics, handle, sort_keys=True, separators=(",", ":"))
     handle.write("\n")
+    handle.flush()
+    os.fsync(handle.fileno())
+disk_tmp = disk_map_path + ".tmp"
+with open(disk_tmp, "w", encoding="utf-8") as handle:
+    json.dump(disk_map, handle, sort_keys=True, separators=(",", ":"))
+    handle.write("\n")
+    handle.flush()
+    os.fsync(handle.fileno())
 os.replace(metrics_tmp, metrics_path)
+os.replace(disk_tmp, disk_map_path)
 PY
 }
 
@@ -832,7 +944,7 @@ main() {
   local disk_map="${FTCTL_DR_DISK_MAP:-}" target_disk_map="${FTCTL_DR_TARGET_DISK_MAP:-}" credentials_file="${FTCTL_DR_CREDENTIALS_FILE:-}"
   local endpoint username password tls_verify thumbprint libdir password_file rows row count i
   local govc_bin source_vm_ref_for_snapshot snapshot_name snapshot_ref snapshot_created="false" mover_rc=0
-  local cycle_type requested_mode metrics_path results_path result_tmp query_path patch_metrics_path
+  local cycle_type requested_mode metrics_path results_path result_tmp query_path patch_metrics_path journal_path commit_rc
 
   [[ -n "${disk_map}" && -f "${disk_map}" ]] || ftctl_vmware_mover_die 65 "FTCTL_DR_DISK_MAP is required"
   [[ -n "${credentials_file}" && -f "${credentials_file}" ]] || ftctl_vmware_mover_die 65 "FTCTL_DR_CREDENTIALS_FILE is required"
@@ -879,8 +991,10 @@ main() {
     *) requested_mode="CBT_INCREMENTAL" ;;
   esac
   metrics_path="${FTCTL_DR_CYCLE_METRICS_PATH:-${FTCTL_DR_VMWARE_MOVER_LOG_DIR}/cycle-${FTCTL_DR_CHECKPOINT_SEQUENCE:-0}.json}"
+  journal_path="${FTCTL_DR_CYCLE_JOURNAL_PATH:-${metrics_path}.journal.json}"
   results_path="$(mktemp -p "${FTCTL_DR_VMWARE_MOVER_LOG_DIR}" vmware-cycle-results.XXXXXX.json)"
   printf '[]\n' > "${results_path}"
+  ftctl_vmware_mover_write_cycle_journal "${journal_path}" "PREPARING" "FULL_RETRY" "" "" "${results_path}"
   snapshot_ref="$(jq -r '[.[].sourceSnapshotRef // ""] | map(select(. != "")) | .[0] // ""' <<< "${rows}")"
   snapshot_name="$(jq -r '[.[].sourceSnapshotName // ""] | map(select(. != "")) | .[0] // ""' <<< "${rows}")"
   source_vm_ref_for_snapshot="$(jq -r '[.[].sourceVmRef // ""] | map(select(. != "")) | .[0] // ""' <<< "${rows}")"
@@ -950,18 +1064,31 @@ main() {
         "${endpoint}" "${username}" "${password_file}" "${tls_verify}" "${thumbprint}" "${libdir}" "${query_path}" "${patch_metrics_path}"
     fi
     result_tmp="$(mktemp -p "${FTCTL_DR_VMWARE_MOVER_LOG_DIR}" vmware-cycle-result.XXXXXX.json)"
-    jq -cn --argjson index "${i}" --arg label "${label:-disk${i}}" --arg requested "${requested_mode}" \
-      --arg effective "${effective_mode}" --arg previous "${previous_change_id}" --arg next "${new_change_id}" \
-      --argjson virtual "${virtual_bytes:-0}" --argjson verified "${incremental_verified}" --slurpfile metric "${patch_metrics_path}" \
-      '{diskIndex:$index,diskLabel:$label,requestedMode:$requested,effectiveMode:$effective,previousChangeId:$previous,newChangeId:$next,virtualBytes:$virtual,incrementalVerified:$verified} + $metric[0]' > "${result_tmp}"
+    if ! ftctl_vmware_mover_build_disk_result "${i}" "${label:-disk${i}}" "${requested_mode}" "${effective_mode}" \
+      "${previous_change_id}" "${new_change_id}" "${virtual_bytes:-0}" "${incremental_verified}" "${patch_metrics_path}" "${result_tmp}"; then
+      ftctl_vmware_mover_write_cycle_journal "${journal_path}" "DATA_COPIED_METADATA_FAILED" "RESEED_REQUIRED" \
+        "DR_CBT_METRICS_INVALID" "Copied disk result could not be validated" "${results_path}" || true
+      ftctl_vmware_mover_die 87 "DR_CBT_METRICS_INVALID: copied disk result could not be validated"
+    fi
     jq --slurpfile item "${result_tmp}" '. + $item' "${results_path}" > "${results_path}.tmp"
     mv -f "${results_path}.tmp" "${results_path}"
+    ftctl_vmware_mover_write_cycle_journal "${journal_path}" "DATA_COPIED" "METADATA_ONLY" "" "" "${results_path}"
     rm -f "${query_path}" "${patch_metrics_path}" "${result_tmp}"
     i=$((i + 1))
   done
+  ftctl_vmware_mover_write_cycle_journal "${journal_path}" "METADATA_PREPARED" "METADATA_ONLY" "" "" "${results_path}"
+  commit_rc=0
   ftctl_vmware_mover_commit_cycle_metrics "${disk_map}" "${results_path}" "${metrics_path}" \
-    "${FTCTL_DR_PLAN_UUID:-}" "${FTCTL_DR_RUN_UUID:-}" "${FTCTL_DR_CHECKPOINT_SEQUENCE:-0}" "${requested_mode}"
+    "${FTCTL_DR_PLAN_UUID:-}" "${FTCTL_DR_RUN_UUID:-}" "${FTCTL_DR_CHECKPOINT_SEQUENCE:-0}" "${requested_mode}" || commit_rc=$?
+  if [[ "${commit_rc}" != "0" ]]; then
+    ftctl_vmware_mover_write_cycle_journal "${journal_path}" "LOCAL_COMMIT_FAILED" "RESEED_REQUIRED" \
+      "DR_CBT_LOCAL_COMMIT_FAILED" "Cycle metadata could not be committed atomically" "${results_path}" || true
+    ftctl_vmware_mover_die 88 "DR_CBT_LOCAL_COMMIT_FAILED: cycle metadata could not be committed atomically"
+  fi
+  ftctl_vmware_mover_write_cycle_journal "${journal_path}" "LOCAL_DURABLE" "NONE" "" "" "${results_path}"
   rm -f "${results_path}"
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

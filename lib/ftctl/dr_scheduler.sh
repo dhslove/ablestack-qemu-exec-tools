@@ -463,7 +463,7 @@ ftctl_dr_scheduler_iso_from_epoch() {
 ftctl_dr_scheduler_worker() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" state_path="${4-}" status_path="${5-}"
   local pid_path restore_points_path interval max_cycles sequence=0 command cycle_type source_provider target_provider driver
-  local output rc manifest_path checkpoint_path source_at target_at rpo now error_code checkpoint_ref
+  local output rc manifest_path checkpoint_path source_at target_at rpo now error_code error_message data_commit_state cycle_retry_mode checkpoint_ref
   local effective_mode incremental_verified metrics_estimated virtual_bytes changed_bytes source_read_bytes target_written_bytes transfer_payload_bytes changed_extent_count duration_ms throughput_bps baseline_generation cycle_token cycle_metrics_path
   local cycle_started_epoch next_cycle_epoch next_cycle_at wait_seconds control_generation
 
@@ -592,8 +592,27 @@ ftctl_dr_scheduler_worker() {
         84) error_code="DR_CBT_EXTENT_INVALID" ;;
         85) error_code="DR_CBT_RESEED_REQUIRED" ;;
         86) error_code="DR_CBT_PATCH_FAILED" ;;
+        87) error_code="DR_CBT_METRICS_INVALID" ;;
+        88) error_code="DR_CBT_LOCAL_COMMIT_FAILED" ;;
         66) error_code="DR_UNSUPPORTED_DIRECTION" ;;
         *) error_code="DR_REPLICATION_CYCLE_FAILED" ;;
+      esac
+      case "${error_code}" in
+        DR_CBT_METRICS_INVALID)
+          error_message="Disk data was copied, but the cycle metrics could not be validated"
+          data_commit_state="DATA_COPIED_METADATA_FAILED"
+          cycle_retry_mode="RESEED_REQUIRED"
+          ;;
+        DR_CBT_LOCAL_COMMIT_FAILED)
+          error_message="Disk data was copied, but the local cycle metadata commit failed"
+          data_commit_state="LOCAL_COMMIT_FAILED"
+          cycle_retry_mode="RESEED_REQUIRED"
+          ;;
+        *)
+          error_message="FTCTL DR replication cycle failed"
+          data_commit_state="FAILED"
+          cycle_retry_mode="FULL_RETRY"
+          ;;
       esac
       now="$(ftctl_now_iso8601)"
       ftctl_dr_scheduler_update_state "${state_path}" "${status_path}" \
@@ -608,6 +627,13 @@ ftctl_dr_scheduler_worker() {
         "current_checkpoint_ref=${checkpoint_ref}" \
         "current_checkpoint_state=FAILED" \
         "error_code=${error_code}" \
+        "error_message=${error_message}" \
+        "failed_component=vmware-mover" \
+        "data_commit_state=${data_commit_state}" \
+        "data_copied=$([[ "${data_commit_state}" == "DATA_COPIED_METADATA_FAILED" || "${data_commit_state}" == "LOCAL_COMMIT_FAILED" ]] && printf true || printf false)" \
+        "metadata_committed=false" \
+        "target_durable=false" \
+        "cycle_retry_mode=${cycle_retry_mode}" \
         "updated_at=${now}" || true
       ftctl_log_event "dr-runtime" "dr.scheduler.cycle" "fail" "" "${rc}" \
         "plan=${plan} run=${run} sequence=${sequence} error=${error_code}"
@@ -681,7 +707,14 @@ ftctl_dr_scheduler_worker() {
       "latest_completed_baseline_generation=${baseline_generation}" \
       "latest_completed_cycle_token=${cycle_token}" \
       "latest_completed_cycle_metrics_path=${cycle_metrics_path}" \
+      "data_commit_state=LOCAL_DURABLE" \
+      "data_copied=true" \
+      "metadata_committed=true" \
+      "target_durable=true" \
+      "cycle_retry_mode=NONE" \
       "error_code=" \
+      "error_message=" \
+      "failed_component=" \
       "updated_at=${now}" || true
     ftctl_log_event "dr-runtime" "dr.scheduler.cycle" "ok" "" "" \
       "plan=${plan} run=${run} sequence=${sequence} type=${cycle_type} checkpoint=${checkpoint_path} rpo=${rpo}"

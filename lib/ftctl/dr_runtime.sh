@@ -2092,7 +2092,7 @@ ftctl_dr_runtime_emit_events_since() {
 
 ftctl_dr_runtime_emit_state_json() {
   local command="${1-}" result="${2-ok}" plan="${3-}" run="${4-}" state_path="${5-}" events_offset="${6-}"
-  local action state step progress external_job_ref error_code error_message driver_exit_code last_source last_target target_rpo updated accepted
+  local action state step progress external_job_ref error_code error_message failed_component data_commit_state data_copied metadata_committed target_durable cycle_retry_mode driver_exit_code last_source last_target target_rpo updated accepted
   local runtime_exists profile_exists run_exists
   local driver driver_state disk_map_path source_disk_map_path target_disk_map_path disk_map_role
   local target_disk_count target_disk_invalid_count manifest_path checkpoint_path cbt_status_path source_open_status_path source_snapshot_status_path
@@ -2136,6 +2136,12 @@ ftctl_dr_runtime_emit_state_json() {
   external_job_ref="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "external_job_ref")"
   error_code="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "error_code")"
   error_message="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "error_message")"
+  failed_component="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "failed_component")"
+  data_commit_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "data_commit_state")"
+  data_copied="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "data_copied")"
+  metadata_committed="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "metadata_committed")"
+  target_durable="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "target_durable")"
+  cycle_retry_mode="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "cycle_retry_mode")"
   driver_exit_code="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "driver_exit_code")"
   last_source="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "last_source_checkpoint_at")"
   last_target="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "last_target_durable_at")"
@@ -2387,6 +2393,12 @@ PY
   [[ "${target_iothreads}" == "true" || "${target_iothreads}" == "false" ]] && printf ',"target_iothreads":%s' "${target_iothreads}"
   ftctl_dr_runtime_json_string_field "error_code" "${error_code}"
   ftctl_dr_runtime_json_string_field "error_message" "${error_message}"
+  ftctl_dr_runtime_json_string_field "failed_component" "${failed_component:-ftctl}"
+  ftctl_dr_runtime_json_string_field "data_commit_state" "${data_commit_state}"
+  [[ "${data_copied}" == "true" || "${data_copied}" == "false" ]] && printf ',"data_copied":%s' "${data_copied}"
+  [[ "${metadata_committed}" == "true" || "${metadata_committed}" == "false" ]] && printf ',"metadata_committed":%s' "${metadata_committed}"
+  [[ "${target_durable}" == "true" || "${target_durable}" == "false" ]] && printf ',"target_durable":%s' "${target_durable}"
+  ftctl_dr_runtime_json_string_field "cycle_retry_mode" "${cycle_retry_mode}"
   ftctl_dr_runtime_json_number_field "driver_exit_code" "${driver_exit_code}"
   ftctl_dr_runtime_json_string_field "updated_at" "${updated}"
   ftctl_dr_runtime_json_string_field "driver" "${driver}"

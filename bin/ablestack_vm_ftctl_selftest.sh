@@ -8018,6 +8018,57 @@ JSON
   selftest_assert_file_not_contains "${call_log}" "json:{"
 }
 
+selftest_case_dr_vmware_cycle_result_contract() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR VMware cycle result and journal contract"
+
+  local metric_path="${SELFTEST_ROOT}/cycle-metric.json"
+  local result_path="${SELFTEST_ROOT}/cycle-result.json"
+  local results_path="${SELFTEST_ROOT}/cycle-results.json"
+  local journal_path="${SELFTEST_ROOT}/cycle-journal.json"
+  cat > "${metric_path}" <<'JSON'
+{"changedExtentCount":1,"changedBytes":4096,"sourceReadBytes":4096,"targetWrittenBytes":4096,"transferPayloadBytes":4096,"durationMs":10,"throughputBps":409600,"metricsEstimated":false}
+JSON
+  printf '[]\n' > "${results_path}"
+
+  # shellcheck source=/dev/null
+  source "${ROOT_DIR}/lib/ftctl/dr_vmware_mover.sh"
+  ftctl_vmware_mover_build_disk_result 0 "root-disk" "FULL_SEED" "FULL_SEED" "" "change-1" \
+    1048576 false "${metric_path}" "${result_path}"
+  python3 - "${result_path}" "${results_path}" <<'PY'
+import json
+import sys
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    result = json.load(handle)
+with open(sys.argv[2], "w", encoding="utf-8") as handle:
+    json.dump([result], handle, sort_keys=True, separators=(",", ":"))
+    handle.write("\n")
+PY
+  FTCTL_DR_PLAN_UUID="plan-result-contract" \
+  FTCTL_DR_RUN_UUID="run-result-contract" \
+  FTCTL_DR_CHECKPOINT_SEQUENCE=1 \
+    ftctl_vmware_mover_write_cycle_journal "${journal_path}" "DATA_COPIED" "METADATA_ONLY" "" "" "${results_path}"
+
+  python3 - "${results_path}" "${journal_path}" <<'PY' || selftest_fail "vmware cycle result or journal contract is invalid"
+import json
+import sys
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    results = json.load(handle)
+with open(sys.argv[2], "r", encoding="utf-8") as handle:
+    journal = json.load(handle)
+assert results[0]["diskLabel"] == "root-disk"
+assert results[0]["newChangeId"] == "change-1"
+assert results[0]["changedBytes"] == 4096
+assert journal["state"] == "DATA_COPIED"
+assert journal["dataCopied"] is True
+assert journal["metadataCommitted"] is False
+assert journal["completedDiskCount"] == 1
+PY
+  if grep -Eq -- '--arg[[:space:]]+label|\$label([^[:alnum:]_]|$)' "${ROOT_DIR}/lib/ftctl/dr_vmware_mover.sh"; then
+    selftest_fail "vmware mover must not use jq reserved label variable"
+  fi
+}
+
 selftest_main() {
   selftest_run_lint
   selftest_case_cluster_cli
@@ -8152,6 +8203,7 @@ selftest_main() {
   selftest_case_dr_runtime_failback_restores_source_after_reverse_checkpoint
   selftest_case_dr_runtime_reprotect_starts_reverse_protection_checkpoint
   selftest_case_dr_scheduler_vmware_requires_mover
+  selftest_case_dr_vmware_cycle_result_contract
   selftest_case_dr_vmware_mover_uses_raw_over_nbd_image_opts
   selftest_case_events_json
   selftest_info "all checks passed"
