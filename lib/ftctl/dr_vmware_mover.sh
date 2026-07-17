@@ -49,16 +49,16 @@ ftctl_vmware_mover_require() {
 }
 
 ftctl_vmware_mover_write_cycle_journal() {
-  local journal_path="${1-}" state="${2-}" retry_mode="${3-}" error_code="${4-}" error_message="${5-}" results_path="${6-}"
+  local journal_path="${1-}" state="${2-}" retry_mode="${3-}" error_code="${4-}" error_message="${5-}" results_path="${6-}" mode_decision="${7-}"
   [[ -n "${journal_path}" ]] || return 0
   python3 - "${journal_path}" "${state}" "${retry_mode}" "${error_code}" "${error_message}" "${results_path}" \
-    "${FTCTL_DR_PLAN_UUID:-}" "${FTCTL_DR_RUN_UUID:-}" "${FTCTL_DR_CHECKPOINT_SEQUENCE:-0}" <<'PY'
+    "${FTCTL_DR_PLAN_UUID:-}" "${FTCTL_DR_RUN_UUID:-}" "${FTCTL_DR_CHECKPOINT_SEQUENCE:-0}" "${mode_decision}" <<'PY'
 import json
 import os
 import sys
 import time
 
-path, state, retry_mode, error_code, error_message, results_path, plan, run, sequence = sys.argv[1:10]
+path, state, retry_mode, error_code, error_message, results_path, plan, run, sequence, raw_decision = sys.argv[1:11]
 results = []
 if results_path and os.path.isfile(results_path):
     try:
@@ -84,6 +84,20 @@ payload = {
     "disks": results,
     "updatedAtEpochMs": int(time.time() * 1000),
 }
+if raw_decision:
+    try:
+        decision = json.loads(raw_decision)
+        if isinstance(decision, dict):
+            payload.update({
+                "requestedMode": decision.get("requestedMode"),
+                "effectiveMode": decision.get("effectiveMode"),
+                "automaticReseed": bool(decision.get("automaticReseed")),
+                "modeDecisionCode": decision.get("decisionCode"),
+                "reseedReason": decision.get("reseedReason"),
+                "invalidBaselineDiskCount": int(decision.get("invalidBaselineDiskCount") or 0),
+            })
+    except (ValueError, TypeError):
+        pass
 os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
 tmp = path + ".tmp"
 with open(tmp, "w", encoding="utf-8") as handle:
@@ -289,25 +303,149 @@ ftctl_vmware_mover_wait_block_device_ready() {
   done
 }
 
-ftctl_vmware_mover_resolve_requested_mode() {
+ftctl_vmware_mover_resolve_cycle_mode() {
   local rows="${1-}" requested_mode="${2-CBT_INCREMENTAL}"
-  if [[ "${requested_mode}" != "CBT_INCREMENTAL" ]]; then
-    printf '%s\n' "${requested_mode}"
-    return 0
-  fi
   python3 - "${requested_mode}" "${rows}" <<'PY'
 import json
+import hashlib
 import sys
 
 requested = sys.argv[1]
 rows = json.loads(sys.argv[2])
-reseed = any(
-    not str(row.get("previousChangeId") or "")
-    or (row.get("baselineState") not in (None, "", "LOCAL_DURABLE"))
-    or int(row.get("baselineGeneration") or 0) <= 0
-    for row in rows
-)
-print("FULL_RESEED" if reseed else requested)
+if not isinstance(rows, list) or not rows:
+    raise SystemExit("disk execution rows must be a non-empty list")
+
+invalid = []
+generations = set()
+identities = []
+for row in rows:
+    if not isinstance(row, dict):
+        raise SystemExit("disk execution row must be an object")
+    disk_key = str(row.get("sourceDiskKey") or row.get("cbtDiskId") or row.get("index") or "")
+    identity = str(row.get("diskIdentityHash") or "")
+    identities.append(identity or disk_key)
+    generation = int(row.get("baselineGeneration") or 0)
+    if generation > 0:
+        generations.add(generation)
+    reason = ""
+    if not str(row.get("previousChangeId") or ""):
+        reason = "MISSING_CHANGE_ID"
+    elif generation <= 0:
+        reason = "MISSING_BASELINE_GENERATION"
+    elif str(row.get("baselineState") or "") != "LOCAL_DURABLE":
+        reason = "BASELINE_NOT_LOCAL_DURABLE"
+    elif not identity:
+        reason = "DISK_IDENTITY_UNRESOLVED"
+    if reason:
+        invalid.append({"sourceDiskKey": disk_key, "reason": reason})
+
+effective = requested
+decision = "BASELINE_NOT_REQUIRED"
+automatic = False
+reseed_reason = ""
+if requested == "CBT_INCREMENTAL":
+    if invalid:
+        reseed_reason = invalid[0]["reason"]
+        if reseed_reason == "BASELINE_NOT_LOCAL_DURABLE":
+            effective = "BLOCKED"
+            decision = reseed_reason
+        else:
+            effective = "FULL_RESEED"
+            decision = reseed_reason
+            automatic = True
+    elif len(generations) != 1:
+        effective = "FULL_RESEED"
+        decision = "BASELINE_GENERATION_DIVERGED"
+        reseed_reason = decision
+        automatic = True
+    else:
+        effective = "CBT_INCREMENTAL"
+        decision = "BASELINE_VALID"
+elif requested == "FULL_RESEED":
+    decision = "OPERATOR_REQUESTED"
+    reseed_reason = decision
+
+identity_material = "|".join(sorted(identities)).encode("utf-8")
+payload = {
+    "requestedMode": requested,
+    "effectiveMode": effective,
+    "automaticReseed": automatic,
+    "decisionCode": decision,
+    "reseedReason": reseed_reason,
+    "invalidDisks": invalid,
+    "invalidBaselineDiskCount": len(invalid),
+    "baselineGeneration": next(iter(generations)) if len(generations) == 1 else 0,
+    "diskIdentityHash": "sha256:" + hashlib.sha256(identity_material).hexdigest(),
+}
+print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+PY
+}
+
+ftctl_vmware_mover_resolve_requested_mode() {
+  local decision
+  decision="$(ftctl_vmware_mover_resolve_cycle_mode "${1-}" "${2-CBT_INCREMENTAL}")" || return $?
+  jq -er '.effectiveMode' <<< "${decision}"
+}
+
+ftctl_vmware_mover_reseed_guard() {
+  local state_path="${1-}" decision="${2-}"
+  python3 - "${state_path}" "${decision}" <<'PY'
+import json
+import os
+import sys
+
+path, raw = sys.argv[1:3]
+decision = json.loads(raw)
+previous = {}
+if path and os.path.isfile(path):
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            value = json.load(handle)
+            if isinstance(value, dict):
+                previous = value
+    except (OSError, ValueError, TypeError):
+        previous = {}
+
+if decision.get("automaticReseed"):
+    same = (
+        previous.get("automaticReseed") is True
+        and previous.get("reseedReason") == decision.get("reseedReason")
+        and previous.get("baselineGeneration") == decision.get("baselineGeneration")
+        and previous.get("diskIdentityHash") == decision.get("diskIdentityHash")
+    )
+    if same:
+        raise SystemExit(90)
+PY
+}
+
+ftctl_vmware_mover_commit_mode_decision() {
+  local state_path="${1-}" decision="${2-}" actual_mode="${3-}"
+  python3 - "${state_path}" "${decision}" "${actual_mode}" <<'PY'
+import json
+import os
+import sys
+
+path, raw, actual_mode = sys.argv[1:4]
+if not path:
+    raise SystemExit(0)
+decision = json.loads(raw)
+payload = {
+    "automaticReseed": bool(decision.get("automaticReseed")),
+    "reseedReason": str(decision.get("reseedReason") or ""),
+    "decisionCode": str(decision.get("decisionCode") or ""),
+    "baselineGeneration": int(decision.get("baselineGeneration") or 0),
+    "diskIdentityHash": str(decision.get("diskIdentityHash") or ""),
+    "actualMode": actual_mode,
+    "consecutiveAutomaticReseedCount": 1 if decision.get("automaticReseed") else 0,
+}
+os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+tmp = path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as handle:
+    json.dump(payload, handle, sort_keys=True, separators=(",", ":"))
+    handle.write("\n")
+    handle.flush()
+    os.fsync(handle.fileno())
+os.replace(tmp, path)
 PY
 }
 
@@ -577,6 +715,12 @@ def first(*values):
             return value
     return ""
 
+def integer(value):
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
 def item_at(items, index):
     if isinstance(items, list) and index < len(items) and isinstance(items[index], dict):
         return items[index]
@@ -591,6 +735,15 @@ rows = []
 for index in range(count):
     source = item_at(source_disks, index)
     dest = item_at(target_disks, index)
+    source_disk_key = first(source.get("sourceDiskKey"), source.get("cbtDiskId"), source.get("device"), index)
+    identity_parts = [
+        source_disk_key,
+        first(source.get("sourceVmdkPath"), source.get("sourceDiskRef"), source.get("sourcePath")),
+        first(source.get("sizeBytes"), dest.get("sizeBytes")),
+        first(dest.get("targetPath"), source.get("targetPath"), source.get("targetDiskRef")),
+    ]
+    import hashlib
+    identity_hash = "sha256:" + hashlib.sha256("|".join(identity_parts).encode("utf-8")).hexdigest()
     rows.append({
         "index": index,
         "label": first(source.get("device"), source.get("label"), dest.get("device"), dest.get("label"), f"disk{index}"),
@@ -598,8 +751,13 @@ for index in range(count):
         "sourceVmRef": first(source.get("sourceVmRef"), vmware.get("sourceVmRef")),
         "sourceSnapshotRef": first(source.get("sourceSnapshotRef"), source.get("snapshotRef"), source.get("snapshot"), vmware.get("sourceSnapshotRef")),
         "sourceSnapshotName": first(source.get("sourceSnapshotName"), source.get("snapshotName"), vmware.get("sourceSnapshotName")),
+        "sourceDiskKey": source_disk_key,
         "cbtDiskId": first(source.get("cbtDiskId"), source.get("sourceDiskKey"), source.get("device")),
         "previousChangeId": first(source.get("changeId"), source.get("cbtChangeId")),
+        "baselineState": first(source.get("baselineState")),
+        "baselineGeneration": integer(source.get("baselineGeneration")),
+        "lastSyncSequence": integer(source.get("lastSyncSequence")),
+        "diskIdentityHash": identity_hash,
         "virtualBytes": first(source.get("sizeBytes"), dest.get("sizeBytes")),
         "targetPath": first(dest.get("targetPath"), source.get("targetPath"), source.get("targetDiskRef"), source.get("targetVmdkPath")),
         "targetName": first(dest.get("targetName"), source.get("targetName"), source.get("targetDiskRef")),
@@ -989,15 +1147,16 @@ ftctl_vmware_mover_cleanup() {
 }
 
 ftctl_vmware_mover_commit_cycle_metrics() {
-  local disk_map="${1-}" results_path="${2-}" metrics_path="${3-}" plan="${4-}" run="${5-}" sequence="${6-}" requested_mode="${7-}"
-  python3 - "${disk_map}" "${results_path}" "${metrics_path}" "${plan}" "${run}" "${sequence}" "${requested_mode}" <<'PY'
+  local disk_map="${1-}" results_path="${2-}" metrics_path="${3-}" plan="${4-}" run="${5-}" sequence="${6-}" requested_mode="${7-}" mode_decision="${8-}"
+  python3 - "${disk_map}" "${results_path}" "${metrics_path}" "${plan}" "${run}" "${sequence}" "${requested_mode}" "${mode_decision}" <<'PY'
 import json
 import os
 import sys
 import time
 import uuid
 
-disk_map_path, results_path, metrics_path, plan, run, sequence, requested_mode = sys.argv[1:8]
+disk_map_path, results_path, metrics_path, plan, run, sequence, requested_mode, raw_decision = sys.argv[1:9]
+decision = json.loads(raw_decision) if raw_decision else {}
 with open(disk_map_path, "r", encoding="utf-8") as handle:
     original_disk_map = json.load(handle)
 with open(results_path, "r", encoding="utf-8") as handle:
@@ -1037,10 +1196,14 @@ for result in disks:
 effective_modes = {str(item.get("effectiveMode") or "") for item in disks}
 if effective_modes == {"NO_CHANGE"}:
     effective_mode = "NO_CHANGE"
-elif requested_mode in ("FULL_SEED", "FULL_RESEED"):
-    effective_mode = requested_mode
-else:
+elif effective_modes == {"CBT_INCREMENTAL"}:
     effective_mode = "CBT_INCREMENTAL"
+elif effective_modes == {"FULL_SEED"}:
+    effective_mode = "FULL_SEED"
+elif effective_modes == {"FULL_RESEED"}:
+    effective_mode = "FULL_RESEED"
+else:
+    raise SystemExit("cycle disks have inconsistent effective modes: " + ",".join(sorted(effective_modes)))
 incremental_verified = bool(disks) and all(bool(item.get("incrementalVerified")) for item in disks)
 if effective_mode in ("FULL_SEED", "FULL_RESEED"):
     incremental_verified = False
@@ -1062,6 +1225,10 @@ metrics.update({
     "sequence": generation,
     "requestedMode": requested_mode,
     "effectiveMode": effective_mode,
+    "automaticReseed": bool(decision.get("automaticReseed")),
+    "modeDecisionCode": str(decision.get("decisionCode") or ""),
+    "reseedReason": str(decision.get("reseedReason") or ""),
+    "invalidBaselineDiskCount": int(decision.get("invalidBaselineDiskCount") or 0),
     "incrementalVerified": incremental_verified,
     "metricsEstimated": any(bool(item.get("metricsEstimated")) for item in disks),
     "baselineGeneration": generation,
@@ -1091,7 +1258,8 @@ main() {
   local disk_map="${FTCTL_DR_DISK_MAP:-}" target_disk_map="${FTCTL_DR_TARGET_DISK_MAP:-}" credentials_file="${FTCTL_DR_CREDENTIALS_FILE:-}"
   local endpoint username password tls_verify thumbprint libdir password_file rows row count i
   local govc_bin source_vm_ref_for_snapshot snapshot_name snapshot_ref snapshot_created="false" mover_rc=0
-  local cycle_type requested_mode metrics_path results_path result_tmp query_path patch_metrics_path journal_path commit_rc
+  local cycle_type requested_mode effective_mode_request mode_decision reseed_reason
+  local metrics_path results_path result_tmp query_path patch_metrics_path journal_path commit_rc mode_state_path guard_rc
 
   [[ -n "${disk_map}" && -f "${disk_map}" ]] || ftctl_vmware_mover_die 65 "FTCTL_DR_DISK_MAP is required"
   [[ -n "${credentials_file}" && -f "${credentials_file}" ]] || ftctl_vmware_mover_die 65 "FTCTL_DR_CREDENTIALS_FILE is required"
@@ -1137,12 +1305,25 @@ main() {
     full-reseed) requested_mode="FULL_RESEED" ;;
     *) requested_mode="CBT_INCREMENTAL" ;;
   esac
-  requested_mode="$(ftctl_vmware_mover_resolve_requested_mode "${rows}" "${requested_mode}")"
+  mode_decision="$(ftctl_vmware_mover_resolve_cycle_mode "${rows}" "${requested_mode}")" ||
+    ftctl_vmware_mover_die 83 "DR_CBT_BASELINE_INVALID: cycle mode decision failed"
+  effective_mode_request="$(jq -er '.effectiveMode' <<< "${mode_decision}")" ||
+    ftctl_vmware_mover_die 83 "DR_CBT_BASELINE_INVALID: effective mode is unavailable"
+  reseed_reason="$(jq -r '.reseedReason // ""' <<< "${mode_decision}")"
+  [[ "${effective_mode_request}" != "BLOCKED" ]] ||
+    ftctl_vmware_mover_die 91 "DR_CBT_BASELINE_NOT_DURABLE: ${reseed_reason:-baseline is not locally durable}"
+  mode_state_path="${FTCTL_DR_MODE_DECISION_STATE_PATH:-$(dirname "${disk_map}")/mode-decision.json}"
+  guard_rc=0
+  ftctl_vmware_mover_reseed_guard "${mode_state_path}" "${mode_decision}" || guard_rc=$?
+  [[ "${guard_rc}" != "90" ]] ||
+    ftctl_vmware_mover_die 90 "DR_CBT_RESEED_LOOP_DETECTED: ${reseed_reason:-automatic reseed repeated}"
+  [[ "${guard_rc}" == "0" ]] ||
+    ftctl_vmware_mover_die 83 "DR_CBT_BASELINE_INVALID: reseed guard failed"
   metrics_path="${FTCTL_DR_CYCLE_METRICS_PATH:-${FTCTL_DR_VMWARE_MOVER_LOG_DIR}/cycle-${FTCTL_DR_CHECKPOINT_SEQUENCE:-0}.json}"
   journal_path="${FTCTL_DR_CYCLE_JOURNAL_PATH:-${metrics_path}.journal.json}"
   results_path="$(mktemp -p "${FTCTL_DR_VMWARE_MOVER_LOG_DIR}" vmware-cycle-results.XXXXXX.json)"
   printf '[]\n' > "${results_path}"
-  ftctl_vmware_mover_write_cycle_journal "${journal_path}" "PREPARING" "FULL_RETRY" "" "" "${results_path}"
+  ftctl_vmware_mover_write_cycle_journal "${journal_path}" "PREPARING" "FULL_RETRY" "" "" "${results_path}" "${mode_decision}"
   snapshot_ref="$(jq -r '[.[].sourceSnapshotRef // ""] | map(select(. != "")) | .[0] // ""' <<< "${rows}")"
   snapshot_name="$(jq -r '[.[].sourceSnapshotName // ""] | map(select(. != "")) | .[0] // ""' <<< "${rows}")"
   source_vm_ref_for_snapshot="$(jq -r '[.[].sourceVmRef // ""] | map(select(. != "")) | .[0] // ""' <<< "${rows}")"
@@ -1184,19 +1365,25 @@ main() {
     query_path="$(mktemp -p "${FTCTL_DR_VMWARE_MOVER_LOG_DIR}" vmware-cbt-query-${i}.XXXXXX.json)"
     ftctl_vmware_mover_query_cbt "${endpoint}" "${username}" "${password_file}" "${tls_verify}" "${libdir}" \
       "${source_vm_ref}" "${snapshot_name}" "${cbt_disk_id}" \
-      "$([[ "${requested_mode}" == "CBT_INCREMENTAL" ]] && printf '%s' "${previous_change_id}")" "${query_path}"
+      "$([[ "${effective_mode_request}" == "CBT_INCREMENTAL" ]] && printf '%s' "${previous_change_id}")" "${query_path}"
     new_change_id="$(jq -r '.new_change_id // ""' "${query_path}")"
     source_vmdk="$(jq -r '.vmdk_path // ""' "${query_path}")"
     areas_count="$(jq -r '(.areas // []) | length' "${query_path}")"
     changed_bytes="$(jq -r '[.areas[]?.length] | add // 0' "${query_path}")"
     patch_metrics_path="$(mktemp -p "${FTCTL_DR_VMWARE_MOVER_LOG_DIR}" vmware-patch-metrics-${i}.XXXXXX.json)"
-    if [[ "${requested_mode}" == "FULL_SEED" || "${requested_mode}" == "FULL_RESEED" ]]; then
+    if [[ "${effective_mode_request}" == "FULL_SEED" || "${effective_mode_request}" == "FULL_RESEED" ]]; then
+      local copy_started_ms copy_finished_ms copy_duration_ms
+      copy_started_ms="$(date +%s%3N)"
       printf 'VMware DR mover full copy: %s snapshot=%s -> %s\n' "${source_vmdk}" "${source_snapshot_ref:-none}" "${target_uri}" >&2
       ftctl_vmware_mover_convert_disk "${source_vmdk}" "${source_vm_ref}" "${source_snapshot_ref}" "${target_uri}" "${target_format:-raw}" "${label:-disk${i}}" \
         "${endpoint}" "${username}" "${password_file}" "${tls_verify}" "${thumbprint}" "${libdir}"
-      effective_mode="${requested_mode}"
+      copy_finished_ms="$(date +%s%3N)"
+      copy_duration_ms=$((copy_finished_ms - copy_started_ms))
+      (( copy_duration_ms > 0 )) || copy_duration_ms=1
+      effective_mode="${effective_mode_request}"
       incremental_verified="false"
-      jq -cn --argjson size "${virtual_bytes:-0}" '{changedExtentCount:1,changedBytes:$size,sourceReadBytes:$size,targetWrittenBytes:$size,transferPayloadBytes:$size,durationMs:0,throughputBps:0,metricsEstimated:true}' > "${patch_metrics_path}"
+      jq -cn --argjson size "${virtual_bytes:-0}" --argjson duration "${copy_duration_ms}" \
+        '{changedExtentCount:1,changedBytes:$size,sourceReadBytes:$size,targetWrittenBytes:$size,transferPayloadBytes:$size,durationMs:$duration,throughputBps:(if $duration > 0 then ($size * 1000 / $duration | floor) else 0 end),metricsEstimated:true}' > "${patch_metrics_path}"
     elif [[ "${areas_count}" == "0" ]]; then
       effective_mode="NO_CHANGE"
       incremental_verified="true"
@@ -1212,25 +1399,28 @@ main() {
     if ! ftctl_vmware_mover_build_disk_result "${i}" "${label:-disk${i}}" "${requested_mode}" "${effective_mode}" \
       "${previous_change_id}" "${new_change_id}" "${virtual_bytes:-0}" "${incremental_verified}" "${patch_metrics_path}" "${result_tmp}"; then
       ftctl_vmware_mover_write_cycle_journal "${journal_path}" "DATA_COPIED_METADATA_FAILED" "RESEED_REQUIRED" \
-        "DR_CBT_METRICS_INVALID" "Copied disk result could not be validated" "${results_path}" || true
+        "DR_CBT_METRICS_INVALID" "Copied disk result could not be validated" "${results_path}" "${mode_decision}" || true
       ftctl_vmware_mover_die 87 "DR_CBT_METRICS_INVALID: copied disk result could not be validated"
     fi
     jq --slurpfile item "${result_tmp}" '. + $item' "${results_path}" > "${results_path}.tmp"
     mv -f "${results_path}.tmp" "${results_path}"
-    ftctl_vmware_mover_write_cycle_journal "${journal_path}" "DATA_COPIED" "METADATA_ONLY" "" "" "${results_path}"
+    ftctl_vmware_mover_write_cycle_journal "${journal_path}" "DATA_COPIED" "METADATA_ONLY" "" "" "${results_path}" "${mode_decision}"
     rm -f "${query_path}" "${patch_metrics_path}" "${result_tmp}"
     i=$((i + 1))
   done
-  ftctl_vmware_mover_write_cycle_journal "${journal_path}" "METADATA_PREPARED" "METADATA_ONLY" "" "" "${results_path}"
+  ftctl_vmware_mover_write_cycle_journal "${journal_path}" "METADATA_PREPARED" "METADATA_ONLY" "" "" "${results_path}" "${mode_decision}"
   commit_rc=0
   ftctl_vmware_mover_commit_cycle_metrics "${disk_map}" "${results_path}" "${metrics_path}" \
-    "${FTCTL_DR_PLAN_UUID:-}" "${FTCTL_DR_RUN_UUID:-}" "${FTCTL_DR_CHECKPOINT_SEQUENCE:-0}" "${requested_mode}" || commit_rc=$?
+    "${FTCTL_DR_PLAN_UUID:-}" "${FTCTL_DR_RUN_UUID:-}" "${FTCTL_DR_CHECKPOINT_SEQUENCE:-0}" "${requested_mode}" "${mode_decision}" || commit_rc=$?
   if [[ "${commit_rc}" != "0" ]]; then
     ftctl_vmware_mover_write_cycle_journal "${journal_path}" "LOCAL_COMMIT_FAILED" "RESEED_REQUIRED" \
-      "DR_CBT_LOCAL_COMMIT_FAILED" "Cycle metadata could not be committed atomically" "${results_path}" || true
+      "DR_CBT_LOCAL_COMMIT_FAILED" "Cycle metadata could not be committed atomically" "${results_path}" "${mode_decision}" || true
     ftctl_vmware_mover_die 88 "DR_CBT_LOCAL_COMMIT_FAILED: cycle metadata could not be committed atomically"
   fi
-  ftctl_vmware_mover_write_cycle_journal "${journal_path}" "LOCAL_DURABLE" "NONE" "" "" "${results_path}"
+  ftctl_vmware_mover_commit_mode_decision "${mode_state_path}" "${mode_decision}" \
+    "$(jq -r '.effectiveMode // ""' "${metrics_path}")" ||
+      ftctl_vmware_mover_die 88 "DR_CBT_LOCAL_COMMIT_FAILED: mode decision state commit failed"
+  ftctl_vmware_mover_write_cycle_journal "${journal_path}" "LOCAL_DURABLE" "NONE" "" "" "${results_path}" "${mode_decision}"
   rm -f "${results_path}"
 }
 

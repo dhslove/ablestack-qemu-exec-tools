@@ -8158,16 +8158,39 @@ EOF
 
 selftest_case_dr_vmware_automatic_reseed_mode() {
   selftest_reset_env
-  selftest_info "FTCTL_DR VMware missing committed baseline selects full reseed"
+  selftest_info "FTCTL_DR VMware preserves baseline rows and separates requested/effective mode"
 
   # shellcheck source=/dev/null
   source "${ROOT_DIR}/lib/ftctl/dr_vmware_mover.sh"
-  local missing='[{"previousChangeId":"","baselineGeneration":0}]'
-  local committed='[{"previousChangeId":"change-42","baselineGeneration":42,"baselineState":"LOCAL_DURABLE"}]'
-  selftest_assert_eq "$(ftctl_vmware_mover_resolve_requested_mode "${missing}" CBT_INCREMENTAL)" "FULL_RESEED" \
-    "missing baseline mode"
-  selftest_assert_eq "$(ftctl_vmware_mover_resolve_requested_mode "${committed}" CBT_INCREMENTAL)" "CBT_INCREMENTAL" \
-    "committed baseline mode"
+  local source_map="${SELFTEST_ROOT}/vmware-baseline-source.json"
+  local target_map="${SELFTEST_ROOT}/vmware-baseline-target.json"
+  local state_path="${SELFTEST_ROOT}/vmware-mode-decision.json"
+  local rows missing committed decision rc=0
+  cat > "${source_map}" <<'JSON'
+{"disks":[{"sourceDiskKey":"2000","cbtDiskId":"2000","changeId":"change-42","baselineGeneration":42,"lastSyncSequence":42,"baselineState":"LOCAL_DURABLE","sizeBytes":1048576,"sourceVmdkPath":"[ds] vm/root.vmdk"}]}
+JSON
+  cat > "${target_map}" <<'JSON'
+{"disks":[{"targetPath":"rbd/target-root","sizeBytes":1048576,"targetFormat":"raw"}]}
+JSON
+  rows="$(ftctl_vmware_mover_disk_plan "${source_map}" "${target_map}")"
+  selftest_assert_eq "$(jq -r '.[0].baselineState' <<< "${rows}")" "LOCAL_DURABLE" "baseline state row"
+  selftest_assert_eq "$(jq -r '.[0].baselineGeneration' <<< "${rows}")" "42" "baseline generation row"
+  selftest_assert_eq "$(jq -r '.[0].lastSyncSequence' <<< "${rows}")" "42" "last sequence row"
+  selftest_assert_contains "$(jq -r '.[0].diskIdentityHash' <<< "${rows}")" "sha256:" "disk identity row"
+
+  missing='[{"sourceDiskKey":"2000","diskIdentityHash":"sha256:test","previousChangeId":"","baselineGeneration":0,"baselineState":""}]'
+  committed='[{"sourceDiskKey":"2000","diskIdentityHash":"sha256:test","previousChangeId":"change-42","baselineGeneration":42,"baselineState":"LOCAL_DURABLE"}]'
+  decision="$(ftctl_vmware_mover_resolve_cycle_mode "${missing}" CBT_INCREMENTAL)"
+  selftest_assert_eq "$(jq -r '.requestedMode' <<< "${decision}")" "CBT_INCREMENTAL" "missing baseline requested mode"
+  selftest_assert_eq "$(jq -r '.effectiveMode' <<< "${decision}")" "FULL_RESEED" "missing baseline effective mode"
+  selftest_assert_eq "$(jq -r '.decisionCode' <<< "${decision}")" "MISSING_CHANGE_ID" "missing baseline reason"
+  selftest_assert_eq "$(jq -r '.automaticReseed' <<< "${decision}")" "true" "automatic reseed flag"
+  selftest_assert_eq "$(jq -r '.effectiveMode' <<< "$(ftctl_vmware_mover_resolve_cycle_mode "${committed}" CBT_INCREMENTAL)")" \
+    "CBT_INCREMENTAL" "committed baseline mode"
+
+  ftctl_vmware_mover_commit_mode_decision "${state_path}" "${decision}" FULL_RESEED
+  ftctl_vmware_mover_reseed_guard "${state_path}" "${decision}" || rc=$?
+  selftest_assert_eq "${rc}" "90" "repeated automatic reseed guard"
 }
 
 selftest_main() {

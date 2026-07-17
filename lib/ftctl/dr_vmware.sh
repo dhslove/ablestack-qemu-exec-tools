@@ -603,6 +603,7 @@ if cycle_metrics:
     checkpoint["cycleMetricsPath"] = metrics_path
     for key in (
         "cycleUuid", "cycleToken", "sequence", "requestedMode", "effectiveMode",
+        "automaticReseed", "modeDecisionCode", "reseedReason", "invalidBaselineDiskCount",
         "incrementalVerified", "metricsEstimated", "baselineGeneration", "cycleCommitState",
         "virtualBytes", "changedBytes", "sourceReadBytes", "targetWrittenBytes",
         "transferPayloadBytes", "changedExtentCount", "durationMs", "throughputBps",

@@ -2140,16 +2140,20 @@ ftctl_dr_runtime_emit_state_json() {
   local driver driver_state disk_map_path source_disk_map_path target_disk_map_path disk_map_role
   local target_disk_count target_disk_invalid_count manifest_path checkpoint_path cbt_status_path source_open_status_path source_snapshot_status_path
   local scheduler_state worker_pid worker_state worker_started_at worker_updated_at worker_exit_code
-  local runtime_generation scheduler_pid_alive baseline_state reseed_reason
+  local runtime_generation scheduler_pid_alive baseline_state reseed_reason consecutive_automatic_reseed_count
   local control_protocol_version control_generation control_ack_generation control_state cycle_state
   local transition_state transition_action transition_quiesced_at checkpoint_lease_state checkpoint_lease_path
   local retryable retry_after_sec lock_file holder_pid holder_command holder_age_sec
   local checkpoint_sequence restore_points_path dynamic_rpo
-  local current_checkpoint_sequence current_checkpoint_cycle_type current_checkpoint_ref current_checkpoint_state
+  local current_checkpoint_sequence current_checkpoint_cycle_type current_checkpoint_requested_mode current_checkpoint_effective_mode
+  local current_checkpoint_mode_decision_code current_checkpoint_automatic_reseed current_checkpoint_invalid_baseline_disk_count
+  local current_checkpoint_ref current_checkpoint_state
   local latest_completed_checkpoint_sequence latest_completed_checkpoint_cycle_type latest_completed_checkpoint_ref latest_completed_checkpoint_state
   local latest_completed_source_checkpoint_at latest_completed_target_durable_at latest_completed_target_ready_rpo_seconds
   local latest_completed_manifest_path latest_completed_checkpoint_path
-  local latest_completed_effective_mode latest_completed_incremental_verified latest_completed_metrics_estimated latest_completed_virtual_bytes
+  local latest_completed_requested_mode latest_completed_effective_mode latest_completed_mode_decision_code latest_completed_reseed_reason
+  local latest_completed_automatic_reseed latest_completed_invalid_baseline_disk_count
+  local latest_completed_incremental_verified latest_completed_metrics_estimated latest_completed_virtual_bytes
   local latest_completed_changed_bytes latest_completed_source_read_bytes latest_completed_target_written_bytes
   local latest_completed_transfer_payload_bytes latest_completed_changed_extent_count latest_completed_duration_ms
   local latest_completed_throughput_bps latest_completed_baseline_generation latest_completed_cycle_token latest_completed_cycle_metrics_path
@@ -2222,6 +2226,7 @@ ftctl_dr_runtime_emit_state_json() {
   runtime_generation="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "runtime_generation")"
   baseline_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "baseline_state")"
   reseed_reason="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "reseed_reason")"
+  consecutive_automatic_reseed_count="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "consecutive_automatic_reseed_count")"
   control_protocol_version="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "control_protocol_version")"
   control_generation="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "control_generation")"
   control_ack_generation="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "control_ack_generation")"
@@ -2252,6 +2257,11 @@ ftctl_dr_runtime_emit_state_json() {
   [[ -n "${restore_points_path}" ]] || restore_points_path="$(ftctl_dr_runtime_plan_dir "${plan}")/restore-points.jsonl"
   current_checkpoint_sequence="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "current_checkpoint_sequence")"
   current_checkpoint_cycle_type="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "current_checkpoint_cycle_type")"
+  current_checkpoint_requested_mode="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "current_checkpoint_requested_mode")"
+  current_checkpoint_effective_mode="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "current_checkpoint_effective_mode")"
+  current_checkpoint_mode_decision_code="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "current_checkpoint_mode_decision_code")"
+  current_checkpoint_automatic_reseed="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "current_checkpoint_automatic_reseed")"
+  current_checkpoint_invalid_baseline_disk_count="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "current_checkpoint_invalid_baseline_disk_count")"
   current_checkpoint_ref="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "current_checkpoint_ref")"
   current_checkpoint_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "current_checkpoint_state")"
   latest_completed_checkpoint_sequence="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_checkpoint_sequence")"
@@ -2263,7 +2273,12 @@ ftctl_dr_runtime_emit_state_json() {
   latest_completed_target_ready_rpo_seconds="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_target_ready_rpo_seconds")"
   latest_completed_manifest_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_manifest_path")"
   latest_completed_checkpoint_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_checkpoint_path")"
+  latest_completed_requested_mode="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_requested_mode")"
   latest_completed_effective_mode="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_effective_mode")"
+  latest_completed_mode_decision_code="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_mode_decision_code")"
+  latest_completed_reseed_reason="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_reseed_reason")"
+  latest_completed_automatic_reseed="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_automatic_reseed")"
+  latest_completed_invalid_baseline_disk_count="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_invalid_baseline_disk_count")"
   latest_completed_incremental_verified="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_incremental_verified")"
   latest_completed_metrics_estimated="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_metrics_estimated")"
   latest_completed_virtual_bytes="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_virtual_bytes")"
@@ -2473,6 +2488,7 @@ PY
   ftctl_dr_runtime_json_boolean_field "scheduler_pid_alive" "${scheduler_pid_alive}" || return $?
   ftctl_dr_runtime_json_string_field "baseline_state" "${baseline_state}"
   ftctl_dr_runtime_json_string_field "reseed_reason" "${reseed_reason}"
+  ftctl_dr_runtime_json_number_field "consecutive_automatic_reseed_count" "${consecutive_automatic_reseed_count}"
   ftctl_dr_runtime_json_number_field "control_protocol_version" "${control_protocol_version}"
   ftctl_dr_runtime_json_number_field "control_generation" "${control_generation}"
   ftctl_dr_runtime_json_number_field "control_ack_generation" "${control_ack_generation}"
@@ -2497,6 +2513,11 @@ PY
   ftctl_dr_runtime_json_number_field "checkpoint_sequence" "${checkpoint_sequence}"
   ftctl_dr_runtime_json_number_field "current_checkpoint_sequence" "${current_checkpoint_sequence}"
   ftctl_dr_runtime_json_string_field "current_checkpoint_cycle_type" "${current_checkpoint_cycle_type}"
+  ftctl_dr_runtime_json_string_field "current_checkpoint_requested_mode" "${current_checkpoint_requested_mode}"
+  ftctl_dr_runtime_json_string_field "current_checkpoint_effective_mode" "${current_checkpoint_effective_mode}"
+  ftctl_dr_runtime_json_string_field "current_checkpoint_mode_decision_code" "${current_checkpoint_mode_decision_code}"
+  ftctl_dr_runtime_json_boolean_field "current_checkpoint_automatic_reseed" "${current_checkpoint_automatic_reseed:-false}" || return $?
+  ftctl_dr_runtime_json_number_field "current_checkpoint_invalid_baseline_disk_count" "${current_checkpoint_invalid_baseline_disk_count}"
   ftctl_dr_runtime_json_string_field "current_checkpoint_ref" "${current_checkpoint_ref}"
   ftctl_dr_runtime_json_string_field "current_checkpoint_state" "${current_checkpoint_state}"
   ftctl_dr_runtime_json_number_field "latest_completed_checkpoint_sequence" "${latest_completed_checkpoint_sequence}"
@@ -2508,7 +2529,12 @@ PY
   ftctl_dr_runtime_json_number_field "latest_completed_target_ready_rpo_seconds" "${latest_completed_target_ready_rpo_seconds}"
   ftctl_dr_runtime_json_string_field "latest_completed_manifest_path" "${latest_completed_manifest_path}"
   ftctl_dr_runtime_json_string_field "latest_completed_checkpoint_path" "${latest_completed_checkpoint_path}"
+  ftctl_dr_runtime_json_string_field "latest_completed_requested_mode" "${latest_completed_requested_mode}"
   ftctl_dr_runtime_json_string_field "latest_completed_effective_mode" "${latest_completed_effective_mode}"
+  ftctl_dr_runtime_json_string_field "latest_completed_mode_decision_code" "${latest_completed_mode_decision_code}"
+  ftctl_dr_runtime_json_string_field "latest_completed_reseed_reason" "${latest_completed_reseed_reason}"
+  ftctl_dr_runtime_json_boolean_field "latest_completed_automatic_reseed" "${latest_completed_automatic_reseed:-false}" || return $?
+  ftctl_dr_runtime_json_number_field "latest_completed_invalid_baseline_disk_count" "${latest_completed_invalid_baseline_disk_count}"
   ftctl_dr_runtime_json_boolean_field "latest_completed_incremental_verified" "${latest_completed_incremental_verified}" || return $?
   ftctl_dr_runtime_json_boolean_field "latest_completed_metrics_estimated" "${latest_completed_metrics_estimated}" || return $?
   ftctl_dr_runtime_json_number_field "latest_completed_virtual_bytes" "${latest_completed_virtual_bytes}"

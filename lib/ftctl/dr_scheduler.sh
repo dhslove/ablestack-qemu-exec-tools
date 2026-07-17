@@ -440,6 +440,7 @@ if metrics:
     record["cycleMetrics"] = metrics
     for key in (
         "cycleUuid", "cycleToken", "requestedMode", "effectiveMode",
+        "automaticReseed", "modeDecisionCode", "reseedReason", "invalidBaselineDiskCount",
         "incrementalVerified", "baselineGeneration", "cycleCommitState",
         "virtualBytes", "changedBytes", "sourceReadBytes", "targetWrittenBytes",
         "transferPayloadBytes", "changedExtentCount", "durationMs", "throughputBps",
@@ -552,7 +553,8 @@ ftctl_dr_scheduler_worker() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" state_path="${4-}" status_path="${5-}"
   local pid_path restore_points_path interval max_cycles sequence=0 command cycle_type source_provider target_provider driver
   local output rc manifest_path checkpoint_path source_at target_at rpo now error_code error_message data_commit_state cycle_retry_mode checkpoint_ref
-  local effective_mode incremental_verified metrics_estimated virtual_bytes changed_bytes source_read_bytes target_written_bytes transfer_payload_bytes changed_extent_count duration_ms throughput_bps baseline_generation cycle_token cycle_metrics_path
+  local requested_mode effective_mode automatic_reseed mode_decision_code reseed_reason invalid_baseline_disk_count
+  local incremental_verified metrics_estimated virtual_bytes changed_bytes source_read_bytes target_written_bytes transfer_payload_bytes changed_extent_count duration_ms throughput_bps baseline_generation cycle_token cycle_metrics_path
   local cycle_started_epoch next_cycle_epoch next_cycle_at wait_seconds control_generation
 
   [[ -n "${plan}" && -n "${run}" && -f "${profile_file}" && -f "${state_path}" ]] || return 2
@@ -653,6 +655,11 @@ ftctl_dr_scheduler_worker() {
       "checkpoint_ref=${checkpoint_ref}" \
       "current_checkpoint_sequence=${sequence}" \
       "current_checkpoint_cycle_type=${cycle_type}" \
+      "current_checkpoint_requested_mode=$([[ "${cycle_type}" == "full-seed" ]] && printf FULL_SEED || { [[ "${cycle_type}" == "full-reseed" ]] && printf FULL_RESEED || printf CBT_INCREMENTAL; })" \
+      "current_checkpoint_effective_mode=" \
+      "current_checkpoint_mode_decision_code=" \
+      "current_checkpoint_automatic_reseed=false" \
+      "current_checkpoint_invalid_baseline_disk_count=0" \
       "current_checkpoint_ref=${checkpoint_ref}" \
       "current_checkpoint_state=TRANSFERRING" \
       "runtime_generation=${sequence}" \
@@ -686,6 +693,8 @@ ftctl_dr_scheduler_worker() {
         87) error_code="DR_CBT_METRICS_INVALID" ;;
         88) error_code="DR_CBT_LOCAL_COMMIT_FAILED" ;;
         89) error_code="DR_TARGET_NBD_SIZE_NOT_READY" ;;
+        90) error_code="DR_CBT_RESEED_LOOP_DETECTED" ;;
+        91) error_code="DR_CBT_BASELINE_NOT_DURABLE" ;;
         66) error_code="DR_UNSUPPORTED_DIRECTION" ;;
         *) error_code="DR_REPLICATION_CYCLE_FAILED" ;;
       esac
@@ -699,6 +708,11 @@ ftctl_dr_scheduler_worker() {
           error_message="Disk data was copied, but the local cycle metadata commit failed"
           data_commit_state="LOCAL_COMMIT_FAILED"
           cycle_retry_mode="RESEED_REQUIRED"
+          ;;
+        DR_CBT_RESEED_LOOP_DETECTED|DR_CBT_BASELINE_NOT_DURABLE)
+          error_message="Automatic reseed was blocked until the CBT baseline is repaired or explicitly reset"
+          data_commit_state="BLOCKED"
+          cycle_retry_mode="OPERATOR_REPAIR_REQUIRED"
           ;;
         *)
           error_message="FTCTL DR replication cycle failed"
@@ -718,6 +732,7 @@ ftctl_dr_scheduler_worker() {
         "current_checkpoint_cycle_type=${cycle_type}" \
         "current_checkpoint_ref=${checkpoint_ref}" \
         "current_checkpoint_state=FAILED" \
+        "current_checkpoint_mode_decision_code=${error_code}" \
         "runtime_generation=${sequence}" \
         "error_code=${error_code}" \
         "error_message=${error_message}" \
@@ -740,6 +755,11 @@ ftctl_dr_scheduler_worker() {
     target_at="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "targetDurableAt" || true)"
     rpo="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "targetReadyRpoSeconds" || true)"
     effective_mode="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "effectiveMode" || true)"
+    requested_mode="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "requestedMode" || true)"
+    automatic_reseed="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "automaticReseed" boolean || true)"
+    mode_decision_code="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "modeDecisionCode" || true)"
+    reseed_reason="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "reseedReason" || true)"
+    invalid_baseline_disk_count="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "invalidBaselineDiskCount" integer || true)"
     incremental_verified="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "incrementalVerified" boolean || true)"
     metrics_estimated="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "metricsEstimated" boolean || true)"
     virtual_bytes="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "virtualBytes" integer || true)"
@@ -769,11 +789,17 @@ ftctl_dr_scheduler_worker() {
       "checkpoint_ref=${checkpoint_ref}" \
       "current_checkpoint_sequence=${sequence}" \
       "current_checkpoint_cycle_type=${cycle_type}" \
+      "current_checkpoint_requested_mode=${requested_mode}" \
+      "current_checkpoint_effective_mode=${effective_mode}" \
+      "current_checkpoint_mode_decision_code=${mode_decision_code}" \
+      "current_checkpoint_automatic_reseed=${automatic_reseed:-false}" \
+      "current_checkpoint_invalid_baseline_disk_count=${invalid_baseline_disk_count:-0}" \
       "current_checkpoint_ref=${checkpoint_ref}" \
       "current_checkpoint_state=COMPLETED" \
       "runtime_generation=${sequence}" \
       "latest_completed_checkpoint_sequence=${sequence}" \
       "latest_completed_checkpoint_cycle_type=${cycle_type}" \
+      "latest_completed_requested_mode=${requested_mode}" \
       "latest_completed_checkpoint_ref=${checkpoint_ref}" \
       "latest_completed_checkpoint_state=READY" \
       "latest_completed_source_checkpoint_at=${source_at}" \
@@ -788,6 +814,11 @@ ftctl_dr_scheduler_worker() {
       "last_target_durable_at=${target_at}" \
       "target_ready_rpo_seconds=${rpo}" \
       "latest_completed_effective_mode=${effective_mode}" \
+      "latest_completed_mode_decision_code=${mode_decision_code}" \
+      "latest_completed_reseed_reason=${reseed_reason}" \
+      "latest_completed_automatic_reseed=${automatic_reseed:-false}" \
+      "latest_completed_invalid_baseline_disk_count=${invalid_baseline_disk_count:-0}" \
+      "consecutive_automatic_reseed_count=$([[ "${automatic_reseed:-false}" == "true" ]] && printf 1 || printf 0)" \
       "latest_completed_incremental_verified=${incremental_verified}" \
       "latest_completed_metrics_estimated=${metrics_estimated}" \
       "latest_completed_virtual_bytes=${virtual_bytes}" \
@@ -807,7 +838,7 @@ ftctl_dr_scheduler_worker() {
       "target_durable=true" \
       "cycle_retry_mode=NONE" \
       "baseline_state=LOCAL_DURABLE" \
-      "reseed_reason=" \
+      "reseed_reason=${reseed_reason}" \
       "error_code=" \
       "error_message=" \
       "failed_component=" \
