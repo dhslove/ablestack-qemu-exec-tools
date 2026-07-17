@@ -129,11 +129,17 @@ ftctl_dr_scheduler_max_cycles() {
 }
 
 ftctl_dr_scheduler_pid_alive() {
-  local pid_path="${1-}" pid
+  local pid_path="${1-}" expected_plan="${2-}" expected_run="${3-}" pid cmdline
   [[ -n "${pid_path}" && -f "${pid_path}" ]] || return 1
   pid="$(tr -d '[:space:]' < "${pid_path}" 2>/dev/null || true)"
   [[ "${pid}" =~ ^[0-9]+$ ]] || return 1
-  kill -0 "${pid}" >/dev/null 2>&1
+  kill -0 "${pid}" >/dev/null 2>&1 || return 1
+  if [[ -n "${expected_plan}" || -n "${expected_run}" ]]; then
+    cmdline="$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null || true)"
+    [[ -z "${expected_plan}" || "${cmdline}" == *"--plan ${expected_plan}"* ]] || return 1
+    [[ -z "${expected_run}" || "${cmdline}" == *"--run ${expected_run}"* ]] || return 1
+  fi
+  return 0
 }
 
 ftctl_dr_scheduler_profile_has_data_plane() {
@@ -237,11 +243,66 @@ ftctl_dr_scheduler_request_and_wait() {
   local plan="${1-}" command="${2-}" expected_state="${3-}" reason="${4-operator}" owner_run="${5-}" resume_after_cleanup="${6-false}"
   local generation
   generation="$(ftctl_dr_scheduler_control_set "${plan}" "${command}" "${reason}" "${owner_run}" "${resume_after_cleanup}")" || return $?
-  if ! ftctl_dr_scheduler_has_live_worker "${plan}"; then
+  if ! ftctl_dr_scheduler_has_live_worker "${plan}" && [[ "${command}" != "run" ]]; then
     ftctl_dr_scheduler_control_ack "${plan}" "${generation}" "${expected_state}" "IDLE" "${owner_run}"
   fi
   ftctl_dr_scheduler_wait_for_ack "${plan}" "${generation}" "${expected_state}" || return $?
   printf '%s\n' "${generation}"
+}
+
+ftctl_dr_scheduler_ensure_running() {
+  local plan="${1-}" run="${2-}" profile_file="${3-}" state_path="${4-}" status_path="${5-}"
+  local pid_path generation now
+
+  [[ -n "${plan}" && -n "${run}" && -f "${profile_file}" && -f "${state_path}" ]] || return 2
+  pid_path="$(ftctl_dr_scheduler_pid_path "${plan}" "${run}")"
+  if ftctl_dr_scheduler_pid_alive "${pid_path}" "${plan}" "${run}"; then
+    return 0
+  fi
+
+  now="$(ftctl_now_iso8601)"
+  generation=$(( $(ftctl_dr_scheduler_control_generation "${plan}") + 1 ))
+  ftctl_dr_scheduler_update_state "${state_path}" "${status_path}" \
+    "scheduler_state=RECOVERING" \
+    "scheduler_pid_alive=false" \
+    "runtime_generation=${generation}" \
+    "worker_pid=" \
+    "updated_at=${now}" || return $?
+  rm -f "${pid_path}" 2>/dev/null || true
+  ftctl_dr_scheduler_start "${plan}" "${run}" "${profile_file}" "${state_path}" "${status_path}" "false" || return $?
+
+  # Background start writes the owned PID before returning. A missing PID here
+  # means the profile is not schedulable (or startup was suppressed), so do
+  # not spend the full control ACK timeout pretending recovery is in progress.
+  if [[ ! -s "${pid_path}" ]]; then
+    ftctl_dr_scheduler_update_state "${state_path}" "${status_path}" \
+      "scheduler_state=ERROR" \
+      "scheduler_pid_alive=false" \
+      "error_code=DR_SCHEDULER_NOT_RUNNING" \
+      "error_message=Scheduler did not create an owned PID" \
+      "updated_at=$(ftctl_now_iso8601)" || true
+    return 22
+  fi
+
+  local deadline=$(( $(date +%s) + FTCTL_DR_CONTROL_ACK_TIMEOUT_SEC ))
+  while (( $(date +%s) <= deadline )); do
+    if ftctl_dr_scheduler_pid_alive "${pid_path}" "${plan}" "${run}"; then
+      ftctl_dr_scheduler_update_state "${state_path}" "${status_path}" \
+        "scheduler_state=RUNNING" \
+        "scheduler_pid_alive=true" \
+        "updated_at=$(ftctl_now_iso8601)" || true
+      return 0
+    fi
+    sleep 1
+  done
+
+  ftctl_dr_scheduler_update_state "${state_path}" "${status_path}" \
+    "scheduler_state=ERROR" \
+    "scheduler_pid_alive=false" \
+    "error_code=DR_SCHEDULER_NOT_RUNNING" \
+    "error_message=Scheduler process ownership could not be established" \
+    "updated_at=$(ftctl_now_iso8601)" || true
+  return 22
 }
 
 ftctl_dr_scheduler_checkpoint_lease_acquire() {
@@ -402,9 +463,23 @@ ftctl_dr_scheduler_driver_name() {
 }
 
 ftctl_dr_scheduler_cycle_type() {
-  local sequence="${1-}"
+  local sequence="${1-}" source_provider="${2-}" state_path="${3-}" disk_map=""
   if [[ "${sequence}" == "1" ]]; then
     printf 'full-seed\n'
+  elif [[ "${source_provider}" == "VMWARE" ]]; then
+    disk_map="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "source_disk_map_path")"
+    if [[ -n "${disk_map}" && -f "${disk_map}" ]] &&
+        jq -e '.disks | [
+          .[] | select(
+            (.changeId // .cbtChangeId // "") == ""
+            or ((.baselineState // "") != "" and .baselineState != "LOCAL_DURABLE")
+            or (.baselineGeneration // 0) <= 0
+          )
+        ] | length > 0' "${disk_map}" >/dev/null 2>&1; then
+      printf 'full-reseed\n'
+    else
+      printf 'incremental\n'
+    fi
   else
     printf 'incremental\n'
   fi
@@ -555,7 +630,7 @@ ftctl_dr_scheduler_worker() {
       "updated_at=$(ftctl_now_iso8601)" || true
 
     sequence=$((sequence + 1))
-    cycle_type="$(ftctl_dr_scheduler_cycle_type "${sequence}")"
+    cycle_type="$(ftctl_dr_scheduler_cycle_type "${sequence}" "${source_provider}" "${state_path}")"
     checkpoint_ref="ftctl:${plan}:${run}:${sequence}"
     cycle_started_epoch="$(date +%s)"
     now="$(ftctl_now_iso8601)"
@@ -580,6 +655,9 @@ ftctl_dr_scheduler_worker() {
       "current_checkpoint_cycle_type=${cycle_type}" \
       "current_checkpoint_ref=${checkpoint_ref}" \
       "current_checkpoint_state=TRANSFERRING" \
+      "runtime_generation=${sequence}" \
+      "baseline_state=$([[ "${cycle_type}" == "full-reseed" ]] && printf REBUILDING || printf COMMITTED)" \
+      "reseed_reason=$([[ "${cycle_type}" == "full-reseed" ]] && printf MISSING_OR_INVALID_COMMITTED_BASELINE || printf '')" \
       "updated_at=${now}" || true
 
     rc=0
@@ -607,6 +685,7 @@ ftctl_dr_scheduler_worker() {
         86) error_code="DR_CBT_PATCH_FAILED" ;;
         87) error_code="DR_CBT_METRICS_INVALID" ;;
         88) error_code="DR_CBT_LOCAL_COMMIT_FAILED" ;;
+        89) error_code="DR_TARGET_NBD_SIZE_NOT_READY" ;;
         66) error_code="DR_UNSUPPORTED_DIRECTION" ;;
         *) error_code="DR_REPLICATION_CYCLE_FAILED" ;;
       esac
@@ -639,6 +718,7 @@ ftctl_dr_scheduler_worker() {
         "current_checkpoint_cycle_type=${cycle_type}" \
         "current_checkpoint_ref=${checkpoint_ref}" \
         "current_checkpoint_state=FAILED" \
+        "runtime_generation=${sequence}" \
         "error_code=${error_code}" \
         "error_message=${error_message}" \
         "failed_component=vmware-mover" \
@@ -691,6 +771,7 @@ ftctl_dr_scheduler_worker() {
       "current_checkpoint_cycle_type=${cycle_type}" \
       "current_checkpoint_ref=${checkpoint_ref}" \
       "current_checkpoint_state=COMPLETED" \
+      "runtime_generation=${sequence}" \
       "latest_completed_checkpoint_sequence=${sequence}" \
       "latest_completed_checkpoint_cycle_type=${cycle_type}" \
       "latest_completed_checkpoint_ref=${checkpoint_ref}" \
@@ -725,6 +806,8 @@ ftctl_dr_scheduler_worker() {
       "metadata_committed=true" \
       "target_durable=true" \
       "cycle_retry_mode=NONE" \
+      "baseline_state=LOCAL_DURABLE" \
+      "reseed_reason=" \
       "error_code=" \
       "error_message=" \
       "failed_component=" \
@@ -771,7 +854,7 @@ ftctl_dr_scheduler_start() {
 
   ftctl_ensure_dir "$(ftctl_dr_scheduler_dir "${plan}")" "0755"
   pid_path="$(ftctl_dr_scheduler_pid_path "${plan}" "${run}")"
-  if ftctl_dr_scheduler_pid_alive "${pid_path}"; then
+  if ftctl_dr_scheduler_pid_alive "${pid_path}" "${plan}" "${run}"; then
     pid="$(tr -d '[:space:]' < "${pid_path}")"
     ftctl_dr_runtime_path_set "${state_path}" "scheduler_state=RUNNING" "worker_pid=${pid}" || true
     return 0
@@ -801,7 +884,7 @@ ftctl_dr_scheduler_start() {
 }
 
 ftctl_dr_scheduler_control_action() {
-  local action="${1-}" plan="${2-}" run_path="${3-}" status_path="${4-}"
+  local action="${1-}" plan="${2-}" run_path="${3-}" status_path="${4-}" profile_file="${5-}"
   local command expected_state now generation
   case "${action}" in
     dr-sync-pause) command="pause"; expected_state="PAUSED" ;;
@@ -809,6 +892,10 @@ ftctl_dr_scheduler_control_action() {
     dr-release|dr-cancel) command="stop"; expected_state="STOPPED" ;;
     *) return 0 ;;
   esac
+  if [[ "${action}" == "dr-sync-resume" ]]; then
+    ftctl_dr_scheduler_ensure_running "${plan}" "$(ftctl_dr_runtime_state_get_from_path "${run_path}" run)" \
+      "${profile_file}" "${run_path}" "${status_path}" || return $?
+  fi
   generation="$(ftctl_dr_scheduler_request_and_wait "${plan}" "${command}" "${expected_state}" "${action}" "$(ftctl_dr_runtime_state_get_from_path "${run_path}" run)" "false")" || return $?
   now="$(ftctl_now_iso8601)"
   case "${command}" in

@@ -27,6 +27,10 @@ FTCTL_DR_VMWARE_MOVER_LOG_DIR="${FTCTL_DR_VMWARE_MOVER_LOG_DIR:-/run/ablestack-v
 FTCTL_DR_VMWARE_NBDKIT_READY_TIMEOUT="${FTCTL_DR_VMWARE_NBDKIT_READY_TIMEOUT:-20}"
 FTCTL_DR_VMWARE_QEMU_INFO_TIMEOUT="${FTCTL_DR_VMWARE_QEMU_INFO_TIMEOUT:-20}"
 FTCTL_DR_VMWARE_SOURCE_OPEN_TIMEOUT="${FTCTL_DR_VMWARE_SOURCE_OPEN_TIMEOUT:-60}"
+FTCTL_DR_NBD_READY_TIMEOUT_MS="${FTCTL_DR_NBD_READY_TIMEOUT_MS:-5000}"
+FTCTL_DR_NBD_READY_POLL_MS="${FTCTL_DR_NBD_READY_POLL_MS:-50}"
+FTCTL_DR_NBD_ATTACH_ATTEMPTS="${FTCTL_DR_NBD_ATTACH_ATTEMPTS:-2}"
+FTCTL_DR_NBD_SYSFS_ROOT="${FTCTL_DR_NBD_SYSFS_ROOT:-/sys/class/block}"
 FTCTL_DR_VMWARE_LAST_SNAPSHOT_REF=""
 FTCTL_DR_VMWARE_LAST_SNAPSHOT_RESOLVE_METHOD=""
 FTCTL_DR_VMWARE_SOURCE_OPEN_TLS_VERIFY=""
@@ -239,11 +243,80 @@ ftctl_vmware_mover_free_nbd() {
   return 1
 }
 
+ftctl_vmware_mover_now_ms() {
+  local value
+  value="$(date +%s%3N 2>/dev/null || true)"
+  if [[ "${value}" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' "${value}"
+  else
+    python3 - <<'PY'
+import time
+print(int(time.time() * 1000))
+PY
+  fi
+}
+
+ftctl_vmware_mover_wait_block_device_ready() {
+  local device="${1-}" expected_bytes="${2-}" timeout_ms="${3-${FTCTL_DR_NBD_READY_TIMEOUT_MS}}"
+  local poll_ms="${4-${FTCTL_DR_NBD_READY_POLL_MS}}"
+  local name start now observed=0 sectors=0 sysfs_bytes=0 sleep_value
+  [[ -n "${device}" && "${expected_bytes}" =~ ^[1-9][0-9]*$ ]] || return 1
+  [[ "${timeout_ms}" =~ ^[1-9][0-9]*$ ]] || timeout_ms=5000
+  [[ "${poll_ms}" =~ ^[1-9][0-9]*$ ]] || poll_ms=50
+  name="${device#/dev/}"
+  start="$(ftctl_vmware_mover_now_ms)"
+  if command -v udevadm >/dev/null 2>&1; then
+    udevadm settle --timeout=1 >/dev/null 2>&1 || true
+  fi
+  while true; do
+    observed="$(blockdev --getsize64 "${device}" 2>/dev/null || printf '0')"
+    sectors="$(cat "${FTCTL_DR_NBD_SYSFS_ROOT}/${name}/size" 2>/dev/null || printf '0')"
+    [[ "${observed}" =~ ^[0-9]+$ ]] || observed=0
+    [[ "${sectors}" =~ ^[0-9]+$ ]] || sectors=0
+    sysfs_bytes=$((sectors * 512))
+    FTCTL_DR_NBD_LAST_OBSERVED_BYTES="${observed}"
+    FTCTL_DR_NBD_LAST_SYSFS_BYTES="${sysfs_bytes}"
+    now="$(ftctl_vmware_mover_now_ms)"
+    FTCTL_DR_NBD_LAST_ELAPSED_MS=$((now - start))
+    if (( observed >= expected_bytes && sysfs_bytes >= expected_bytes && observed == sysfs_bytes )); then
+      return 0
+    fi
+    if (( now - start >= timeout_ms )); then
+      return 1
+    fi
+    printf -v sleep_value '%d.%03d' "$((poll_ms / 1000))" "$((poll_ms % 1000))"
+    sleep "${sleep_value}"
+  done
+}
+
+ftctl_vmware_mover_resolve_requested_mode() {
+  local rows="${1-}" requested_mode="${2-CBT_INCREMENTAL}"
+  if [[ "${requested_mode}" != "CBT_INCREMENTAL" ]]; then
+    printf '%s\n' "${requested_mode}"
+    return 0
+  fi
+  python3 - "${requested_mode}" "${rows}" <<'PY'
+import json
+import sys
+
+requested = sys.argv[1]
+rows = json.loads(sys.argv[2])
+reseed = any(
+    not str(row.get("previousChangeId") or "")
+    or (row.get("baselineState") not in (None, "", "LOCAL_DURABLE"))
+    or int(row.get("baselineGeneration") or 0) <= 0
+    for row in rows
+)
+print("FULL_RESEED" if reseed else requested)
+PY
+}
+
 ftctl_vmware_mover_patch_disk() {
   local source_vmdk="${1-}" source_vm_ref="${2-}" source_snapshot_ref="${3-}" target_uri="${4-}" target_format="${5-}" label="${6-}"
   local endpoint="${7-}" username="${8-}" password_file="${9-}" tls_verify="${10-}" thumbprint="${11-}" libdir="${12-}"
-  local areas_path="${13-}" metrics_path="${14-}" work_dir socket_path pid="" source_opts safe_label nbdkit_log qemu_info_log transports
+  local areas_path="${13-}" metrics_path="${14-}" expected_bytes="${15-}" work_dir socket_path pid="" source_opts safe_label nbdkit_log qemu_info_log transports
   local source_dev="" target_dev="" patch_helper lock_file="${FTCTL_DR_VMWARE_NBD_LOCK:-/run/ablestack-vm-ftctl/dr-runtime/nbd.lock}"
+  local attach_attempt ready=false
 
   [[ -s "${areas_path}" ]] || ftctl_vmware_mover_die 84 "DR_CBT_EXTENT_INVALID: changed-area payload is missing for ${label}"
   work_dir="$(mktemp -d -t ftctl.vmware.patch.XXXXXX)"
@@ -290,6 +363,12 @@ ftctl_vmware_mover_patch_disk() {
     ftctl_vmware_mover_cleanup_nbdkit "${pid}" "${work_dir}"
     ftctl_vmware_mover_die 86 "DR_CBT_PATCH_FAILED: source NBD attach failed"
   fi
+  if ! ftctl_vmware_mover_wait_block_device_ready "${source_dev}" "${expected_bytes}"; then
+    nbd-client -d "${source_dev}" >/dev/null 2>&1 || true
+    flock -u 9
+    ftctl_vmware_mover_cleanup_nbdkit "${pid}" "${work_dir}"
+    ftctl_vmware_mover_die 89 "DR_SOURCE_NBD_SIZE_NOT_READY: expected=${expected_bytes} observed=${FTCTL_DR_NBD_LAST_OBSERVED_BYTES:-0} sysfs=${FTCTL_DR_NBD_LAST_SYSFS_BYTES:-0} elapsedMs=${FTCTL_DR_NBD_LAST_ELAPSED_MS:-0}"
+  fi
   target_dev="$(ftctl_vmware_mover_free_nbd "${source_dev}" || true)"
   if [[ -z "${target_dev}" ]]; then
     nbd-client -d "${source_dev}" >/dev/null 2>&1 || true
@@ -297,16 +376,25 @@ ftctl_vmware_mover_patch_disk() {
     ftctl_vmware_mover_cleanup_nbdkit "${pid}" "${work_dir}"
     ftctl_vmware_mover_die 86 "DR_CBT_PATCH_FAILED: no free target NBD device"
   fi
-  if ! qemu-nbd --connect="${target_dev}" --format="${target_format:-raw}" "${target_uri}" >/dev/null; then
+  for ((attach_attempt=1; attach_attempt<=FTCTL_DR_NBD_ATTACH_ATTEMPTS; attach_attempt++)); do
+    if qemu-nbd --connect="${target_dev}" --format="${target_format:-raw}" "${target_uri}" >/dev/null &&
+        ftctl_vmware_mover_wait_block_device_ready "${target_dev}" "${expected_bytes}"; then
+      ready=true
+      break
+    fi
+    qemu-nbd --disconnect "${target_dev}" >/dev/null 2>&1 || true
+  done
+  if [[ "${ready}" != "true" ]]; then
     nbd-client -d "${source_dev}" >/dev/null 2>&1 || true
     flock -u 9
     ftctl_vmware_mover_cleanup_nbdkit "${pid}" "${work_dir}"
-    ftctl_vmware_mover_die 86 "DR_CBT_PATCH_FAILED: target NBD attach failed"
+    ftctl_vmware_mover_die 89 "DR_TARGET_NBD_SIZE_NOT_READY: expected=${expected_bytes} observed=${FTCTL_DR_NBD_LAST_OBSERVED_BYTES:-0} sysfs=${FTCTL_DR_NBD_LAST_SYSFS_BYTES:-0} elapsedMs=${FTCTL_DR_NBD_LAST_ELAPSED_MS:-0} attempts=${FTCTL_DR_NBD_ATTACH_ATTEMPTS}"
   fi
   flock -u 9
 
   patch_helper="${FTCTL_DR_VMWARE_EXTENT_PATCH_HELPER:-${FTCTL_DR_VMWARE_MOVER_LIB_DIR}/dr_extent_patch.py}"
-  if ! python3 "${patch_helper}" --source "${source_dev}" --target "${target_dev}" --areas-json "${areas_path}" > "${metrics_path}"; then
+  if ! python3 "${patch_helper}" --source "${source_dev}" --target "${target_dev}" --areas-json "${areas_path}" \
+      --expected-source-size "${expected_bytes}" --expected-target-size "${expected_bytes}" > "${metrics_path}"; then
     qemu-nbd --disconnect "${target_dev}" >/dev/null 2>&1 || true
     nbd-client -d "${source_dev}" >/dev/null 2>&1 || true
     ftctl_vmware_mover_cleanup_nbdkit "${pid}" "${work_dir}"
@@ -1049,6 +1137,7 @@ main() {
     full-reseed) requested_mode="FULL_RESEED" ;;
     *) requested_mode="CBT_INCREMENTAL" ;;
   esac
+  requested_mode="$(ftctl_vmware_mover_resolve_requested_mode "${rows}" "${requested_mode}")"
   metrics_path="${FTCTL_DR_CYCLE_METRICS_PATH:-${FTCTL_DR_VMWARE_MOVER_LOG_DIR}/cycle-${FTCTL_DR_CHECKPOINT_SEQUENCE:-0}.json}"
   journal_path="${FTCTL_DR_CYCLE_JOURNAL_PATH:-${metrics_path}.journal.json}"
   results_path="$(mktemp -p "${FTCTL_DR_VMWARE_MOVER_LOG_DIR}" vmware-cycle-results.XXXXXX.json)"
@@ -1092,9 +1181,6 @@ main() {
     target_uri="$(ftctl_vmware_mover_target_uri "${target_path}" "${target_storage_path}" "${target_name}")"
     target_format="$(jq -r '.targetFormat // "raw"' <<< "${row}")"
     [[ -n "${snapshot_name}" ]] || ftctl_vmware_mover_die 82 "DR_CBT_QUERY_FAILED: VMware snapshot name is unavailable"
-    if [[ "${requested_mode}" == "CBT_INCREMENTAL" && -z "${previous_change_id}" ]]; then
-      ftctl_vmware_mover_die 85 "DR_CBT_RESEED_REQUIRED: committed changeId is missing for ${label:-disk${i}}"
-    fi
     query_path="$(mktemp -p "${FTCTL_DR_VMWARE_MOVER_LOG_DIR}" vmware-cbt-query-${i}.XXXXXX.json)"
     ftctl_vmware_mover_query_cbt "${endpoint}" "${username}" "${password_file}" "${tls_verify}" "${libdir}" \
       "${source_vm_ref}" "${snapshot_name}" "${cbt_disk_id}" \
@@ -1120,7 +1206,7 @@ main() {
       incremental_verified="true"
       printf 'VMware DR mover CBT patch: disk=%s extents=%s bytes=%s -> %s\n' "${label:-disk${i}}" "${areas_count}" "${changed_bytes}" "${target_uri}" >&2
       ftctl_vmware_mover_patch_disk "${source_vmdk}" "${source_vm_ref}" "${source_snapshot_ref}" "${target_uri}" "${target_format:-raw}" "${label:-disk${i}}" \
-        "${endpoint}" "${username}" "${password_file}" "${tls_verify}" "${thumbprint}" "${libdir}" "${query_path}" "${patch_metrics_path}"
+        "${endpoint}" "${username}" "${password_file}" "${tls_verify}" "${thumbprint}" "${libdir}" "${query_path}" "${patch_metrics_path}" "${virtual_bytes}"
     fi
     result_tmp="$(mktemp -p "${FTCTL_DR_VMWARE_MOVER_LOG_DIR}" vmware-cycle-result.XXXXXX.json)"
     if ! ftctl_vmware_mover_build_disk_result "${i}" "${label:-disk${i}}" "${requested_mode}" "${effective_mode}" \

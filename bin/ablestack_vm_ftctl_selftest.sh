@@ -6435,13 +6435,18 @@ JSON
   selftest_assert_contains "${out}" '"state":"PAUSED"' "pause state"
   selftest_assert_contains "${out}" '"progress":100' "pause progress"
 
-  out="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-sync-resume \
+  local resume_rc=0
+  set +e
+  out="$(FTCTL_DR_CONTROL_ACK_TIMEOUT_SEC=1 bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-sync-resume \
     --config "${SELFTEST_CONFIG}" \
     --plan plan-control \
     --run run-resume \
     --profile-json "${profile}" \
-    --json)"
-  selftest_assert_contains "${out}" '"state":"SYNCING"' "resume state"
+    --json 2>&1)"
+  resume_rc="$?"
+  set -e
+  [[ "${resume_rc}" != "0" ]] || selftest_fail "resume must not report RUNNING without an owned scheduler"
+  selftest_assert_contains "${out}" 'DR_SCHEDULER_NOT_RUNNING' "resume scheduler ownership failure"
 
   out="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-release \
     --config "${SELFTEST_CONFIG}" \
@@ -8105,6 +8110,66 @@ PY
   fi
 }
 
+selftest_case_dr_vmware_nbd_readiness_barrier() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR VMware NBD readiness barrier waits for a stable size"
+
+  local fakebin="${SELFTEST_ROOT}/nbd-ready-bin"
+  local sysfs="${SELFTEST_ROOT}/nbd-sysfs"
+  local counter="${SELFTEST_ROOT}/nbd-ready-count"
+  mkdir -p "${fakebin}" "${sysfs}/nbd-test"
+  printf '0\n' > "${sysfs}/nbd-test/size"
+  printf '0\n' > "${counter}"
+  cat > "${fakebin}/blockdev" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+count=$(cat "${FTCTL_FAKE_NBD_COUNTER}")
+count=$((count + 1))
+printf '%s\n' "${count}" > "${FTCTL_FAKE_NBD_COUNTER}"
+if (( count >= 2 )); then
+  printf '2048\n' > "${FTCTL_DR_NBD_SYSFS_ROOT}/nbd-test/size"
+  printf '1048576\n'
+else
+  printf '0\n'
+fi
+EOF
+  chmod +x "${fakebin}/blockdev"
+
+  # shellcheck source=/dev/null
+  source "${ROOT_DIR}/lib/ftctl/dr_vmware_mover.sh"
+  FTCTL_FAKE_NBD_COUNTER="${counter}" \
+  FTCTL_DR_NBD_SYSFS_ROOT="${sysfs}" \
+  PATH="${fakebin}:${PATH}" \
+    ftctl_vmware_mover_wait_block_device_ready /dev/nbd-test 1048576 500 10 ||
+      selftest_fail "NBD readiness barrier should accept the delayed stable size"
+  [[ "$(cat "${counter}")" -ge 2 ]] || selftest_fail "NBD readiness barrier did not poll"
+
+  printf '0\n' > "${sysfs}/nbd-test/size"
+  cat > "${fakebin}/blockdev" <<'EOF'
+#!/usr/bin/env bash
+printf '0\n'
+EOF
+  chmod +x "${fakebin}/blockdev"
+  if FTCTL_DR_NBD_SYSFS_ROOT="${sysfs}" PATH="${fakebin}:${PATH}" \
+      ftctl_vmware_mover_wait_block_device_ready /dev/nbd-test 1048576 30 10; then
+    selftest_fail "NBD readiness barrier must reject a permanent zero-size device"
+  fi
+}
+
+selftest_case_dr_vmware_automatic_reseed_mode() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR VMware missing committed baseline selects full reseed"
+
+  # shellcheck source=/dev/null
+  source "${ROOT_DIR}/lib/ftctl/dr_vmware_mover.sh"
+  local missing='[{"previousChangeId":"","baselineGeneration":0}]'
+  local committed='[{"previousChangeId":"change-42","baselineGeneration":42,"baselineState":"LOCAL_DURABLE"}]'
+  selftest_assert_eq "$(ftctl_vmware_mover_resolve_requested_mode "${missing}" CBT_INCREMENTAL)" "FULL_RESEED" \
+    "missing baseline mode"
+  selftest_assert_eq "$(ftctl_vmware_mover_resolve_requested_mode "${committed}" CBT_INCREMENTAL)" "CBT_INCREMENTAL" \
+    "committed baseline mode"
+}
+
 selftest_main() {
   selftest_run_lint
   selftest_case_cluster_cli
@@ -8240,6 +8305,8 @@ selftest_main() {
   selftest_case_dr_runtime_reprotect_starts_reverse_protection_checkpoint
   selftest_case_dr_scheduler_vmware_requires_mover
   selftest_case_dr_vmware_cycle_result_contract
+  selftest_case_dr_vmware_nbd_readiness_barrier
+  selftest_case_dr_vmware_automatic_reseed_mode
   selftest_case_dr_vmware_mover_uses_raw_over_nbd_image_opts
   selftest_case_events_json
   selftest_info "all checks passed"

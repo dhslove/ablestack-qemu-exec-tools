@@ -2140,6 +2140,7 @@ ftctl_dr_runtime_emit_state_json() {
   local driver driver_state disk_map_path source_disk_map_path target_disk_map_path disk_map_role
   local target_disk_count target_disk_invalid_count manifest_path checkpoint_path cbt_status_path source_open_status_path source_snapshot_status_path
   local scheduler_state worker_pid worker_state worker_started_at worker_updated_at worker_exit_code
+  local runtime_generation scheduler_pid_alive baseline_state reseed_reason
   local control_protocol_version control_generation control_ack_generation control_state cycle_state
   local transition_state transition_action transition_quiesced_at checkpoint_lease_state checkpoint_lease_path
   local retryable retry_after_sec lock_file holder_pid holder_command holder_age_sec
@@ -2218,6 +2219,9 @@ ftctl_dr_runtime_emit_state_json() {
   source_open_status_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "source_open_status_path")"
   source_snapshot_status_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "source_snapshot_status_path")"
   scheduler_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "scheduler_state")"
+  runtime_generation="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "runtime_generation")"
+  baseline_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "baseline_state")"
+  reseed_reason="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "reseed_reason")"
   control_protocol_version="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "control_protocol_version")"
   control_generation="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "control_generation")"
   control_ack_generation="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "control_ack_generation")"
@@ -2233,6 +2237,10 @@ ftctl_dr_runtime_emit_state_json() {
   worker_started_at="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "worker_started_at")"
   worker_updated_at="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "worker_updated_at")"
   worker_exit_code="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "worker_exit_code")"
+  scheduler_pid_alive="false"
+  if [[ "${worker_pid}" =~ ^[0-9]+$ ]] && kill -0 "${worker_pid}" >/dev/null 2>&1; then
+    scheduler_pid_alive="true"
+  fi
   retryable="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "retryable")"
   retry_after_sec="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "retry_after_sec")"
   lock_file="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "lock_file")"
@@ -2461,6 +2469,10 @@ PY
   ftctl_dr_runtime_json_string_field "source_snapshot_status_path" "${source_snapshot_status_path}"
   ftctl_dr_runtime_json_file_field_redacted "source_snapshot" "${source_snapshot_status_path}"
   ftctl_dr_runtime_json_string_field "scheduler_state" "${scheduler_state}"
+  ftctl_dr_runtime_json_number_field "runtime_generation" "${runtime_generation}"
+  ftctl_dr_runtime_json_boolean_field "scheduler_pid_alive" "${scheduler_pid_alive}" || return $?
+  ftctl_dr_runtime_json_string_field "baseline_state" "${baseline_state}"
+  ftctl_dr_runtime_json_string_field "reseed_reason" "${reseed_reason}"
   ftctl_dr_runtime_json_number_field "control_protocol_version" "${control_protocol_version}"
   ftctl_dr_runtime_json_number_field "control_generation" "${control_generation}"
   ftctl_dr_runtime_json_number_field "control_ack_generation" "${control_ack_generation}"
@@ -2902,7 +2914,24 @@ ftctl_dr_runtime_action() {
   case "${action}" in
     dr-sync-pause|dr-sync-resume|dr-release)
       if command -v ftctl_dr_scheduler_control_action >/dev/null 2>&1; then
-        ftctl_dr_scheduler_control_action "${action}" "${plan}" "${run_path}" "${status_path}" || true
+        rc=0
+        ftctl_dr_scheduler_control_action "${action}" "${plan}" "${run_path}" "${status_path}" \
+          "$(ftctl_dr_runtime_profile_path "${plan}")" || rc=$?
+        if [[ "${rc}" != "0" && "${action}" == "dr-sync-resume" ]]; then
+          ftctl_dr_runtime_path_set "${run_path}" \
+            "state=ERROR" \
+            "step=scheduler-recovery-failed" \
+            "progress=100" \
+            "accepted=false" \
+            "scheduler_state=ERROR" \
+            "error_code=DR_SCHEDULER_NOT_RUNNING" \
+            "error_message=Scheduler recovery did not establish a live worker" \
+            "updated_at=$(ftctl_now_iso8601)" || true
+          cp -f "${run_path}" "${status_path}" 2>/dev/null || true
+          ftctl_dr_runtime_mark_worker_terminal "${run_path}" "${status_path}" "FAILED" "${rc}" "DR_SCHEDULER_NOT_RUNNING" "true" "2"
+          [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_state_json "${action}" "error" "${plan}" "${run}" "${run_path}" "0"
+          return "${rc}"
+        fi
       fi
       ;;
     dr-test-failover)

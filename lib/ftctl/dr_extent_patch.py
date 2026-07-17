@@ -55,7 +55,14 @@ def normalize(areas: Iterable[Dict[str, int]], upper_bound: int) -> List[Dict[st
     return [{"offset": start, "length": end - start} for start, end in merged]
 
 
-def copy_extents(source: str, target: str, areas: List[Dict[str, int]], chunk: int) -> Dict[str, int]:
+def copy_extents(
+    source: str,
+    target: str,
+    areas: List[Dict[str, int]],
+    chunk: int,
+    expected_source_size: int = 0,
+    expected_target_size: int = 0,
+) -> Dict[str, int]:
     source_fd = os.open(source, os.O_RDONLY)
     target_fd = os.open(target, os.O_RDWR)
     started = time.monotonic_ns()
@@ -64,6 +71,18 @@ def copy_extents(source: str, target: str, areas: List[Dict[str, int]], chunk: i
     try:
         source_size = device_size(source_fd)
         target_size = device_size(target_fd)
+        if source_size <= 0 or target_size <= 0:
+            raise ValueError(
+                f"block device is not ready sourceSize={source_size} targetSize={target_size}"
+            )
+        if expected_source_size and source_size < expected_source_size:
+            raise ValueError(
+                f"source device is undersized expected={expected_source_size} actual={source_size}"
+            )
+        if expected_target_size and target_size < expected_target_size:
+            raise ValueError(
+                f"target device is undersized expected={expected_target_size} actual={target_size}"
+            )
         upper_bound = min(source_size, target_size)
         normalized = normalize(areas, upper_bound)
         for extent in normalized:
@@ -106,10 +125,19 @@ def main() -> int:
     parser.add_argument("--target", required=True)
     parser.add_argument("--areas-json", required=True)
     parser.add_argument("--chunk", type=int, default=8 * 1024 * 1024)
+    parser.add_argument("--expected-source-size", type=int, default=0)
+    parser.add_argument("--expected-target-size", type=int, default=0)
     args = parser.parse_args()
     with open(args.areas_json, "r", encoding="utf-8") as handle:
         payload = json.load(handle)
-    result = copy_extents(args.source, args.target, payload.get("areas") or [], max(4096, args.chunk))
+    result = copy_extents(
+        args.source,
+        args.target,
+        payload.get("areas") or [],
+        max(4096, args.chunk),
+        max(0, args.expected_source_size),
+        max(0, args.expected_target_size),
+    )
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     return 0
 
