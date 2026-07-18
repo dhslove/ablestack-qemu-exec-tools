@@ -373,8 +373,7 @@ ftctl_dr_scheduler_update_state() {
   local state_path="${1-}" status_path="${2-}"
   shift 2
   ftctl_dr_runtime_path_set "${state_path}" "$@" || return $?
-  cp -f "${state_path}" "${status_path}" 2>/dev/null || true
-  chmod 0644 "${status_path}" 2>/dev/null || true
+  ftctl_dr_runtime_atomic_copy "${state_path}" "${status_path}" "0644" || return $?
 }
 
 ftctl_dr_scheduler_checkpoint_value() {

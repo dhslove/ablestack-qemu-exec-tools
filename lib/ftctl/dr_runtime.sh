@@ -317,15 +317,57 @@ ftctl_dr_runtime_save_profile() {
 
 ftctl_dr_runtime_state_get_from_path() {
   local path="${1-}" key="${2-}"
+  if [[ -n "${FTCTL_DR_RUNTIME_STATE_SNAPSHOT_PATH:-}" && "${path}" == "${FTCTL_DR_RUNTIME_STATE_SNAPSHOT_PATH}" ]]; then
+    if [[ -n "${FTCTL_DR_RUNTIME_STATE_SNAPSHOT_VALUES[${key}]+x}" ]]; then
+      printf '%s\n' "${FTCTL_DR_RUNTIME_STATE_SNAPSHOT_VALUES[${key}]}"
+    fi
+    return 0
+  fi
   ftctl_state_read_kv "${path}" "${key}" 2>/dev/null || true
+}
+
+ftctl_dr_runtime_state_snapshot_begin() {
+  local path="${1-}" key value
+  FTCTL_DR_RUNTIME_STATE_SNAPSHOT_PATH="${path}"
+  declare -gA FTCTL_DR_RUNTIME_STATE_SNAPSHOT_VALUES=()
+  [[ -n "${path}" && -f "${path}" ]] || return 0
+  while IFS='=' read -r key value; do
+    [[ -n "${key}" ]] || continue
+    FTCTL_DR_RUNTIME_STATE_SNAPSHOT_VALUES["${key}"]="${value}"
+  done < "${path}"
+}
+
+ftctl_dr_runtime_state_snapshot_end() {
+  FTCTL_DR_RUNTIME_STATE_SNAPSHOT_PATH=""
+  unset FTCTL_DR_RUNTIME_STATE_SNAPSHOT_VALUES
+}
+
+ftctl_dr_runtime_atomic_copy() {
+  local source="${1-}" target="${2-}" mode="${3-0644}" dir tmp
+  [[ -n "${source}" && -f "${source}" && -n "${target}" ]] || return 1
+  dir="$(dirname "${target}")"
+  ftctl_ensure_dir "${dir}" "0755"
+  tmp="$(mktemp "${dir}/.$(basename "${target}").tmp.XXXXXX")" || return 1
+  if ! cp -f -- "${source}" "${tmp}"; then
+    rm -f -- "${tmp}"
+    return 1
+  fi
+  chmod "${mode}" "${tmp}" 2>/dev/null || true
+  sync -f "${tmp}" 2>/dev/null || true
+  if ! mv -f -- "${tmp}" "${target}"; then
+    rm -f -- "${tmp}"
+    return 1
+  fi
+  sync -f "${dir}" 2>/dev/null || true
 }
 
 ftctl_dr_runtime_path_set() {
   local path="${1-}"
-  local tmp key value
+  local dir tmp key value
   shift
   [[ -n "${path}" && -f "${path}" ]] || return 1
-  tmp="$(mktemp -t ftctl.dr.state.set.XXXXXX)"
+  dir="$(dirname "${path}")"
+  tmp="$(mktemp "${dir}/.$(basename "${path}").set.XXXXXX")" || return 1
   cp -f "${path}" "${tmp}"
   while (($#)); do
     key="${1%%=*}"
@@ -337,8 +379,11 @@ ftctl_dr_runtime_path_set() {
     fi
     shift
   done
+  chmod 0644 "${tmp}" 2>/dev/null || true
+  sync -f "${tmp}" 2>/dev/null || true
   mv -f "${tmp}" "${path}"
   chmod 0644 "${path}" 2>/dev/null || true
+  sync -f "${dir}" 2>/dev/null || true
 }
 
 ftctl_dr_runtime_record_lock_conflict() {
@@ -2108,7 +2153,9 @@ current = len(lines)
 candidates = list(enumerate(lines, start=1))
 candidates = [(seq, line) for seq, line in candidates if seq > offset]
 truncated = limit == 0 and bool(candidates)
-if limit > 0 and len(candidates) > limit:
+if limit == 0:
+    candidates = []
+elif len(candidates) > limit:
     candidates = candidates[-limit:]
     truncated = True
 events = []
@@ -2177,6 +2224,7 @@ ftctl_dr_runtime_emit_state_json() {
   local profile_path source_firmware="" source_secure_boot="" source_hardware_fingerprint=""
   local target_boot_type="" target_boot_mode="" target_io_policy="" target_iothreads=""
 
+  ftctl_dr_runtime_state_snapshot_begin "${state_path}"
   action="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "action")"
   state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "state")"
   step="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "step")"
@@ -2619,6 +2667,7 @@ PY
   fi
   ftctl_dr_runtime_emit_events_since "${plan}" "${events_offset}" "${events_limit:-20}"
   printf ',"exit_code":0}\n'
+  ftctl_dr_runtime_state_snapshot_end
 }
 
 ftctl_dr_runtime_emit_error_json() {

@@ -52,13 +52,14 @@ ftctl_vmware_mover_write_cycle_journal() {
   local journal_path="${1-}" state="${2-}" retry_mode="${3-}" error_code="${4-}" error_message="${5-}" results_path="${6-}" mode_decision="${7-}"
   [[ -n "${journal_path}" ]] || return 0
   python3 - "${journal_path}" "${state}" "${retry_mode}" "${error_code}" "${error_message}" "${results_path}" \
-    "${FTCTL_DR_PLAN_UUID:-}" "${FTCTL_DR_RUN_UUID:-}" "${FTCTL_DR_CHECKPOINT_SEQUENCE:-0}" "${mode_decision}" <<'PY'
+    "${FTCTL_DR_PLAN_UUID:-}" "${FTCTL_DR_RUN_UUID:-}" "${FTCTL_DR_CHECKPOINT_SEQUENCE:-0}" "${mode_decision}" \
+    "${FTCTL_DR_CYCLE_METRICS_PATH:-}" <<'PY'
 import json
 import os
 import sys
 import time
 
-path, state, retry_mode, error_code, error_message, results_path, plan, run, sequence, raw_decision = sys.argv[1:11]
+path, state, retry_mode, error_code, error_message, results_path, plan, run, sequence, raw_decision, metrics_path = sys.argv[1:12]
 results = []
 if results_path and os.path.isfile(results_path):
     try:
@@ -98,6 +99,26 @@ if raw_decision:
             })
     except (ValueError, TypeError):
         pass
+if state == "LOCAL_DURABLE" and metrics_path and os.path.isfile(metrics_path):
+    with open(metrics_path, "r", encoding="utf-8") as handle:
+        metrics = json.load(handle)
+    expected_sequence = int(sequence or 0)
+    if (str(metrics.get("planUuid") or "") != plan
+            or str(metrics.get("runUuid") or "") != run
+            or int(metrics.get("sequence") or -1) != expected_sequence):
+        raise SystemExit("cycle metrics identity does not match cycle journal")
+    for key in (
+        "cycleUuid", "cycleToken", "requestedMode", "effectiveMode",
+        "automaticReseed", "modeDecisionCode", "reseedReason",
+        "invalidBaselineDiskCount", "incrementalVerified", "metricsEstimated",
+        "baselineGeneration", "cycleCommitState", "virtualBytes", "changedBytes",
+        "sourceReadBytes", "targetWrittenBytes", "transferPayloadBytes",
+        "changedExtentCount", "durationMs", "throughputBps",
+    ):
+        if key in metrics:
+            payload[key] = metrics[key]
+    payload["disks"] = metrics.get("disks") or results
+    payload["completedDiskCount"] = len(payload["disks"])
 os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
 tmp = path + ".tmp"
 with open(tmp, "w", encoding="utf-8") as handle:
@@ -1196,7 +1217,7 @@ for result in disks:
 effective_modes = {str(item.get("effectiveMode") or "") for item in disks}
 if effective_modes == {"NO_CHANGE"}:
     effective_mode = "NO_CHANGE"
-elif effective_modes == {"CBT_INCREMENTAL"}:
+elif effective_modes and effective_modes <= {"NO_CHANGE", "CBT_INCREMENTAL"}:
     effective_mode = "CBT_INCREMENTAL"
 elif effective_modes == {"FULL_SEED"}:
     effective_mode = "FULL_SEED"

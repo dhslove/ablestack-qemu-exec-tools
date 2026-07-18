@@ -8067,6 +8067,7 @@ selftest_case_dr_vmware_cycle_result_contract() {
   local result_path="${SELFTEST_ROOT}/cycle-result.json"
   local results_path="${SELFTEST_ROOT}/cycle-results.json"
   local journal_path="${SELFTEST_ROOT}/cycle-journal.json"
+  local cycle_metrics_path="${SELFTEST_ROOT}/cycle-metrics.json"
   cat > "${metric_path}" <<'JSON'
 {"changedExtentCount":1,"changedBytes":4096,"sourceReadBytes":4096,"targetWrittenBytes":4096,"transferPayloadBytes":4096,"durationMs":10,"throughputBps":409600,"metricsEstimated":false}
 JSON
@@ -8090,6 +8091,15 @@ PY
   FTCTL_DR_CHECKPOINT_SEQUENCE=1 \
     ftctl_vmware_mover_write_cycle_journal "${journal_path}" "DATA_COPIED" "METADATA_ONLY" "" "" "${results_path}"
 
+  cat > "${cycle_metrics_path}" <<'JSON'
+{"schemaVersion":1,"cycleToken":"plan-result-contract:1","planUuid":"plan-result-contract","runUuid":"run-result-contract","sequence":1,"requestedMode":"CBT_INCREMENTAL","effectiveMode":"NO_CHANGE","automaticReseed":false,"modeDecisionCode":"CBT_BASELINE_VALID","reseedReason":"","invalidBaselineDiskCount":0,"incrementalVerified":true,"metricsEstimated":false,"baselineGeneration":1,"cycleCommitState":"LOCAL_DURABLE","virtualBytes":1048576,"changedBytes":0,"sourceReadBytes":0,"targetWrittenBytes":0,"transferPayloadBytes":0,"changedExtentCount":0,"durationMs":5,"throughputBps":0,"disks":[{"diskIndex":0,"diskLabel":"root-disk","requestedMode":"CBT_INCREMENTAL","effectiveMode":"NO_CHANGE","previousChangeId":"change-1","newChangeId":"change-1","virtualBytes":1048576,"changedBytes":0,"sourceReadBytes":0,"targetWrittenBytes":0,"transferPayloadBytes":0,"changedExtentCount":0,"durationMs":5,"throughputBps":0,"incrementalVerified":true,"metricsEstimated":false}]}
+JSON
+  FTCTL_DR_PLAN_UUID="plan-result-contract" \
+  FTCTL_DR_RUN_UUID="run-result-contract" \
+  FTCTL_DR_CHECKPOINT_SEQUENCE=1 \
+  FTCTL_DR_CYCLE_METRICS_PATH="${cycle_metrics_path}" \
+    ftctl_vmware_mover_write_cycle_journal "${journal_path}" "LOCAL_DURABLE" "NONE" "" "" "${results_path}"
+
   python3 - "${results_path}" "${journal_path}" <<'PY' || selftest_fail "vmware cycle result or journal contract is invalid"
 import json
 import sys
@@ -8100,14 +8110,40 @@ with open(sys.argv[2], "r", encoding="utf-8") as handle:
 assert results[0]["diskLabel"] == "root-disk"
 assert results[0]["newChangeId"] == "change-1"
 assert results[0]["changedBytes"] == 4096
-assert journal["state"] == "DATA_COPIED"
+assert journal["state"] == "LOCAL_DURABLE"
 assert journal["dataCopied"] is True
-assert journal["metadataCommitted"] is False
+assert journal["metadataCommitted"] is True
 assert journal["completedDiskCount"] == 1
+assert journal["effectiveMode"] == "NO_CHANGE"
+assert journal["baselineGeneration"] == 1
+assert journal["cycleToken"] == "plan-result-contract:1"
 PY
   if grep -Eq -- '--arg[[:space:]]+label|\$label([^[:alnum:]_]|$)' "${ROOT_DIR}/lib/ftctl/dr_vmware_mover.sh"; then
     selftest_fail "vmware mover must not use jq reserved label variable"
   fi
+}
+
+selftest_case_dr_runtime_state_snapshot_consistency() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR status reads one immutable state generation"
+
+  local state_path="${SELFTEST_ROOT}/snapshot-consistency.state"
+  ftctl_state_write_kv_all "${state_path}" \
+    "latest_completed_checkpoint_sequence=10" \
+    "latest_completed_baseline_generation=10"
+  ftctl_dr_runtime_state_snapshot_begin "${state_path}"
+  ftctl_dr_runtime_path_set "${state_path}" \
+    "latest_completed_checkpoint_sequence=11" \
+    "latest_completed_baseline_generation=11"
+  selftest_assert_eq "$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_checkpoint_sequence")" \
+    "10" "captured checkpoint sequence"
+  selftest_assert_eq "$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_baseline_generation")" \
+    "10" "captured baseline generation"
+  ftctl_dr_runtime_state_snapshot_end
+  selftest_assert_eq "$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_checkpoint_sequence")" \
+    "11" "published checkpoint sequence"
+  selftest_assert_eq "$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_baseline_generation")" \
+    "11" "published baseline generation"
 }
 
 selftest_case_dr_vmware_nbd_readiness_barrier() {
@@ -8328,6 +8364,7 @@ selftest_main() {
   selftest_case_dr_runtime_reprotect_starts_reverse_protection_checkpoint
   selftest_case_dr_scheduler_vmware_requires_mover
   selftest_case_dr_vmware_cycle_result_contract
+  selftest_case_dr_runtime_state_snapshot_consistency
   selftest_case_dr_vmware_nbd_readiness_barrier
   selftest_case_dr_vmware_automatic_reseed_mode
   selftest_case_dr_vmware_mover_uses_raw_over_nbd_image_opts
