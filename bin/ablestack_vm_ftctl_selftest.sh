@@ -7398,6 +7398,7 @@ selftest_case_dr_runtime_test_failover_cleanup() {
 
   local plan="plan-test-session"
   local profile="${SELFTEST_ROOT}/dr-test-session-profile.json"
+  local artifact_spec="${SELFTEST_ROOT}/dr-test-session-artifact-spec.json"
   local plan_dir="${SELFTEST_ROOT}/run/dr-runtime/plans/${plan}"
   local restore_points="${plan_dir}/restore-points.jsonl"
   local checkpoint1="${plan_dir}/checkpoints/cycle-1-checkpoint.json"
@@ -7407,16 +7408,21 @@ selftest_case_dr_runtime_test_failover_cleanup() {
   local fakebin="${SELFTEST_ROOT}/fakebin"
   local call_log="${SELFTEST_ROOT}/qemu-img-test-session.log"
   local status_path="${plan_dir}/status.state"
-  local session_path="" artifact_dir="" out="" cleanup=""
+  local session_path="" artifact_dir="" out="" cleanup="" ack_pid=""
 
   mkdir -p "${plan_dir}/checkpoints" "${plan_dir}/manifests" "${fakebin}" "${SELFTEST_ROOT}/target"
   cat > "${fakebin}/qemu-img" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "${call_log}"
+[[ "\${1-}" == "info" ]] && exit 0
 target="\${@: -1}"
 : > "\${target}"
 EOF
   chmod +x "${fakebin}/qemu-img"
+  : > "${SELFTEST_ROOT}/target/root.qcow2"
+  cat > "${artifact_spec}" <<JSON
+{"contractVersion":"3","planUuid":"${plan}","runUuid":"run-test-session","checkpointRef":"ftctl:${plan}:run-sync:2","checkpointSequence":2,"disks":[{"diskIndex":0,"device":"vda","provider":"FILE","canonicalLocator":"file:${SELFTEST_ROOT}/target/root.qcow2","format":"qcow2"}]}
+JSON
   cat > "${profile}" <<JSON
 {
   "version": 1,
@@ -7486,6 +7492,7 @@ EOF
     --plan "${plan}" \
     --run run-test-session \
     --profile-json "${profile}" \
+    --artifact-spec-json "${artifact_spec}" \
     --restore-point "ftctl:${plan}:run-sync:2" \
     --json)"
   selftest_assert_contains "${out}" '"result":"accepted"' "test failover accepted"
@@ -7511,12 +7518,34 @@ EOF
   selftest_assert_contains "${out}" '"state":"TEST_ARTIFACTS_READY"' "status projects artifact-ready state"
   selftest_assert_file_contains "${SELFTEST_ROOT}/run/dr-runtime/plans/${plan}/test-sessions/active.json" '"sessionId":"plan-test-session:run-test-session"'
 
+  (
+    local control_path="$(ftctl_dr_scheduler_control_path "${plan}")"
+    local generation="" command="" last_generation="$(ftctl_dr_scheduler_control_generation "${plan}")"
+    while true; do
+      generation="$(ftctl_state_read_kv "${control_path}" generation 2>/dev/null || true)"
+      command="$(ftctl_state_read_kv "${control_path}" command 2>/dev/null || true)"
+      if [[ -n "${generation}" && "${generation}" != "${last_generation}" ]]; then
+        if [[ "${command}" == "pause" ]]; then
+          ftctl_dr_scheduler_control_ack "${plan}" "${generation}" "PAUSED" "IDLE" "run-test-cleanup"
+        elif [[ "${command}" == "run" ]]; then
+          ftctl_dr_scheduler_control_ack "${plan}" "${generation}" "RUNNING" "IDLE" "run-test-cleanup"
+          break
+        fi
+        last_generation="${generation}"
+      fi
+      sleep 0.1
+    done
+  ) &
+  ack_pid="$!"
+  printf '%s\n' "${ack_pid}" > "$(ftctl_dr_scheduler_pid_path "${plan}" run-test-cleanup)"
+
   cleanup="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-test-artifact-cleanup \
     --config "${SELFTEST_CONFIG}" \
     --plan "${plan}" \
     --run run-test-cleanup \
     --profile-json "${profile}" \
     --json)"
+  wait "${ack_pid}"
   selftest_assert_contains "${cleanup}" '"state":"READY"' "test cleanup state"
   selftest_assert_contains "${cleanup}" '"step":"test-cleanup-completed"' "test cleanup step"
   selftest_assert_contains "${cleanup}" '"test_session_state":"CLEANED"' "test cleanup session state"

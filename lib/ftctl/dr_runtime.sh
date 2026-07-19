@@ -34,6 +34,11 @@ ftctl_dr_runtime_profile_path() {
   printf '%s/profile.json\n' "$(ftctl_dr_runtime_plan_dir "${plan}")"
 }
 
+ftctl_dr_runtime_artifact_spec_path() {
+  local plan="${1-}" run="${2-}"
+  printf '%s/test-sessions/%s.artifact-spec.json\n' "$(ftctl_dr_runtime_plan_dir "${plan}")" "$(ftctl_dr_runtime_key "${run}")"
+}
+
 ftctl_dr_runtime_credential_path() {
   local plan="${1-}"
   printf '%s/credentials.json\n' "$(ftctl_dr_runtime_plan_dir "${plan}")"
@@ -313,6 +318,55 @@ ftctl_dr_runtime_save_profile() {
   ftctl_dr_runtime_save_credentials "${plan}" "${profile_file}" || return $?
   redacted="$(ftctl_dr_runtime_redacted_profile_json "${profile_file}")" || return $?
   ftctl_state_write_json_file "$(ftctl_dr_runtime_profile_path "${plan}")" "${redacted}"
+}
+
+ftctl_dr_runtime_save_artifact_spec() {
+  local plan="${1-}" run="${2-}" spec_file="${3-}" out_path
+
+  [[ -n "${spec_file}" && -f "${spec_file}" ]] || return 2
+  out_path="$(ftctl_dr_runtime_artifact_spec_path "${plan}" "${run}")"
+  ftctl_dr_runtime_ensure_plan_dirs "${plan}"
+  python3 - "${spec_file}" "${plan}" "${run}" <<'PY' || return $?
+import json
+import sys
+
+path, plan, run = sys.argv[1:4]
+try:
+    with open(path, "r", encoding="utf-8") as fh:
+        spec = json.load(fh)
+except (OSError, ValueError) as exc:
+    sys.stderr.write(f"ERROR: invalid artifact spec JSON: {exc}\n")
+    sys.exit(53)
+if str(spec.get("contractVersion") or "") != "3":
+    sys.stderr.write("ERROR: artifact contractVersion 3 is required\n")
+    sys.exit(53)
+if spec.get("planUuid") != plan or spec.get("runUuid") != run:
+    sys.stderr.write("ERROR: artifact spec plan/run correlation mismatch\n")
+    sys.exit(53)
+disks = spec.get("disks")
+if not isinstance(disks, list) or not disks:
+    sys.stderr.write("ERROR: artifact spec requires at least one disk\n")
+    sys.exit(53)
+for index, disk in enumerate(disks):
+    if not isinstance(disk, dict):
+        sys.stderr.write(f"ERROR: artifact spec disk {index} is invalid\n")
+        sys.exit(53)
+    provider = str(disk.get("provider") or "").upper()
+    locator = str(disk.get("canonicalLocator") or "")
+    if provider == "RBD":
+        if not locator.startswith("rbd:") or "/" not in locator[4:]:
+            sys.stderr.write(f"ERROR: disk {index} requires rbd:pool/image\n")
+            sys.exit(53)
+    elif provider == "FILE":
+        if not locator.startswith("file:/"):
+            sys.stderr.write(f"ERROR: disk {index} requires file:/absolute/path\n")
+            sys.exit(53)
+    else:
+        sys.stderr.write(f"ERROR: disk {index} provider {provider} is unsupported\n")
+        sys.exit(54)
+PY
+  ftctl_state_write_json_file "${out_path}" "$(cat "${spec_file}")" || return $?
+  chmod 0600 "${out_path}" 2>/dev/null || true
 }
 
 ftctl_dr_runtime_state_get_from_path() {
@@ -1122,6 +1176,7 @@ PY
   test_artifact_count="$(ftctl_dr_runtime_state_get_from_path "${selection_path}" "test_artifact_count")"
   restore_points_path="$(ftctl_dr_runtime_default_restore_points_path "${plan}" "${status_path}")"
   rm -f "${selection_path}" 2>/dev/null || true
+  rm -f "$(ftctl_dr_runtime_artifact_spec_path "${plan}" "${run}")" 2>/dev/null || true
 
   ftctl_dr_runtime_path_set "${run_path}" \
     "state=READY" \
@@ -1144,29 +1199,35 @@ PY
 }
 
 ftctl_dr_runtime_materialize_test_artifacts() {
-  local plan="${1-}" run="${2-}" session_path="${3-}" run_path="${4-}"
+  local plan="${1-}" run="${2-}" session_path="${3-}" run_path="${4-}" artifact_spec_path="${5-}"
   local artifacts_dir artifacts_state_path rc=0
-  local test_artifacts_state test_artifacts_path test_artifact_count
+  local test_artifacts_state test_artifacts_path test_artifact_count artifact_error_code artifact_error_message
 
   artifacts_dir="$(ftctl_dr_runtime_test_artifacts_dir "${plan}" "${run}")"
   artifacts_state_path="$(mktemp -t ftctl.dr.test.artifacts.XXXXXX)"
-  python3 - "${session_path}" "${artifacts_dir}" "${artifacts_state_path}" "$(ftctl_now_iso8601)" <<'PY' || rc=$?
+  python3 - "${session_path}" "${artifacts_dir}" "${artifacts_state_path}" "$(ftctl_now_iso8601)" "${artifact_spec_path}" <<'PY' || rc=$?
 import json
 import os
 import shutil
 import subprocess
 import sys
 
-session_path, artifacts_dir, state_path, now = sys.argv[1:5]
+session_path, artifacts_dir, state_path, now, artifact_spec_path = sys.argv[1:6]
 with open(session_path, "r", encoding="utf-8") as fh:
     session = json.load(fh)
+try:
+    with open(artifact_spec_path, "r", encoding="utf-8") as fh:
+        artifact_spec = json.load(fh)
+except (OSError, ValueError) as exc:
+    sys.stderr.write(f"ERROR: unable to read artifact locator contract: {exc}\n")
+    sys.exit(53)
+if str(artifact_spec.get("contractVersion") or "") != "3":
+    sys.stderr.write("ERROR: artifact contractVersion 3 is required\n")
+    sys.exit(53)
 
 profile = session.get("profile") if isinstance(session.get("profile"), dict) else {}
 target = profile.get("target") if isinstance(profile.get("target"), dict) else {}
-mapping = profile.get("mapping") if isinstance(profile.get("mapping"), dict) else {}
-checkpoint = session.get("checkpoint") if isinstance(session.get("checkpoint"), dict) else {}
-manifest = checkpoint.get("manifest") if isinstance(checkpoint.get("manifest"), dict) else {}
-disks = manifest.get("disks") or checkpoint.get("disks") or mapping.get("disks") or []
+disks = artifact_spec.get("disks") if isinstance(artifact_spec.get("disks"), list) else []
 target_provider = str(target.get("provider") or "").upper()
 records = []
 state = "NO_DISKS"
@@ -1183,67 +1244,122 @@ def rbd_spec(value):
 def safe_key(value):
     return "".join(ch if ch.isalnum() else "-" for ch in str(value)).strip("-")[:36]
 
+def cleanup_records():
+    for record in reversed(records):
+        if not isinstance(record, dict):
+            continue
+        if record.get("type") == "rbd-clone":
+            clone = str(record.get("clone") or "")
+            backing = str(record.get("backing") or "")
+            snapshot = str(record.get("snapshot") or "")
+            if clone.startswith("rbd:"):
+                subprocess.run(["rbd", "rm", clone[4:]], check=False,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if backing.startswith("rbd:") and snapshot:
+                snap_ref = backing[4:] + "@" + snapshot
+                subprocess.run(["rbd", "snap", "unprotect", snap_ref], check=False,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.run(["rbd", "snap", "rm", snap_ref], check=False,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        path = str(record.get("path") or "")
+        if record.get("type") == "qcow2-overlay" and path and os.path.isfile(path):
+            os.unlink(path)
+
+def fail(code, message):
+    cleanup_records()
+    session["testArtifacts"] = {
+        "state": "FAILED",
+        "path": artifacts_dir,
+        "count": 0,
+        "records": records,
+        "errorCode": "DR_TEST_ARTIFACT_LOCATOR_INVALID" if code == 53 else "DR_TEST_ARTIFACT_PROVIDER_UNSUPPORTED" if code == 54 else "DR_TEST_MATERIALIZATION_FAILED",
+        "errorMessage": message,
+        "updatedAt": now,
+    }
+    with open(session_path, "w", encoding="utf-8") as fh:
+        json.dump(session, fh, sort_keys=True, separators=(",", ":"))
+        fh.write("\n")
+    with open(state_path, "w", encoding="utf-8") as fh:
+        fh.write("test_artifacts_state=FAILED\n")
+        fh.write("test_artifacts_path=\n")
+        fh.write("test_artifact_count=0\n")
+        fh.write(f"artifact_error_code={session['testArtifacts']['errorCode']}\n")
+        fh.write(f"artifact_error_message={message.replace(chr(10), ' ')}\n")
+    sys.stderr.write(f"ERROR: {message}\n")
+    sys.exit(code)
+
 if target_provider == "VMWARE":
     state = "METADATA_ONLY"
 else:
     qemu_img = shutil.which("qemu-img")
-    if disks and not qemu_img:
-        sys.stderr.write("ERROR: qemu-img is required to create ABLESTACK test overlays\n")
-        sys.exit(46)
     for index, disk in enumerate(disks):
         if not isinstance(disk, dict):
-            continue
-        target_path = disk.get("targetPath") or disk.get("targetDiskRef") or disk.get("targetDisk") or disk.get("target")
-        if not target_path:
-            records.append({"device": disk.get("device") or f"disk{index}", "state": "SKIPPED", "reason": "missing targetPath"})
-            continue
+            fail(53, f"artifact disk {index} is not an object")
+        provider = str(disk.get("provider") or "").upper()
+        locator = str(disk.get("canonicalLocator") or "")
         device = str(disk.get("device") or f"disk{index}").replace("/", "_").replace(" ", "_")
         target_format = str(disk.get("targetFormat") or disk.get("format") or "qcow2")
-        source_rbd = rbd_spec(target_path)
-        if source_rbd:
+        if provider == "RBD":
+            source_rbd = rbd_spec(locator)
             if shutil.which("rbd") is None:
-                sys.stderr.write("ERROR: rbd is required to create ABLESTACK test clones\n")
-                sys.exit(46)
+                fail(46, "rbd is required to create ABLESTACK test clones")
             if "/" not in source_rbd:
-                sys.stderr.write(f"ERROR: invalid RBD target path {target_path}\n")
-                sys.exit(46)
+                fail(53, f"invalid RBD locator {locator}; expected rbd:pool/image")
             pool, image = source_rbd.split("/", 1)
             suffix = safe_key(session.get("runUuid") or now)
             snapshot = f"ftctl-dr-test-{suffix}"
             clone_image = f"{image}-ftctl-test-{suffix}"
             clone_spec = f"{pool}/{clone_image}"
             snap_spec = f"{source_rbd}@{snapshot}"
-            subprocess.run(["rbd", "snap", "create", snap_spec], check=True)
-            subprocess.run(["rbd", "snap", "protect", snap_spec], check=True)
             try:
+                subprocess.run(["rbd", "info", source_rbd], check=True,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+                subprocess.run(["rbd", "snap", "create", snap_spec], check=True)
+                records.append({
+                    "device": disk.get("device") or f"disk{index}",
+                    "state": "CREATING",
+                    "type": "rbd-clone",
+                    "backing": f"rbd:{source_rbd}",
+                    "snapshot": snapshot,
+                    "clone": f"rbd:{clone_spec}",
+                    "path": f"rbd:{clone_spec}",
+                    "sizeBytes": disk.get("sizeBytes") or disk.get("capacityBytes") or 0,
+                })
+                subprocess.run(["rbd", "snap", "protect", snap_spec], check=True)
                 subprocess.run(["rbd", "clone", snap_spec, clone_spec], check=True)
-            except Exception:
-                subprocess.run(["rbd", "snap", "unprotect", snap_spec], check=False)
-                subprocess.run(["rbd", "snap", "rm", snap_spec], check=False)
-                raise
+                records[-1]["state"] = "CREATED"
+            except subprocess.CalledProcessError as exc:
+                stderr = (exc.stderr or "").strip() if isinstance(exc.stderr, str) else ""
+                fail(46, f"RBD test clone failed for {source_rbd}: {stderr or exc}")
+            continue
+        if provider == "FILE":
+            if not locator.startswith("file:/"):
+                fail(53, f"invalid file locator {locator}; expected file:/absolute/path")
+            target_path = locator[5:]
+            if not os.path.isabs(target_path) or not os.path.isfile(target_path):
+                fail(53, f"file-backed target does not exist: {target_path}")
+            if not qemu_img:
+                fail(46, "qemu-img is required to create ABLESTACK test overlays")
+            overlay_path = os.path.join(artifacts_dir, f"{device}.qcow2")
+            command = [qemu_img, "create", "-f", "qcow2", "-F", target_format, "-b", target_path, overlay_path]
+            try:
+                subprocess.run([qemu_img, "info", target_path], check=True,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+                subprocess.run(command, check=True)
+            except subprocess.CalledProcessError as exc:
+                stderr = (exc.stderr or "").strip() if isinstance(exc.stderr, str) else ""
+                fail(46, f"file-backed test overlay failed for {target_path}: {stderr or exc}")
             records.append({
                 "device": disk.get("device") or f"disk{index}",
                 "state": "CREATED",
-                "type": "rbd-clone",
-                "backing": f"rbd:{source_rbd}",
-                "snapshot": snapshot,
-                "clone": f"rbd:{clone_spec}",
-                "path": f"rbd:{clone_spec}",
+                "type": "qcow2-overlay",
+                "backing": target_path,
+                "path": overlay_path,
                 "sizeBytes": disk.get("sizeBytes") or disk.get("capacityBytes") or 0,
+                "command": command,
             })
             continue
-        overlay_path = os.path.join(artifacts_dir, f"{device}.qcow2")
-        command = [qemu_img, "create", "-f", "qcow2", "-F", target_format, "-b", str(target_path), overlay_path]
-        subprocess.run(command, check=True)
-        records.append({
-            "device": disk.get("device") or f"disk{index}",
-            "state": "CREATED",
-            "type": "qcow2-overlay",
-            "backing": target_path,
-            "path": overlay_path,
-            "sizeBytes": disk.get("sizeBytes") or disk.get("capacityBytes") or 0,
-            "command": command,
-        })
+        fail(54, f"unsupported test artifact provider {provider} for disk {index}")
     state = "CREATED" if any(record.get("state") == "CREATED" for record in records) else "NO_MATERIALIZED_DISKS"
 
 session["testArtifacts"] = {
@@ -1262,6 +1378,13 @@ with open(state_path, "w", encoding="utf-8") as fh:
     fh.write(f"test_artifact_count={session['testArtifacts']['count']}\n")
 PY
   [[ "${rc}" == "0" ]] || {
+    artifact_error_code="$(ftctl_dr_runtime_state_get_from_path "${artifacts_state_path}" "artifact_error_code")"
+    artifact_error_message="$(ftctl_dr_runtime_state_get_from_path "${artifacts_state_path}" "artifact_error_message")"
+    ftctl_dr_runtime_path_set "${run_path}" \
+      "test_artifacts_state=FAILED" \
+      "error_code=${artifact_error_code}" \
+      "error_message=${artifact_error_message}" \
+      "updated_at=$(ftctl_now_iso8601)" || true
     rm -f "${artifacts_state_path}" 2>/dev/null || true
     return "${rc}"
   }
@@ -2861,7 +2984,7 @@ ftctl_dr_runtime_should_delegate_action() {
 }
 
 ftctl_dr_runtime_start_background_worker() {
-  local action="${1-}" plan="${2-}" run="${3-}" role="${4-}" mode="${5-}" restore_point="${6-}" force="${7-0}" dry_run="${8-0}" log_path ftctl_bin profile_path
+  local action="${1-}" plan="${2-}" run="${3-}" role="${4-}" mode="${5-}" restore_point="${6-}" force="${7-0}" dry_run="${8-0}" artifact_spec_path="${9-}" log_path ftctl_bin profile_path
   local run_path status_path now worker_pid
   local -a worker_cmd
 
@@ -2890,6 +3013,7 @@ ftctl_dr_runtime_start_background_worker() {
   [[ -n "${FTCTL_CONFIG_PATH:-}" ]] && worker_cmd+=("--config" "${FTCTL_CONFIG_PATH}")
   [[ -n "${mode}" ]] && worker_cmd+=("--mode" "${mode}")
   [[ -n "${restore_point}" ]] && worker_cmd+=("--restore-point" "${restore_point}")
+  [[ -n "${artifact_spec_path}" && -f "${artifact_spec_path}" ]] && worker_cmd+=("--artifact-spec-json" "${artifact_spec_path}")
   [[ "${force}" == "1" ]] && worker_cmd+=("--force")
   [[ "${dry_run}" == "1" ]] && worker_cmd+=("--dry-run")
   worker_cmd+=("--wait=true" "--json")
@@ -2927,9 +3051,9 @@ ftctl_dr_runtime_mark_worker_terminal() {
 }
 
 ftctl_dr_runtime_action() {
-  local action="${1-}" plan="${2-}" run="${3-}" profile_file="${4-}" role="${5-}" mode="${6-}" restore_point="${7-}" force="${8-0}" dry_run="${9-0}" wait_value="${10-}" json="${11-0}"
+  local action="${1-}" plan="${2-}" run="${3-}" profile_file="${4-}" role="${5-}" mode="${6-}" restore_point="${7-}" force="${8-0}" dry_run="${9-0}" wait_value="${10-}" json="${11-0}" artifact_spec_file="${12-}"
   local state_tuple state step progress run_path status_path external_ref rc error_code
-  local target_vm_id target_external_ref checkpoint_lease_path test_sequence
+  local target_vm_id target_external_ref checkpoint_lease_path test_sequence persisted_artifact_spec=""
 
   ftctl_dr_runtime_require_plan "${plan}" || return 2
   ftctl_dr_runtime_require_run "${run}" || return 2
@@ -2938,6 +3062,16 @@ ftctl_dr_runtime_action() {
       [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_error_json "${action}" "${plan}" "${run}" "profile_invalid" "profile JSON is missing or invalid" 2
       return 2
     }
+  fi
+  if [[ "${action}" == "dr-test-prepare" ]]; then
+    ftctl_dr_runtime_save_artifact_spec "${plan}" "${run}" "${artifact_spec_file}" || {
+      rc=$?
+      error_code="DR_TEST_ARTIFACT_LOCATOR_INVALID"
+      [[ "${rc}" == "54" ]] && error_code="DR_TEST_ARTIFACT_PROVIDER_UNSUPPORTED"
+      [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_error_json "${action}" "${plan}" "${run}" "artifact_spec_invalid" "artifact locator contract is missing or invalid" "${rc}"
+      return "${rc}"
+    }
+    persisted_artifact_spec="$(ftctl_dr_runtime_artifact_spec_path "${plan}" "${run}")"
   fi
 
   state_tuple="$(ftctl_dr_runtime_action_state "${action}")"
@@ -2963,7 +3097,7 @@ ftctl_dr_runtime_action() {
     cp -f "${run_path}" "${status_path}"
     chmod 0644 "${status_path}" 2>/dev/null || true
     command -v ftctl_lock_release >/dev/null 2>&1 && ftctl_lock_release || true
-    ftctl_dr_runtime_start_background_worker "${action}" "${plan}" "${run}" "${role}" "${mode}" "${restore_point}" "${force}" "${dry_run}"
+    ftctl_dr_runtime_start_background_worker "${action}" "${plan}" "${run}" "${role}" "${mode}" "${restore_point}" "${force}" "${dry_run}" "${persisted_artifact_spec}"
     ftctl_log_event "dr-runtime" "dr.action.accepted" "ok" "" "" \
       "plan=${plan} run=${run} action=${action} role=${role:-} mode=${mode:-} restore_point=${restore_point:-} force=${force} dry_run=${dry_run} wait=${wait_value:-} delegated=1"
     if [[ "${json}" == "1" ]]; then
@@ -3034,7 +3168,8 @@ ftctl_dr_runtime_action() {
       fi
       ftctl_dr_runtime_prepare_test_session "${plan}" "${run}" "${profile_file}" "${restore_point}" "${run_path}" "${status_path}" || rc=$?
       if [[ "${rc}" == "0" ]]; then
-        ftctl_dr_runtime_materialize_test_artifacts "${plan}" "${run}" "$(ftctl_dr_runtime_test_session_path "${plan}" "${run}")" "${run_path}" || rc=$?
+        ftctl_dr_runtime_materialize_test_artifacts "${plan}" "${run}" "$(ftctl_dr_runtime_test_session_path "${plan}" "${run}")" "${run_path}" \
+          "$(ftctl_dr_runtime_artifact_spec_path "${plan}" "${run}")" || rc=$?
       fi
       if [[ "${rc}" == "0" ]]; then
         if [[ "${action}" == "dr-test-prepare" ]]; then
@@ -3052,9 +3187,7 @@ ftctl_dr_runtime_action() {
           "updated_at=$(ftctl_now_iso8601)" || true
       fi
       if [[ "${rc}" != "0" ]]; then
-        if [[ "${rc}" -ge 46 ]]; then
-          ftctl_dr_runtime_cleanup_test_session "${plan}" "${run}" "${run_path}" "${status_path}" >/dev/null 2>&1 || true
-        fi
+        ftctl_dr_runtime_cleanup_test_session "${plan}" "${run}" "${run_path}" "${status_path}" >/dev/null 2>&1 || true
         error_code="DR_RESTORE_POINT_NOT_FOUND"
         [[ "${rc}" == "45" ]] && error_code="DR_TARGET_NOT_READY"
         [[ "${rc}" == "46" ]] && error_code="DR_TEST_MATERIALIZATION_FAILED"
@@ -3064,6 +3197,8 @@ ftctl_dr_runtime_action() {
         [[ "${rc}" == "50" ]] && error_code="DR_TEST_DOMAIN_DEFINE_FAILED"
         [[ "${rc}" == "51" ]] && error_code="DR_TEST_BOOT_TIMEOUT"
         [[ "${rc}" == "52" ]] && error_code="DR_TEST_QGA_UNAVAILABLE"
+        [[ "${rc}" == "53" ]] && error_code="DR_TEST_ARTIFACT_LOCATOR_INVALID"
+        [[ "${rc}" == "54" ]] && error_code="DR_TEST_ARTIFACT_PROVIDER_UNSUPPORTED"
         local failed_step="test-session-restore-point-missing"
         [[ "${rc}" == "46" ]] && failed_step="test-materialization-failed"
         [[ "${rc}" -ge 47 ]] && failed_step="test-guest-preparation-failed"
