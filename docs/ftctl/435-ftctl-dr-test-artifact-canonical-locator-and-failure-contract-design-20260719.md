@@ -161,10 +161,11 @@ The terminal session record remains until Cloud confirms or requests cleanup.
 
 Scheduler resume is a recovery operation, not only a control-message write. If
 the former continuous-sync worker is no longer alive, FTCTL first starts and
-verifies an owned worker from the persisted Plan profile, then sends the
-generation-scoped `run` command and waits for the matching `RUNNING` ACK. A
-missing worker can therefore never be represented as a successful cleanup with
-`PAUSED` or `QUIESCED` control state.
+verifies an owned worker from the persisted Plan profile and the latest durable
+checkpoint producer Run, then sends the generation-scoped `run` command and
+waits for the matching `RUNNING` ACK. The finite cleanup Run never becomes the
+producer of later checkpoints. A missing worker can therefore never be
+represented as a successful cleanup with `PAUSED` or `QUIESCED` control state.
 
 ## 7. Status isolation
 

@@ -356,9 +356,18 @@ ftctl_dr_scheduler_transition_end() {
 
 ftctl_dr_scheduler_resume_after_transition() {
   local plan="${1-}" run="${2-}" reason="${3-transition-complete}" run_path="${4-}" status_path="${5-}"
-  local generation now profile_file
+  local generation now profile_file scheduler_run scheduler_run_path producer_run
   profile_file="$(ftctl_dr_runtime_profile_path "${plan}")"
-  ftctl_dr_scheduler_ensure_running "${plan}" "${run}" "${profile_file}" "${run_path}" "${status_path}" || return $?
+  scheduler_run="${run}"
+  scheduler_run_path="${run_path}"
+  if ! ftctl_dr_scheduler_has_live_worker "${plan}"; then
+    producer_run="$(ftctl_dr_scheduler_latest_producer_run "$(ftctl_dr_scheduler_restore_points_path "${plan}")" "${plan}")"
+    if [[ -n "${producer_run}" && -f "$(ftctl_dr_runtime_run_path "${plan}" "${producer_run}")" ]]; then
+      scheduler_run="${producer_run}"
+      scheduler_run_path="$(ftctl_dr_runtime_run_path "${plan}" "${producer_run}")"
+    fi
+  fi
+  ftctl_dr_scheduler_ensure_running "${plan}" "${scheduler_run}" "${profile_file}" "${scheduler_run_path}" "${status_path}" || return $?
   generation="$(ftctl_dr_scheduler_request_and_wait "${plan}" "run" "RUNNING" "${reason}" "${run}" "false")" || return $?
   now="$(ftctl_now_iso8601)"
   ftctl_dr_scheduler_update_state "${run_path}" "${status_path}" \
@@ -541,6 +550,28 @@ with open(path, "r", encoding="utf-8") as fh:
         except (TypeError, ValueError):
             pass
 print(latest)
+PY
+}
+
+ftctl_dr_scheduler_latest_producer_run() {
+  local restore_points_path="${1-}" plan="${2-}"
+  [[ -f "${restore_points_path}" ]] || return 0
+  python3 - "${restore_points_path}" "${plan}" <<'PY'
+import json
+import sys
+
+path, plan = sys.argv[1:3]
+latest = None
+with open(path, "r", encoding="utf-8") as fh:
+    for line in fh:
+        try:
+            record = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        if record.get("planUuid") == plan and record.get("runUuid"):
+            latest = record
+if latest:
+    print(latest["runUuid"])
 PY
 }
 

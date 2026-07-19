@@ -6467,6 +6467,8 @@ selftest_case_dr_plan_scoped_control_protocol() {
   local plan_dir="${SELFTEST_ROOT}/run/dr-runtime/plans/${plan}"
   local scheduler_dir="${plan_dir}/scheduler"
   local run_path="${plan_dir}/runs/${run}.state"
+  local producer_run="run-sync-authority"
+  local producer_run_path="${plan_dir}/runs/${producer_run}.state"
   local status_path="${plan_dir}/status.state"
   local generation="" lease_path="" ack_pid="" capabilities=""
 
@@ -7568,6 +7570,8 @@ selftest_case_dr_scheduler_resume_recovers_missing_worker() {
   mkdir -p "${plan_dir}/runs"
   printf '{"planUuid":"%s","source":{"provider":"ABLESTACK"},"target":{"provider":"ABLESTACK"}}\n' "${plan}" > "${plan_dir}/profile.json"
   printf 'plan=%s\nrun=%s\n' "${plan}" "${run}" > "${run_path}"
+  printf 'plan=%s\nrun=%s\n' "${plan}" "${producer_run}" > "${producer_run_path}"
+  printf '{"planUuid":"%s","runUuid":"%s","checkpointSequence":4,"state":"TARGET_READY"}\n' "${plan}" "${producer_run}" > "${plan_dir}/restore-points.jsonl"
   cp -f "${run_path}" "${status_path}"
 
   (
@@ -7586,7 +7590,7 @@ selftest_case_dr_scheduler_resume_recovers_missing_worker() {
     ftctl_dr_scheduler_resume_after_transition "${plan}" "${run}" "test-cleanup" "${run_path}" "${status_path}"
   )
 
-  selftest_assert_file_contains "${call_log}" "ensure:${plan}:${run}:${plan_dir}/profile.json"
+  selftest_assert_file_contains "${call_log}" "ensure:${plan}:${producer_run}:${plan_dir}/profile.json"
   selftest_assert_file_contains "${call_log}" "request:${plan}:run:RUNNING"
   selftest_assert_eq "$(sed -n '1p' "${call_log}" | cut -d: -f1)" "ensure" "scheduler recovery must precede RUN request"
 }
