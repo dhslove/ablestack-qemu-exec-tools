@@ -2710,7 +2710,8 @@ ftctl_dr_runtime_action_state() {
     dr-sync-pause) printf 'PAUSED|sync-paused|100\n' ;;
     dr-sync-resume) printf 'SYNCING|sync-resumed|1\n' ;;
     dr-test-failover) printf 'TESTING|test-failover-accepted|1\n' ;;
-    dr-test-cleanup) printf 'READY|test-cleanup-completed|100\n' ;;
+    dr-test-prepare) printf 'TESTING|test-artifact-prepare-accepted|1\n' ;;
+    dr-test-cleanup|dr-test-artifact-cleanup) printf 'READY|test-cleanup-completed|100\n' ;;
     dr-failover) printf 'RUNNING|failover-accepted|1\n' ;;
     dr-failback) printf 'RUNNING|failback-accepted|1\n' ;;
     dr-reprotect) printf 'RUNNING|reprotect-accepted|1\n' ;;
@@ -2835,7 +2836,7 @@ ftctl_dr_runtime_should_delegate_action() {
       [[ "${FTCTL_DR_SYNC_FOREGROUND:-0}" != "1" ]] || return 1
       [[ "${FTCTL_DR_SCHEDULER_FOREGROUND:-0}" != "1" ]] || return 1
       ;;
-    dr-test-failover)
+    dr-test-failover|dr-test-prepare)
       [[ "${FTCTL_DR_TEST_FAILOVER_FOREGROUND:-0}" != "1" ]] || return 1
       ;;
     dr-failover)
@@ -2847,14 +2848,14 @@ ftctl_dr_runtime_should_delegate_action() {
     dr-reprotect)
       [[ "${FTCTL_DR_REPROTECT_FOREGROUND:-0}" != "1" ]] || return 1
       ;;
-    dr-sync-pause|dr-sync-resume|dr-test-cleanup|dr-release)
+    dr-sync-pause|dr-sync-resume|dr-test-cleanup|dr-test-artifact-cleanup|dr-release)
       ;;
   esac
   wait_lower="$(printf '%s' "${wait_value}" | tr '[:upper:]' '[:lower:]')"
   [[ "${wait_lower}" == "false" || "${wait_lower}" == "0" || "${wait_lower}" == "no" ]] || return 1
 
   case "${action}" in
-    dr-sync-start|dr-sync-pause|dr-sync-resume|dr-test-failover|dr-test-cleanup|dr-failover|dr-failback|dr-reprotect|dr-release) return 0 ;;
+    dr-sync-start|dr-sync-pause|dr-sync-resume|dr-test-failover|dr-test-prepare|dr-test-cleanup|dr-test-artifact-cleanup|dr-failover|dr-failback|dr-reprotect|dr-release) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -3009,7 +3010,7 @@ ftctl_dr_runtime_action() {
         fi
       fi
       ;;
-    dr-test-failover)
+    dr-test-failover|dr-test-prepare)
       rc=0
       if command -v ftctl_dr_scheduler_transition_begin >/dev/null 2>&1; then
         ftctl_dr_scheduler_transition_begin "${plan}" "${run}" "${action}" "${run_path}" "${status_path}" || rc=$?
@@ -3036,7 +3037,11 @@ ftctl_dr_runtime_action() {
         ftctl_dr_runtime_materialize_test_artifacts "${plan}" "${run}" "$(ftctl_dr_runtime_test_session_path "${plan}" "${run}")" "${run_path}" || rc=$?
       fi
       if [[ "${rc}" == "0" ]]; then
-        ftctl_guestprep_prepare_and_start "$(ftctl_dr_runtime_test_session_path "${plan}" "${run}")" "${run_path}" || rc=$?
+        if [[ "${action}" == "dr-test-prepare" ]]; then
+          ftctl_guestprep_prepare_artifacts "$(ftctl_dr_runtime_test_session_path "${plan}" "${run}")" "${run_path}" || rc=$?
+        else
+          ftctl_guestprep_prepare_and_start "$(ftctl_dr_runtime_test_session_path "${plan}" "${run}")" "${run_path}" || rc=$?
+        fi
         cp -f "$(ftctl_dr_runtime_test_session_path "${plan}" "${run}")" "$(ftctl_dr_runtime_active_test_session_path "${plan}")" 2>/dev/null || true
         test_sequence="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "test_restore_point_sequence")"
         checkpoint_lease_path="$(ftctl_dr_scheduler_checkpoint_lease_acquire "${plan}" "${test_sequence}" "${run}" "$(ftctl_dr_runtime_state_get_from_path "${run_path}" "test_restore_point_ref")")"
@@ -3087,7 +3092,7 @@ ftctl_dr_runtime_action() {
       ftctl_log_event "dr-runtime" "dr.test.failover" "ok" "" "" \
         "plan=${plan} run=${run} restore_point=$(ftctl_dr_runtime_state_get_from_path "${run_path}" "test_restore_point_ref")"
       ;;
-    dr-test-cleanup)
+    dr-test-cleanup|dr-test-artifact-cleanup)
       rc=0
       if command -v ftctl_dr_scheduler_transition_begin >/dev/null 2>&1; then
         ftctl_dr_scheduler_transition_begin "${plan}" "${run}" "${action}" "${run_path}" "${status_path}" || rc=$?
@@ -3363,7 +3368,7 @@ ftctl_dr_runtime_target_materialized() {
 
 ftctl_dr_runtime_capabilities() {
   local json="${1-0}" version="${PROG_VERSION:-unknown}"
-  local schema="20260714" action_contract="2026-07-14"
+  local schema="20260719" action_contract="2026-07-19"
   local commands=(
     "dr-plan-apply"
     "dr-sync-start"
@@ -3371,6 +3376,8 @@ ftctl_dr_runtime_capabilities() {
     "dr-sync-resume"
     "dr-test-failover"
     "dr-test-cleanup"
+    "dr-test-prepare"
+    "dr-test-artifact-cleanup"
     "dr-failover"
     "dr-failback"
     "dr-reprotect"
@@ -3389,7 +3396,7 @@ ftctl_dr_runtime_capabilities() {
       first="0"
       printf '"%s"' "$(ftctl__json_escape "${command}")"
     done
-    printf '],"supported_features":["async-run","status-projection","target-materialized-notify","target-materialized-idempotent","hardware-contract-projection","control-protocol-v2","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","guest-preparation-v1","test-domain-lifecycle-v1","cutover-ready-v1"]}\n'
+    printf '],"supported_features":["async-run","status-projection","target-materialized-notify","target-materialized-idempotent","hardware-contract-projection","control-protocol-v2","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","guest-preparation-v1","guest-preparation-v2","test-domain-lifecycle-v1","test-artifact-lifecycle-v2","cloud-managed-test-vm-v1","cutover-ready-v1"]}\n'
     return 0
   fi
 

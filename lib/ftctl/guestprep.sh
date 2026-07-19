@@ -148,6 +148,85 @@ except Exception:
   printf '%s\n' "${family}"
 }
 
+ftctl_guestprep_prepare_artifacts() {
+  local session_path="${1-}" run_path="${2-}"
+  local artifacts_dir plan run artifact_name manifest v2k_dir family rc=0 state_file execution_mode
+  artifacts_dir="$(jq -r '.testArtifacts.path // ""' "${session_path}" 2>/dev/null || true)"
+  plan="$(jq -r '.planUuid // ""' "${session_path}" 2>/dev/null || true)"
+  run="$(jq -r '.runUuid // ""' "${session_path}" 2>/dev/null || true)"
+  [[ -n "${artifacts_dir}" ]] || return 46
+  execution_mode="$(jq -r '.profile.policy.testExecutionMode // .request.testExecutionMode // "BOOT"' "${session_path}" 2>/dev/null || echo BOOT)"
+  if [[ "${execution_mode}" == "METADATA_ONLY" ]]; then
+    python3 - "${session_path}" "$(ftctl_now_iso8601)" <<'PY'
+import json, sys
+session_path, now = sys.argv[1:3]
+with open(session_path, "r", encoding="utf-8") as fh:
+    session = json.load(fh)
+session["guestPreparation"] = {"state":"SKIPPED", "reason":"METADATA_ONLY", "completedAt":now}
+session["state"] = "TEST_ARTIFACTS_READY"
+with open(session_path, "w", encoding="utf-8") as fh:
+    json.dump(session, fh, sort_keys=True, separators=(",", ":")); fh.write("\n")
+PY
+    ftctl_dr_runtime_path_set "${run_path}" \
+      "state=TEST_ARTIFACTS_READY" \
+      "step=test-artifacts-ready" \
+      "progress=100" \
+      "guest_prep_state=SKIPPED" \
+      "test_domain_name=" \
+      "test_domain_state=" \
+      "updated_at=$(ftctl_now_iso8601)"
+    return 0
+  fi
+  artifact_name="ftctl-dr-artifact-$(ftctl_dr_runtime_key "${plan}")-$(ftctl_dr_runtime_key "${run}")"
+  artifact_name="${artifact_name:0:62}"
+  manifest="${artifacts_dir}/guestprep-manifest.json"
+  ftctl_guestprep_write_manifest "${session_path}" "${manifest}" "${artifact_name}" || return 47
+  [[ "$(jq -r '.disks | length' "${manifest}" 2>/dev/null || echo 0)" -gt 0 ]] || return 46
+
+  v2k_dir="$(ftctl_guestprep_v2k_lib_dir || true)"
+  [[ -n "${v2k_dir}" ]] || return 47
+  family="$(ftctl_guestprep_detect_family "${manifest}")"
+  case "${family}" in
+    linux)
+      env V2K_LIB_DIR="${v2k_dir}" V2K_WORKDIR="${artifacts_dir}" V2K_MANIFEST="${manifest}" V2K_JSON_OUT=1 \
+        bash -c 'source "$1/engine.sh"; v2k_linux_bootstrap_initramfs "$2"' _ "${v2k_dir}" "${manifest}" || rc=$?
+      ;;
+    windows)
+      env V2K_LIB_DIR="${v2k_dir}" V2K_WORKDIR="${artifacts_dir}" V2K_MANIFEST="${manifest}" V2K_JSON_OUT=1 \
+        bash -c 'source "$1/engine.sh"; v2k_cloud_windows_winpe_bootstrap "${FTCTL_DR_WINPE_ISO:-/usr/share/ablestack/v2k/winpe/winpe-ablestack-v2k-amd64.iso}" "${FTCTL_DR_VIRTIO_ISO:-/usr/share/virtio-win/virtio-win.iso}" "${FTCTL_DR_WINPE_TIMEOUT:-900}"' _ "${v2k_dir}" || rc=$?
+      ;;
+    *) return 48 ;;
+  esac
+  [[ "${rc}" == "0" ]] || return 49
+
+  state_file="$(mktemp -t ftctl.dr.guestprep-artifacts.XXXXXX)"
+  python3 - "${session_path}" "${state_file}" "${manifest}" "${family}" "$(ftctl_now_iso8601)" <<'PY'
+import json, sys
+session_path, state_path, manifest, family, now = sys.argv[1:6]
+with open(session_path, "r", encoding="utf-8") as fh:
+    session = json.load(fh)
+session["guestPreparation"] = {"state":"READY", "family":family, "manifest":manifest, "completedAt":now}
+session["state"] = "TEST_ARTIFACTS_READY"
+with open(session_path, "w", encoding="utf-8") as fh:
+    json.dump(session, fh, sort_keys=True, separators=(",", ":")); fh.write("\n")
+with open(state_path, "w", encoding="utf-8") as fh:
+    fh.write("guest_prep_state=READY\n")
+    fh.write(f"guest_family={family}\n")
+    fh.write(f"guestprep_manifest_path={manifest}\n")
+PY
+  ftctl_dr_runtime_path_set "${run_path}" \
+    "state=TEST_ARTIFACTS_READY" \
+    "step=test-artifacts-ready" \
+    "progress=100" \
+    "guest_prep_state=$(ftctl_dr_runtime_state_get_from_path "${state_file}" guest_prep_state)" \
+    "guest_family=$(ftctl_dr_runtime_state_get_from_path "${state_file}" guest_family)" \
+    "guestprep_manifest_path=$(ftctl_dr_runtime_state_get_from_path "${state_file}" guestprep_manifest_path)" \
+    "test_domain_name=" \
+    "test_domain_state=" \
+    "updated_at=$(ftctl_now_iso8601)"
+  rm -f "${state_file}"
+}
+
 ftctl_guestprep_prepare_and_start() {
   local session_path="${1-}" run_path="${2-}"
   local artifacts_dir plan run domain manifest v2k_dir family validation timeout rc=0 state_file execution_mode

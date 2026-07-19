@@ -237,6 +237,9 @@ Commands:
   dr-sync-resume     Resume a DR sync session
   dr-test-failover   Accept a DR test failover session
   dr-test-cleanup    Complete DR test cleanup state
+  dr-test-prepare    Prepare writable test artifacts for Cloud-managed Test Failover
+  dr-test-artifact-cleanup
+                     Remove FTCTL test artifacts after Cloud resource cleanup
   dr-failover        Accept a DR failover session
   dr-failback        Accept a DR failback session
   dr-reprotect       Accept a DR reprotect session
@@ -330,7 +333,7 @@ parse_args() {
         print_version
         exit "${EXIT_OK}"
         ;;
-      protect|protect-start|status|reconcile|failover|failover-prepare|failback|failback-sync|failback-finalize|failback-reprotect|unprotect|fence-confirm|fence-clear|pause-protection|resume-protection|preflight-remote|dr-key-ensure|dr-key-install|dr-key-remove|check|health|events|snapshot|dr-plan-apply|dr-sync-start|dr-sync-pause|dr-sync-resume|dr-test-failover|dr-test-cleanup|dr-failover|dr-failback|dr-reprotect|dr-target-materialized|dr-release|dr-status|dr-capabilities|dr-cancel|config)
+      protect|protect-start|status|reconcile|failover|failover-prepare|failback|failback-sync|failback-finalize|failback-reprotect|unprotect|fence-confirm|fence-clear|pause-protection|resume-protection|preflight-remote|dr-key-ensure|dr-key-install|dr-key-remove|check|health|events|snapshot|dr-plan-apply|dr-sync-start|dr-sync-pause|dr-sync-resume|dr-test-failover|dr-test-cleanup|dr-test-prepare|dr-test-artifact-cleanup|dr-failover|dr-failback|dr-reprotect|dr-target-materialized|dr-release|dr-status|dr-capabilities|dr-cancel|config)
         [[ -z "${CLI_COMMAND}" ]] || {
           echo "ERROR: multiple commands specified" >&2
           exit "${EXIT_USAGE}"
@@ -675,7 +678,7 @@ dispatch() {
     dr-plan-apply)
       ftctl_dr_runtime_plan_apply "${CLI_PLAN}" "${CLI_PROFILE_JSON}" "${CLI_ROLE}" "${CLI_DRY_RUN}" "${CLI_JSON}"
       ;;
-    dr-sync-start|dr-sync-pause|dr-sync-resume|dr-test-failover|dr-test-cleanup|dr-failover|dr-failback|dr-reprotect|dr-release)
+    dr-sync-start|dr-sync-pause|dr-sync-resume|dr-test-failover|dr-test-cleanup|dr-test-prepare|dr-test-artifact-cleanup|dr-failover|dr-failback|dr-reprotect|dr-release)
       ftctl_dr_runtime_action "${CLI_COMMAND}" "${CLI_PLAN}" "${CLI_RUN}" "${CLI_PROFILE_JSON}" "${CLI_ROLE}" \
         "${CLI_MODE}" "${CLI_RESTORE_POINT}" "${CLI_FORCE}" "${CLI_DRY_RUN}" "${CLI_WAIT_VALUE}" "${CLI_JSON}"
       ;;

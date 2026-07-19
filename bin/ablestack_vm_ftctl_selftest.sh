@@ -7481,7 +7481,7 @@ checkpoint_sequence=2
 restore_points_path=${restore_points}
 EOF
 
-  out="$(PATH="${fakebin}:$PATH" bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-test-failover \
+  out="$(PATH="${fakebin}:$PATH" bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-test-prepare \
     --config "${SELFTEST_CONFIG}" \
     --plan "${plan}" \
     --run run-test-session \
@@ -7489,8 +7489,8 @@ EOF
     --restore-point "ftctl:${plan}:run-sync:2" \
     --json)"
   selftest_assert_contains "${out}" '"result":"accepted"' "test failover accepted"
-  selftest_assert_contains "${out}" '"state":"TESTING"' "test failover state"
-  selftest_assert_contains "${out}" '"step":"test-session-ready"' "test failover step"
+  selftest_assert_contains "${out}" '"state":"TEST_ARTIFACTS_READY"' "test artifact prepare state"
+  selftest_assert_contains "${out}" '"step":"test-artifacts-ready"' "test artifact prepare step"
   selftest_assert_contains "${out}" '"test_session_state":"READY"' "test session ready"
   selftest_assert_contains "${out}" '"test_restore_point_ref":"ftctl:plan-test-session:run-sync:2"' "test restore point ref"
   selftest_assert_contains "${out}" '"test_restore_point_sequence":2' "test restore point sequence"
@@ -7508,10 +7508,10 @@ EOF
     --config "${SELFTEST_CONFIG}" \
     --plan "${plan}" \
     --json)"
-  selftest_assert_contains "${out}" '"state":"TESTING"' "status projects test state"
+  selftest_assert_contains "${out}" '"state":"TEST_ARTIFACTS_READY"' "status projects artifact-ready state"
   selftest_assert_file_contains "${SELFTEST_ROOT}/run/dr-runtime/plans/${plan}/test-sessions/active.json" '"sessionId":"plan-test-session:run-test-session"'
 
-  cleanup="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-test-cleanup \
+  cleanup="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-test-artifact-cleanup \
     --config "${SELFTEST_CONFIG}" \
     --plan "${plan}" \
     --run run-test-cleanup \
