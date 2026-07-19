@@ -356,7 +356,9 @@ ftctl_dr_scheduler_transition_end() {
 
 ftctl_dr_scheduler_resume_after_transition() {
   local plan="${1-}" run="${2-}" reason="${3-transition-complete}" run_path="${4-}" status_path="${5-}"
-  local generation now
+  local generation now profile_file
+  profile_file="$(ftctl_dr_runtime_profile_path "${plan}")"
+  ftctl_dr_scheduler_ensure_running "${plan}" "${run}" "${profile_file}" "${run_path}" "${status_path}" || return $?
   generation="$(ftctl_dr_scheduler_request_and_wait "${plan}" "run" "RUNNING" "${reason}" "${run}" "false")" || return $?
   now="$(ftctl_now_iso8601)"
   ftctl_dr_scheduler_update_state "${run_path}" "${status_path}" \

@@ -7554,6 +7554,43 @@ EOF
   [[ ! -d "${artifact_dir}" ]] || selftest_fail "test artifact directory should be removed"
 }
 
+selftest_case_dr_scheduler_resume_recovers_missing_worker() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR cleanup resume recovers a missing scheduler worker"
+
+  local plan="plan-resume-recovery"
+  local run="run-resume-recovery"
+  local plan_dir="${SELFTEST_ROOT}/run/dr-runtime/plans/${plan}"
+  local run_path="${plan_dir}/runs/${run}.state"
+  local status_path="${plan_dir}/status.state"
+  local call_log="${SELFTEST_ROOT}/scheduler-resume-recovery.log"
+
+  mkdir -p "${plan_dir}/runs"
+  printf '{"planUuid":"%s","source":{"provider":"ABLESTACK"},"target":{"provider":"ABLESTACK"}}\n' "${plan}" > "${plan_dir}/profile.json"
+  printf 'plan=%s\nrun=%s\n' "${plan}" "${run}" > "${run_path}"
+  cp -f "${run_path}" "${status_path}"
+
+  (
+    ftctl_dr_scheduler_ensure_running() {
+      printf 'ensure:%s:%s:%s\n' "$1" "$2" "$3" >> "${call_log}"
+      return 0
+    }
+    ftctl_dr_scheduler_request_and_wait() {
+      printf 'request:%s:%s:%s\n' "$1" "$2" "$3" >> "${call_log}"
+      printf '7\n'
+    }
+    ftctl_dr_scheduler_update_state() {
+      printf 'update:%s:%s\n' "$1" "$2" >> "${call_log}"
+      return 0
+    }
+    ftctl_dr_scheduler_resume_after_transition "${plan}" "${run}" "test-cleanup" "${run_path}" "${status_path}"
+  )
+
+  selftest_assert_file_contains "${call_log}" "ensure:${plan}:${run}:${plan_dir}/profile.json"
+  selftest_assert_file_contains "${call_log}" "request:${plan}:run:RUNNING"
+  selftest_assert_eq "$(sed -n '1p' "${call_log}" | cut -d: -f1)" "ensure" "scheduler recovery must precede RUN request"
+}
+
 selftest_case_dr_runtime_planned_failover_promotes_latest_checkpoint() {
   selftest_reset_env
   selftest_info "FTCTL_DR planned failover locks a final checkpoint and delegates target power-on"
@@ -8388,6 +8425,7 @@ selftest_main() {
   selftest_case_dr_scheduler_vmware_mock_checkpoint_loop
   selftest_case_dr_guestprep_manifest_preserves_vmware_boot_contract
   selftest_case_dr_runtime_test_failover_cleanup
+  selftest_case_dr_scheduler_resume_recovers_missing_worker
   selftest_case_dr_runtime_planned_failover_promotes_latest_checkpoint
   selftest_case_dr_runtime_failback_restores_source_after_reverse_checkpoint
   selftest_case_dr_runtime_reprotect_starts_reverse_protection_checkpoint

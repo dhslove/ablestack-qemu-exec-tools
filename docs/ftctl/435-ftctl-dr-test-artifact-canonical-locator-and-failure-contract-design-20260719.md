@@ -159,6 +159,13 @@ After the test session file exists, all nonzero exits execute:
 
 The terminal session record remains until Cloud confirms or requests cleanup.
 
+Scheduler resume is a recovery operation, not only a control-message write. If
+the former continuous-sync worker is no longer alive, FTCTL first starts and
+verifies an owned worker from the persisted Plan profile, then sends the
+generation-scoped `run` command and waits for the matching `RUNNING` ACK. A
+missing worker can therefore never be represented as a successful cleanup with
+`PAUSED` or `QUIESCED` control state.
+
 ## 7. Status isolation
 
 Finite Test Failover state must not overwrite Plan-wide protection authority.
@@ -212,6 +219,7 @@ PASS requires:
 - canonical RBD creates a protected snapshot and clone;
 - injected failures leave no snapshot, clone, lease, or active pointer;
 - scheduler resumes after all failure classes;
+- cleanup restarts a missing scheduler worker before publishing `READY`;
 - status reports the failed operation without changing protection authority;
 - Cloud can consume the published manifest and create its own test VM;
 - cleanup is idempotent when called repeatedly.
@@ -226,5 +234,6 @@ PASS requires:
 | File access | relative path possible | validated absolute immutable source only |
 | Failure | rc 1 becomes restore point not found | explicit materialization/locator error |
 | Cleanup | only selected exit codes | all post-session failures rollback |
+| Scheduler recovery | cleanup can wait on a dead worker | ensure owned worker, then require `RUNNING` ACK |
 | Status | operation can overwrite Plan state | operation and protection stored separately |
 | VM authority | compatibility path may start a domain | Cloud exclusively owns customer test VM |
