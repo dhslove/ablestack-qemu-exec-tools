@@ -263,3 +263,27 @@ JSONL row 수 == completed sequence 수
 - 실패/진행 cycle가 Cloud READY checkpoint로 표시되지 않는다.
 - 기존 FT/DR 데이터 전송 경로와 lock 경계가 회귀하지 않는다.
 - self-test와 세 RPO cycle 실환경 검증을 통과한다.
+
+## 13. 2026-07-20 Plan-Wide Sequence And Scheduler Session Addendum
+
+Current/completed checkpoint 분리는 유지하되 sequence와 Scheduler ownership은
+run 경계에 종속되면 안 된다. 실환경에서 pause/resume 및 test cleanup 이후
+여러 run PID 파일과 이전 run의 live worker가 동시에 관찰됐다. run-local
+sequence는 Cloud authority generation과 충돌했다.
+
+신규 cycle은 Plan 단위 `plan_cycle_sequence`를 사용하고, 지속 Scheduler는
+별도 `scheduler_session_uuid`와 Plan singleton lease를 가진다. current와 latest
+completed bundle은 해당 session, lease epoch, Plan sequence를 함께 제공한다.
+세부 파일 구조, generation, control ACK, reconcile 및 selftest 계약은
+`436-ftctl-dr-plan-scheduler-singleton-lease-and-generation-design-20260720.md`를
+따른다.
+
+## 14. 2026-07-21 Operation/Protection Envelope Addendum
+
+`current`와 `latest completed` bundle은 상태 조회에 전달된 operation Run에
+귀속되지 않는다. Test Cleanup 상태 조회처럼 요청 Run과 producer Run이 다를 수
+있으므로 completed cycle은 durable record의 producer UUID를 제공해야 한다.
+
+요청 Run의 상태, Plan 보호 authority, completed cycle을 분리하는 JSON 계약과
+호환 alias 규칙은
+`437-ftctl-dr-operation-and-protection-status-envelope-design-20260721.md`를 따른다.

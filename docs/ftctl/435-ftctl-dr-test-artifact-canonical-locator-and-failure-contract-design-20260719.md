@@ -1,9 +1,10 @@
 # FTCTL DR Test Artifact Canonical Locator And Failure Contract Design
 
 - Date: 2026-07-19
-- Status: corrective engine design, implementation pending
+- Status: implemented and real-environment verified; Cloud terminal convergence correction pending
 - Scope: `dr-test-prepare` and `dr-test-artifact-cleanup`
 - Cloud normative design: `ablestack-cloud/docs/ftctl/562-cross-hypervisor-dr-test-artifact-contract-and-projection-isolation-design-20260719.md`
+- Cloud terminal design: `ablestack-cloud/docs/ftctl/563-cross-hypervisor-dr-test-failover-terminal-convergence-design-20260720.md`
 
 ## 1. Engine boundary
 
@@ -238,3 +239,38 @@ PASS requires:
 | Scheduler recovery | cleanup can wait on a dead worker | ensure owned worker, then require `RUNNING` ACK |
 | Status | operation can overwrite Plan state | operation and protection stored separately |
 | VM authority | compatibility path may start a domain | Cloud exclusively owns customer test VM |
+
+## 12. Real-environment verification and authority boundary - 2026-07-20
+
+The v3 RBD contract passed a real Test Failover preparation for Plan
+`cbdf5abe-2795-4e7c-9995-78a67129b0de`, Run
+`5d44ebc4-3bde-46d1-a706-353cfd878f60`.
+
+| Check | Result |
+|---|---|
+| FTCTL state | `TEST_ARTIFACTS_READY`, progress 100 |
+| Worker | `SUCCEEDED`, exit 0 |
+| Checkpoint | sequence 19 leased |
+| RBD | protected snapshot and Plan/Run-scoped clone present |
+| Guest preparation | Linux `READY` |
+| Cloud import | test volume created from the clone |
+| Cloud VM | created and Running with secure OVMF and `io_uring` |
+
+The remaining nonterminal Cloud Run is not an FTCTL failure. FTCTL must retain
+`TEST_ARTIFACTS_READY`, `TEST_ACTIVE`, and the checkpoint lease until explicit
+artifact cleanup. It must not add a Cloud-VM-running state or complete the
+Cloud Run because Cloud owns volume import, VM start, and boot validation.
+
+Cloud document 563 is normative for monotonic `DrTestSession` transitions and
+finite Run completion. No FTCTL behavior change is required for that correction.
+
+## 13. Cleanup Resume Projection Boundary - 2026-07-21
+
+Artifact cleanup success and scheduler resume are confirmed separately. The
+cleanup action releases the checkpoint lease and obtains an identity-bearing
+RUNNING ACK, while the next normal producer checkpoint proves resumed data
+protection. A cleanup Run never owns that checkpoint.
+
+FTCTL status must therefore expose the cleanup operation and Plan protection as
+separate envelopes. The normative engine contract is document 437; the Cloud
+projection contract is document 565.

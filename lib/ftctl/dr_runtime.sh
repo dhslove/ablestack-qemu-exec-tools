@@ -2322,6 +2322,7 @@ ftctl_dr_runtime_emit_state_json() {
   local current_checkpoint_mode_decision_code current_checkpoint_automatic_reseed current_checkpoint_invalid_baseline_disk_count
   local current_checkpoint_ref current_checkpoint_state
   local latest_completed_checkpoint_sequence latest_completed_checkpoint_cycle_type latest_completed_checkpoint_ref latest_completed_checkpoint_state
+  local latest_completed_producer_run_uuid
   local latest_completed_source_checkpoint_at latest_completed_target_durable_at latest_completed_target_ready_rpo_seconds
   local latest_completed_manifest_path latest_completed_checkpoint_path
   local latest_completed_requested_mode latest_completed_effective_mode latest_completed_mode_decision_code latest_completed_reseed_reason
@@ -2476,6 +2477,7 @@ ftctl_dr_runtime_emit_state_json() {
   latest_completed_checkpoint_cycle_type="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_checkpoint_cycle_type")"
   latest_completed_checkpoint_ref="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_checkpoint_ref")"
   latest_completed_checkpoint_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_checkpoint_state")"
+  latest_completed_producer_run_uuid="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_producer_run_uuid")"
   latest_completed_source_checkpoint_at="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_source_checkpoint_at")"
   latest_completed_target_durable_at="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_target_durable_at")"
   latest_completed_target_ready_rpo_seconds="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_target_ready_rpo_seconds")"
@@ -2518,13 +2520,13 @@ if latest:
     for key in (
         "checkpointSequence", "cycleType", "checkpointRef", "state",
         "sourceCheckpointAt", "targetDurableAt", "targetReadyRpoSeconds",
-        "manifest", "checkpoint",
+        "manifest", "checkpoint", "producerRunUuid",
     ):
         value = latest.get(key)
         print("" if value is None else value)
 PY
     )
-    if (( ${#completed_checkpoint_fields[@]} >= 9 )); then
+    if (( ${#completed_checkpoint_fields[@]} >= 10 )); then
       latest_completed_checkpoint_sequence="${completed_checkpoint_fields[0]}"
       latest_completed_checkpoint_cycle_type="${completed_checkpoint_fields[1]}"
       latest_completed_checkpoint_ref="${completed_checkpoint_fields[2]}"
@@ -2534,8 +2536,13 @@ PY
       latest_completed_target_ready_rpo_seconds="${completed_checkpoint_fields[6]}"
       latest_completed_manifest_path="${completed_checkpoint_fields[7]}"
       latest_completed_checkpoint_path="${completed_checkpoint_fields[8]}"
+      latest_completed_producer_run_uuid="${completed_checkpoint_fields[9]}"
     fi
   fi
+  if [[ -z "${latest_completed_producer_run_uuid}" && "${latest_completed_checkpoint_ref}" == ftctl:* ]]; then
+    latest_completed_producer_run_uuid="$(awk -F: '{print $(NF-1)}' <<< "${latest_completed_checkpoint_ref}")"
+  fi
+  [[ -n "${latest_completed_producer_run_uuid}" ]] || latest_completed_producer_run_uuid="${active_worker_run_uuid}"
   [[ -n "${current_checkpoint_sequence}" ]] || current_checkpoint_sequence="${checkpoint_sequence}"
   test_session_id="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "test_session_id")"
   test_session_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "test_session_path")"
@@ -2745,6 +2752,7 @@ PY
   ftctl_dr_runtime_json_string_field "latest_completed_checkpoint_cycle_type" "${latest_completed_checkpoint_cycle_type}"
   ftctl_dr_runtime_json_string_field "latest_completed_checkpoint_ref" "${latest_completed_checkpoint_ref}"
   ftctl_dr_runtime_json_string_field "latest_completed_checkpoint_state" "${latest_completed_checkpoint_state}"
+  ftctl_dr_runtime_json_string_field "latest_completed_producer_run_uuid" "${latest_completed_producer_run_uuid}"
   ftctl_dr_runtime_json_string_field "latest_completed_source_checkpoint_at" "${latest_completed_source_checkpoint_at}"
   ftctl_dr_runtime_json_string_field "latest_completed_target_durable_at" "${latest_completed_target_durable_at}"
   ftctl_dr_runtime_json_number_field "latest_completed_target_ready_rpo_seconds" "${latest_completed_target_ready_rpo_seconds}"
@@ -3581,7 +3589,7 @@ ftctl_dr_runtime_capabilities() {
       first="0"
       printf '"%s"' "$(ftctl__json_escape "${command}")"
     done
-    printf '],"supported_features":["async-run","status-projection","target-materialized-notify","target-materialized-idempotent","hardware-contract-projection","control-protocol-v2","control-protocol-v3","dr-scheduler-singleton-v1","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","guest-preparation-v1","guest-preparation-v2","test-domain-lifecycle-v1","test-artifact-lifecycle-v2","cloud-managed-test-vm-v1","cutover-ready-v1"]}\n'
+    printf '],"supported_features":["async-run","status-projection","target-materialized-notify","target-materialized-idempotent","hardware-contract-projection","control-protocol-v2","control-protocol-v3","dr-scheduler-singleton-v1","dr-checkpoint-producer-v1","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","guest-preparation-v1","guest-preparation-v2","test-domain-lifecycle-v1","test-artifact-lifecycle-v2","cloud-managed-test-vm-v1","cutover-ready-v1"]}\n'
     return 0
   fi
 

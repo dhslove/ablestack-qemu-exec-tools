@@ -631,6 +631,7 @@ if os.path.exists(checkpoint_path):
 record = {
     "planUuid": plan,
     "runUuid": run,
+    "producerRunUuid": run,
     "checkpointSequence": int(sequence),
     "checkpointRef": f"ftctl:{plan}:{run}:{sequence}",
     "cycleType": cycle_type,
@@ -1130,6 +1131,7 @@ ftctl_dr_scheduler_worker() {
       "latest_completed_requested_mode=${requested_mode}" \
       "latest_completed_checkpoint_ref=${checkpoint_ref}" \
       "latest_completed_checkpoint_state=READY" \
+      "latest_completed_producer_run_uuid=${run}" \
       "latest_completed_source_checkpoint_at=${source_at}" \
       "latest_completed_target_durable_at=${target_at}" \
       "latest_completed_target_ready_rpo_seconds=${rpo}" \

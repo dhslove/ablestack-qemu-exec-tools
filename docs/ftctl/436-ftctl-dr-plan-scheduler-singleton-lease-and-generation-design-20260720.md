@@ -440,3 +440,13 @@ PID가 정확히 하나인지 검증한다.
 `selftest_case_dr_plan_scoped_control_protocol`,
 `selftest_case_dr_scheduler_ablestack_checkpoint_loop`,
 `selftest_case_dr_scheduler_vmware_mock_checkpoint_loop`가 통과했다.
+
+## 18. Status Consumer Identity Correction - 2026-07-21
+
+Plan singleton ownership is insufficient if a consumer interprets the latest
+terminal operation Run as the producer. The status request Run now identifies
+only the operation envelope. Scheduler lease/active PID identifies the producer,
+and each completed cycle carries that producer UUID from its durable record.
+
+Automatic Test Cleanup resume remains unchanged. Status envelope v2 and its
+self-test/compatibility rules are normative in document 437.

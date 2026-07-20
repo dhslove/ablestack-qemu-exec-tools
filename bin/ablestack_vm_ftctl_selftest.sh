@@ -7301,12 +7301,14 @@ JSON
   selftest_assert_contains "${out}" '"latest_completed_checkpoint_sequence":2' "scheduler completed checkpoint sequence"
   selftest_assert_contains "${out}" '"latest_completed_checkpoint_ref":"ftctl:plan-scheduler-ablestack:run-scheduler-ablestack:2"' "scheduler completed checkpoint ref"
   selftest_assert_contains "${out}" '"latest_completed_checkpoint_state":"READY"' "scheduler completed checkpoint state"
+  selftest_assert_contains "${out}" '"latest_completed_producer_run_uuid":"run-scheduler-ablestack"' "scheduler completed producer run"
   selftest_assert_contains "${out}" '"driver_state":"CHECKPOINT_READY"' "scheduler driver state"
   restore_points="${SELFTEST_ROOT}/run/dr-runtime/plans/plan-scheduler-ablestack/restore-points.jsonl"
   selftest_assert_eq "$(wc -l < "${restore_points}" | tr -d '[:space:]')" "2" "restore point count"
   selftest_assert_file_contains "${restore_points}" '"cycleType":"full-seed"'
   selftest_assert_file_contains "${restore_points}" '"cycleType":"incremental"'
   selftest_assert_file_contains "${restore_points}" '"checkpointRef":"ftctl:plan-scheduler-ablestack:run-scheduler-ablestack:2"'
+  selftest_assert_file_contains "${restore_points}" '"producerRunUuid":"run-scheduler-ablestack"'
   convert_count="$(grep -c -- "convert --force-share -p -n -S" "${call_log}")"
   selftest_assert_eq "${convert_count}" "2" "scheduler convert count"
 }
@@ -7361,6 +7363,7 @@ JSON
   selftest_assert_contains "${out}" '"current_checkpoint_state":"COMPLETED"' "vmware scheduler current checkpoint state"
   selftest_assert_contains "${out}" '"latest_completed_checkpoint_sequence":2' "vmware scheduler completed checkpoint sequence"
   selftest_assert_contains "${out}" '"latest_completed_checkpoint_ref":"ftctl:plan-scheduler-vmware:run-scheduler-vmware:2"' "vmware scheduler completed checkpoint ref"
+  selftest_assert_contains "${out}" '"latest_completed_producer_run_uuid":"run-scheduler-vmware"' "vmware scheduler completed producer run"
   restore_points="${SELFTEST_ROOT}/run/dr-runtime/plans/plan-scheduler-vmware/restore-points.jsonl"
   selftest_assert_eq "$(wc -l < "${restore_points}" | tr -d '[:space:]')" "2" "vmware restore point count"
   selftest_assert_file_contains "${restore_points}" '"cycleType":"incremental"'
