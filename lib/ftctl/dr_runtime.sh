@@ -2312,6 +2312,9 @@ ftctl_dr_runtime_emit_state_json() {
   local scheduler_state worker_pid worker_state worker_started_at worker_updated_at worker_exit_code
   local runtime_generation scheduler_pid_alive baseline_state reseed_reason consecutive_automatic_reseed_count
   local control_protocol_version control_generation control_ack_generation control_state cycle_state
+  local scheduler_session_uuid scheduler_lease_epoch authority_sequence plan_cycle_sequence scheduler_health
+  local replication_activity protection_state active_worker_run_uuid active_worker_pid active_worker_start_ticks
+  local worker_heartbeat_at control_request_run_uuid owner_matched
   local transition_state transition_action transition_quiesced_at checkpoint_lease_state checkpoint_lease_path
   local retryable retry_after_sec lock_file holder_pid holder_command holder_age_sec
   local checkpoint_sequence restore_points_path dynamic_rpo
@@ -2403,6 +2406,19 @@ ftctl_dr_runtime_emit_state_json() {
   control_ack_generation="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "control_ack_generation")"
   control_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "control_state")"
   cycle_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "cycle_state")"
+  scheduler_session_uuid="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "scheduler_session_uuid")"
+  scheduler_lease_epoch="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "scheduler_lease_epoch")"
+  authority_sequence="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "authority_sequence")"
+  plan_cycle_sequence="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "plan_cycle_sequence")"
+  scheduler_health="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "scheduler_health")"
+  replication_activity="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "replication_activity")"
+  protection_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "protection_state")"
+  active_worker_run_uuid="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "active_worker_run_uuid")"
+  active_worker_pid="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "active_worker_pid")"
+  active_worker_start_ticks="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "active_worker_start_ticks")"
+  worker_heartbeat_at="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "worker_heartbeat_at")"
+  control_request_run_uuid="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "control_request_run_uuid")"
+  owner_matched="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "owner_matched")"
   transition_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "transition_state")"
   transition_action="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "transition_action")"
   transition_quiesced_at="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "transition_quiesced_at")"
@@ -2414,9 +2430,30 @@ ftctl_dr_runtime_emit_state_json() {
   worker_updated_at="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "worker_updated_at")"
   worker_exit_code="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "worker_exit_code")"
   scheduler_pid_alive="false"
-  if [[ "${worker_pid}" =~ ^[0-9]+$ ]] && kill -0 "${worker_pid}" >/dev/null 2>&1; then
+  if ftctl_dr_scheduler_active_worker_valid "${plan}" ""; then
     scheduler_pid_alive="true"
+    scheduler_state="RUNNING"
+    scheduler_health="HEALTHY"
+    owner_matched="true"
+    scheduler_session_uuid="$(ftctl_dr_scheduler_active_value "${plan}" "scheduler_session_uuid")"
+    scheduler_lease_epoch="$(ftctl_dr_scheduler_active_value "${plan}" "lease_epoch")"
+    active_worker_run_uuid="$(ftctl_dr_scheduler_active_value "${plan}" "worker_run_uuid")"
+    active_worker_pid="$(ftctl_dr_scheduler_active_value "${plan}" "pid")"
+    active_worker_start_ticks="$(ftctl_dr_scheduler_active_value "${plan}" "start_ticks")"
+    worker_heartbeat_at="$(ftctl_dr_scheduler_active_value "${plan}" "heartbeat_at")"
+  elif [[ -f "$(ftctl_dr_scheduler_active_pid_path "${plan}")" ]]; then
+    scheduler_pid_alive="false"
+    scheduler_health="DEAD"
+    owner_matched="false"
+  elif [[ -z "${scheduler_health}" ]]; then
+    scheduler_health="STOPPED"
+    owner_matched="false"
   fi
+  authority_sequence="$(ftctl_dr_scheduler_current_authority_sequence "${plan}")"
+  plan_cycle_sequence="$(ftctl_state_read_kv "$(ftctl_dr_scheduler_sequence_path "${plan}")" "plan_cycle_sequence" 2>/dev/null || true)"
+  control_request_run_uuid="$(ftctl_dr_scheduler_control_value "${plan}" "owner_run")"
+  [[ -n "${replication_activity}" ]] || replication_activity="IDLE"
+  [[ -n "${protection_state}" ]] || protection_state="${state}"
   retryable="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "retryable")"
   retry_after_sec="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "retry_after_sec")"
   lock_file="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "lock_file")"
@@ -2657,6 +2694,19 @@ PY
   ftctl_dr_runtime_json_string_field "scheduler_state" "${scheduler_state}"
   ftctl_dr_runtime_json_number_field "runtime_generation" "${runtime_generation}"
   ftctl_dr_runtime_json_boolean_field "scheduler_pid_alive" "${scheduler_pid_alive}" || return $?
+  ftctl_dr_runtime_json_string_field "scheduler_session_uuid" "${scheduler_session_uuid}"
+  ftctl_dr_runtime_json_number_field "scheduler_lease_epoch" "${scheduler_lease_epoch}"
+  ftctl_dr_runtime_json_number_field "authority_sequence" "${authority_sequence}"
+  ftctl_dr_runtime_json_number_field "plan_cycle_sequence" "${plan_cycle_sequence}"
+  ftctl_dr_runtime_json_string_field "scheduler_health" "${scheduler_health}"
+  ftctl_dr_runtime_json_string_field "replication_activity" "${replication_activity}"
+  ftctl_dr_runtime_json_string_field "protection_state" "${protection_state}"
+  ftctl_dr_runtime_json_string_field "active_worker_run_uuid" "${active_worker_run_uuid}"
+  ftctl_dr_runtime_json_number_field "active_worker_pid" "${active_worker_pid}"
+  ftctl_dr_runtime_json_number_field "active_worker_start_ticks" "${active_worker_start_ticks}"
+  ftctl_dr_runtime_json_string_field "worker_heartbeat_at" "${worker_heartbeat_at}"
+  ftctl_dr_runtime_json_string_field "control_request_run_uuid" "${control_request_run_uuid}"
+  ftctl_dr_runtime_json_boolean_field "owner_matched" "${owner_matched}" || return $?
   ftctl_dr_runtime_json_string_field "baseline_state" "${baseline_state}"
   ftctl_dr_runtime_json_string_field "reseed_reason" "${reseed_reason}"
   ftctl_dr_runtime_json_number_field "consecutive_automatic_reseed_count" "${consecutive_automatic_reseed_count}"
@@ -3503,7 +3553,7 @@ ftctl_dr_runtime_target_materialized() {
 
 ftctl_dr_runtime_capabilities() {
   local json="${1-0}" version="${PROG_VERSION:-unknown}"
-  local schema="20260719" action_contract="2026-07-19"
+  local schema="20260720" action_contract="2026-07-20"
   local commands=(
     "dr-plan-apply"
     "dr-sync-start"
@@ -3531,7 +3581,7 @@ ftctl_dr_runtime_capabilities() {
       first="0"
       printf '"%s"' "$(ftctl__json_escape "${command}")"
     done
-    printf '],"supported_features":["async-run","status-projection","target-materialized-notify","target-materialized-idempotent","hardware-contract-projection","control-protocol-v2","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","guest-preparation-v1","guest-preparation-v2","test-domain-lifecycle-v1","test-artifact-lifecycle-v2","cloud-managed-test-vm-v1","cutover-ready-v1"]}\n'
+    printf '],"supported_features":["async-run","status-projection","target-materialized-notify","target-materialized-idempotent","hardware-contract-projection","control-protocol-v2","control-protocol-v3","dr-scheduler-singleton-v1","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","guest-preparation-v1","guest-preparation-v2","test-domain-lifecycle-v1","test-artifact-lifecycle-v2","cloud-managed-test-vm-v1","cutover-ready-v1"]}\n'
     return 0
   fi
 

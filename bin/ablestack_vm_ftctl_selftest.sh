@@ -6470,7 +6470,7 @@ selftest_case_dr_plan_scoped_control_protocol() {
   local producer_run="run-sync-authority"
   local producer_run_path="${plan_dir}/runs/${producer_run}.state"
   local status_path="${plan_dir}/status.state"
-  local generation="" lease_path="" ack_pid="" capabilities=""
+  local generation="" lease_path="" ack_pid="" capabilities="" worker_pid="" worker_start_ticks=""
 
   if ftctl_command_requires_lock "dr-test-failover" ""; then
     selftest_fail "DR test failover must not use the legacy global lock"
@@ -6488,20 +6488,32 @@ scheduler_state=RUNNING
 EOF
   cp -f "${run_path}" "${status_path}"
 
+  bash -c 'while true; do sleep 1; done' -- --plan "${plan}" &
+  worker_pid="$!"
+  worker_start_ticks="$(ftctl_dr_scheduler_process_start_ticks "${worker_pid}")"
+  ftctl_state_write_kv_all "$(ftctl_dr_scheduler_active_pid_path "${plan}")" \
+    "pid=${worker_pid}" \
+    "start_ticks=${worker_start_ticks}" \
+    "scheduler_session_uuid=${plan}" \
+    "lease_epoch=1" \
+    "worker_run_uuid=${producer_run}" \
+    "heartbeat_at=$(ftctl_now_iso8601)"
   (
     local control_path control_generation
     control_path="$(ftctl_dr_scheduler_control_path "${plan}")"
     while [[ ! -f "${control_path}" ]]; do sleep 1; done
     control_generation="$(ftctl_state_read_kv "${control_path}" generation)"
-    ftctl_dr_scheduler_control_ack "${plan}" "${control_generation}" "PAUSED" "IDLE" "${run}"
+    ftctl_dr_scheduler_control_ack "${plan}" "${control_generation}" "PAUSED" "IDLE" "${producer_run}" \
+      "${plan}" "1" "${worker_pid}" "${worker_start_ticks}"
   ) &
   ack_pid="$!"
-  printf '%s\n' "${ack_pid}" > "$(ftctl_dr_scheduler_pid_path "${plan}" "${run}")"
   generation="$(ftctl_dr_scheduler_request_and_wait "${plan}" pause PAUSED test-failover "${run}" true)"
   wait "${ack_pid}"
+  kill "${worker_pid}" 2>/dev/null || true
+  wait "${worker_pid}" 2>/dev/null || true
 
   selftest_assert_eq "${generation}" "1" "first control generation"
-  selftest_assert_file_contains "$(ftctl_dr_scheduler_control_path "${plan}")" "version=2"
+  selftest_assert_file_contains "$(ftctl_dr_scheduler_control_path "${plan}")" "version=3"
   selftest_assert_file_contains "$(ftctl_dr_scheduler_control_path "${plan}")" "generation=1"
   selftest_assert_file_contains "$(ftctl_dr_scheduler_control_ack_path "${plan}")" "state=PAUSED"
   selftest_assert_file_contains "$(ftctl_dr_scheduler_control_ack_path "${plan}")" "cycle_state=IDLE"
@@ -6513,8 +6525,10 @@ EOF
   [[ ! -e "${lease_path}" ]] || selftest_fail "checkpoint lease should be released"
 
   capabilities="$(ftctl_dr_runtime_capabilities 1)"
-  selftest_assert_contains "${capabilities}" '"runtime_schema_version":"20260714"' "control schema version"
+  selftest_assert_contains "${capabilities}" '"runtime_schema_version":"20260720"' "control schema version"
   selftest_assert_contains "${capabilities}" '"control-protocol-v2"' "control protocol capability"
+  selftest_assert_contains "${capabilities}" '"control-protocol-v3"' "control protocol v3 capability"
+  selftest_assert_contains "${capabilities}" '"dr-scheduler-singleton-v1"' "singleton scheduler capability"
   selftest_assert_contains "${capabilities}" '"checkpoint-lease"' "checkpoint lease capability"
 }
 
