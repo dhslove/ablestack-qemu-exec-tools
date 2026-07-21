@@ -285,3 +285,127 @@ Add cases to `ftctl-vm` self-tests:
 - A post-cleanup cycle advances normally without a manual Resume.
 - Cloud can project authority and cycles without interpreting the request Run as
   protection ownership.
+
+## 13. Implementation and deployment record (2026-07-21)
+
+The compatibility implementation shipped in this iteration adds the durable
+producer identity without breaking the current flat `dr-status` contract:
+
+- restore-point records persist `producerRunUuid`;
+- scheduler state persists `latest_completed_producer_run_uuid`;
+- `dr-status` emits `latest_completed_producer_run_uuid` and advertises
+  `dr-checkpoint-producer-v1`;
+- the Cloud Agent maps the field into the latest completed-cycle snapshot;
+- Cloud resolves cycle and restore-point ownership from that producer UUID,
+  independently of the latest finite operation Run.
+
+Validation completed with the deployed `0.9.1-1` RPM on `10.10.32.1/2/3`.
+After deployment-safe scheduler restart, Plan
+`c952cae5-11db-4e2a-807d-5ae1d3f9634d` advanced from sequence 152 to 153.
+The new checkpoint reported producer Run
+`faf53080-6832-4fbd-9d5a-77e3cc19461c`, `CBT_INCREMENTAL`, a healthy live
+scheduler, and a consistent owner. Test artifacts remained cleaned.
+
+The full nested v2 envelope remains a forward-compatible follow-up. The
+producer field added here is the minimum compatible contract required to stop
+cleanup Run attribution from corrupting protection projection.
+
+## 14. Mandatory v2 correction after live regression - 2026-07-21
+
+The minimum producer compatibility field is not sufficient as a terminal
+design. Live Plan 37 showed that Cloud still queried `dr-status` with terminal
+cleanup Run `308e9451-...`. The run-scoped flat response represented cleanup
+success but omitted the latest incremental verification metric and exposed
+stopped operation-local scheduler aliases. A Plan-only status query at the same
+time exposed checkpoint sequence 154 as incrementally verified and the actual
+protection scheduler as failed with `DR_SCHEDULER_OWNER_MISMATCH`.
+
+Therefore `dr-status-envelope-v2` is mandatory, not an optional follow-up.
+
+### 14.1 Scope contract
+
+```text
+dr-status --plan P
+  scope=PLAN_AUTHORITY
+  operation absent
+  protection required
+
+dr-status --plan P --run R
+  scope=BOTH
+  operation describes R
+  protection is still read from Plan-scoped authority files
+```
+
+The requested Run may not affect these protection fields:
+
+- scheduler identity, lease, health, heartbeat, and activity;
+- Plan authority and cycle sequences;
+- producer Run UUID;
+- latest durable checkpoint and incremental verification;
+- protection error and integrity state.
+
+Top-level compatibility aliases are generated only after both typed envelopes
+are complete. A missing operation metric cannot create a null protection alias.
+
+### 14.2 Required emitter split
+
+Refactor `ftctl_dr_runtime_emit_state_json()` into:
+
+```bash
+ftctl_dr_runtime_emit_operation_json plan run run_path
+ftctl_dr_runtime_emit_protection_json plan status_path
+ftctl_dr_runtime_emit_status_envelope_json scope operation_json protection_json
+```
+
+`ftctl_dr_runtime_emit_protection_json` resolves the latest completed cycle from
+the durable cycle/restore-point record and validates its producer against the
+checkpoint reference. It never reads `runs/<requested-run>.state` for
+protection values.
+
+### 14.3 Strict validation
+
+The command returns exit 65 and `DR_STATUS_PROTECTION_INCOMPLETE` when a READY
+protection envelope lacks any of:
+
+```text
+scheduler_session_uuid
+scheduler_lease_epoch
+authority_sequence
+owner_matched
+scheduler_health
+latest_completed_sequence
+latest_completed_producer_run_uuid
+latest_completed_target_durable_at
+latest_completed_incremental_verified
+```
+
+An ERROR/DEGRADED protection envelope may retain the last durable checkpoint,
+but it must expose the current scheduler error independently of operation
+success.
+
+### 14.4 Compatibility and rollout
+
+Advertise `dr-status-envelope-v2` only after nested output and all self-tests
+pass. Cloud/Agent may use a two-query compatibility mode before that capability:
+one Plan-only query for protection and one run-scoped query for operation. They
+must never project authority from the run-scoped flat response.
+
+### 14.5 Additional self-tests
+
+1. cleanup Run succeeds while Plan protection reports OWNER_MISMATCH;
+2. Plan-only and BOTH responses contain identical protection objects;
+3. run-scoped operation omission cannot null latest incremental verification;
+4. requested Run UUID never becomes producer fallback;
+5. top-level aliases equal their typed-envelope source;
+6. malformed/incomplete READY protection is rejected;
+7. status reads do not create, resume, or replace a scheduler worker.
+
+### 14.6 Corrected AS-IS / TO-BE
+
+| Area | AS-IS after minimum fix | Required TO-BE |
+|---|---|---|
+| producer | cycle owner corrected | owner plus complete authority envelope |
+| run query | finite Run still controls flat response | finite Run controls operation only |
+| metrics | operation omission becomes null authority | latest cycle metrics always Plan-scoped |
+| scheduler error | hidden by stale operation/cache | current protection error always emitted |
+| rollout | v2 optional follow-up | v2 mandatory with bounded dual-query fallback |

@@ -94,6 +94,34 @@ ftctl_dr_scheduler_active_worker_valid() {
   return 0
 }
 
+ftctl_dr_scheduler_repair_self_ownership() {
+  local plan="${1-}" session="${2-}" epoch="${3-}" run="${4-}" pid="${5-}" start_ticks="${6-}"
+  local actual_start lease_epoch active_pid active_start active_session active_epoch
+  [[ "${pid}" == "$$" && "${pid}" =~ ^[0-9]+$ ]] || return 1
+  actual_start="$(ftctl_dr_scheduler_process_start_ticks "${pid}" 2>/dev/null || true)"
+  [[ "${start_ticks}" =~ ^[0-9]+$ && "${actual_start}" == "${start_ticks}" ]] || return 1
+
+  # The caller owns the Plan scheduler flock while this repair runs. A newer
+  # lease is the only durable evidence that this worker has lost authority.
+  lease_epoch="$(ftctl_dr_scheduler_current_lease_epoch "${plan}")"
+  [[ "${lease_epoch}" =~ ^[0-9]+$ && "${epoch}" =~ ^[0-9]+$ ]] || return 1
+  (( lease_epoch <= epoch )) || return 1
+
+  active_pid="$(ftctl_dr_scheduler_active_value "${plan}" "pid")"
+  active_start="$(ftctl_dr_scheduler_active_value "${plan}" "start_ticks")"
+  active_session="$(ftctl_dr_scheduler_active_value "${plan}" "scheduler_session_uuid")"
+  active_epoch="$(ftctl_dr_scheduler_active_value "${plan}" "lease_epoch")"
+  if [[ "${active_pid}" =~ ^[0-9]+$ && "${active_pid}" != "${pid}" ]] \
+      && kill -0 "${active_pid}" >/dev/null 2>&1 \
+      && [[ "$(ftctl_dr_scheduler_process_start_ticks "${active_pid}" 2>/dev/null || true)" == "${active_start}" ]] \
+      && [[ "${active_session}" != "${session}" || "${active_epoch}" -gt "${epoch}" ]]; then
+    return 1
+  fi
+
+  ftctl_dr_scheduler_write_heartbeat "${plan}" "${session}" "${epoch}" "${run}" "${pid}" "${start_ticks}" || return 1
+  ftctl_dr_scheduler_active_worker_valid "${plan}" "${session}"
+}
+
 ftctl_dr_scheduler_current_lease_epoch() {
   local plan="${1-}" epoch
   epoch="$(ftctl_dr_scheduler_lease_value "${plan}" "lease_epoch")"
@@ -859,7 +887,8 @@ ftctl_dr_scheduler_worker() {
     "plan=${plan} run=${run} driver=${driver} interval=${interval} max_cycles=${max_cycles}"
 
   while true; do
-    if ! ftctl_dr_scheduler_active_worker_valid "${plan}" "${session}"; then
+    if ! ftctl_dr_scheduler_active_worker_valid "${plan}" "${session}" \
+        && ! ftctl_dr_scheduler_repair_self_ownership "${plan}" "${session}" "${lease_epoch}" "${run}" "$$" "${start_ticks}"; then
       ftctl_dr_scheduler_update_state "${state_path}" "${status_path}" \
         "state=ERROR" \
         "scheduler_state=ERROR" \

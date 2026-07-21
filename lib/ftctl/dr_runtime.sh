@@ -2348,7 +2348,7 @@ ftctl_dr_runtime_emit_state_json() {
   local reprotect_manifest_path reprotect_checkpoint_path reprotect_requested_at reprotect_completed_at
   local reprotect_rto_actual_seconds reverse_direction reverse_profile_path reverse_restore_points_path reprotect_worker_pid
   local target_vm_id target_external_ref target_materialized target_vm_present target_storage_present target_network_present restore_point_present
-  local profile_path source_firmware="" source_secure_boot="" source_hardware_fingerprint=""
+  local status_scope profile_path source_firmware="" source_secure_boot="" source_hardware_fingerprint=""
   local target_boot_type="" target_boot_mode="" target_io_policy="" target_iothreads=""
 
   ftctl_dr_runtime_state_snapshot_begin "${state_path}"
@@ -2521,12 +2521,17 @@ if latest:
         "checkpointSequence", "cycleType", "checkpointRef", "state",
         "sourceCheckpointAt", "targetDurableAt", "targetReadyRpoSeconds",
         "manifest", "checkpoint", "producerRunUuid",
+        "requestedMode", "effectiveMode", "modeDecisionCode", "reseedReason",
+        "automaticReseed", "invalidBaselineDiskCount", "incrementalVerified",
+        "metricsEstimated", "virtualBytes", "changedBytes", "sourceReadBytes",
+        "targetWrittenBytes", "transferPayloadBytes", "changedExtentCount",
+        "durationMs", "throughputBps", "baselineGeneration", "cycleToken",
     ):
         value = latest.get(key)
         print("" if value is None else value)
 PY
     )
-    if (( ${#completed_checkpoint_fields[@]} >= 10 )); then
+    if (( ${#completed_checkpoint_fields[@]} >= 28 )); then
       latest_completed_checkpoint_sequence="${completed_checkpoint_fields[0]}"
       latest_completed_checkpoint_cycle_type="${completed_checkpoint_fields[1]}"
       latest_completed_checkpoint_ref="${completed_checkpoint_fields[2]}"
@@ -2537,6 +2542,24 @@ PY
       latest_completed_manifest_path="${completed_checkpoint_fields[7]}"
       latest_completed_checkpoint_path="${completed_checkpoint_fields[8]}"
       latest_completed_producer_run_uuid="${completed_checkpoint_fields[9]}"
+      latest_completed_requested_mode="${completed_checkpoint_fields[10]}"
+      latest_completed_effective_mode="${completed_checkpoint_fields[11]}"
+      latest_completed_mode_decision_code="${completed_checkpoint_fields[12]}"
+      latest_completed_reseed_reason="${completed_checkpoint_fields[13]}"
+      latest_completed_automatic_reseed="${completed_checkpoint_fields[14]}"
+      latest_completed_invalid_baseline_disk_count="${completed_checkpoint_fields[15]}"
+      latest_completed_incremental_verified="${completed_checkpoint_fields[16]}"
+      latest_completed_metrics_estimated="${completed_checkpoint_fields[17]}"
+      latest_completed_virtual_bytes="${completed_checkpoint_fields[18]}"
+      latest_completed_changed_bytes="${completed_checkpoint_fields[19]}"
+      latest_completed_source_read_bytes="${completed_checkpoint_fields[20]}"
+      latest_completed_target_written_bytes="${completed_checkpoint_fields[21]}"
+      latest_completed_transfer_payload_bytes="${completed_checkpoint_fields[22]}"
+      latest_completed_changed_extent_count="${completed_checkpoint_fields[23]}"
+      latest_completed_duration_ms="${completed_checkpoint_fields[24]}"
+      latest_completed_throughput_bps="${completed_checkpoint_fields[25]}"
+      latest_completed_baseline_generation="${completed_checkpoint_fields[26]}"
+      latest_completed_cycle_token="${completed_checkpoint_fields[27]}"
     fi
   fi
   if [[ -z "${latest_completed_producer_run_uuid}" && "${latest_completed_checkpoint_ref}" == ftctl:* ]]; then
@@ -2644,10 +2667,12 @@ PY
     fi
   }
 
+  [[ -n "${run}" ]] && status_scope="OPERATION" || status_scope="PLAN_AUTHORITY"
   printf '{"command":"%s","result":"%s"' \
     "$(ftctl__json_escape "${command}")" \
     "$(ftctl__json_escape "${result}")"
   ftctl_dr_runtime_json_string_field "plan_uuid" "${plan}"
+  ftctl_dr_runtime_json_string_field "status_scope" "${status_scope}"
   [[ -n "${run}" ]] && ftctl_dr_runtime_json_string_field "run_uuid" "${run}"
   ftctl_dr_runtime_json_string_field "action" "${action}"
   ftctl_dr_runtime_json_string_field "state" "${state:-PLANNED}"
@@ -3589,7 +3614,7 @@ ftctl_dr_runtime_capabilities() {
       first="0"
       printf '"%s"' "$(ftctl__json_escape "${command}")"
     done
-    printf '],"supported_features":["async-run","status-projection","target-materialized-notify","target-materialized-idempotent","hardware-contract-projection","control-protocol-v2","control-protocol-v3","dr-scheduler-singleton-v1","dr-checkpoint-producer-v1","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","guest-preparation-v1","guest-preparation-v2","test-domain-lifecycle-v1","test-artifact-lifecycle-v2","cloud-managed-test-vm-v1","cutover-ready-v1"]}\n'
+    printf '],"supported_features":["async-run","status-projection","status-scope-v2","target-materialized-notify","target-materialized-idempotent","hardware-contract-projection","control-protocol-v2","control-protocol-v3","dr-scheduler-singleton-v1","dr-scheduler-self-owner-repair-v1","dr-checkpoint-producer-v1","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","guest-preparation-v1","guest-preparation-v2","test-domain-lifecycle-v1","test-artifact-lifecycle-v2","cloud-managed-test-vm-v1","cutover-ready-v1"]}\n'
     return 0
   fi
 

@@ -450,3 +450,114 @@ and each completed cycle carries that producer UUID from its durable record.
 
 Automatic Test Cleanup resume remains unchanged. Status envelope v2 and its
 self-test/compatibility rules are normative in document 437.
+
+## 19. Self-owner validation and automatic recovery correction - 2026-07-21
+
+Read-only preflight on Plan `c952cae5-11db-4e2a-807d-5ae1d3f9634d` found that
+the resumed worker completed cycles 153 and 154, then stopped with:
+
+```text
+state=ERROR
+step=scheduler-recovery-failed
+error_code=DR_SCHEDULER_OWNER_MISMATCH
+scheduler_pid_alive=false
+scheduler_health=OWNER_MISMATCH
+owner_matched=false
+replication_activity=STOPPED
+```
+
+The durable checkpoint remained valid. The failure was scheduler ownership,
+not data loss. Current worker code converts any failure of
+`ftctl_dr_scheduler_active_worker_valid()` into a terminal owner mismatch. That
+binary decision is too strong for transient, partially replaced, or repairable
+self-record state.
+
+### 19.1 Immutable worker identity
+
+After background `exec`, the worker captures and retains:
+
+```text
+local_pid=$BASHPID
+local_start_ticks=/proc/$BASHPID/stat[22]
+local_session_uuid
+local_lease_epoch
+local_producer_run_uuid
+owner_lock_fd=205
+```
+
+The identity is not re-derived from mutable `active.pid` during each loop.
+`active.pid` and `lease.state` are durable observations of this identity, not
+the source of the worker's self identity.
+
+### 19.2 Diagnostic validation result
+
+Replace boolean validation with a typed result:
+
+```text
+VALID
+SELF_RECORD_MISSING
+SELF_RECORD_STALE
+PROCESS_DEAD
+START_TICKS_MISMATCH
+SESSION_MISMATCH
+LEASE_EPOCH_MISMATCH
+FOREIGN_LIVE_OWNER
+OWNER_LOCK_LOST
+```
+
+The worker retries state-file reads three times. If it still owns the lifetime
+lock and no higher live lease is proven, `SELF_RECORD_MISSING` and
+`SELF_RECORD_STALE` are repaired atomically from immutable local identity and
+the loop continues. `FOREIGN_LIVE_OWNER`, a higher lease, or lost owner lock is
+a genuine mismatch and stops the worker.
+
+### 19.3 Atomic state files
+
+Write `active.pid`, `lease.state`, `control.ack`, and `sequence.state` through a
+temporary file in the same directory, `fsync`, and atomic rename. Readers parse
+one complete snapshot and reject duplicate keys or missing required identity
+fields. A status query never rewrites these files.
+
+### 19.4 Recovery algorithm
+
+The DR reconcile path scans enabled Plan profiles. For a dead worker:
+
+1. acquire the Plan owner lock non-blocking;
+2. recheck that no live owner exists;
+3. ensure no transition/checkpoint lease is active;
+4. increment `lease_epoch` exactly once;
+5. write RECOVERING authority and start one worker;
+6. require RUNNING ACK with matching session/epoch/PID/start ticks;
+7. require a fresh heartbeat before reporting HEALTHY;
+8. require a subsequent durable cycle before restoring normal cutover
+   eligibility.
+
+Recovery is rate-limited by Plan and idempotent. Repeated timer invocations may
+observe or adopt the same worker but cannot create another worker. A failed
+recovery remains DEGRADED with a stable reason; it never leaves a green READY
+status.
+
+### 19.5 Self-tests
+
+```text
+test_dr_scheduler_repairs_missing_self_record_under_owned_lock
+test_dr_scheduler_repairs_stale_self_record_under_owned_lock
+test_dr_scheduler_rejects_higher_foreign_lease
+test_dr_scheduler_rejects_lost_owner_lock
+test_dr_scheduler_recover_dead_owner_once
+test_dr_scheduler_reconcile_is_idempotent_under_concurrency
+test_dr_scheduler_recovery_requires_identity_ack
+test_dr_scheduler_recovery_requires_new_heartbeat
+test_dr_scheduler_status_does_not_recover_worker
+```
+
+### 19.6 Corrected AS-IS / TO-BE
+
+| Area | AS-IS | TO-BE |
+|---|---|---|
+| self identity | re-read from mutable active file | immutable local identity plus durable observation |
+| validation | boolean pass/fail | typed reason and bounded repair |
+| transient file state | terminal OWNER_MISMATCH | atomic reread and self-repair under owner lock |
+| genuine conflict | same generic mismatch | proven foreign identity/higher lease only |
+| dead worker | may remain stopped | singleton reconcile with lease +1 |
+| READY restoration | stale DB/cache may remain green | fresh identity ACK, heartbeat, and cycle required |
