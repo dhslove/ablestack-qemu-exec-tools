@@ -8481,6 +8481,10 @@ JSON
 
   unit="$(ftctl_dr_scheduler_unit_name "${plan}")"
   selftest_assert_eq "${unit}" "ablestack-vm-ftctl-dr@${plan}.service" "Plan systemd unit name"
+  selftest_assert_file_contains "${ROOT_DIR}/lib/ftctl/systemd/ablestack-vm-ftctl-dr@.service" \
+    'dr-scheduler-run --plan %i --json'
+  selftest_assert_file_not_contains "${ROOT_DIR}/lib/ftctl/systemd/ablestack-vm-ftctl-dr@.service" \
+    'dr-scheduler-run --plan %I --json'
   ftctl_dr_scheduler_write_launch_state "${plan}" "${run}" "${profile}" "${state}" "${status}" "SELFTEST"
   selftest_assert_file_contains "${launch}" "plan_uuid=${plan}"
   selftest_assert_file_contains "${launch}" "run_uuid=${run}"

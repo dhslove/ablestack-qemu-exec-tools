@@ -1,5 +1,5 @@
 [Unit]
-Description=ABLESTACK FTCTL DR scheduler for plan %I
+Description=ABLESTACK FTCTL DR scheduler for plan %i
 After=network-online.target libvirtd.service
 Wants=network-online.target
 StartLimitIntervalSec=300
@@ -8,7 +8,7 @@ StartLimitBurst=3
 [Service]
 Type=exec
 EnvironmentFile=-/etc/ablestack/ablestack-vm-ftctl.conf
-ExecStart=/usr/local/bin/ablestack_vm_ftctl dr-scheduler-run --plan %I --json
+ExecStart=/usr/local/bin/ablestack_vm_ftctl dr-scheduler-run --plan %i --json
 Restart=on-failure
 RestartSec=5s
 KillMode=mixed
@@ -16,4 +16,3 @@ TimeoutStopSec=90s
 SuccessExitStatus=0 10
 User=root
 Group=root
-
