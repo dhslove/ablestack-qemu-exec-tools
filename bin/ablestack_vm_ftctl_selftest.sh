@@ -7834,6 +7834,65 @@ EOF
   selftest_assert_contains "${out}" '"target_power_state":"POWER_ON_DELEGATED"' "status projects delegated power state"
 }
 
+selftest_case_dr_runtime_cloud_cutover_commit_is_idempotent() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR commits Cloud-owned target promotion with monotonic authority"
+
+  local plan="plan-cloud-cutover" run="run-cloud-cutover"
+  local plan_dir="${SELFTEST_ROOT}/run/dr-runtime/plans/${plan}"
+  local run_path="${plan_dir}/runs/${run}.state"
+  local status_path="${plan_dir}/status.state"
+  local session_path="${plan_dir}/failovers/${run}.json"
+  local out="" rc=0
+
+  mkdir -p "${plan_dir}/runs" "${plan_dir}/failovers"
+  cat > "${run_path}" <<EOF
+plan=${plan}
+run=${run}
+action=dr-failover
+state=CUTOVER_READY
+step=cutover-ready
+progress=100
+failover_session_id=${plan}:${run}
+failover_restore_point_sequence=42
+active_side=SOURCE
+target_power_state=POWERED_OFF
+target_promotion_state=CUTOVER_READY
+updated_at=2026-07-22T00:00:00Z
+EOF
+  cp -f "${run_path}" "${status_path}"
+  cat > "${session_path}" <<JSON
+{"planUuid":"${plan}","runUuid":"${run}","sessionId":"${plan}:${run}","state":"CUTOVER_READY","activeSide":"SOURCE","targetPromotion":{"state":"CUTOVER_READY","powerState":"POWERED_OFF","lifecycleOwner":"Cloud"}}
+JSON
+  cp -f "${session_path}" "${plan_dir}/failovers/active.json"
+
+  out="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-cutover-commit \
+    --config "${SELFTEST_CONFIG}" --plan "${plan}" --run "${run}" \
+    --session-id "${plan}:${run}" --checkpoint-sequence 42 --authority-generation 7 \
+    --target-power-state POWERED_ON --boot-validation-state POWER_STATE_VALIDATED --json)"
+  selftest_assert_contains "${out}" '"state":"FAILED_OVER"' "Cloud cutover commit state"
+  selftest_assert_contains "${out}" '"active_side":"TARGET"' "Cloud cutover commit active side"
+  selftest_assert_contains "${out}" '"engine_ack_state":"ACKNOWLEDGED"' "Cloud cutover commit acknowledgement"
+  selftest_assert_file_contains "${session_path}" '"cloudAuthorityGeneration":7'
+  selftest_assert_file_contains "${session_path}" '"activeSide":"TARGET"'
+
+  out="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-cutover-commit \
+    --config "${SELFTEST_CONFIG}" --plan "${plan}" --run "${run}" \
+    --session-id "${plan}:${run}" --checkpoint-sequence 42 --authority-generation 7 \
+    --target-power-state POWERED_ON --boot-validation-state POWER_STATE_VALIDATED --json)"
+  selftest_assert_contains "${out}" '"state":"FAILED_OVER"' "repeated Cloud cutover commit is idempotent"
+
+  set +e
+  out="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-cutover-commit \
+    --config "${SELFTEST_CONFIG}" --plan "${plan}" --run "${run}" \
+    --session-id "${plan}:${run}" --checkpoint-sequence 42 --authority-generation 6 \
+    --target-power-state POWERED_ON --boot-validation-state POWER_STATE_VALIDATED --json 2>&1)"
+  rc=$?
+  set -e
+  selftest_assert_eq "${rc}" "79" "stale Cloud authority generation must fail"
+  selftest_assert_contains "${out}" 'DR_CUTOVER_GENERATION_STALE' "stale generation error code"
+}
+
 selftest_case_dr_runtime_failback_restores_source_after_reverse_checkpoint() {
   selftest_reset_env
   selftest_info "FTCTL_DR failback runs reverse checkpoint and restores source active side"
@@ -8536,6 +8595,7 @@ selftest_main() {
   selftest_case_dr_runtime_test_failover_cleanup
   selftest_case_dr_scheduler_resume_recovers_missing_worker
   selftest_case_dr_runtime_planned_failover_promotes_latest_checkpoint
+  selftest_case_dr_runtime_cloud_cutover_commit_is_idempotent
   selftest_case_dr_runtime_failback_restores_source_after_reverse_checkpoint
   selftest_case_dr_runtime_reprotect_starts_reverse_protection_checkpoint
   selftest_case_dr_scheduler_vmware_requires_mover

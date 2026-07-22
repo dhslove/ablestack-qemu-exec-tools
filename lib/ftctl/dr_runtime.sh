@@ -2388,6 +2388,7 @@ ftctl_dr_runtime_emit_state_json() {
   local failover_manifest_path failover_checkpoint_path failover_requested_at restore_point_locked_at
   local target_promote_started_at target_power_on_at failover_completed_at rto_actual_seconds
   local active_side target_power_state target_promotion_state failover_worker_pid
+  local boot_validation_state cloud_cutover_session_id cloud_authority_generation engine_ack_state engine_ack_at
   local guest_prep_state guest_family guestprep_manifest_path manifest_schema_version manifest_sha256
   local guestprep_checkpoint_sequence source_fence_state scheduler_recovery_state
   local test_domain_name test_domain_state test_boot_validation_mode
@@ -2654,6 +2655,11 @@ PY
   active_side="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "active_side")"
   target_power_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "target_power_state")"
   target_promotion_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "target_promotion_state")"
+  boot_validation_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "boot_validation_state")"
+  cloud_cutover_session_id="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "cloud_cutover_session_id")"
+  cloud_authority_generation="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "cloud_authority_generation")"
+  engine_ack_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "engine_ack_state")"
+  engine_ack_at="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "engine_ack_at")"
   failover_worker_pid="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "failover_worker_pid")"
   failback_session_id="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "failback_session_id")"
   failback_mode="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "failback_mode")"
@@ -2897,6 +2903,11 @@ PY
   ftctl_dr_runtime_json_string_field "active_side" "${active_side}"
   ftctl_dr_runtime_json_string_field "target_power_state" "${target_power_state}"
   ftctl_dr_runtime_json_string_field "target_promotion_state" "${target_promotion_state}"
+  ftctl_dr_runtime_json_string_field "boot_validation_state" "${boot_validation_state}"
+  ftctl_dr_runtime_json_string_field "cloud_cutover_session_id" "${cloud_cutover_session_id}"
+  ftctl_dr_runtime_json_number_field "cloud_authority_generation" "${cloud_authority_generation}"
+  ftctl_dr_runtime_json_string_field "engine_ack_state" "${engine_ack_state}"
+  ftctl_dr_runtime_json_string_field "engine_ack_at" "${engine_ack_at}"
   ftctl_dr_runtime_json_number_field "failover_worker_pid" "${failover_worker_pid}"
   ftctl_dr_runtime_json_string_field "failback_session_id" "${failback_session_id}"
   ftctl_dr_runtime_json_string_field "failback_mode" "${failback_mode}"
@@ -3645,6 +3656,130 @@ ftctl_dr_runtime_target_materialized() {
   fi
 }
 
+ftctl_dr_runtime_cutover_commit() {
+  local plan="${1-}" run="${2-}" session_id="${3-}" checkpoint_sequence="${4-}"
+  local authority_generation="${5-}" target_power_state="${6-}" boot_validation_state="${7-}" json="${8-0}"
+  local run_path status_path active_path session_path state current_session current_checkpoint current_generation now
+
+  ftctl_dr_runtime_require_plan "${plan}" || return 2
+  ftctl_dr_runtime_require_run "${run}" || return 2
+  if [[ -z "${session_id}" || ! "${checkpoint_sequence}" =~ ^[0-9]+$ || ! "${authority_generation}" =~ ^[0-9]+$ ]]; then
+    [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_error_json "dr-cutover-commit" "${plan}" "${run}" \
+      "DR_CUTOVER_COMMIT_INVALID" "session id, checkpoint sequence, and authority generation are required" 2
+    [[ "${json}" == "1" ]] || printf 'dr-cutover-commit: invalid commit contract\n' >&2
+    return 2
+  fi
+  if [[ "${target_power_state}" != "POWERED_ON" ]]; then
+    [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_error_json "dr-cutover-commit" "${plan}" "${run}" \
+      "DR_TARGET_NOT_RUNNING" "Cloud target power state must be POWERED_ON" 78
+    return 78
+  fi
+  case "${boot_validation_state}" in
+    POWER_STATE_VALIDATED|GUEST_HEARTBEAT_VALIDATED) ;;
+    *)
+      [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_error_json "dr-cutover-commit" "${plan}" "${run}" \
+        "DR_BOOT_VALIDATION_INCOMPLETE" "Cloud target boot validation is incomplete" 78
+      return 78
+      ;;
+  esac
+
+  run_path="$(ftctl_dr_runtime_run_path "${plan}" "${run}")"
+  status_path="$(ftctl_dr_runtime_status_path "${plan}")"
+  active_path="$(ftctl_dr_runtime_active_failover_session_path "${plan}")"
+  session_path="$(ftctl_dr_runtime_failover_session_path "${plan}" "${run}")"
+  [[ -f "${run_path}" && -f "${status_path}" ]] || {
+    [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_error_json "dr-cutover-commit" "${plan}" "${run}" \
+      "DR_CUTOVER_SESSION_NOT_FOUND" "FTCTL cutover runtime was not found" 44
+    return 44
+  }
+
+  state="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "state")"
+  current_session="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "failover_session_id")"
+  current_checkpoint="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "failover_restore_point_sequence")"
+  current_generation="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "cloud_authority_generation")"
+  [[ "${current_session}" == "${session_id}" ]] || {
+    [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_error_json "dr-cutover-commit" "${plan}" "${run}" \
+      "DR_CUTOVER_SESSION_MISMATCH" "Cloud cutover session does not match FTCTL runtime" 79
+    return 79
+  }
+  [[ "${current_checkpoint}" == "${checkpoint_sequence}" ]] || {
+    [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_error_json "dr-cutover-commit" "${plan}" "${run}" \
+      "DR_CUTOVER_CHECKPOINT_MISMATCH" "Cloud checkpoint does not match FTCTL cutover checkpoint" 79
+    return 79
+  }
+  if [[ -n "${current_generation}" && "${authority_generation}" -lt "${current_generation}" ]]; then
+    [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_error_json "dr-cutover-commit" "${plan}" "${run}" \
+      "DR_CUTOVER_GENERATION_STALE" "Cloud authority generation is older than the committed generation" 79
+    return 79
+  fi
+  if [[ "${state}" != "CUTOVER_READY" && "${state}" != "FAILED_OVER" ]]; then
+    [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_error_json "dr-cutover-commit" "${plan}" "${run}" \
+      "DR_CUTOVER_STATE_INVALID" "FTCTL runtime is not ready for Cloud promotion commit" 79
+    return 79
+  fi
+
+  now="$(ftctl_now_iso8601)"
+  ftctl_dr_runtime_path_set "${run_path}" \
+    "action=dr-cutover-commit" \
+    "state=FAILED_OVER" \
+    "step=cloud-promotion-committed" \
+    "progress=100" \
+    "active_side=TARGET" \
+    "target_power_state=POWERED_ON" \
+    "target_promotion_state=PROMOTED" \
+    "boot_validation_state=${boot_validation_state}" \
+    "cloud_cutover_session_id=${session_id}" \
+    "cloud_authority_generation=${authority_generation}" \
+    "engine_ack_state=ACKNOWLEDGED" \
+    "engine_ack_at=${now}" \
+    "failover_completed_at=${now}" \
+    "worker_state=SUCCEEDED" \
+    "worker_exit_code=0" \
+    "accepted=true" \
+    "retryable=false" \
+    "error_code=" \
+    "error_message=" \
+    "updated_at=${now}" || return 2
+  cp -f "${run_path}" "${status_path}"
+  chmod 0644 "${status_path}" 2>/dev/null || true
+
+  if [[ -f "${session_path}" ]]; then
+    python3 - "${session_path}" "${active_path}" "${authority_generation}" "${boot_validation_state}" "${now}" <<'PY' || return 2
+import json
+import os
+import shutil
+import sys
+
+path, active_path, generation, validation_state, now = sys.argv[1:6]
+with open(path, "r", encoding="utf-8") as fh:
+    session = json.load(fh)
+session["state"] = "FAILED_OVER"
+session["activeSide"] = "TARGET"
+session["completedAt"] = now
+session["cloudAuthorityGeneration"] = int(generation)
+session["bootValidationState"] = validation_state
+promotion = session.setdefault("targetPromotion", {})
+promotion["state"] = "PROMOTED"
+promotion["powerState"] = "POWERED_ON"
+promotion["committedAt"] = now
+promotion["authorityOwner"] = "Cloud"
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(session, fh, sort_keys=True, separators=(",", ":"))
+    fh.write("\n")
+os.makedirs(os.path.dirname(active_path), exist_ok=True)
+shutil.copyfile(path, active_path)
+PY
+  fi
+
+  ftctl_log_event "dr-runtime" "dr.cutover.commit" "ok" "" "" \
+    "plan=${plan} run=${run} session=${session_id} generation=${authority_generation}"
+  if [[ "${json}" == "1" ]]; then
+    ftctl_dr_runtime_emit_state_json "dr-cutover-commit" "ok" "${plan}" "${run}" "${run_path}" "0"
+  else
+    printf 'dr-cutover-commit: plan=%s run=%s state=FAILED_OVER active_side=TARGET\n' "${plan}" "${run}"
+  fi
+}
+
 ftctl_dr_runtime_capabilities() {
   local json="${1-0}" version="${PROG_VERSION:-unknown}"
   local schema="20260722" action_contract="2026-07-22"
@@ -3661,6 +3796,7 @@ ftctl_dr_runtime_capabilities() {
     "dr-failback"
     "dr-reprotect"
     "dr-target-materialized"
+    "dr-cutover-commit"
     "dr-release"
     "dr-status"
     "dr-cancel"
@@ -3675,7 +3811,7 @@ ftctl_dr_runtime_capabilities() {
       first="0"
       printf '"%s"' "$(ftctl__json_escape "${command}")"
     done
-    printf '],"supported_features":["async-run","status-projection","status-scope-v2","target-materialized-notify","target-materialized-idempotent","hardware-contract-projection","control-protocol-v2","control-protocol-v3","dr-scheduler-singleton-v1","dr-scheduler-self-owner-repair-v1","dr-checkpoint-producer-v1","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","guest-preparation-v1","guest-preparation-v2","test-domain-lifecycle-v1","test-artifact-lifecycle-v2","cloud-managed-test-vm-v1","cutover-ready-v1","cutover-manifest-v2","cutover-preflight-v1"]}\n'
+    printf '],"supported_features":["async-run","status-projection","status-scope-v2","target-materialized-notify","target-materialized-idempotent","hardware-contract-projection","control-protocol-v2","control-protocol-v3","dr-scheduler-singleton-v1","dr-scheduler-self-owner-repair-v1","dr-checkpoint-producer-v1","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","guest-preparation-v1","guest-preparation-v2","test-domain-lifecycle-v1","test-artifact-lifecycle-v2","cloud-managed-test-vm-v1","cutover-ready-v1","cutover-manifest-v2","cutover-preflight-v1","cloud-cutover-commit-v1"]}\n'
     return 0
   fi
 

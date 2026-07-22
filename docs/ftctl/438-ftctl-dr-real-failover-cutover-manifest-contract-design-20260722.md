@@ -288,6 +288,172 @@ or generated package is committed.
 - Package content inspection confirmed `dr_runtime.sh`, `guestprep.sh`, and
   `guestprep_manifest.py` are present.
 
-Live deployment and mutable WinPE cutover validation are intentionally not
-marked PASS while `10.10.32.*` is unreachable from both the workstation and
-the available jump host.
+## 12. Live deployment and preflight verification (2026-07-22)
+
+- Host connectivity was restored and the package was installed on
+  `10.10.32.1/2/3` with `aspkg`.
+- `mold-agent` and `ablestack-vm-ftctl.timer` are active on all three hosts.
+- Installed runtime files contain `guestprep_manifest.py` and the
+  `cutover-manifest-v2` capability.
+- A live manifest was built and validated from Plan
+  `2514a846-64a2-4bc7-ba88-38a874410782` at durable checkpoint 418.
+- The manifest preserved Windows guest identity, EFI/Secure Boot, four CPUs,
+  8192 MiB memory, `io_uring`, I/O threads, and two canonical RBD locators.
+- Provider validation confirmed the 100 GiB and 50 GiB RBD images exist and
+  exactly match the manifest sizes.
+- Recovery cycle 419 completed as a full reseed and the immediately following
+  cycle 420 completed through the CBT incremental path.
+- The scheduler remains `RUNNING/HEALTHY`, replication is idle between cycles,
+  and no FTCTL runtime error is present.
+
+Live deployment and cutover-manifest preflight are therefore PASS. The next
+operator action is a new planned failover run using the restored Plan state;
+that mutable action is intentionally left for the retest itself.
+
+## 13. Cloud promotion acknowledgement contract
+
+### 13.1 Boundary clarified by live failover
+
+The live planned failover reached `CUTOVER_READY` at checkpoint 439 and Cloud
+successfully started the existing target VM. FTCTL correctly did not control
+the Cloud VM lifecycle, but its Plan authority state remained
+`active_side=SOURCE` and `target_power_state=POWERED_OFF` after Cloud committed
+`FAILED_OVER/TARGET`. This stale mirror is unsafe for diagnostics and for the
+next failback/reprotect transition.
+
+FTCTL therefore needs a post-promotion acknowledgement command. The command
+does not promote or start the VM; it records a Cloud authority decision that
+has already been committed.
+
+### 13.2 CLI and capability
+
+Add this command to `ablestack_vm_ftctl`:
+
+```text
+dr-cutover-commit
+  --plan UUID
+  --run UUID
+  --checkpoint-sequence N
+  --manifest-sha256 HEX
+  --authority-generation N
+  --active-side TARGET
+  --target-power-state POWERED_ON
+  --boot-validation-state SUCCEEDED
+  --target-power-on-at ISO8601
+  --failover-completed-at ISO8601
+  --json
+```
+
+Advertise command support and `cloud-cutover-commit-v1` through
+`dr-capabilities`. Bump the action contract version. Older packages cause Cloud
+to keep the Run at `engine-state-reconciliation`; they must not cause Cloud to
+power off a successfully started target.
+
+### 13.3 Validation and idempotency
+
+`ftctl_dr_runtime_cutover_commit()` loads the existing failover state and
+requires:
+
+- matching Plan and failover Run UUIDs;
+- state `CUTOVER_READY` or an acknowledgement state for idempotent replay;
+- matching `guestprep_checkpoint_sequence`;
+- matching 64-character `manifest_sha256`;
+- `active-side=TARGET`, `target-power-state=POWERED_ON`, and a successful boot
+  validation result;
+- a Cloud authority generation greater than or equal to the stored generation.
+
+Reject mismatches with typed errors:
+
+```text
+DR_CUTOVER_SESSION_MISMATCH
+DR_CUTOVER_CHECKPOINT_MISMATCH
+DR_CUTOVER_MANIFEST_MISMATCH
+DR_CLOUD_AUTHORITY_STALE
+DR_BOOT_VALIDATION_NOT_SUCCEEDED
+```
+
+An equal generation with identical values returns success without rewriting
+history. An equal generation with different values is a conflict. A newer
+generation is applied atomically with a temporary file plus rename.
+
+### 13.4 Persisted runtime result
+
+On success, update both the failover Run state and Plan authority state:
+
+```text
+action=dr-cutover-commit
+state=FAILED_OVER_ACKNOWLEDGED
+step=cloud-promotion-acknowledged
+progress=100
+active_side=TARGET
+target_power_state=POWERED_ON
+target_promotion_state=PROMOTED
+boot_validation_state=SUCCEEDED
+cloud_authority_generation=<N>
+target_power_on_at=<time>
+failover_completed_at=<time>
+scheduler_state=STOPPED
+scheduler_health=STOPPED_AFTER_CUTOVER
+scheduler_recovery_state=STOPPED_AFTER_CUTOVER
+worker_state=SUCCEEDED
+error_code=
+error_message=
+```
+
+Preserve the latest durable checkpoint, baseline metadata, restore-point
+history, and source-isolation evidence. Do not restart the forward scheduler.
+Do not call libvirt, `virsh`, Mold, or vCenter from this command.
+
+### 13.5 Status semantics
+
+`dr-status` continues to expose the engine preparation phase separately from
+the Cloud acknowledgement:
+
+- `cutover_engine_state=CUTOVER_READY`;
+- `cloud_promotion_state=PROMOTED`;
+- `engine_ack_state=ACKNOWLEDGED`;
+- `protection_state=FAILED_OVER_UNPROTECTED`;
+- `active_side=TARGET`.
+
+`FAILED_OVER_UNPROTECTED` is not an error. It means the target is active and
+the old forward scheduler is intentionally stopped while reverse protection is
+not yet established. The RPO age of the old forward direction must not be used
+as a live health failure after acknowledgement.
+
+### 13.6 Agent transport contract
+
+Cloud sends the acknowledgement through `FtctlDrActionCommand.Action` as
+`CUTOVER_COMMIT`. The KVM wrapper adds the CLI arguments above from non-secret
+command context. Existing timeout and output-size limits apply. The Agent
+returns the typed JSON result unchanged; it does not inspect or modify VM state.
+
+### 13.7 Self-tests
+
+Add FTCTL self-tests for:
+
+1. valid CUTOVER_READY to acknowledged transition;
+2. exact idempotent replay;
+3. stale Cloud generation rejection;
+4. checkpoint mismatch rejection;
+5. manifest hash mismatch rejection;
+6. boot-validation failure rejection;
+7. preservation of checkpoint/baseline/restore-point files;
+8. no scheduler restart and no libvirt command execution;
+9. `dr-status` separation of engine, Cloud promotion, and protection states.
+
+Cloud wrapper tests verify every CLI argument and capability mismatch. The live
+Plan `2514a846-64a2-4bc7-ba88-38a874410782` is the read-only preflight fixture:
+checkpoint 439, Windows V2 manifest, two RBD disks, source powered off, target
+Running, and FTCTL CUTOVER_READY.
+
+### 13.8 AS-IS / TO-BE
+
+| Area | AS-IS | TO-BE |
+|---|---|---|
+| Lifecycle ownership | FTCTL stops at CUTOVER_READY | unchanged; Cloud remains the sole target VM owner |
+| Final authority mirror | SOURCE/POWERED_OFF remains in runtime | Cloud promotion is acknowledged as TARGET/POWERED_ON |
+| Command model | no post-promotion command | idempotent `dr-cutover-commit` |
+| Protection state | stopped scheduler appears degraded | explicit `FAILED_OVER_UNPROTECTED` |
+| RPO | forward checkpoint age continues growing | cutover RPO freezes until reverse protection starts |
+| Retry | no durable acknowledgement cursor | monotonic Cloud authority generation |
+| Safety | later actions infer from stale fields | failback/reprotect receive a reconciled target-active profile |

@@ -101,6 +101,11 @@ CLI_TARGET_VM_NAME=""
 CLI_TARGET_NETWORK_ID=""
 CLI_TARGET_VOLUME_MAP_JSON=""
 CLI_TARGET_READY_RPO_SECONDS=""
+CLI_CUTOVER_SESSION_ID=""
+CLI_CHECKPOINT_SEQUENCE=""
+CLI_AUTHORITY_GENERATION=""
+CLI_TARGET_POWER_STATE=""
+CLI_BOOT_VALIDATION_STATE=""
 
 FTCTL_LIB_BASE=""
 
@@ -246,6 +251,7 @@ Commands:
   dr-reprotect       Accept a DR reprotect session
   dr-target-materialized
                      Mark Cloud target VM/volume materialization complete
+  dr-cutover-commit  Commit Cloud-owned target promotion to FTCTL authority state
   dr-release         Release DR runtime state
   dr-status          Show DR runtime status for a plan/run
   dr-capabilities    Show FTCTL_DR runtime command capabilities
@@ -291,6 +297,13 @@ Global options:
       --wait VALUE    DR command wait policy; --wait=false returns after accept
       --secondary-vm-name NAME
       --active-side SIDE
+      --session-id ID  Cloud cutover session identifier
+      --checkpoint-sequence N
+                     Durable checkpoint used for target promotion
+      --authority-generation N
+                     Monotonic Cloud promotion generation
+      --target-power-state STATE
+      --boot-validation-state STATE
       --provisioning-backend BACKEND
 
 Config actions:
@@ -336,7 +349,7 @@ parse_args() {
         print_version
         exit "${EXIT_OK}"
         ;;
-      protect|protect-start|status|reconcile|failover|failover-prepare|failback|failback-sync|failback-finalize|failback-reprotect|unprotect|fence-confirm|fence-clear|pause-protection|resume-protection|preflight-remote|dr-key-ensure|dr-key-install|dr-key-remove|check|health|events|snapshot|dr-plan-apply|dr-sync-start|dr-sync-pause|dr-sync-resume|dr-test-failover|dr-test-cleanup|dr-test-prepare|dr-test-artifact-cleanup|dr-failover|dr-failback|dr-reprotect|dr-target-materialized|dr-release|dr-status|dr-capabilities|dr-cancel|config)
+      protect|protect-start|status|reconcile|failover|failover-prepare|failback|failback-sync|failback-finalize|failback-reprotect|unprotect|fence-confirm|fence-clear|pause-protection|resume-protection|preflight-remote|dr-key-ensure|dr-key-install|dr-key-remove|check|health|events|snapshot|dr-plan-apply|dr-sync-start|dr-sync-pause|dr-sync-resume|dr-test-failover|dr-test-cleanup|dr-test-prepare|dr-test-artifact-cleanup|dr-failover|dr-failback|dr-reprotect|dr-target-materialized|dr-cutover-commit|dr-release|dr-status|dr-capabilities|dr-cancel|config)
         [[ -z "${CLI_COMMAND}" ]] || {
           echo "ERROR: multiple commands specified" >&2
           exit "${EXIT_USAGE}"
@@ -593,6 +606,26 @@ parse_args() {
         CLI_TARGET_READY_RPO_SECONDS="${2-}"
         shift 2
         ;;
+      --session-id)
+        CLI_CUTOVER_SESSION_ID="${2-}"
+        shift 2
+        ;;
+      --checkpoint-sequence)
+        CLI_CHECKPOINT_SEQUENCE="${2-}"
+        shift 2
+        ;;
+      --authority-generation)
+        CLI_AUTHORITY_GENERATION="${2-}"
+        shift 2
+        ;;
+      --target-power-state)
+        CLI_TARGET_POWER_STATE="${2-}"
+        shift 2
+        ;;
+      --boot-validation-state)
+        CLI_BOOT_VALIDATION_STATE="${2-}"
+        shift 2
+        ;;
       --profile-json)
         CLI_PROFILE_JSON="${2-}"
         shift 2
@@ -693,6 +726,11 @@ dispatch() {
     dr-target-materialized)
       ftctl_dr_runtime_target_materialized "${CLI_PLAN}" "${CLI_RUN}" "${CLI_TARGET_VM_ID}" "${CLI_TARGET_EXTERNAL_REF}" \
         "${CLI_TARGET_VM_NAME}" "${CLI_TARGET_NETWORK_ID}" "${CLI_TARGET_VOLUME_MAP_JSON}" "${CLI_TARGET_READY_RPO_SECONDS}" "${CLI_JSON}"
+      ;;
+    dr-cutover-commit)
+      ftctl_dr_runtime_cutover_commit "${CLI_PLAN}" "${CLI_RUN}" "${CLI_CUTOVER_SESSION_ID}" \
+        "${CLI_CHECKPOINT_SEQUENCE}" "${CLI_AUTHORITY_GENERATION}" "${CLI_TARGET_POWER_STATE}" \
+        "${CLI_BOOT_VALIDATION_STATE}" "${CLI_JSON}"
       ;;
     dr-status)
       ftctl_dr_runtime_status "${CLI_PLAN}" "${CLI_RUN}" "${CLI_EVENTS_OFFSET}" "${CLI_EVENTS_LIMIT}" "${CLI_JSON}"

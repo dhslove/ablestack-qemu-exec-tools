@@ -25,7 +25,7 @@ _ablestack_vm_ftctl()
     protect status reconcile failover failover-prepare failback failback-sync failback-reprotect unprotect fence-confirm fence-clear
     pause-protection resume-protection check health
     dr-plan-apply dr-sync-start dr-sync-pause dr-sync-resume dr-test-failover dr-test-cleanup
-    dr-failover dr-failback dr-reprotect dr-release dr-status dr-capabilities dr-cancel
+    dr-failover dr-failback dr-reprotect dr-target-materialized dr-cutover-commit dr-release dr-status dr-capabilities dr-cancel
     config
   )
 
@@ -34,6 +34,7 @@ _ablestack_vm_ftctl()
     --vm --mode --peer --profile --config --policy
     --dry-run --json --force
     --plan --run --profile-json --restore-point --events-offset --events-limit --wait
+    --session-id --checkpoint-sequence --authority-generation --target-power-state --boot-validation-state
     --cluster-name --local-host-id --host-id --role
     --management-ip --libvirt-uri --blockcopy-ip
     --xcolo-control-ip --xcolo-data-ip
@@ -79,7 +80,7 @@ _ablestack_vm_ftctl()
       COMPREPLY=( $(compgen -W "manual-block ssh peer-virsh-destroy ipmi redfish" -- "${cur}") )
       return 0
       ;;
-    --vm|--peer|--profile|--policy|--plan|--run|--restore-point|--events-offset|--events-limit|--wait|--cluster-name|--local-host-id|--host-id|--management-ip|--libvirt-uri|--blockcopy-ip|--xcolo-control-ip|--xcolo-data-ip|--secondary-vm-name|--fencing-ipmi-primary-host|--fencing-ipmi-primary-port|--fencing-ipmi-primary-user|--fencing-ipmi-primary-password|--fencing-ipmi-primary-interface|--fencing-ipmi-secondary-host|--fencing-ipmi-secondary-port|--fencing-ipmi-secondary-user|--fencing-ipmi-secondary-password|--fencing-ipmi-secondary-interface|--secondary-target-dir|--remote-nbd-export-addr|--xcolo-proxy-endpoint|--xcolo-nbd-endpoint|--xcolo-migrate-uri)
+    --vm|--peer|--profile|--policy|--plan|--run|--restore-point|--events-offset|--events-limit|--wait|--session-id|--checkpoint-sequence|--authority-generation|--target-power-state|--boot-validation-state|--cluster-name|--local-host-id|--host-id|--management-ip|--libvirt-uri|--blockcopy-ip|--xcolo-control-ip|--xcolo-data-ip|--secondary-vm-name|--fencing-ipmi-primary-host|--fencing-ipmi-primary-port|--fencing-ipmi-primary-user|--fencing-ipmi-primary-password|--fencing-ipmi-primary-interface|--fencing-ipmi-secondary-host|--fencing-ipmi-secondary-port|--fencing-ipmi-secondary-user|--fencing-ipmi-secondary-password|--fencing-ipmi-secondary-interface|--secondary-target-dir|--remote-nbd-export-addr|--xcolo-proxy-endpoint|--xcolo-nbd-endpoint|--xcolo-migrate-uri)
       return 0
       ;;
   esac
@@ -88,7 +89,7 @@ _ablestack_vm_ftctl()
   local i=1
   while (( i < cword )); do
     case "${words[i]}" in
-      --vm|--mode|--peer|--profile|--config|--policy|--plan|--run|--profile-json|--restore-point|--events-offset|--wait|--cluster-name|--local-host-id|--host-id|--role|--management-ip|--libvirt-uri|--blockcopy-ip|--xcolo-control-ip|--xcolo-data-ip|--backend-mode|--provisioning-backend|--target-storage-scope|--secondary-vm-name|--active-side|--fencing-policy|--fencing-ipmi-primary-host|--fencing-ipmi-primary-port|--fencing-ipmi-primary-user|--fencing-ipmi-primary-password|--fencing-ipmi-primary-interface|--fencing-ipmi-secondary-host|--fencing-ipmi-secondary-port|--fencing-ipmi-secondary-user|--fencing-ipmi-secondary-password|--fencing-ipmi-secondary-interface|--secondary-target-dir|--remote-nbd-export-addr|--xcolo-proxy-endpoint|--xcolo-nbd-endpoint|--xcolo-migrate-uri)
+      --vm|--mode|--peer|--profile|--config|--policy|--plan|--run|--profile-json|--restore-point|--events-offset|--wait|--session-id|--checkpoint-sequence|--authority-generation|--target-power-state|--boot-validation-state|--cluster-name|--local-host-id|--host-id|--role|--management-ip|--libvirt-uri|--blockcopy-ip|--xcolo-control-ip|--xcolo-data-ip|--backend-mode|--provisioning-backend|--target-storage-scope|--secondary-vm-name|--active-side|--fencing-policy|--fencing-ipmi-primary-host|--fencing-ipmi-primary-port|--fencing-ipmi-primary-user|--fencing-ipmi-primary-password|--fencing-ipmi-primary-interface|--fencing-ipmi-secondary-host|--fencing-ipmi-secondary-port|--fencing-ipmi-secondary-user|--fencing-ipmi-secondary-password|--fencing-ipmi-secondary-interface|--secondary-target-dir|--remote-nbd-export-addr|--xcolo-proxy-endpoint|--xcolo-nbd-endpoint|--xcolo-migrate-uri)
         ((i+=2))
         continue
         ;;
@@ -137,6 +138,12 @@ _ablestack_vm_ftctl()
       ;;
     dr-sync-start|dr-sync-pause|dr-sync-resume|dr-test-failover|dr-test-cleanup|dr-failover|dr-failback|dr-reprotect|dr-release)
       COMPREPLY=( $(compgen -W "--plan --run --profile-json --role --mode --restore-point --force --dry-run --wait --json --config --policy" -- "${cur}") )
+      ;;
+    dr-target-materialized)
+      COMPREPLY=( $(compgen -W "--plan --run --restore-point --json --config --policy" -- "${cur}") )
+      ;;
+    dr-cutover-commit)
+      COMPREPLY=( $(compgen -W "--plan --run --session-id --checkpoint-sequence --authority-generation --target-power-state --boot-validation-state --json --config --policy" -- "${cur}") )
       ;;
     dr-status)
       COMPREPLY=( $(compgen -W "--plan --run --events-offset --events-limit --json --config --policy" -- "${cur}") )
