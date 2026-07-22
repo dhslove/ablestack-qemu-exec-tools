@@ -148,6 +148,66 @@ except Exception:
   printf '%s\n' "${family}"
 }
 
+ftctl_guestprep_manifest_tool() {
+  local candidates=(
+    "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/guestprep_manifest.py"
+    "${FTCTL_LIB_BASE:-}/ftctl/guestprep_manifest.py"
+    "${ROOT_DIR:-}/lib/ftctl/guestprep_manifest.py"
+    "/usr/local/lib/ablestack-qemu-exec-tools/ftctl/guestprep_manifest.py"
+  )
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    if [[ -n "${candidate}" && -f "${candidate}" ]]; then
+      printf '%s\n' "${candidate}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+ftctl_guestprep_validate_provider_objects() {
+  local manifest_path="${1-}" count index storage_type locator format
+  [[ -n "${manifest_path}" && -f "${manifest_path}" ]] || return 60
+  count="$(jq -r '.disks | length' "${manifest_path}" 2>/dev/null || echo 0)"
+  [[ "${count}" =~ ^[0-9]+$ && "${count}" -gt 0 ]] || return 62
+  for ((index=0; index<count; index++)); do
+    storage_type="$(jq -r ".disks[${index}].storage.type // .target.storage.type // empty" "${manifest_path}" 2>/dev/null || true)"
+    locator="$(jq -r ".disks[${index}].storage.locator // .disks[${index}].transfer.target_path // empty" "${manifest_path}" 2>/dev/null || true)"
+    format="$(jq -r ".disks[${index}].storage.format // .target.format // empty" "${manifest_path}" 2>/dev/null || true)"
+    case "${storage_type}" in
+      rbd)
+        [[ "${locator}" == rbd:* && "${format}" == "raw" ]] || return 63
+        command -v rbd >/dev/null 2>&1 || return 65
+        rbd info "${locator#rbd:}" >/dev/null 2>&1 || return 64
+        ;;
+      file)
+        [[ "${locator}" == /* && -f "${locator}" ]] || return 64
+        if command -v qemu-img >/dev/null 2>&1; then
+          qemu-img info "${locator}" >/dev/null 2>&1 || return 64
+        fi
+        ;;
+      *) return 63 ;;
+    esac
+  done
+}
+
+ftctl_guestprep_release_manifest_mappings() {
+  local manifest_path="${1-}" mapped temporary
+  [[ -n "${manifest_path}" && -f "${manifest_path}" ]] || return 0
+  while IFS= read -r mapped; do
+    [[ -n "${mapped}" && "${mapped}" == /dev/rbd/* ]] || continue
+    if [[ -b "${mapped}" ]]; then
+      rbd unmap "${mapped}" >/dev/null 2>&1 || true
+    fi
+  done < <(jq -r '.runtime.rbd.mapped // {} | to_entries[]? | .value.dev_path // empty' "${manifest_path}" 2>/dev/null || true)
+  temporary="${manifest_path}.sanitize.$$"
+  if jq 'if .runtime?.rbd? then del(.runtime.rbd.mapped) else . end' "${manifest_path}" > "${temporary}" 2>/dev/null; then
+    mv -f "${temporary}" "${manifest_path}"
+  else
+    rm -f "${temporary}" 2>/dev/null || true
+  fi
+}
+
 ftctl_guestprep_prepare_artifacts() {
   local session_path="${1-}" run_path="${2-}"
   local artifacts_dir plan run artifact_name manifest v2k_dir family rc=0 state_file execution_mode
@@ -316,39 +376,64 @@ PY
 }
 
 ftctl_guestprep_prepare_cutover_target() {
-  local profile_file="${1-}" run_path="${2-}" workdir="${3-}"
-  local manifest v2k_dir family rc=0
+  local profile_file="${1-}" run_path="${2-}" workdir="${3-}" status_path="${4-}" restore_point="${5-}"
+  local manifest v2k_dir family rc=0 plan run disk_map restore_points tool build_result validate_result manifest_sha256
   mkdir -p "${workdir}"
   manifest="${workdir}/cutover-manifest.json"
-  python3 - "${profile_file}" "${manifest}" <<'PY'
-import json, os, sys
-profile_path, manifest_path = sys.argv[1:3]
-with open(profile_path, "r", encoding="utf-8") as fh:
-    profile = json.load(fh)
-mapping = profile.get("mapping") if isinstance(profile.get("mapping"), dict) else {}
-source = mapping.get("source") if isinstance(mapping.get("source"), dict) else {}
-target = mapping.get("target") if isinstance(mapping.get("target"), dict) else {}
-hardware = source.get("hardware") if isinstance(source.get("hardware"), dict) else {}
-target_hw = target.get("hardware") if isinstance(target.get("hardware"), dict) else {}
-workload = source.get("workload") if isinstance(source.get("workload"), dict) else {}
-disks = mapping.get("disks") if isinstance(mapping.get("disks"), list) else []
-converted = []
-storage = "file"
-for index, disk in enumerate(disks):
-    if not isinstance(disk, dict): continue
-    path = disk.get("targetPath") or disk.get("targetDiskRef")
-    if not path: continue
-    if str(path).startswith("rbd:") or str(path).startswith("/dev/rbd/"): storage = "rbd"
-    converted.append({"disk_id":str(disk.get("device") or f"disk{index}"), "size_bytes":int(disk.get("sizeBytes") or 0), "controller":{"type":"VirtualSCSIController"}, "transfer":{"target_path":str(path)}})
-firmware = str(hardware.get("firmware") or target_hw.get("bootType") or "bios")
-secure = hardware.get("secureBoot", target_hw.get("bootMode") == "SECURE")
-secure = secure is True or str(secure).strip().lower() in {"true", "1", "yes", "secure"}
-manifest = {"version":1,"source":{"vm":{"name":workload.get("name") or "ftctl-dr-cutover","cpu":int(target.get("cpuNumber") or 2),"memory_mb":int(target.get("memory") or 2048),"firmware":"efi" if "EFI" in firmware.upper() or "UEFI" in firmware.upper() else "bios","secure_boot":secure,"guestFamily":workload.get("guestFamily") or source.get("guestFamily") or "","guestId":workload.get("guestId") or "","nics":[]}},"target":{"storage":{"type":storage},"format":"raw" if storage == "rbd" else "qcow2","libvirt":{"name":"ftctl-dr-cutover-prep"}},"disks":converted}
-os.makedirs(os.path.dirname(manifest_path), exist_ok=True)
-with open(manifest_path,"w",encoding="utf-8") as fh: json.dump(manifest,fh,sort_keys=True,separators=(",",":")); fh.write("\n")
-PY
+  plan="$(ftctl_dr_runtime_state_get_from_path "${run_path}" plan)"
+  run="$(ftctl_dr_runtime_state_get_from_path "${run_path}" run)"
+  [[ -n "${plan}" ]] || plan="$(jq -r '.planUuid // empty' "${profile_file}" 2>/dev/null || true)"
+  [[ -n "${run}" ]] || run="$(jq -r '.runUuid // empty' "${profile_file}" 2>/dev/null || true)"
+  disk_map="$(ftctl_dr_ablestack_disk_map_path "${plan}")"
+  restore_points="$(ftctl_dr_runtime_default_restore_points_path "${plan}" "${status_path}")"
+  tool="$(ftctl_guestprep_manifest_tool || true)"
+  [[ -n "${tool}" ]] || return 65
+  if build_result="$(python3 "${tool}" build \
+    --profile "${profile_file}" \
+    --disk-map "${disk_map}" \
+    --restore-points "${restore_points}" \
+    --status "${status_path}" \
+    --selector "${restore_point}" \
+    --plan "${plan}" \
+    --run "${run}" \
+    --output "${manifest}" 2>&1)"; then
+    :
+  else
+    rc=$?
+    ftctl_dr_runtime_path_set "${run_path}" \
+      "error_message=$(jq -r '.message // "cutover manifest build failed"' <<< "${build_result}" 2>/dev/null || echo 'cutover manifest build failed')" || true
+    return "${rc}"
+  fi
+  if validate_result="$(python3 "${tool}" validate --manifest "${manifest}" 2>&1)"; then
+    :
+  else
+    rc=$?
+    ftctl_dr_runtime_path_set "${run_path}" \
+      "error_message=$(jq -r '.message // "cutover manifest validation failed"' <<< "${validate_result}" 2>/dev/null || echo 'cutover manifest validation failed')" || true
+    return "${rc}"
+  fi
+  if ftctl_guestprep_validate_provider_objects "${manifest}"; then
+    :
+  else
+    rc=$?
+    case "${rc}" in
+      62) validate_result="target disk map contains no usable disks" ;;
+      63) validate_result="target disk provider locator is invalid" ;;
+      64) validate_result="target disk provider object is absent or unreadable" ;;
+      65) validate_result="target disk provider tool is unavailable" ;;
+      *) validate_result="target disk provider validation failed" ;;
+    esac
+    ftctl_dr_runtime_path_set "${run_path}" "error_message=${validate_result}" || true
+    return "${rc}"
+  fi
+
+  ftctl_dr_runtime_path_set "${run_path}" \
+    "manifest_schema_version=$(jq -r '.schemaVersion // empty' "${manifest}")" \
+    "manifest_sha256=$(jq -r '.sha256 // empty' <<< "${build_result}")" \
+    "guestprep_checkpoint_sequence=$(jq -r '.checkpointSequence // 0' <<< "${build_result}")" \
+    "target_disk_count=$(jq -r '.diskCount // 0' <<< "${build_result}")" || true
   v2k_dir="$(ftctl_guestprep_v2k_lib_dir || true)"
-  [[ -n "${v2k_dir}" ]] || return 47
+  [[ -n "${v2k_dir}" ]] || return 65
   family="$(ftctl_guestprep_detect_family "${manifest}")"
   case "${family}" in
     linux)
@@ -359,9 +444,11 @@ PY
       env V2K_LIB_DIR="${v2k_dir}" V2K_WORKDIR="${workdir}" V2K_MANIFEST="${manifest}" V2K_JSON_OUT=1 \
         bash -c 'source "$1/engine.sh"; v2k_cloud_windows_winpe_bootstrap "${FTCTL_DR_WINPE_ISO:-/usr/share/ablestack/v2k/winpe/winpe-ablestack-v2k-amd64.iso}" "${FTCTL_DR_VIRTIO_ISO:-/usr/share/virtio-win/virtio-win.iso}" "${FTCTL_DR_WINPE_TIMEOUT:-900}"' _ "${v2k_dir}" || rc=$?
       ;;
-    *) return 48 ;;
+    *) return 61 ;;
   esac
+  ftctl_guestprep_release_manifest_mappings "${manifest}"
   [[ "${rc}" == "0" ]] || return 49
+  manifest_sha256="$(sha256sum "${manifest}" 2>/dev/null | awk '{print $1}')"
   ftctl_dr_runtime_path_set "${run_path}" \
     "state=CUTOVER_READY" \
     "step=guest-preparation-completed" \
@@ -369,6 +456,7 @@ PY
     "guest_prep_state=READY" \
     "guest_family=${family}" \
     "guestprep_manifest_path=${manifest}" \
+    "manifest_sha256=${manifest_sha256}" \
     "target_promotion_state=CUTOVER_READY" \
     "target_power_state=POWERED_OFF" \
     "updated_at=$(ftctl_now_iso8601)"

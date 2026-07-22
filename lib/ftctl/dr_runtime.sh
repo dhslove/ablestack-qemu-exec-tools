@@ -1689,15 +1689,41 @@ PY
 
 ftctl_dr_runtime_failover_worker() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" restore_point="${4-}" mode="${5-}" run_path="${6-}" status_path="${7-}"
-  local final_sync rc=0 error_code now
+  local final_sync rc=0 error_code now source_isolation_ack source_isolation_reason source_fence_state
 
   now="$(ftctl_now_iso8601)"
+  source_isolation_ack="$(jq -r '.request.sourceIsolationAcknowledged // false' "${profile_file}" 2>/dev/null || echo false)"
+  source_isolation_reason="$(jq -r '.request.sourceIsolationReason // empty' "${profile_file}" 2>/dev/null || true)"
+  source_fence_state="REQUESTED"
+  if [[ "${mode}" == "disaster" ]]; then
+    if [[ "${source_isolation_ack}" != "true" || -z "${source_isolation_reason}" ]]; then
+      ftctl_dr_runtime_path_set "${run_path}" \
+        "state=ERROR" \
+        "step=source-isolation-unconfirmed" \
+        "progress=100" \
+        "worker_state=FAILED" \
+        "worker_pid=$$" \
+        "worker_exit_code=78" \
+        "source_fence_state=UNCONFIRMED" \
+        "error_code=DR_SOURCE_ISOLATION_UNCONFIRMED" \
+        "error_message=Disaster failover requires source isolation acknowledgement and a reason" \
+        "updated_at=${now}" || true
+      cp -f "${run_path}" "${status_path}" 2>/dev/null || true
+      return 78
+    fi
+    source_fence_state="ACKNOWLEDGED"
+  fi
   ftctl_dr_runtime_path_set "${run_path}" \
     "state=RUNNING" \
     "step=pre-failover-check" \
     "progress=25" \
+    "worker_state=RUNNING" \
+    "worker_pid=$$" \
     "failover_requested_at=${now}" \
     "failover_mode=${mode}" \
+    "source_fence_state=${source_fence_state}" \
+    "source_power_state=UNKNOWN" \
+    "scheduler_recovery_state=STOPPED_PENDING_CUTOVER" \
     "updated_at=${now}" || true
   cp -f "${run_path}" "${status_path}" 2>/dev/null || true
 
@@ -1733,6 +1759,9 @@ ftctl_dr_runtime_failover_worker() {
         "step=final-delta-failed" \
         "progress=100" \
         "accepted=false" \
+        "worker_state=FAILED" \
+        "worker_pid=$$" \
+        "worker_exit_code=${rc}" \
         "error_code=${error_code}" \
         "updated_at=$(ftctl_now_iso8601)" || true
       cp -f "${run_path}" "${status_path}" 2>/dev/null || true
@@ -1753,7 +1782,8 @@ ftctl_dr_runtime_failover_worker() {
       "guest_prep_state=RUNNING" \
       "updated_at=$(ftctl_now_iso8601)" || true
     cp -f "${run_path}" "${status_path}" 2>/dev/null || true
-    ftctl_guestprep_prepare_cutover_target "${profile_file}" "${run_path}" "${cutover_workdir}" || rc=$?
+    ftctl_guestprep_prepare_cutover_target "${profile_file}" "${run_path}" "${cutover_workdir}" \
+      "${status_path}" "${restore_point}" || rc=$?
   else
     ftctl_dr_runtime_path_set "${run_path}" \
       "state=CUTOVER_READY" \
@@ -1764,8 +1794,14 @@ ftctl_dr_runtime_failover_worker() {
   fi
   if [[ "${rc}" != "0" ]]; then
     case "${rc}" in
-      47) error_code="DR_GUEST_PREP_RUNTIME_UNAVAILABLE" ;;
-      48) error_code="DR_GUEST_OS_UNSUPPORTED" ;;
+      44) error_code="DR_RESTORE_POINT_NOT_FOUND" ;;
+      60) error_code="DR_CUTOVER_MANIFEST_INVALID" ;;
+      61) error_code="DR_GUEST_OS_UNRESOLVED" ;;
+      62) error_code="DR_TARGET_DISK_MAP_MISSING" ;;
+      63) error_code="DR_TARGET_DISK_LOCATOR_INVALID" ;;
+      64) error_code="DR_TARGET_DISK_NOT_DURABLE" ;;
+      47|65) error_code="DR_GUEST_PREP_RUNTIME_UNAVAILABLE" ;;
+      48) error_code="DR_GUEST_OS_UNRESOLVED" ;;
       *) error_code="DR_GUEST_PREPARATION_FAILED" ;;
     esac
     ftctl_dr_runtime_path_set "${run_path}" \
@@ -1773,7 +1809,11 @@ ftctl_dr_runtime_failover_worker() {
       "step=guest-preparation-failed" \
       "progress=100" \
       "accepted=false" \
+      "worker_state=FAILED" \
+      "worker_pid=$$" \
+      "worker_exit_code=${rc}" \
       "guest_prep_state=FAILED" \
+      "scheduler_recovery_state=REQUIRES_AUTHORIZED_RECOVERY" \
       "error_code=${error_code}" \
       "updated_at=$(ftctl_now_iso8601)" || true
     cp -f "${run_path}" "${status_path}" 2>/dev/null || true
@@ -1792,6 +1832,9 @@ ftctl_dr_runtime_failover_worker() {
       "step=target-promote-failed" \
       "progress=100" \
       "accepted=false" \
+      "worker_state=FAILED" \
+      "worker_pid=$$" \
+      "worker_exit_code=${rc}" \
       "error_code=${error_code}" \
       "updated_at=$(ftctl_now_iso8601)" || true
     cp -f "${run_path}" "${status_path}" 2>/dev/null || true
@@ -1802,6 +1845,12 @@ ftctl_dr_runtime_failover_worker() {
 
   ftctl_log_event "dr-runtime" "dr.failover" "ok" "" "" \
     "plan=${plan} run=${run} mode=${mode} restore_point=$(ftctl_dr_runtime_state_get_from_path "${run_path}" "failover_restore_point_ref")"
+  ftctl_dr_runtime_path_set "${run_path}" \
+    "worker_state=SUCCEEDED" \
+    "worker_pid=$$" \
+    "worker_exit_code=0" \
+    "worker_updated_at=$(ftctl_now_iso8601)" || true
+  cp -f "${run_path}" "${status_path}" 2>/dev/null || true
 }
 
 ftctl_dr_runtime_start_failover() {
@@ -2339,7 +2388,9 @@ ftctl_dr_runtime_emit_state_json() {
   local failover_manifest_path failover_checkpoint_path failover_requested_at restore_point_locked_at
   local target_promote_started_at target_power_on_at failover_completed_at rto_actual_seconds
   local active_side target_power_state target_promotion_state failover_worker_pid
-  local guest_prep_state guest_family guestprep_manifest_path test_domain_name test_domain_state test_boot_validation_mode
+  local guest_prep_state guest_family guestprep_manifest_path manifest_schema_version manifest_sha256
+  local guestprep_checkpoint_sequence source_fence_state scheduler_recovery_state
+  local test_domain_name test_domain_state test_boot_validation_mode
   local failback_session_id failback_mode failback_restore_point_ref failback_restore_point_sequence
   local failback_manifest_path failback_checkpoint_path failback_requested_at reverse_sync_started_at
   local reverse_target_ready_at source_promote_started_at source_power_on_at failback_completed_at
@@ -2580,6 +2631,11 @@ PY
   guest_prep_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "guest_prep_state")"
   guest_family="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "guest_family")"
   guestprep_manifest_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "guestprep_manifest_path")"
+  manifest_schema_version="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "manifest_schema_version")"
+  manifest_sha256="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "manifest_sha256")"
+  guestprep_checkpoint_sequence="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "guestprep_checkpoint_sequence")"
+  source_fence_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "source_fence_state")"
+  scheduler_recovery_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "scheduler_recovery_state")"
   test_domain_name="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "test_domain_name")"
   test_domain_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "test_domain_state")"
   test_boot_validation_mode="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "test_boot_validation_mode")"
@@ -2818,6 +2874,11 @@ PY
   ftctl_dr_runtime_json_string_field "guest_prep_state" "${guest_prep_state}"
   ftctl_dr_runtime_json_string_field "guest_family" "${guest_family}"
   ftctl_dr_runtime_json_string_field "guestprep_manifest_path" "${guestprep_manifest_path}"
+  ftctl_dr_runtime_json_string_field "manifest_schema_version" "${manifest_schema_version}"
+  ftctl_dr_runtime_json_string_field "manifest_sha256" "${manifest_sha256}"
+  ftctl_dr_runtime_json_number_field "guestprep_checkpoint_sequence" "${guestprep_checkpoint_sequence}"
+  ftctl_dr_runtime_json_string_field "source_fence_state" "${source_fence_state}"
+  ftctl_dr_runtime_json_string_field "scheduler_recovery_state" "${scheduler_recovery_state}"
   ftctl_dr_runtime_json_string_field "test_domain_name" "${test_domain_name}"
   ftctl_dr_runtime_json_string_field "test_domain_state" "${test_domain_state}"
   ftctl_dr_runtime_json_string_field "test_boot_validation_mode" "${test_boot_validation_mode}"
@@ -3586,7 +3647,7 @@ ftctl_dr_runtime_target_materialized() {
 
 ftctl_dr_runtime_capabilities() {
   local json="${1-0}" version="${PROG_VERSION:-unknown}"
-  local schema="20260720" action_contract="2026-07-20"
+  local schema="20260722" action_contract="2026-07-22"
   local commands=(
     "dr-plan-apply"
     "dr-sync-start"
@@ -3614,7 +3675,7 @@ ftctl_dr_runtime_capabilities() {
       first="0"
       printf '"%s"' "$(ftctl__json_escape "${command}")"
     done
-    printf '],"supported_features":["async-run","status-projection","status-scope-v2","target-materialized-notify","target-materialized-idempotent","hardware-contract-projection","control-protocol-v2","control-protocol-v3","dr-scheduler-singleton-v1","dr-scheduler-self-owner-repair-v1","dr-checkpoint-producer-v1","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","guest-preparation-v1","guest-preparation-v2","test-domain-lifecycle-v1","test-artifact-lifecycle-v2","cloud-managed-test-vm-v1","cutover-ready-v1"]}\n'
+    printf '],"supported_features":["async-run","status-projection","status-scope-v2","target-materialized-notify","target-materialized-idempotent","hardware-contract-projection","control-protocol-v2","control-protocol-v3","dr-scheduler-singleton-v1","dr-scheduler-self-owner-repair-v1","dr-checkpoint-producer-v1","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","guest-preparation-v1","guest-preparation-v2","test-domain-lifecycle-v1","test-artifact-lifecycle-v2","cloud-managed-test-vm-v1","cutover-ready-v1","cutover-manifest-v2","cutover-preflight-v1"]}\n'
     return 0
   fi
 

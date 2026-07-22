@@ -6525,7 +6525,8 @@ EOF
   [[ ! -e "${lease_path}" ]] || selftest_fail "checkpoint lease should be released"
 
   capabilities="$(ftctl_dr_runtime_capabilities 1)"
-  selftest_assert_contains "${capabilities}" '"runtime_schema_version":"20260720"' "control schema version"
+  selftest_assert_contains "${capabilities}" '"runtime_schema_version":"20260722"' "control schema version"
+  selftest_assert_contains "${capabilities}" '"cutover-manifest-v2"' "cutover manifest capability"
   selftest_assert_contains "${capabilities}" '"control-protocol-v2"' "control protocol capability"
   selftest_assert_contains "${capabilities}" '"control-protocol-v3"' "control protocol v3 capability"
   selftest_assert_contains "${capabilities}" '"dr-scheduler-singleton-v1"' "singleton scheduler capability"
@@ -7409,6 +7410,92 @@ JSON
   selftest_assert_eq "$(jq -r '.source.vm.memory_mb' "${manifest}")" "8192" "guestprep memory"
   selftest_assert_eq "$(jq -r '.target.storage.type' "${manifest}")" "rbd" "guestprep RBD target"
   selftest_assert_eq "$(jq -r '.disks[0].transfer.target_path' "${manifest}")" "rbd:rbd/plan-guestprep-test" "guestprep target disk"
+}
+
+selftest_case_dr_cutover_manifest_v2_normalizes_runtime_disk_map() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR real failover manifest joins VMware hardware, durable checkpoint, and RBD disk map"
+
+  local root="${SELFTEST_ROOT}/dr-cutover-manifest-v2"
+  local profile="${root}/profile.json"
+  local disk_map="${root}/ablestack-disks.json"
+  local checkpoint="${root}/checkpoint.json"
+  local restore_points="${root}/restore-points.jsonl"
+  local status="${root}/status.state"
+  local manifest="${root}/cutover-manifest.json"
+  local tool="${LIB_BASE}/ftctl/guestprep_manifest.py"
+  mkdir -p "${root}"
+
+  cat > "${profile}" <<'JSON'
+{
+  "planUuid":"plan-cutover-v2",
+  "runUuid":"run-cutover-v2",
+  "direction":"VMWARE_TO_KVM",
+  "mapping":{
+    "source":{
+      "vm":{"name":"w22-01","guestId":"windows2019srvNext_64Guest"},
+      "hardware":{"firmware":"efi","secureBoot":true,"cpu":4,"memoryMb":8192}
+    },
+    "target":{"hardware":{"bootType":"UEFI","bootMode":"SECURE","rootDiskController":"scsi"},"ioPolicy":"io_uring","ioThreads":true}
+  }
+}
+JSON
+  cat > "${disk_map}" <<'JSON'
+{
+  "planUuid":"plan-cutover-v2",
+  "count":2,
+  "disks":[
+    {"sourceDiskKey":"2000","device":"sda","sizeBytes":42949672960,"targetType":"rbd","targetFormat":"raw","targetPath":"/dev/rbd/rbd/w22-01-dr-disk-0"},
+    {"sourceDiskKey":"2001","device":"sdb","sizeBytes":10737418240,"targetType":"rbd","targetFormat":"raw","targetPath":"rbd:rbd/w22-01-dr-disk-1"}
+  ]
+}
+JSON
+  cat > "${checkpoint}" <<'JSON'
+{"state":"TARGET_READY","commitState":"LOCAL_DURABLE","checkpointSequence":418,"sourceCheckpointAt":"2026-07-22T02:45:20Z","targetDurableAt":"2026-07-22T02:45:23Z","targetReadyRpoSeconds":3}
+JSON
+  cat > "${restore_points}" <<JSON
+{"planUuid":"plan-cutover-v2","runUuid":"run-sync","checkpointSequence":418,"checkpoint":"${checkpoint}","state":"TARGET_READY","targetDurableAt":"2026-07-22T02:45:23Z"}
+JSON
+  cat > "${status}" <<EOF
+plan=plan-cutover-v2
+run=run-sync
+state=READY
+checkpoint_sequence=418
+checkpoint_path=${checkpoint}
+restore_points_path=${restore_points}
+last_target_durable_at=2026-07-22T02:45:23Z
+EOF
+
+  python3 "${tool}" build \
+    --profile "${profile}" \
+    --disk-map "${disk_map}" \
+    --restore-points "${restore_points}" \
+    --status "${status}" \
+    --plan plan-cutover-v2 \
+    --run run-cutover-v2 \
+    --output "${manifest}" >/dev/null
+  python3 "${tool}" validate --manifest "${manifest}" >/dev/null
+
+  selftest_assert_eq "$(jq -r '.schemaVersion' "${manifest}")" "FTCTL_GUESTPREP_MANIFEST_V2" "cutover schema"
+  selftest_assert_eq "$(jq -r '.source.vm.guestFamily' "${manifest}")" "windows" "cutover guest family"
+  selftest_assert_eq "$(jq -r '.source.vm.firmware' "${manifest}")" "efi" "cutover firmware"
+  selftest_assert_eq "$(jq -r '.source.vm.secure_boot' "${manifest}")" "true" "cutover secure boot"
+  selftest_assert_eq "$(jq -r '.checkpoint.sequence' "${manifest}")" "418" "cutover checkpoint"
+  selftest_assert_eq "$(jq -r '.disks | length' "${manifest}")" "2" "cutover disk count"
+  selftest_assert_eq "$(jq -r '.disks[0].transfer.target_path' "${manifest}")" "rbd:rbd/w22-01-dr-disk-0" "legacy krbd normalization"
+  selftest_assert_eq "$(jq -r '.target.ioPolicy' "${manifest}")" "io_uring" "cutover io policy"
+
+  jq '.disks[0].targetPath="w22-01-dr-disk-0"' "${disk_map}" > "${disk_map}.invalid"
+  if python3 "${tool}" build \
+      --profile "${profile}" \
+      --disk-map "${disk_map}.invalid" \
+      --restore-points "${restore_points}" \
+      --status "${status}" \
+      --plan plan-cutover-v2 \
+      --run run-cutover-invalid \
+      --output "${manifest}.invalid" >/dev/null 2>&1; then
+    selftest_fail "display-only RBD locator must be rejected"
+  fi
 }
 
 selftest_case_dr_runtime_test_failover_cleanup() {
@@ -8445,6 +8532,7 @@ selftest_main() {
   selftest_case_dr_scheduler_ablestack_checkpoint_loop
   selftest_case_dr_scheduler_vmware_mock_checkpoint_loop
   selftest_case_dr_guestprep_manifest_preserves_vmware_boot_contract
+  selftest_case_dr_cutover_manifest_v2_normalizes_runtime_disk_map
   selftest_case_dr_runtime_test_failover_cleanup
   selftest_case_dr_scheduler_resume_recovers_missing_worker
   selftest_case_dr_runtime_planned_failover_promotes_latest_checkpoint

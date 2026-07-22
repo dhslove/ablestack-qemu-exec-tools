@@ -3,6 +3,11 @@
 - Date: 2026-07-21
 - Cloud normative design: `ablestack-cloud/docs/ftctl/565-cross-hypervisor-dr-post-test-cleanup-protection-projection-convergence-design-20260721.md`
 - Scope: `lib/ftctl/dr_runtime.sh`, `lib/ftctl/dr_scheduler.sh`, CLI/Agent status contract, self-tests
+- Real Failover manifest contract: `438-ftctl-dr-real-failover-cutover-manifest-contract-design-20260722.md`
+
+> The operation/protection envelope rules in this document also apply to real
+> Failover. Document 438 additionally requires a terminal setup failure when no
+> worker exists, and forbids projecting `worker_state=RUNNING` from stale PIDs.
 
 ## 1. Purpose
 
