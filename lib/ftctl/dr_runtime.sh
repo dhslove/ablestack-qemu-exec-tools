@@ -2364,6 +2364,8 @@ ftctl_dr_runtime_emit_state_json() {
   local scheduler_session_uuid scheduler_lease_epoch authority_sequence plan_cycle_sequence scheduler_health
   local replication_activity protection_state active_worker_run_uuid active_worker_pid active_worker_start_ticks
   local worker_heartbeat_at control_request_run_uuid owner_matched
+  local scheduler_desired_state scheduler_service_unit scheduler_unit_active_state scheduler_unit_sub_state
+  local scheduler_unit_main_pid scheduler_cgroup scheduler_recovery_state scheduler_recovery_trigger scheduler_recovered_at
   local transition_state transition_action transition_quiesced_at checkpoint_lease_state checkpoint_lease_path
   local retryable retry_after_sec lock_file holder_pid holder_command holder_age_sec
   local checkpoint_sequence restore_points_path dynamic_rpo
@@ -2472,6 +2474,15 @@ ftctl_dr_runtime_emit_state_json() {
   worker_heartbeat_at="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "worker_heartbeat_at")"
   control_request_run_uuid="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "control_request_run_uuid")"
   owner_matched="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "owner_matched")"
+  scheduler_desired_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "scheduler_desired_state")"
+  scheduler_service_unit="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "scheduler_service_unit")"
+  scheduler_unit_active_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "scheduler_unit_active_state")"
+  scheduler_unit_sub_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "scheduler_unit_sub_state")"
+  scheduler_unit_main_pid="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "scheduler_unit_main_pid")"
+  scheduler_cgroup="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "scheduler_cgroup")"
+  scheduler_recovery_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "scheduler_recovery_state")"
+  scheduler_recovery_trigger="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "scheduler_recovery_trigger")"
+  scheduler_recovered_at="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "scheduler_recovered_at")"
   transition_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "transition_state")"
   transition_action="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "transition_action")"
   transition_quiesced_at="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "transition_quiesced_at")"
@@ -2494,6 +2505,13 @@ ftctl_dr_runtime_emit_state_json() {
     active_worker_pid="$(ftctl_dr_scheduler_active_value "${plan}" "pid")"
     active_worker_start_ticks="$(ftctl_dr_scheduler_active_value "${plan}" "start_ticks")"
     worker_heartbeat_at="$(ftctl_dr_scheduler_active_value "${plan}" "heartbeat_at")"
+    scheduler_cgroup="$(ftctl_dr_scheduler_process_cgroup "${active_worker_pid}" 2>/dev/null || true)"
+    if ftctl_dr_scheduler_systemd_available "${plan}"; then
+      scheduler_service_unit="$(ftctl_dr_scheduler_unit_name "${plan}" 2>/dev/null || true)"
+      scheduler_unit_active_state="$(systemctl show "${scheduler_service_unit}" -p ActiveState --value 2>/dev/null || true)"
+      scheduler_unit_sub_state="$(systemctl show "${scheduler_service_unit}" -p SubState --value 2>/dev/null || true)"
+      scheduler_unit_main_pid="$(systemctl show "${scheduler_service_unit}" -p MainPID --value 2>/dev/null || true)"
+    fi
   elif [[ -f "$(ftctl_dr_scheduler_active_pid_path "${plan}")" ]]; then
     scheduler_pid_alive="false"
     scheduler_health="DEAD"
@@ -2793,6 +2811,15 @@ PY
   ftctl_dr_runtime_json_number_field "authority_sequence" "${authority_sequence}"
   ftctl_dr_runtime_json_number_field "plan_cycle_sequence" "${plan_cycle_sequence}"
   ftctl_dr_runtime_json_string_field "scheduler_health" "${scheduler_health}"
+  ftctl_dr_runtime_json_string_field "scheduler_desired_state" "${scheduler_desired_state}"
+  ftctl_dr_runtime_json_string_field "scheduler_service_unit" "${scheduler_service_unit}"
+  ftctl_dr_runtime_json_string_field "scheduler_unit_active_state" "${scheduler_unit_active_state}"
+  ftctl_dr_runtime_json_string_field "scheduler_unit_sub_state" "${scheduler_unit_sub_state}"
+  ftctl_dr_runtime_json_number_field "scheduler_unit_main_pid" "${scheduler_unit_main_pid}"
+  ftctl_dr_runtime_json_string_field "scheduler_cgroup" "${scheduler_cgroup}"
+  ftctl_dr_runtime_json_string_field "scheduler_recovery_state" "${scheduler_recovery_state}"
+  ftctl_dr_runtime_json_string_field "scheduler_recovery_trigger" "${scheduler_recovery_trigger}"
+  ftctl_dr_runtime_json_string_field "scheduler_recovered_at" "${scheduler_recovered_at}"
   ftctl_dr_runtime_json_string_field "replication_activity" "${replication_activity}"
   ftctl_dr_runtime_json_string_field "protection_state" "${protection_state}"
   ftctl_dr_runtime_json_string_field "active_worker_run_uuid" "${active_worker_run_uuid}"
@@ -2985,6 +3012,7 @@ ftctl_dr_runtime_action_state() {
   local action="${1-}"
   case "${action}" in
     dr-sync-start) printf 'SYNCING|sync-start-accepted|1\n' ;;
+    dr-sync-recover) printf 'SYNCING|scheduler-recovery-accepted|1\n' ;;
     dr-sync-pause) printf 'PAUSED|sync-paused|100\n' ;;
     dr-sync-resume) printf 'SYNCING|sync-resumed|1\n' ;;
     dr-test-failover) printf 'TESTING|test-failover-accepted|1\n' ;;
@@ -3133,7 +3161,7 @@ ftctl_dr_runtime_should_delegate_action() {
   [[ "${wait_lower}" == "false" || "${wait_lower}" == "0" || "${wait_lower}" == "no" ]] || return 1
 
   case "${action}" in
-    dr-sync-start|dr-sync-pause|dr-sync-resume|dr-test-failover|dr-test-prepare|dr-test-cleanup|dr-test-artifact-cleanup|dr-failover|dr-failback|dr-reprotect|dr-release) return 0 ;;
+    dr-sync-start|dr-sync-recover|dr-sync-pause|dr-sync-resume|dr-test-failover|dr-test-prepare|dr-test-cleanup|dr-test-artifact-cleanup|dr-failover|dr-failback|dr-reprotect|dr-release) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -3246,6 +3274,39 @@ ftctl_dr_runtime_action() {
       "target_external_ref=${target_external_ref}" \
       "target_vm_present=$([[ -n "${target_vm_id}${target_external_ref}" ]] && printf true || printf false)" \
       "target_network_present=$([[ -n "${target_vm_id}${target_external_ref}" ]] && printf true || printf false)" || true
+  fi
+
+  if [[ "${action}" == "dr-sync-recover" && "${dry_run}" != "1" ]]; then
+    rc=0
+    ftctl_dr_scheduler_recover "${plan}" "${run}" "$(ftctl_dr_runtime_profile_path "${plan}")" \
+      "${run_path}" "${status_path}" "MANUAL" || rc=$?
+    if [[ "${rc}" != "0" ]]; then
+      case "${rc}" in
+        41) error_code="DR_RECOVERY_SUPPRESSED_TARGET" ;;
+        42) error_code="DR_RECOVERY_SUPPRESSED_CONTROL_STATE" ;;
+        43) error_code="DR_RECOVERY_TRANSITION_ACTIVE" ;;
+        69) error_code="DR_RECOVERY_UNIT_START_FAILED" ;;
+        *) error_code="DR_RECOVERY_FAILED" ;;
+      esac
+      ftctl_dr_runtime_path_set "${run_path}" \
+        "state=ERROR" \
+        "step=scheduler-recovery-failed" \
+        "progress=100" \
+        "accepted=false" \
+        "scheduler_recovery_state=FAILED" \
+        "error_code=${error_code}" \
+        "updated_at=$(ftctl_now_iso8601)" || true
+      [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_state_json "${action}" "error" "${plan}" "${run}" "${run_path}" "0"
+      return "${rc}"
+    fi
+    ftctl_log_event "dr-runtime" "dr.scheduler.recovery" "ok" "" "" \
+      "plan=${plan} run=${run} trigger=MANUAL"
+    if [[ "${json}" == "1" ]]; then
+      ftctl_dr_runtime_emit_state_json "${action}" "accepted" "${plan}" "${run}" "${run_path}" "0"
+    else
+      printf '%s: plan=%s run=%s accepted\n' "${action}" "${plan}" "${run}"
+    fi
+    return 0
   fi
 
   if ftctl_dr_runtime_should_delegate_action "${action}" "${wait_value}" "${dry_run}"; then
@@ -3577,6 +3638,28 @@ ftctl_dr_runtime_action() {
       fi
       return "${rc}"
     fi
+
+    # systemd now owns the live Plan projection. Keep the dispatch Run
+    # terminal for Cloud accounting, but never copy its older snapshot back
+    # over status.kv after the scheduler unit has been accepted.
+    if [[ "$(ftctl_dr_runtime_state_get_from_path "${run_path}" "scheduler_launch_mode")" == "systemd" ]]; then
+      ftctl_dr_runtime_path_set "${run_path}" \
+        "worker_state=SUCCEEDED" \
+        "worker_pid=$$" \
+        "worker_exit_code=0" \
+        "worker_error_code=" \
+        "worker_retryable=false" \
+        "worker_retry_after_sec=" \
+        "worker_updated_at=$(ftctl_now_iso8601)" || true
+      ftctl_log_event "dr-runtime" "dr.action.accepted" "ok" "" "" \
+        "plan=${plan} run=${run} action=${action} scheduler_owner=systemd"
+      if [[ "${json}" == "1" ]]; then
+        ftctl_dr_runtime_emit_state_json "${action}" "accepted" "${plan}" "${run}" "${run_path}" "0"
+      else
+        printf '%s: plan=%s run=%s accepted scheduler_owner=systemd\n' "${action}" "${plan}" "${run}"
+      fi
+      return 0
+    fi
   fi
 
   ftctl_dr_runtime_mark_worker_terminal "${run_path}" "${status_path}" "SUCCEEDED" "0" "" "false" ""
@@ -3786,6 +3869,7 @@ ftctl_dr_runtime_capabilities() {
   local commands=(
     "dr-plan-apply"
     "dr-sync-start"
+    "dr-sync-recover"
     "dr-sync-pause"
     "dr-sync-resume"
     "dr-test-failover"
@@ -3799,6 +3883,7 @@ ftctl_dr_runtime_capabilities() {
     "dr-cutover-commit"
     "dr-release"
     "dr-status"
+    "dr-reconcile"
     "dr-cancel"
   )
   local first="1" command
@@ -3811,7 +3896,7 @@ ftctl_dr_runtime_capabilities() {
       first="0"
       printf '"%s"' "$(ftctl__json_escape "${command}")"
     done
-    printf '],"supported_features":["async-run","status-projection","status-scope-v2","target-materialized-notify","target-materialized-idempotent","hardware-contract-projection","control-protocol-v2","control-protocol-v3","dr-scheduler-singleton-v1","dr-scheduler-self-owner-repair-v1","dr-checkpoint-producer-v1","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","guest-preparation-v1","guest-preparation-v2","test-domain-lifecycle-v1","test-artifact-lifecycle-v2","cloud-managed-test-vm-v1","cutover-ready-v1","cutover-manifest-v2","cutover-preflight-v1","cloud-cutover-commit-v1"]}\n'
+    printf '],"supported_features":["async-run","status-projection","status-scope-v2","target-materialized-notify","target-materialized-idempotent","hardware-contract-projection","control-protocol-v2","control-protocol-v3","dr-scheduler-singleton-v1","dr-scheduler-self-owner-repair-v1","dr-scheduler-systemd-unit-v1","dr-sync-recover-v1","dr-local-reconcile-fence-v1","dr-checkpoint-producer-v1","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","guest-preparation-v1","guest-preparation-v2","test-domain-lifecycle-v1","test-artifact-lifecycle-v2","cloud-managed-test-vm-v1","cutover-ready-v1","cutover-manifest-v2","cutover-preflight-v1","cloud-cutover-commit-v1"]}\n'
     return 0
   fi
 

@@ -61,6 +61,7 @@ install -d %{buildroot}/etc/ablestack/ftctl-cluster.d/hosts
 install -d %{buildroot}%{_unitdir}
 install -m 0644 lib/ftctl/systemd/ablestack-vm-ftctl.service %{buildroot}%{_unitdir}/ablestack-vm-ftctl.service
 install -m 0644 lib/ftctl/systemd/ablestack-vm-ftctl.timer %{buildroot}%{_unitdir}/ablestack-vm-ftctl.timer
+install -m 0644 lib/ftctl/systemd/ablestack-vm-ftctl-dr@.service %{buildroot}%{_unitdir}/ablestack-vm-ftctl-dr@.service
 
 install -d %{buildroot}%{_datadir}/bash-completion/completions
 install -m 0644 completions/%{name} %{buildroot}%{_datadir}/bash-completion/completions/%{name}
@@ -105,6 +106,7 @@ fi
 %dir /etc/ablestack/ftctl-cluster.d/hosts
 %{_unitdir}/ablestack-vm-ftctl.service
 %{_unitdir}/ablestack-vm-ftctl.timer
+%{_unitdir}/ablestack-vm-ftctl-dr@.service
 %{_datadir}/bash-completion/completions/%{name}
 
 %changelog

@@ -7666,8 +7666,10 @@ selftest_case_dr_scheduler_resume_recovers_missing_worker() {
 
   local plan="plan-resume-recovery"
   local run="run-resume-recovery"
+  local producer_run="run-sync-producer"
   local plan_dir="${SELFTEST_ROOT}/run/dr-runtime/plans/${plan}"
   local run_path="${plan_dir}/runs/${run}.state"
+  local producer_run_path="${plan_dir}/runs/${producer_run}.state"
   local status_path="${plan_dir}/status.state"
   local call_log="${SELFTEST_ROOT}/scheduler-resume-recovery.log"
 
@@ -8462,6 +8464,45 @@ JSON
   selftest_assert_eq "${rc}" "90" "repeated automatic reseed guard"
 }
 
+selftest_case_dr_scheduler_systemd_launch_contract() {
+  local plan="plan-systemd-owned" run="run-systemd-owned" plan_dir profile state status launch unit rc
+  selftest_reset_env
+  plan_dir="${SELFTEST_ROOT}/run/dr-runtime/plans/${plan}"
+  profile="${plan_dir}/profile.json"
+  state="${plan_dir}/runs/${run}.state"
+  status="${plan_dir}/status.state"
+  launch="${plan_dir}/scheduler/launch.state"
+  mkdir -p "${plan_dir}/runs" "${plan_dir}/scheduler"
+  cat > "${profile}" <<JSON
+{"planUuid":"${plan}","schedulerSessionUuid":"${plan}","source":{"provider":"VMWARE"},"target":{"provider":"ABLESTACK"}}
+JSON
+  ftctl_state_write_kv_all "${state}" "plan=${plan}" "run=${run}" "state=READY" "control_state=RUNNING"
+  cp -f "${state}" "${status}"
+
+  unit="$(ftctl_dr_scheduler_unit_name "${plan}")"
+  selftest_assert_eq "${unit}" "ablestack-vm-ftctl-dr@${plan}.service" "Plan systemd unit name"
+  ftctl_dr_scheduler_write_launch_state "${plan}" "${run}" "${profile}" "${state}" "${status}" "SELFTEST"
+  selftest_assert_file_contains "${launch}" "plan_uuid=${plan}"
+  selftest_assert_file_contains "${launch}" "run_uuid=${run}"
+  selftest_assert_file_contains "${launch}" "desired_state=RUNNING"
+  selftest_assert_file_contains "${launch}" "active_side=SOURCE"
+  selftest_assert_file_contains "${launch}" "recovery_trigger=SELFTEST"
+
+  if ftctl_dr_scheduler_unit_name 'invalid/plan' >/dev/null 2>&1; then
+    selftest_fail "invalid Plan UUID must not produce a systemd unit name"
+  fi
+
+  rc=0
+  ftctl_dr_runtime_path_set "${status}" "state=FAILED_OVER" "active_side=TARGET" "control_state=RUNNING"
+  ftctl_dr_scheduler_recover "${plan}" "${run}" "${profile}" "${state}" "${status}" "SELFTEST" || rc=$?
+  selftest_assert_eq "${rc}" "41" "TARGET authority suppresses scheduler recovery"
+
+  rc=0
+  ftctl_dr_runtime_path_set "${status}" "state=READY" "active_side=SOURCE" "control_state=PAUSED"
+  ftctl_dr_scheduler_recover "${plan}" "${run}" "${profile}" "${state}" "${status}" "SELFTEST" || rc=$?
+  selftest_assert_eq "${rc}" "42" "PAUSED control state suppresses scheduler recovery"
+}
+
 selftest_main() {
   selftest_run_lint
   selftest_case_cluster_cli
@@ -8594,6 +8635,7 @@ selftest_main() {
   selftest_case_dr_cutover_manifest_v2_normalizes_runtime_disk_map
   selftest_case_dr_runtime_test_failover_cleanup
   selftest_case_dr_scheduler_resume_recovers_missing_worker
+  selftest_case_dr_scheduler_systemd_launch_contract
   selftest_case_dr_runtime_planned_failover_promotes_latest_checkpoint
   selftest_case_dr_runtime_cloud_cutover_commit_is_idempotent
   selftest_case_dr_runtime_failback_restores_source_after_reverse_checkpoint

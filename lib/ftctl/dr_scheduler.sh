@@ -28,6 +28,186 @@ ftctl_dr_scheduler_dir() {
   printf '%s/scheduler\n' "$(ftctl_dr_runtime_plan_dir "${plan}")"
 }
 
+ftctl_dr_scheduler_launch_state_path() {
+  local plan="${1-}"
+  printf '%s/launch.state\n' "$(ftctl_dr_scheduler_dir "${plan}")"
+}
+
+ftctl_dr_scheduler_unit_name() {
+  local plan="${1-}"
+  [[ "${plan}" =~ ^[A-Za-z0-9_.:-]+$ ]] || return 2
+  printf 'ablestack-vm-ftctl-dr@%s.service\n' "${plan}"
+}
+
+ftctl_dr_scheduler_systemd_available() {
+  local plan="${1-}" unit load_state
+  [[ -d /run/systemd/system ]] || return 1
+  command -v systemctl >/dev/null 2>&1 || return 1
+  unit="$(ftctl_dr_scheduler_unit_name "${plan}" 2>/dev/null || true)"
+  [[ -n "${unit}" ]] || return 1
+  load_state="$(systemctl show "${unit}" -p LoadState --value 2>/dev/null || true)"
+  [[ "${load_state}" == "loaded" ]]
+}
+
+ftctl_dr_scheduler_process_cgroup() {
+  local pid="${1-}"
+  [[ "${pid}" =~ ^[0-9]+$ && -r "/proc/${pid}/cgroup" ]] || return 1
+  awk -F: '$1 == "0" {print $3; exit}' "/proc/${pid}/cgroup" 2>/dev/null
+}
+
+ftctl_dr_scheduler_write_launch_state() {
+  local plan="${1-}" run="${2-}" profile_file="${3-}" state_path="${4-}" status_path="${5-}" trigger="${6-START}"
+  local launch_path session authority_sequence
+  launch_path="$(ftctl_dr_scheduler_launch_state_path "${plan}")"
+  session="$(ftctl_dr_scheduler_session_uuid "${plan}" "${profile_file}")"
+  authority_sequence="$(ftctl_dr_scheduler_current_authority_sequence "${plan}")"
+  ftctl_ensure_dir "$(dirname "${launch_path}")" "0755"
+  ftctl_state_write_kv_all "${launch_path}" \
+    "version=1" \
+    "plan_uuid=${plan}" \
+    "run_uuid=${run}" \
+    "scheduler_session_uuid=${session}" \
+    "profile_path=${profile_file}" \
+    "state_path=${state_path}" \
+    "status_path=${status_path}" \
+    "desired_state=RUNNING" \
+    "active_side=SOURCE" \
+    "authority_sequence=${authority_sequence}" \
+    "recovery_trigger=${trigger}" \
+    "updated_at=$(ftctl_now_iso8601)"
+}
+
+ftctl_dr_scheduler_update_unit_projection() {
+  local plan="${1-}" state_path="${2-}" status_path="${3-}" recovery_state="${4-NONE}" trigger="${5-}"
+  local unit active_state sub_state cgroup main_pid
+  unit="$(ftctl_dr_scheduler_unit_name "${plan}" 2>/dev/null || true)"
+  active_state="$(systemctl show "${unit}" -p ActiveState --value 2>/dev/null || true)"
+  sub_state="$(systemctl show "${unit}" -p SubState --value 2>/dev/null || true)"
+  cgroup="$(systemctl show "${unit}" -p ControlGroup --value 2>/dev/null || true)"
+  main_pid="$(systemctl show "${unit}" -p MainPID --value 2>/dev/null || true)"
+  ftctl_dr_scheduler_update_state "${state_path}" "${status_path}" \
+    "scheduler_desired_state=RUNNING" \
+    "scheduler_service_unit=${unit}" \
+    "scheduler_unit_active_state=${active_state}" \
+    "scheduler_unit_sub_state=${sub_state}" \
+    "scheduler_cgroup=${cgroup}" \
+    "scheduler_unit_main_pid=${main_pid}" \
+    "scheduler_recovery_state=${recovery_state}" \
+    "scheduler_recovery_trigger=${trigger}" \
+    "scheduler_launch_mode=systemd" \
+    "updated_at=$(ftctl_now_iso8601)" || true
+}
+
+ftctl_dr_scheduler_launch_via_systemd() {
+  local plan="${1-}" run="${2-}" profile_file="${3-}" state_path="${4-}" status_path="${5-}" trigger="${6-START}"
+  local unit
+  ftctl_dr_scheduler_systemd_available "${plan}" || return 69
+  ftctl_dr_scheduler_write_launch_state "${plan}" "${run}" "${profile_file}" "${state_path}" "${status_path}" "${trigger}" || return $?
+  unit="$(ftctl_dr_scheduler_unit_name "${plan}")"
+  systemctl reset-failed "${unit}" >/dev/null 2>&1 || true
+  systemctl start --no-block "${unit}" >/dev/null 2>&1 || return 69
+  ftctl_dr_scheduler_update_unit_projection "${plan}" "${state_path}" "${status_path}" "RECOVERING" "${trigger}"
+}
+
+ftctl_dr_scheduler_run_from_launch() {
+  local plan="${1-}" json="${2-0}" launch_path run profile_file state_path status_path
+  ftctl_dr_runtime_require_plan "${plan}" || return 2
+  launch_path="$(ftctl_dr_scheduler_launch_state_path "${plan}")"
+  [[ -f "${launch_path}" ]] || {
+    [[ "${json}" == "1" ]] && printf '{"command":"dr-scheduler-run","result":"not_found","plan_uuid":"%s","exit_code":2}\n' "$(ftctl__json_escape "${plan}")"
+    return 2
+  }
+  run="$(ftctl_state_read_kv "${launch_path}" "run_uuid" 2>/dev/null || true)"
+  profile_file="$(ftctl_state_read_kv "${launch_path}" "profile_path" 2>/dev/null || true)"
+  state_path="$(ftctl_state_read_kv "${launch_path}" "state_path" 2>/dev/null || true)"
+  status_path="$(ftctl_state_read_kv "${launch_path}" "status_path" 2>/dev/null || true)"
+  [[ -n "${run}" && -f "${profile_file}" && -f "${state_path}" && -n "${status_path}" ]] || return 30
+  export FTCTL_DR_RUNTIME_WORKER=1
+  export FTCTL_DR_SCHEDULER_FOREGROUND=1
+  ftctl_dr_scheduler_worker "${plan}" "${run}" "${profile_file}" "${state_path}" "${status_path}"
+}
+
+ftctl_dr_scheduler_recover() {
+  local plan="${1-}" run="${2-}" profile_file="${3-}" state_path="${4-}" status_path="${5-}" trigger="${6-MANUAL}"
+  local state active_side control_state transition_state
+  [[ -f "${profile_file}" && -f "${status_path}" ]] || return 2
+  state="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "state")"
+  active_side="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "active_side")"
+  control_state="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "control_state")"
+  transition_state="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "transition_state")"
+  [[ "${active_side^^}" != "TARGET" && "${state}" != "FAILED_OVER" ]] || return 41
+  [[ "${control_state}" != "PAUSED" && "${control_state}" != "STOPPED" ]] || return 42
+  case "${transition_state}" in
+    ""|IDLE|COMPLETED|SUCCEEDED) ;;
+    *) return 43 ;;
+  esac
+  if ftctl_dr_scheduler_active_worker_valid "${plan}" ""; then
+    return 0
+  fi
+  ftctl_dr_scheduler_update_state "${state_path}" "${status_path}" \
+    "scheduler_state=RECOVERING" \
+    "scheduler_health=RECOVERING" \
+    "scheduler_recovery_state=RECOVERING" \
+    "scheduler_recovery_trigger=${trigger}" \
+    "replication_activity=RECOVERING" \
+    "protection_state=DEGRADED" \
+    "error_code=" \
+    "error_message=" \
+    "updated_at=$(ftctl_now_iso8601)" || true
+  ftctl_dr_scheduler_launch_via_systemd "${plan}" "${run}" "${profile_file}" "${state_path}" "${status_path}" "${trigger}"
+}
+
+ftctl_dr_scheduler_reconcile_plan() {
+  local plan="${1-}" profile_file status_path state active_side control_state transition_state run state_path
+  profile_file="$(ftctl_dr_runtime_profile_path "${plan}")"
+  status_path="$(ftctl_dr_runtime_status_path "${plan}")"
+  [[ -f "${profile_file}" && -f "${status_path}" ]] || return 0
+  if ftctl_dr_scheduler_active_worker_valid "${plan}" ""; then
+    return 0
+  fi
+  state="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "state")"
+  active_side="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "active_side")"
+  control_state="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "control_state")"
+  transition_state="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "transition_state")"
+  [[ "${state}" == "READY" || "${state}" == "SYNCING" ]] || return 0
+  [[ "${active_side^^}" != "TARGET" ]] || return 0
+  [[ "${control_state}" == "RUNNING" ]] || return 0
+  case "${transition_state}" in
+    ""|IDLE|COMPLETED|SUCCEEDED) ;;
+    *) return 0 ;;
+  esac
+  run="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "latest_completed_producer_run_uuid")"
+  [[ -n "${run}" ]] || run="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "run")"
+  [[ -n "${run}" ]] || return 0
+  state_path="$(ftctl_dr_runtime_run_path "${plan}" "${run}")"
+  [[ -f "${state_path}" ]] || state_path="${status_path}"
+  ftctl_dr_scheduler_recover "${plan}" "${run}" "${profile_file}" "${state_path}" "${status_path}" "LOCAL_RECONCILE"
+}
+
+ftctl_dr_scheduler_reconcile_all() {
+  local json="${1-0}" root profile plan recovered=0 failed=0 rc
+  root="$(ftctl_dr_runtime_root)/plans"
+  [[ -d "${root}" ]] || {
+    [[ "${json}" == "1" ]] && printf '{"command":"dr-reconcile","result":"ok","recovered":0,"failed":0}\n'
+    return 0
+  }
+  for profile in "${root}"/*/profile.json; do
+    [[ -f "${profile}" ]] || continue
+    plan="$(basename "$(dirname "${profile}")")"
+    rc=0
+    ftctl_dr_scheduler_reconcile_plan "${plan}" || rc=$?
+    if [[ "${rc}" == "0" ]]; then
+      if [[ "$(ftctl_dr_runtime_state_get_from_path "$(ftctl_dr_runtime_status_path "${plan}")" "scheduler_recovery_trigger")" == "LOCAL_RECONCILE" ]]; then
+        recovered=$((recovered + 1))
+      fi
+    else
+      failed=$((failed + 1))
+    fi
+  done
+  [[ "${json}" == "1" ]] && printf '{"command":"dr-reconcile","result":"ok","recovered":%s,"failed":%s}\n' "${recovered}" "${failed}"
+  [[ "${failed}" == "0" ]]
+}
+
 ftctl_dr_scheduler_pid_path() {
   local plan="${1-}" run="${2-}"
   printf '%s/%s.pid\n' "$(ftctl_dr_scheduler_dir "${plan}")" "$(ftctl_dr_runtime_key "${run}")"
@@ -1191,6 +1371,8 @@ ftctl_dr_scheduler_worker() {
       "latest_completed_baseline_generation=${baseline_generation}" \
       "latest_completed_cycle_token=${cycle_token}" \
       "latest_completed_cycle_metrics_path=${cycle_metrics_path}" \
+      "scheduler_recovery_state=SUCCEEDED" \
+      "scheduler_recovered_at=${now}" \
       "data_commit_state=LOCAL_DURABLE" \
       "data_copied=true" \
       "metadata_committed=true" \
@@ -1273,8 +1455,14 @@ ftctl_dr_scheduler_start() {
     return 0
   fi
 
-  if [[ "${wait_value}" != "false" || "${FTCTL_DR_SCHEDULER_FOREGROUND:-0}" == "1" ]]; then
+  if [[ "${FTCTL_DR_SCHEDULER_FOREGROUND:-0}" == "1" ]] \
+      || { [[ "${wait_value}" != "false" ]] && [[ "${FTCTL_DR_RUNTIME_WORKER:-0}" != "1" ]]; }; then
     ftctl_dr_scheduler_worker "${plan}" "${run}" "${profile_file}" "${state_path}" "${status_path}"
+    return $?
+  fi
+
+  if ftctl_dr_scheduler_systemd_available "${plan}"; then
+    ftctl_dr_scheduler_launch_via_systemd "${plan}" "${run}" "${profile_file}" "${state_path}" "${status_path}" "SYNC_START"
     return $?
   fi
 

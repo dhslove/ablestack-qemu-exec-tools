@@ -561,3 +561,17 @@ test_dr_scheduler_status_does_not_recover_worker
 | genuine conflict | same generic mismatch | proven foreign identity/higher lease only |
 | dead worker | may remain stopped | singleton reconcile with lease +1 |
 | READY restoration | stale DB/cache may remain green | fresh identity ACK, heartbeat, and cycle required |
+
+## 20. Systemd Cgroup Ownership Correction - 2026-07-22
+
+본 문서의 lease, generation, immutable identity 규약은 그대로 유지한다. 그러나
+background subshell과 `nohup`은 Scheduler를 Mold Agent의 systemd cgroup에서
+분리하지 못한다. PPID가 1이어도 `/system.slice/mold-agent.service`에 남은 worker는
+Agent 재시작 시 종료된다.
+
+Plan별 systemd template가 Scheduler foreground process를 직접 소유하고,
+`dr-sync-recover`와 Cloud-fenced local reconcile이 이 unit을 제어하도록 보정한다.
+valid committed baseline은 process recovery 중 보존하며 READY는 새 identity ACK,
+heartbeat, durable Cycle commit 후에만 성립한다. 파일, CLI, unit, capability, 테스트
+계약은
+`439-ftctl-dr-systemd-owned-scheduler-and-recovery-design-20260722.md`를 규범으로 한다.

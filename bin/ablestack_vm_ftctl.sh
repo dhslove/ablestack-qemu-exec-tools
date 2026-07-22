@@ -239,8 +239,11 @@ Commands:
   snapshot           Show recorded FTCTL state/check/health/events only
   dr-plan-apply      Validate/apply a Cloud-provided FTCTL_DR profile
   dr-sync-start      Accept a DR sync session
+  dr-sync-recover    Recover a stopped DR scheduler without discarding its baseline
   dr-sync-pause      Pause a DR sync session
   dr-sync-resume     Resume a DR sync session
+  dr-scheduler-run   Run the Plan scheduler as a systemd-owned foreground process
+  dr-reconcile       Recover eligible local DR schedulers from Cloud-fenced profiles
   dr-test-failover   Accept a DR test failover session
   dr-test-cleanup    Complete DR test cleanup state
   dr-test-prepare    Prepare writable test artifacts for Cloud-managed Test Failover
@@ -349,7 +352,7 @@ parse_args() {
         print_version
         exit "${EXIT_OK}"
         ;;
-      protect|protect-start|status|reconcile|failover|failover-prepare|failback|failback-sync|failback-finalize|failback-reprotect|unprotect|fence-confirm|fence-clear|pause-protection|resume-protection|preflight-remote|dr-key-ensure|dr-key-install|dr-key-remove|check|health|events|snapshot|dr-plan-apply|dr-sync-start|dr-sync-pause|dr-sync-resume|dr-test-failover|dr-test-cleanup|dr-test-prepare|dr-test-artifact-cleanup|dr-failover|dr-failback|dr-reprotect|dr-target-materialized|dr-cutover-commit|dr-release|dr-status|dr-capabilities|dr-cancel|config)
+      protect|protect-start|status|reconcile|failover|failover-prepare|failback|failback-sync|failback-finalize|failback-reprotect|unprotect|fence-confirm|fence-clear|pause-protection|resume-protection|preflight-remote|dr-key-ensure|dr-key-install|dr-key-remove|check|health|events|snapshot|dr-plan-apply|dr-sync-start|dr-sync-recover|dr-sync-pause|dr-sync-resume|dr-scheduler-run|dr-reconcile|dr-test-failover|dr-test-cleanup|dr-test-prepare|dr-test-artifact-cleanup|dr-failover|dr-failback|dr-reprotect|dr-target-materialized|dr-cutover-commit|dr-release|dr-status|dr-capabilities|dr-cancel|config)
         [[ -z "${CLI_COMMAND}" ]] || {
           echo "ERROR: multiple commands specified" >&2
           exit "${EXIT_USAGE}"
@@ -718,10 +721,16 @@ dispatch() {
     dr-plan-apply)
       ftctl_dr_runtime_plan_apply "${CLI_PLAN}" "${CLI_PROFILE_JSON}" "${CLI_ROLE}" "${CLI_DRY_RUN}" "${CLI_JSON}"
       ;;
-    dr-sync-start|dr-sync-pause|dr-sync-resume|dr-test-failover|dr-test-cleanup|dr-test-prepare|dr-test-artifact-cleanup|dr-failover|dr-failback|dr-reprotect|dr-release)
+    dr-sync-start|dr-sync-recover|dr-sync-pause|dr-sync-resume|dr-test-failover|dr-test-cleanup|dr-test-prepare|dr-test-artifact-cleanup|dr-failover|dr-failback|dr-reprotect|dr-release)
       ftctl_dr_runtime_action "${CLI_COMMAND}" "${CLI_PLAN}" "${CLI_RUN}" "${CLI_PROFILE_JSON}" "${CLI_ROLE}" \
         "${CLI_MODE}" "${CLI_RESTORE_POINT}" "${CLI_FORCE}" "${CLI_DRY_RUN}" "${CLI_WAIT_VALUE}" "${CLI_JSON}" \
         "${CLI_ARTIFACT_SPEC_JSON}"
+      ;;
+    dr-scheduler-run)
+      ftctl_dr_scheduler_run_from_launch "${CLI_PLAN}" "${CLI_JSON}"
+      ;;
+    dr-reconcile)
+      ftctl_dr_scheduler_reconcile_all "${CLI_JSON}"
       ;;
     dr-target-materialized)
       ftctl_dr_runtime_target_materialized "${CLI_PLAN}" "${CLI_RUN}" "${CLI_TARGET_VM_ID}" "${CLI_TARGET_EXTERNAL_REF}" \
@@ -884,6 +893,7 @@ dispatch() {
       ftctl_state_print_status "${CLI_VM}" "${CLI_JSON}"
       ;;
     reconcile)
+      ftctl_dr_scheduler_reconcile_all "0" || true
       ftctl_orchestrator_reconcile "${CLI_VM}" "${CLI_JSON}"
       ;;
     failover)
