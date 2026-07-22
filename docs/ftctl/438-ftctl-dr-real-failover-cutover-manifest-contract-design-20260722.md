@@ -267,3 +267,27 @@ or generated package is committed.
 | Success point | guest preparation may look like Failover completion | `CUTOVER_READY`; Cloud owns boot and promotion |
 | Failure | stale running worker and ambiguous cleanup | terminal typed status and ownership cleanup |
 | Checkpoint | runtime latest may be implied | explicit target-ready, locally durable selection |
+
+## 11. Implementation and package verification (2026-07-22)
+
+- Added `guestprep_manifest.py` to join the authoritative Plan profile,
+  durable restore point, and runtime disk map into
+  `FTCTL_GUESTPREP_MANIFEST_V2`.
+- Canonicalized RBD locators to `rbd:pool/image`, rejected display-only
+  locators, preserved VMware EFI/Secure Boot, and emitted `io_uring` plus
+  per-disk I/O-thread metadata.
+- Added provider validation, typed exit codes, terminal worker-state cleanup,
+  source-isolation verification, and manifest/checkpoint fields in status.
+- Targeted self-tests passed for VMware boot-contract preservation, V2 disk-map
+  normalization, and planned-failover checkpoint promotion.
+- GitHub Actions run `29891374059`, job `build-ftctl-rpm`, completed
+  successfully from commit `a0656f8`.
+- Package: `ablestack_vm_ftctl-0.9.1-1.noarch.rpm`.
+- SHA-256:
+  `2cb386ec636015d592df21224ff40d22102ad2900e6b7e40fc72ac6df5f21bfe`.
+- Package content inspection confirmed `dr_runtime.sh`, `guestprep.sh`, and
+  `guestprep_manifest.py` are present.
+
+Live deployment and mutable WinPE cutover validation are intentionally not
+marked PASS while `10.10.32.*` is unreachable from both the workstation and
+the available jump host.
