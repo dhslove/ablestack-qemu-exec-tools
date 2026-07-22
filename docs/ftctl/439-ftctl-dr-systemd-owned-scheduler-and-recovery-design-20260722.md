@@ -350,3 +350,43 @@ Cloud는 세 capability를 모두 확인한 뒤 recovery API와 자동 controlle
 - READY는 identity ACK, heartbeat, durable Cycle 이후에만 표시된다.
 - TARGET/FAILED_OVER/PAUSED/transition Plan은 자동 복구되지 않는다.
 - 기존 RBD/QCOW2 FT/HA와 xcolo 경로에 회귀가 없다.
+
+## 14. 구현 및 배포 결과 (2026-07-22)
+
+### 14.1 구현 결과
+
+- `ablestack-vm-ftctl-dr@.service`가 Plan별 Scheduler의 유일한 장기 프로세스 소유자가 되도록 구현했다.
+- `dr-scheduler-run`, `dr-sync-recover`, `dr-reconcile` 명령과 regular reconcile 연동을 구현했다.
+- SOURCE/RUNNING Plan만 복구하고 TARGET, FAILED_OVER, PAUSED 및 transition 중인 Plan은 억제한다.
+- 복구 시 기존 committed baseline을 보존하며, 복구 상태와 systemd unit/cgroup 정보를 `dr-status`에 제공한다.
+- 영향 selftest인 `selftest_case_dr_scheduler_systemd_launch_contract`와
+  `selftest_case_dr_scheduler_resume_recovers_missing_worker`가 통과했다.
+
+### 14.2 실제 환경 preflight에서 발견한 결함과 교정
+
+최초 unit은 인스턴스 문자열에 `%I`를 사용했다. systemd가 UUID의 하이픈을 경로 구분자로
+unescape하여 FTCTL에 `c952cae5/11db/...` 형태를 전달했고, Plan 조회가 `not_found`와 재시작
+루프에 빠졌다. unit 인자를 raw 인스턴스인 `%i`로 교정하고, 설치 unit에 `%I`가 존재하지
+않는 회귀 검사를 추가했다.
+
+### 14.3 빌드 및 배포 증적
+
+- 소스 커밋: `a8a2029ee0b7c23e78216174810bfe127f4d16ce`
+- GitHub Actions: `29916365845` (`build-ftctl-rpm`, 성공)
+- RPM: `ablestack_vm_ftctl-0.9.1-1.noarch.rpm`
+- RPM SHA256: `328df7e4956488ec01ca831bfa0118724e0bad463eba7c284594ffa1f5468d22`
+- 배포 호스트: `10.10.32.1`, `10.10.32.2`, `10.10.32.3`
+- 세 호스트 모두 `ablestack-vm-ftctl.timer=active`, 설치 unit은 `%i`만 사용한다.
+
+### 14.4 런타임 검증 결과
+
+| Plan | 권한/상태 | systemd 상태 | 복구 결과 | 판정 |
+|---|---|---|---|---|
+| Rocky `c952cae5-...` | SOURCE / READY | active/running, 전용 cgroup | `SUCCEEDED/LOCAL_RECONCILE` | PASS |
+| Windows `2514a846-...` | TARGET / FAILED_OVER | unit 없음 | `SUPPRESSED` | PASS |
+| Ubuntu `daf0ab48-...` | SOURCE / READY | active/running, 전용 cgroup | `SUCCEEDED/LOCAL_RECONCILE` | PASS |
+
+Rocky와 Ubuntu는 복구 후 fresh heartbeat와 새 incremental durable cycle을 만들었다. Ubuntu
+Cycle 34는 `CBT_INCREMENTAL`, `BASELINE_VALID`, changed/transfer bytes `5,963,776`으로
+기록되어 baseline 보존형 복구임을 확인했다. Scheduler cgroup은 `mold-agent.service`가
+아닌 `ablestack-vm-ftctl-dr@<plan>.service`이다.
