@@ -28,6 +28,18 @@ from typing import Dict, Iterable, List
 BLKGETSIZE64 = 0x80081272
 
 
+def parse_rbd_target(target: str):
+    if not target.startswith("rbd:"):
+        return None
+    payload = target[4:]
+    if ":" in payload or "/" not in payload:
+        raise ValueError(f"unsupported RBD target URI: {target}")
+    pool, image = payload.split("/", 1)
+    if not pool or not image:
+        raise ValueError(f"invalid RBD target URI: {target}")
+    return pool, image
+
+
 def device_size(fd: int) -> int:
     try:
         result = fcntl.ioctl(fd, BLKGETSIZE64, struct.pack("Q", 0))
@@ -64,13 +76,33 @@ def copy_extents(
     expected_target_size: int = 0,
 ) -> Dict[str, int]:
     source_fd = os.open(source, os.O_RDONLY)
-    target_fd = os.open(target, os.O_RDWR)
+    target_fd = None
+    cluster = None
+    ioctx = None
+    image = None
     started = time.monotonic_ns()
     bytes_read = 0
     bytes_written = 0
     try:
         source_size = device_size(source_fd)
-        target_size = device_size(target_fd)
+        rbd_target = parse_rbd_target(target)
+        if rbd_target:
+            try:
+                import rados
+                import rbd
+            except ImportError as error:
+                raise RuntimeError("python-rados and python-rbd are required for an RBD target") from error
+            cluster = rados.Rados(
+                conffile=os.environ.get("FTCTL_DR_RBD_CONF", "/etc/ceph/ceph.conf"),
+                rados_id=os.environ.get("FTCTL_DR_RBD_USER", "admin"),
+            )
+            cluster.connect()
+            ioctx = cluster.open_ioctx(rbd_target[0])
+            image = rbd.Image(ioctx, rbd_target[1])
+            target_size = int(image.size())
+        else:
+            target_fd = os.open(target, os.O_RDWR)
+            target_size = device_size(target_fd)
         if source_size <= 0 or target_size <= 0:
             raise ValueError(
                 f"block device is not ready sourceSize={source_size} targetSize={target_size}"
@@ -94,16 +126,23 @@ def copy_extents(
                 if len(data) != amount:
                     raise IOError(f"short source read at {offset}: expected={amount} actual={len(data)}")
                 bytes_read += len(data)
-                written = 0
-                while written < len(data):
-                    count = os.pwrite(target_fd, data[written:], offset + written)
-                    if count <= 0:
-                        raise IOError(f"short target write at {offset + written}")
-                    written += count
-                    bytes_written += count
+                if image is not None:
+                    image.write(data, offset)
+                    bytes_written += len(data)
+                else:
+                    written = 0
+                    while written < len(data):
+                        count = os.pwrite(target_fd, data[written:], offset + written)
+                        if count <= 0:
+                            raise IOError(f"short target write at {offset + written}")
+                        written += count
+                        bytes_written += count
                 offset += amount
                 remaining -= amount
-        os.fsync(target_fd)
+        if image is not None:
+            image.flush()
+        else:
+            os.fsync(target_fd)
         duration_ms = max(1, (time.monotonic_ns() - started) // 1_000_000)
         return {
             "changedExtentCount": len(normalized),
@@ -115,7 +154,14 @@ def copy_extents(
             "throughputBps": (bytes_read * 1000) // duration_ms,
         }
     finally:
-        os.close(target_fd)
+        if image is not None:
+            image.close()
+        if ioctx is not None:
+            ioctx.close()
+        if cluster is not None:
+            cluster.shutdown()
+        if target_fd is not None:
+            os.close(target_fd)
         os.close(source_fd)
 
 

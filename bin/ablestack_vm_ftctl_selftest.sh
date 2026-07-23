@@ -8432,8 +8432,22 @@ assert metrics["targetWrittenBytes"] == 4096
 PY
     selftest_fail "direct target patch data or metrics are invalid"
 
+  python3 - "${ROOT_DIR}/lib/ftctl/dr_extent_patch.py" <<'PY' ||
+import importlib.util
+import sys
+
+spec = importlib.util.spec_from_file_location("dr_extent_patch", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+assert module.parse_rbd_target("rbd:rbd/target-image") == ("rbd", "target-image")
+assert module.parse_rbd_target("/dev/rbd0") is None
+PY
+    selftest_fail "native librbd target parsing contract is invalid"
+
   selftest_assert_file_contains "${ROOT_DIR}/lib/ftctl/dr_vmware_mover.sh" \
     "target_direct=true"
+  selftest_assert_file_contains "${ROOT_DIR}/lib/ftctl/dr_vmware_mover.sh" \
+    "target_direct_block=false"
   selftest_assert_file_contains "${ROOT_DIR}/lib/ftctl/dr_vmware_mover.sh" \
     'target_cleanup_dev=""'
 }

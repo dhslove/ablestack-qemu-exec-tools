@@ -815,7 +815,7 @@ ftctl_vmware_mover_patch_disk() {
   local source_vmdk="${1-}" source_vm_ref="${2-}" source_snapshot_ref="${3-}" target_uri="${4-}" target_format="${5-}" label="${6-}"
   local endpoint="${7-}" username="${8-}" password_file="${9-}" tls_verify="${10-}" thumbprint="${11-}" libdir="${12-}"
   local areas_path="${13-}" metrics_path="${14-}" expected_bytes="${15-}" work_dir socket_path pid="" source_opts safe_label nbdkit_log qemu_info_log transports
-  local source_dev="" target_dev="" target_cleanup_dev="" target_direct=false
+  local source_dev="" target_dev="" target_cleanup_dev="" target_direct=false target_direct_block=false
   local patch_helper lock_file="${FTCTL_DR_VMWARE_NBD_LOCK:-/run/ablestack-vm-ftctl/dr-runtime/nbd.lock}"
   local attach_attempt ready=false attached=false cleanup_rc=0
 
@@ -883,9 +883,14 @@ ftctl_vmware_mover_patch_disk() {
     [[ "${cleanup_rc}" == "0" ]] || ftctl_vmware_mover_nbd_die "${cleanup_rc}"
     ftctl_vmware_mover_die 89 "DR_SOURCE_NBD_SIZE_NOT_READY: expected=${expected_bytes} observed=${FTCTL_DR_NBD_LAST_OBSERVED_BYTES:-0} sysfs=${FTCTL_DR_NBD_LAST_SYSFS_BYTES:-0} elapsedMs=${FTCTL_DR_NBD_LAST_ELAPSED_MS:-0}"
   fi
-  if [[ -b "${target_uri}" ]]; then
+  if [[ "${target_uri}" == rbd:* ]]; then
     target_dev="${target_uri}"
     target_direct=true
+    ready=true
+  elif [[ -b "${target_uri}" ]]; then
+    target_dev="${target_uri}"
+    target_direct=true
+    target_direct_block=true
     if ftctl_vmware_mover_wait_block_device_ready "${target_dev}" "${expected_bytes}"; then
       ready=true
     fi
@@ -944,7 +949,7 @@ ftctl_vmware_mover_patch_disk() {
     [[ "${cleanup_rc}" == "0" ]] || ftctl_vmware_mover_nbd_die "${cleanup_rc}"
     ftctl_vmware_mover_die 86 "DR_CBT_PATCH_FAILED: extent apply failed for ${label}"
   fi
-  if [[ "${target_direct}" == "true" ]] &&
+  if [[ "${target_direct_block}" == "true" ]] &&
       ! blockdev --flushbufs "${target_dev}" >/dev/null 2>&1; then
     cleanup_rc=0
     ftctl_vmware_mover_nbd_cleanup_pair "" "${source_dev}" || cleanup_rc=$?
