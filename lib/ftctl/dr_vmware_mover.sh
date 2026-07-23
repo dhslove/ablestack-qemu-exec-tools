@@ -815,7 +815,8 @@ ftctl_vmware_mover_patch_disk() {
   local source_vmdk="${1-}" source_vm_ref="${2-}" source_snapshot_ref="${3-}" target_uri="${4-}" target_format="${5-}" label="${6-}"
   local endpoint="${7-}" username="${8-}" password_file="${9-}" tls_verify="${10-}" thumbprint="${11-}" libdir="${12-}"
   local areas_path="${13-}" metrics_path="${14-}" expected_bytes="${15-}" work_dir socket_path pid="" source_opts safe_label nbdkit_log qemu_info_log transports
-  local source_dev="" target_dev="" patch_helper lock_file="${FTCTL_DR_VMWARE_NBD_LOCK:-/run/ablestack-vm-ftctl/dr-runtime/nbd.lock}"
+  local source_dev="" target_dev="" target_cleanup_dev="" target_direct=false
+  local patch_helper lock_file="${FTCTL_DR_VMWARE_NBD_LOCK:-/run/ablestack-vm-ftctl/dr-runtime/nbd.lock}"
   local attach_attempt ready=false attached=false cleanup_rc=0
 
   FTCTL_DR_NBD_TEARDOWN_STATE="NOT_APPLICABLE"
@@ -882,42 +883,54 @@ ftctl_vmware_mover_patch_disk() {
     [[ "${cleanup_rc}" == "0" ]] || ftctl_vmware_mover_nbd_die "${cleanup_rc}"
     ftctl_vmware_mover_die 89 "DR_SOURCE_NBD_SIZE_NOT_READY: expected=${expected_bytes} observed=${FTCTL_DR_NBD_LAST_OBSERVED_BYTES:-0} sysfs=${FTCTL_DR_NBD_LAST_SYSFS_BYTES:-0} elapsedMs=${FTCTL_DR_NBD_LAST_ELAPSED_MS:-0}"
   fi
-  target_dev="$(ftctl_vmware_mover_free_nbd "${source_dev}" || true)"
-  if [[ -z "${target_dev}" ]]; then
-    cleanup_rc=0
-    ftctl_vmware_mover_nbd_cleanup_pair "" "${source_dev}" || cleanup_rc=$?
-    flock -u 9
-    ftctl_vmware_mover_cleanup_nbdkit "${pid}" "${work_dir}"
-    [[ "${cleanup_rc}" == "0" ]] || ftctl_vmware_mover_nbd_die "${cleanup_rc}"
-    ftctl_vmware_mover_die 86 "DR_CBT_PATCH_FAILED: no free target NBD device"
-  fi
-  for ((attach_attempt=1; attach_attempt<=FTCTL_DR_NBD_ATTACH_ATTEMPTS; attach_attempt++)); do
-    attached=false
-    if qemu-nbd --connect="${target_dev}" --format="${target_format:-raw}" "${target_uri}" >/dev/null; then
-      attached=true
-      FTCTL_DR_NBD_TARGET_DEVICE_COUNT=1
-      if ftctl_vmware_mover_wait_block_device_ready "${target_dev}" "${expected_bytes}"; then
-        ready=true
-        break
-      fi
+  if [[ -b "${target_uri}" ]]; then
+    target_dev="${target_uri}"
+    target_direct=true
+    if ftctl_vmware_mover_wait_block_device_ready "${target_dev}" "${expected_bytes}"; then
+      ready=true
     fi
-    if [[ "${attached}" == "true" ]]; then
+  else
+    target_dev="$(ftctl_vmware_mover_free_nbd "${source_dev}" || true)"
+    if [[ -z "${target_dev}" ]]; then
       cleanup_rc=0
-      ftctl_vmware_mover_nbd_cleanup_pair "${target_dev}" "" || cleanup_rc=$?
-      [[ "${cleanup_rc}" == "0" ]] || {
-        flock -u 9
-        ftctl_vmware_mover_nbd_cleanup_pair "" "${source_dev}" >/dev/null 2>&1 || true
-        ftctl_vmware_mover_cleanup_nbdkit "${pid}" "${work_dir}"
-        ftctl_vmware_mover_nbd_die "${cleanup_rc}"
-      }
+      ftctl_vmware_mover_nbd_cleanup_pair "" "${source_dev}" || cleanup_rc=$?
+      flock -u 9
+      ftctl_vmware_mover_cleanup_nbdkit "${pid}" "${work_dir}"
+      [[ "${cleanup_rc}" == "0" ]] || ftctl_vmware_mover_nbd_die "${cleanup_rc}"
+      ftctl_vmware_mover_die 86 "DR_CBT_PATCH_FAILED: no free target NBD device"
     fi
-  done
+    target_cleanup_dev="${target_dev}"
+    for ((attach_attempt=1; attach_attempt<=FTCTL_DR_NBD_ATTACH_ATTEMPTS; attach_attempt++)); do
+      attached=false
+      if qemu-nbd --connect="${target_dev}" --format="${target_format:-raw}" "${target_uri}" >/dev/null; then
+        attached=true
+        FTCTL_DR_NBD_TARGET_DEVICE_COUNT=1
+        if ftctl_vmware_mover_wait_block_device_ready "${target_dev}" "${expected_bytes}"; then
+          ready=true
+          break
+        fi
+      fi
+      if [[ "${attached}" == "true" ]]; then
+        cleanup_rc=0
+        ftctl_vmware_mover_nbd_cleanup_pair "${target_dev}" "" || cleanup_rc=$?
+        [[ "${cleanup_rc}" == "0" ]] || {
+          flock -u 9
+          ftctl_vmware_mover_nbd_cleanup_pair "" "${source_dev}" >/dev/null 2>&1 || true
+          ftctl_vmware_mover_cleanup_nbdkit "${pid}" "${work_dir}"
+          ftctl_vmware_mover_nbd_die "${cleanup_rc}"
+        }
+      fi
+    done
+  fi
   if [[ "${ready}" != "true" ]]; then
     cleanup_rc=0
     ftctl_vmware_mover_nbd_cleanup_pair "" "${source_dev}" || cleanup_rc=$?
     flock -u 9
     ftctl_vmware_mover_cleanup_nbdkit "${pid}" "${work_dir}"
     [[ "${cleanup_rc}" == "0" ]] || ftctl_vmware_mover_nbd_die "${cleanup_rc}"
+    if [[ "${target_direct}" == "true" ]]; then
+      ftctl_vmware_mover_die 89 "DR_TARGET_BLOCK_SIZE_NOT_READY: expected=${expected_bytes} observed=${FTCTL_DR_NBD_LAST_OBSERVED_BYTES:-0} sysfs=${FTCTL_DR_NBD_LAST_SYSFS_BYTES:-0} elapsedMs=${FTCTL_DR_NBD_LAST_ELAPSED_MS:-0}"
+    fi
     ftctl_vmware_mover_die 89 "DR_TARGET_NBD_SIZE_NOT_READY: expected=${expected_bytes} observed=${FTCTL_DR_NBD_LAST_OBSERVED_BYTES:-0} sysfs=${FTCTL_DR_NBD_LAST_SYSFS_BYTES:-0} elapsedMs=${FTCTL_DR_NBD_LAST_ELAPSED_MS:-0} attempts=${FTCTL_DR_NBD_ATTACH_ATTEMPTS}"
   fi
   flock -u 9
@@ -926,13 +939,21 @@ ftctl_vmware_mover_patch_disk() {
   if ! python3 "${patch_helper}" --source "${source_dev}" --target "${target_dev}" --areas-json "${areas_path}" \
       --expected-source-size "${expected_bytes}" --expected-target-size "${expected_bytes}" > "${metrics_path}"; then
     cleanup_rc=0
-    ftctl_vmware_mover_nbd_cleanup_pair "${target_dev}" "${source_dev}" || cleanup_rc=$?
+    ftctl_vmware_mover_nbd_cleanup_pair "${target_cleanup_dev}" "${source_dev}" || cleanup_rc=$?
     ftctl_vmware_mover_cleanup_nbdkit "${pid}" "${work_dir}"
     [[ "${cleanup_rc}" == "0" ]] || ftctl_vmware_mover_nbd_die "${cleanup_rc}"
     ftctl_vmware_mover_die 86 "DR_CBT_PATCH_FAILED: extent apply failed for ${label}"
   fi
+  if [[ "${target_direct}" == "true" ]] &&
+      ! blockdev --flushbufs "${target_dev}" >/dev/null 2>&1; then
+    cleanup_rc=0
+    ftctl_vmware_mover_nbd_cleanup_pair "" "${source_dev}" || cleanup_rc=$?
+    ftctl_vmware_mover_cleanup_nbdkit "${pid}" "${work_dir}"
+    [[ "${cleanup_rc}" == "0" ]] || ftctl_vmware_mover_nbd_die "${cleanup_rc}"
+    ftctl_vmware_mover_die 96 "DR_NBD_TARGET_FLUSH_FAILED: direct target flush failed for ${label}"
+  fi
   cleanup_rc=0
-  ftctl_vmware_mover_nbd_cleanup_pair "${target_dev}" "${source_dev}" || cleanup_rc=$?
+  ftctl_vmware_mover_nbd_cleanup_pair "${target_cleanup_dev}" "${source_dev}" || cleanup_rc=$?
   ftctl_vmware_mover_cleanup_nbdkit "${pid}" "${work_dir}"
   [[ "${cleanup_rc}" == "0" ]] || ftctl_vmware_mover_nbd_die "${cleanup_rc}"
   ftctl_vmware_mover_nbd_append_metrics "${metrics_path}"

@@ -1267,7 +1267,7 @@ ftctl_dr_scheduler_worker() {
           cycle_retry_mode="CLEANUP_ONLY"
           ;;
         DR_NBD_TARGET_FLUSH_FAILED)
-          error_message="Target NBD data flush failed before cycle commit"
+          error_message="Target data flush failed before cycle commit"
           data_commit_state="FAILED"
           cycle_retry_mode="FULL_RETRY"
           ;;

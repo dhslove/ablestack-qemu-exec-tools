@@ -430,3 +430,34 @@ no-partition 결과는 warning으로 남기지 않는다.
 - cleanup-only 복구가 데이터 재전송 없이 격리를 해제한다.
 - Cloud가 raw host device 정보 없이 Plan/cycle 정리 상태를 판단할 수 있다.
 - 기존 RBD/QCOW2 FT/HA와 xcolo 경로에는 동작 변경이 없다.
+
+## 13. 실환경 보강: Cloud 관리 KRBD 대상 직접 쓰기
+
+예약 NBD pool과 deterministic drain을 배포한 뒤 실제 RPO cycle을 다시
+관찰한 결과, source `/dev/nbd16`에는 오류가 없었지만 target
+`/dev/nbd17`에서만 sector-0 read 오류가 재현되었다. Cloud는 이미 대상 RBD를
+KRBD 블록 장치(`/dev/rbd/<pool>/<image>`)로 매핑해 `targetPath`로 전달하고
+있었다. 이 블록 장치를 다시 `qemu-nbd`로 감싸는 두 번째 NBD 계층은 필요하지
+않으며 오류 표면만 늘린다.
+
+보강된 mover 계약은 다음과 같다.
+
+1. VMware source는 VDDK를 연 nbdkit과 FTCTL 예약 source NBD로 읽는다.
+2. `targetPath`가 블록 장치이면 `dr_extent_patch.py`가 해당 장치에 직접
+   `pwrite`하고 `fsync`한다.
+3. patch 성공 후 `blockdev --flushbufs <targetPath>`가 성공해야 cycle을
+   commit한다.
+4. 이 경로의 `nbdTargetDeviceCount`는 `0`이고 source NBD만 deterministic
+   drain한다.
+5. 비블록 URI는 기존 target qemu-nbd 호환 경로를 유지한다.
+
+| 항목 | AS-IS | TO-BE |
+|---|---|---|
+| VMware source | VDDK -> nbdkit -> source NBD | 동일, FTCTL 예약 NBD 사용 |
+| ABLESTACK RBD target | KRBD를 target qemu-nbd로 다시 래핑 | Cloud 관리 KRBD 블록 장치에 직접 증분 쓰기 |
+| target NBD 수 | RBD cycle마다 1 | Cloud 관리 블록 대상은 0 |
+| 내구성 gate | target NBD flush 후 drain | direct target fsync + block flush, source NBD drain |
+| 소유권 | FTCTL이 Cloud 대상 위에 임시 target NBD 생성 | Cloud가 대상 장치를 소유하고 FTCTL은 전달받은 블록 경로만 사용 |
+
+완료 판정에는 연속 changed-data RPO cycle에서 `nbdTargetDeviceCount=0`,
+`nbdTeardownState=DRAINED`, 신규 kernel NBD I/O 오류 0건을 함께 요구한다.

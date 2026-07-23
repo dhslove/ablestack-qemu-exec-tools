@@ -8381,6 +8381,63 @@ selftest_case_dr_runtime_state_snapshot_consistency() {
     "11" "published baseline generation"
 }
 
+selftest_case_dr_vmware_direct_target_patch_contract() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR VMware writes extents directly to a Cloud-managed target block path"
+
+  local source_path="${SELFTEST_ROOT}/direct-source.raw"
+  local target_path="${SELFTEST_ROOT}/direct-target.raw"
+  local areas_path="${SELFTEST_ROOT}/direct-areas.json"
+  local metrics_path="${SELFTEST_ROOT}/direct-metrics.json"
+
+  python3 - "${source_path}" "${target_path}" "${areas_path}" <<'PY'
+import json
+import sys
+
+source_path, target_path, areas_path = sys.argv[1:4]
+size = 1024 * 1024
+with open(source_path, "wb") as handle:
+    handle.truncate(size)
+with open(target_path, "wb") as handle:
+    handle.truncate(size)
+with open(source_path, "r+b") as handle:
+    handle.seek(4096)
+    handle.write(b"ABLESTACK-DR-DIRECT-TARGET")
+with open(areas_path, "w", encoding="utf-8") as handle:
+    json.dump({"areas": [{"offset": 4096, "length": 4096}]}, handle)
+PY
+
+  python3 "${ROOT_DIR}/lib/ftctl/dr_extent_patch.py" \
+    --source "${source_path}" \
+    --target "${target_path}" \
+    --areas-json "${areas_path}" \
+    --expected-source-size 1048576 \
+    --expected-target-size 1048576 > "${metrics_path}" ||
+      selftest_fail "direct target extent patch should succeed"
+
+  python3 - "${source_path}" "${target_path}" "${metrics_path}" <<'PY' ||
+import json
+import sys
+
+source_path, target_path, metrics_path = sys.argv[1:4]
+with open(source_path, "rb") as source, open(target_path, "rb") as target:
+    source.seek(4096)
+    target.seek(4096)
+    assert target.read(4096) == source.read(4096)
+with open(metrics_path, "r", encoding="utf-8") as handle:
+    metrics = json.load(handle)
+assert metrics["changedExtentCount"] == 1
+assert metrics["sourceReadBytes"] == 4096
+assert metrics["targetWrittenBytes"] == 4096
+PY
+    selftest_fail "direct target patch data or metrics are invalid"
+
+  selftest_assert_file_contains "${ROOT_DIR}/lib/ftctl/dr_vmware_mover.sh" \
+    "target_direct=true"
+  selftest_assert_file_contains "${ROOT_DIR}/lib/ftctl/dr_vmware_mover.sh" \
+    'target_cleanup_dev=""'
+}
+
 selftest_case_dr_vmware_nbd_readiness_barrier() {
   selftest_reset_env
   selftest_info "FTCTL_DR VMware NBD readiness barrier waits for a stable size"
@@ -8837,6 +8894,7 @@ selftest_main() {
   selftest_case_dr_scheduler_vmware_requires_mover
   selftest_case_dr_vmware_cycle_result_contract
   selftest_case_dr_runtime_state_snapshot_consistency
+  selftest_case_dr_vmware_direct_target_patch_contract
   selftest_case_dr_vmware_nbd_readiness_barrier
   selftest_case_dr_vmware_nbd_reserved_pool_contract
   selftest_case_dr_vmware_nbd_deterministic_drain
