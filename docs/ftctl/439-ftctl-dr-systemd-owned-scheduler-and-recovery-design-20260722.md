@@ -6,6 +6,7 @@
 - 범위: FTCTL CLI, DR runtime, DR scheduler, systemd package, Mold Agent contract
 - Cloud 상위 설계:
   - `ablestack-cloud/docs/ftctl/568-cross-hypervisor-dr-scheduler-service-and-automatic-recovery-design-20260722.md`
+  - `ablestack-cloud/docs/ftctl/569-cross-hypervisor-dr-nbd-deterministic-drain-and-cycle-observability-design-20260723.md`
 - 선행 설계:
   - [436-ftctl-dr-plan-scheduler-singleton-lease-and-generation-design-20260720.md](436-ftctl-dr-plan-scheduler-singleton-lease-and-generation-design-20260720.md)
   - [437-ftctl-dr-operation-and-protection-status-envelope-design-20260721.md](437-ftctl-dr-operation-and-protection-status-envelope-design-20260721.md)
@@ -390,3 +391,21 @@ Rocky와 Ubuntu는 복구 후 fresh heartbeat와 새 incremental durable cycle�
 Cycle 34는 `CBT_INCREMENTAL`, `BASELINE_VALID`, changed/transfer bytes `5,963,776`으로
 기록되어 baseline 보존형 복구임을 확인했다. Scheduler cgroup은 `mold-agent.service`가
 아닌 `ablestack-vm-ftctl-dr@<plan>.service`이다.
+
+## 15. NBD Quarantine Recovery Addendum (2026-07-23)
+
+The Scheduler recovery contract is extended by:
+
+```text
+440-ftctl-dr-vmware-nbd-deterministic-drain-and-observability-design-20260723.md
+```
+
+Local reconcile must not classify `NBD_TEARDOWN_FAILED` or
+`nbdTeardownState=QUARANTINED` as an ordinary missing worker. It must first run
+cleanup-only NBD drain. A new sync worker may start only after all quarantined
+devices reach stable-free `DRAINED`.
+
+Cleanup-only recovery preserves the previous committed CBT baseline and does
+not create a VMware snapshot, query CBT, write target data, or increment the
+cycle sequence. If cleanup still fails, the Plan remains recovery-required and
+the Scheduler must not automatically start another copy cycle.

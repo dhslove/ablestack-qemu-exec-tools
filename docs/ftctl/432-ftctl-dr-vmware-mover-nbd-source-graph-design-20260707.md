@@ -155,3 +155,21 @@ Error code separation:
 | 74 | `DR_VMWARE_VDDK_EXPORT_UNAVAILABLE` | VDDK NBD export is unavailable |
 | 75 | `DR_VMWARE_VDDK_SOURCE_LOCKED` | powered-on source VMDK is locked because no run snapshot is used |
 | 76 | `DR_VMWARE_VDDK_OPEN_DENIED` | VDDK cannot open the requested VMDK path |
+
+## 8. Follow-up: Deterministic NBD Drain
+
+The raw-over-NBD graph and VDDK connection contract do not by themselves
+complete the NBD block-device lifecycle. Live RPO-cycle evidence on
+2026-07-23 showed sector-zero reads racing with immediate source/target NBD
+disconnect.
+
+The normative follow-up is:
+
+```text
+440-ftctl-dr-vmware-nbd-deterministic-drain-and-observability-design-20260723.md
+```
+
+All source and target NBD success/failure paths must use the shared deterministic
+drain contract defined there. A cycle cannot be committed as completed merely
+because the QEMU source graph opened and target writes were flushed; every
+cycle-owned NBD device must also reach `DRAINED`.

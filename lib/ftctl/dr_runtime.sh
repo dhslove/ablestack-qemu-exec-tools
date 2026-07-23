@@ -2382,6 +2382,12 @@ ftctl_dr_runtime_emit_state_json() {
   local latest_completed_changed_bytes latest_completed_source_read_bytes latest_completed_target_written_bytes
   local latest_completed_transfer_payload_bytes latest_completed_changed_extent_count latest_completed_duration_ms
   local latest_completed_throughput_bps latest_completed_baseline_generation latest_completed_cycle_token latest_completed_cycle_metrics_path
+  local nbd_teardown_state nbd_quarantined_device_count nbd_teardown_error_code nbd_teardown_error_message
+  local latest_completed_nbd_teardown_state latest_completed_nbd_teardown_started_at_ms
+  local latest_completed_nbd_teardown_completed_at_ms latest_completed_nbd_teardown_duration_ms
+  local latest_completed_nbd_source_device_count latest_completed_nbd_target_device_count
+  local latest_completed_nbd_quarantined_device_count latest_completed_nbd_teardown_error_code
+  local latest_completed_nbd_teardown_error_message
   local -a completed_checkpoint_fields=()
   local test_session_id test_session_path test_session_state test_restore_point_ref test_restore_point_sequence
   local test_manifest_path test_checkpoint_path
@@ -2483,6 +2489,10 @@ ftctl_dr_runtime_emit_state_json() {
   scheduler_recovery_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "scheduler_recovery_state")"
   scheduler_recovery_trigger="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "scheduler_recovery_trigger")"
   scheduler_recovered_at="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "scheduler_recovered_at")"
+  nbd_teardown_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "nbd_teardown_state")"
+  nbd_quarantined_device_count="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "nbd_quarantined_device_count")"
+  nbd_teardown_error_code="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "nbd_teardown_error_code")"
+  nbd_teardown_error_message="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "nbd_teardown_error_message")"
   transition_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "transition_state")"
   transition_action="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "transition_action")"
   transition_quiesced_at="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "transition_quiesced_at")"
@@ -2572,6 +2582,15 @@ ftctl_dr_runtime_emit_state_json() {
   latest_completed_baseline_generation="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_baseline_generation")"
   latest_completed_cycle_token="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_cycle_token")"
   latest_completed_cycle_metrics_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_cycle_metrics_path")"
+  latest_completed_nbd_teardown_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_nbd_teardown_state")"
+  latest_completed_nbd_teardown_started_at_ms="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_nbd_teardown_started_at_ms")"
+  latest_completed_nbd_teardown_completed_at_ms="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_nbd_teardown_completed_at_ms")"
+  latest_completed_nbd_teardown_duration_ms="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_nbd_teardown_duration_ms")"
+  latest_completed_nbd_source_device_count="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_nbd_source_device_count")"
+  latest_completed_nbd_target_device_count="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_nbd_target_device_count")"
+  latest_completed_nbd_quarantined_device_count="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_nbd_quarantined_device_count")"
+  latest_completed_nbd_teardown_error_code="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_nbd_teardown_error_code")"
+  latest_completed_nbd_teardown_error_message="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_nbd_teardown_error_message")"
   if [[ -z "${latest_completed_checkpoint_sequence}" && -s "${restore_points_path}" ]]; then
     mapfile -t completed_checkpoint_fields < <(python3 - "${restore_points_path}" <<'PY' 2>/dev/null
 import json
@@ -2820,6 +2839,10 @@ PY
   ftctl_dr_runtime_json_string_field "scheduler_recovery_state" "${scheduler_recovery_state}"
   ftctl_dr_runtime_json_string_field "scheduler_recovery_trigger" "${scheduler_recovery_trigger}"
   ftctl_dr_runtime_json_string_field "scheduler_recovered_at" "${scheduler_recovered_at}"
+  ftctl_dr_runtime_json_string_field "nbd_teardown_state" "${nbd_teardown_state}"
+  ftctl_dr_runtime_json_number_field "nbd_quarantined_device_count" "${nbd_quarantined_device_count}"
+  ftctl_dr_runtime_json_string_field "nbd_teardown_error_code" "${nbd_teardown_error_code}"
+  ftctl_dr_runtime_json_string_field "nbd_teardown_error_message" "${nbd_teardown_error_message}"
   ftctl_dr_runtime_json_string_field "replication_activity" "${replication_activity}"
   ftctl_dr_runtime_json_string_field "protection_state" "${protection_state}"
   ftctl_dr_runtime_json_string_field "active_worker_run_uuid" "${active_worker_run_uuid}"
@@ -2891,6 +2914,15 @@ PY
   ftctl_dr_runtime_json_number_field "latest_completed_baseline_generation" "${latest_completed_baseline_generation}"
   ftctl_dr_runtime_json_string_field "latest_completed_cycle_token" "${latest_completed_cycle_token}"
   ftctl_dr_runtime_json_string_field "latest_completed_cycle_metrics_path" "${latest_completed_cycle_metrics_path}"
+  ftctl_dr_runtime_json_string_field "latest_completed_nbd_teardown_state" "${latest_completed_nbd_teardown_state}"
+  ftctl_dr_runtime_json_number_field "latest_completed_nbd_teardown_started_at_ms" "${latest_completed_nbd_teardown_started_at_ms}"
+  ftctl_dr_runtime_json_number_field "latest_completed_nbd_teardown_completed_at_ms" "${latest_completed_nbd_teardown_completed_at_ms}"
+  ftctl_dr_runtime_json_number_field "latest_completed_nbd_teardown_duration_ms" "${latest_completed_nbd_teardown_duration_ms}"
+  ftctl_dr_runtime_json_number_field "latest_completed_nbd_source_device_count" "${latest_completed_nbd_source_device_count}"
+  ftctl_dr_runtime_json_number_field "latest_completed_nbd_target_device_count" "${latest_completed_nbd_target_device_count}"
+  ftctl_dr_runtime_json_number_field "latest_completed_nbd_quarantined_device_count" "${latest_completed_nbd_quarantined_device_count}"
+  ftctl_dr_runtime_json_string_field "latest_completed_nbd_teardown_error_code" "${latest_completed_nbd_teardown_error_code}"
+  ftctl_dr_runtime_json_string_field "latest_completed_nbd_teardown_error_message" "${latest_completed_nbd_teardown_error_message}"
   ftctl_dr_runtime_json_file_field_redacted "latest_completed_cycle_metrics" "${latest_completed_cycle_metrics_path}"
   ftctl_dr_runtime_json_string_field "restore_points_path" "${restore_points_path}"
   ftctl_dr_runtime_json_string_field "test_session_id" "${test_session_id}"
@@ -3286,6 +3318,11 @@ ftctl_dr_runtime_action() {
         42) error_code="DR_RECOVERY_SUPPRESSED_CONTROL_STATE" ;;
         43) error_code="DR_RECOVERY_TRANSITION_ACTIVE" ;;
         69) error_code="DR_RECOVERY_UNIT_START_FAILED" ;;
+        92) error_code="DR_NBD_TEARDOWN_TIMEOUT" ;;
+        93) error_code="DR_NBD_DISCONNECT_FAILED" ;;
+        94) error_code="DR_NBD_DEVICE_BUSY" ;;
+        95) error_code="DR_NBD_DEVICE_QUARANTINED" ;;
+        96) error_code="DR_NBD_TARGET_FLUSH_FAILED" ;;
         *) error_code="DR_RECOVERY_FAILED" ;;
       esac
       ftctl_dr_runtime_path_set "${run_path}" \
@@ -3896,7 +3933,7 @@ ftctl_dr_runtime_capabilities() {
       first="0"
       printf '"%s"' "$(ftctl__json_escape "${command}")"
     done
-    printf '],"supported_features":["async-run","status-projection","status-scope-v2","target-materialized-notify","target-materialized-idempotent","hardware-contract-projection","control-protocol-v2","control-protocol-v3","dr-scheduler-singleton-v1","dr-scheduler-self-owner-repair-v1","dr-scheduler-systemd-unit-v1","dr-sync-recover-v1","dr-local-reconcile-fence-v1","dr-checkpoint-producer-v1","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","guest-preparation-v1","guest-preparation-v2","test-domain-lifecycle-v1","test-artifact-lifecycle-v2","cloud-managed-test-vm-v1","cutover-ready-v1","cutover-manifest-v2","cutover-preflight-v1","cloud-cutover-commit-v1"]}\n'
+    printf '],"supported_features":["async-run","status-projection","status-scope-v2","target-materialized-notify","target-materialized-idempotent","hardware-contract-projection","control-protocol-v2","control-protocol-v3","dr-scheduler-singleton-v1","dr-scheduler-self-owner-repair-v1","dr-scheduler-systemd-unit-v1","dr-sync-recover-v1","dr-local-reconcile-fence-v1","dr-checkpoint-producer-v1","dr-nbd-deterministic-drain-v1","dr-nbd-cleanup-recovery-v1","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","guest-preparation-v1","guest-preparation-v2","test-domain-lifecycle-v1","test-artifact-lifecycle-v2","cloud-managed-test-vm-v1","cutover-ready-v1","cutover-manifest-v2","cutover-preflight-v1","cloud-cutover-commit-v1"]}\n'
     return 0
   fi
 

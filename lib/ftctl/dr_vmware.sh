@@ -607,6 +607,9 @@ if cycle_metrics:
         "incrementalVerified", "metricsEstimated", "baselineGeneration", "cycleCommitState",
         "virtualBytes", "changedBytes", "sourceReadBytes", "targetWrittenBytes",
         "transferPayloadBytes", "changedExtentCount", "durationMs", "throughputBps",
+        "nbdTeardownState", "nbdTeardownStartedAtEpochMs", "nbdTeardownCompletedAtEpochMs",
+        "nbdTeardownDurationMs", "nbdSourceDeviceCount", "nbdTargetDeviceCount",
+        "nbdQuarantinedDeviceCount", "nbdTeardownErrorCode", "nbdTeardownErrorMessage",
     ):
         if key in cycle_metrics:
             checkpoint[key] = cycle_metrics[key]

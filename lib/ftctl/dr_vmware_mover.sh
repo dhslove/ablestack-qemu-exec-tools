@@ -31,6 +31,20 @@ FTCTL_DR_NBD_READY_TIMEOUT_MS="${FTCTL_DR_NBD_READY_TIMEOUT_MS:-5000}"
 FTCTL_DR_NBD_READY_POLL_MS="${FTCTL_DR_NBD_READY_POLL_MS:-50}"
 FTCTL_DR_NBD_ATTACH_ATTEMPTS="${FTCTL_DR_NBD_ATTACH_ATTEMPTS:-2}"
 FTCTL_DR_NBD_SYSFS_ROOT="${FTCTL_DR_NBD_SYSFS_ROOT:-/sys/class/block}"
+FTCTL_DR_NBD_DRAIN_TIMEOUT_MS="${FTCTL_DR_NBD_DRAIN_TIMEOUT_MS:-10000}"
+FTCTL_DR_NBD_DRAIN_POLL_MS="${FTCTL_DR_NBD_DRAIN_POLL_MS:-50}"
+FTCTL_DR_NBD_UDEV_SETTLE_TIMEOUT_SEC="${FTCTL_DR_NBD_UDEV_SETTLE_TIMEOUT_SEC:-10}"
+FTCTL_DR_NBD_STABLE_POLLS="${FTCTL_DR_NBD_STABLE_POLLS:-2}"
+FTCTL_DR_NBD_QUARANTINE_ROOT="${FTCTL_DR_NBD_QUARANTINE_ROOT:-/run/ablestack-vm-ftctl/dr-runtime/nbd-quarantine}"
+FTCTL_DR_NBD_TEARDOWN_STATE="NOT_APPLICABLE"
+FTCTL_DR_NBD_TEARDOWN_STARTED_AT_MS=0
+FTCTL_DR_NBD_TEARDOWN_COMPLETED_AT_MS=0
+FTCTL_DR_NBD_TEARDOWN_DURATION_MS=0
+FTCTL_DR_NBD_SOURCE_DEVICE_COUNT=0
+FTCTL_DR_NBD_TARGET_DEVICE_COUNT=0
+FTCTL_DR_NBD_QUARANTINED_DEVICE_COUNT=0
+FTCTL_DR_NBD_TEARDOWN_ERROR_CODE=""
+FTCTL_DR_NBD_TEARDOWN_ERROR_MESSAGE=""
 FTCTL_DR_VMWARE_LAST_SNAPSHOT_REF=""
 FTCTL_DR_VMWARE_LAST_SNAPSHOT_RESOLVE_METHOD=""
 FTCTL_DR_VMWARE_SOURCE_OPEN_TLS_VERIFY=""
@@ -113,7 +127,10 @@ if state == "LOCAL_DURABLE" and metrics_path and os.path.isfile(metrics_path):
         "invalidBaselineDiskCount", "incrementalVerified", "metricsEstimated",
         "baselineGeneration", "cycleCommitState", "virtualBytes", "changedBytes",
         "sourceReadBytes", "targetWrittenBytes", "transferPayloadBytes",
-        "changedExtentCount", "durationMs", "throughputBps",
+        "changedExtentCount", "durationMs", "throughputBps", "nbdTeardownState",
+        "nbdTeardownStartedAtEpochMs", "nbdTeardownCompletedAtEpochMs",
+        "nbdTeardownDurationMs", "nbdSourceDeviceCount", "nbdTargetDeviceCount",
+        "nbdQuarantinedDeviceCount", "nbdTeardownErrorCode", "nbdTeardownErrorMessage",
     ):
         if key in metrics:
             payload[key] = metrics[key]
@@ -270,7 +287,8 @@ ftctl_vmware_mover_free_nbd() {
   for dev in /dev/nbd{0..31}; do
     [[ -b "${dev}" && "${dev}" != "${excluded}" ]] || continue
     name="${dev#/dev/}"
-    if [[ ! -s "/sys/class/block/${name}/pid" ]]; then
+    if ftctl_vmware_mover_nbd_is_stable_free "${dev}" &&
+        ! ftctl_vmware_mover_nbd_is_quarantined "${dev}"; then
       printf '%s\n' "${dev}"
       return 0
     fi
@@ -289,6 +307,276 @@ import time
 print(int(time.time() * 1000))
 PY
   fi
+}
+
+ftctl_vmware_mover_nbd_quarantine_path() {
+  local device="${1-}" plan="${2-${FTCTL_DR_PLAN_UUID:-unknown}}" name
+  name="${device#/dev/}"
+  printf '%s/%s/%s.json\n' "${FTCTL_DR_NBD_QUARANTINE_ROOT}" "${plan}" "${name}"
+}
+
+ftctl_vmware_mover_nbd_is_quarantined() {
+  local device="${1-}" name record
+  name="${device#/dev/}"
+  [[ -d "${FTCTL_DR_NBD_QUARANTINE_ROOT}" ]] || return 1
+  while IFS= read -r record; do
+    [[ -n "${record}" ]] && return 0
+  done < <(find "${FTCTL_DR_NBD_QUARANTINE_ROOT}" -mindepth 2 -maxdepth 2 \
+    -type f -name "${name}.json" -print 2>/dev/null | head -n 1)
+  return 1
+}
+
+ftctl_vmware_mover_nbd_partition_count() {
+  local device="${1-}" name entry count=0
+  name="${device#/dev/}"
+  shopt -s nullglob
+  for entry in "${FTCTL_DR_NBD_SYSFS_ROOT}/${name}"p*; do
+    [[ -e "${entry}" ]] && count=$((count + 1))
+  done
+  shopt -u nullglob
+  printf '%s\n' "${count}"
+}
+
+ftctl_vmware_mover_nbd_holder_count() {
+  local device="${1-}" name holder_dir
+  name="${device#/dev/}"
+  holder_dir="${FTCTL_DR_NBD_SYSFS_ROOT}/${name}/holders"
+  [[ -d "${holder_dir}" ]] || {
+    printf '0\n'
+    return 0
+  }
+  find "${holder_dir}" -mindepth 1 -maxdepth 1 -print 2>/dev/null | wc -l | tr -d ' '
+}
+
+ftctl_vmware_mover_nbd_mounted_count() {
+  local device="${1-}"
+  if command -v lsblk >/dev/null 2>&1; then
+    lsblk -nrpo MOUNTPOINT "${device}" 2>/dev/null | awk 'NF {count++} END {print count + 0}'
+  else
+    printf '0\n'
+  fi
+}
+
+ftctl_vmware_mover_nbd_is_stable_free() {
+  local device="${1-}" name pid="" sectors=0 holders=0 partitions=0 mounted=0
+  name="${device#/dev/}"
+  [[ -e "${FTCTL_DR_NBD_SYSFS_ROOT}/${name}" ]] || return 1
+  pid="$(cat "${FTCTL_DR_NBD_SYSFS_ROOT}/${name}/pid" 2>/dev/null || true)"
+  sectors="$(cat "${FTCTL_DR_NBD_SYSFS_ROOT}/${name}/size" 2>/dev/null || printf '0')"
+  holders="$(ftctl_vmware_mover_nbd_holder_count "${device}")"
+  partitions="$(ftctl_vmware_mover_nbd_partition_count "${device}")"
+  mounted="$(ftctl_vmware_mover_nbd_mounted_count "${device}")"
+  [[ -z "${pid}" && "${sectors:-0}" == "0" && "${holders:-0}" == "0" &&
+    "${partitions:-0}" == "0" && "${mounted:-0}" == "0" ]]
+}
+
+ftctl_vmware_mover_nbd_wait_stable_free() {
+  local device="${1-}" timeout_ms="${2-${FTCTL_DR_NBD_DRAIN_TIMEOUT_MS}}"
+  local poll_ms="${3-${FTCTL_DR_NBD_DRAIN_POLL_MS}}" start now stable=0 sleep_value
+  [[ "${timeout_ms}" =~ ^[1-9][0-9]*$ ]] || timeout_ms=10000
+  [[ "${poll_ms}" =~ ^[1-9][0-9]*$ ]] || poll_ms=50
+  start="$(ftctl_vmware_mover_now_ms)"
+  while true; do
+    if ftctl_vmware_mover_nbd_is_stable_free "${device}"; then
+      stable=$((stable + 1))
+      if (( stable >= FTCTL_DR_NBD_STABLE_POLLS )); then
+        return 0
+      fi
+    else
+      stable=0
+    fi
+    now="$(ftctl_vmware_mover_now_ms)"
+    (( now - start < timeout_ms )) || return 1
+    printf -v sleep_value '%d.%03d' "$((poll_ms / 1000))" "$((poll_ms % 1000))"
+    sleep "${sleep_value}"
+  done
+}
+
+ftctl_vmware_mover_nbd_write_quarantine() {
+  local device="${1-}" role="${2-}" method="${3-}" error_code="${4-}" error_message="${5-}"
+  local path now
+  path="$(ftctl_vmware_mover_nbd_quarantine_path "${device}")"
+  now="$(ftctl_vmware_mover_now_ms)"
+  mkdir -p "$(dirname "${path}")"
+  python3 - "${path}" "${FTCTL_DR_PLAN_UUID:-}" "${FTCTL_DR_CHECKPOINT_SEQUENCE:-0}" \
+    "${device#/dev/}" "${role}" "${method}" "${error_code}" "${error_message}" "${now}" <<'PY'
+import json
+import os
+import sys
+
+path, plan, sequence, device, role, method, error_code, error_message, now = sys.argv[1:10]
+payload = {
+    "schemaVersion": 1,
+    "planUuid": plan,
+    "cycleSequence": int(sequence or 0),
+    "deviceName": device,
+    "role": role,
+    "attachMethod": method,
+    "state": "QUARANTINED",
+    "errorCode": error_code,
+    "errorMessage": error_message,
+    "quarantinedAtEpochMs": int(now),
+}
+tmp = path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as handle:
+    json.dump(payload, handle, sort_keys=True, separators=(",", ":"))
+    handle.write("\n")
+    handle.flush()
+    os.fsync(handle.fileno())
+os.replace(tmp, path)
+PY
+}
+
+ftctl_vmware_mover_nbd_clear_quarantine() {
+  local device="${1-}" plan="${2-${FTCTL_DR_PLAN_UUID:-unknown}}"
+  rm -f "$(ftctl_vmware_mover_nbd_quarantine_path "${device}" "${plan}")"
+}
+
+ftctl_vmware_mover_nbd_set_failure() {
+  local device="${1-}" role="${2-}" method="${3-}" code="${4-DR_NBD_TEARDOWN_TIMEOUT}" message="${5-NBD teardown failed}"
+  FTCTL_DR_NBD_TEARDOWN_STATE="QUARANTINED"
+  FTCTL_DR_NBD_QUARANTINED_DEVICE_COUNT=$((FTCTL_DR_NBD_QUARANTINED_DEVICE_COUNT + 1))
+  FTCTL_DR_NBD_TEARDOWN_ERROR_CODE="${code}"
+  FTCTL_DR_NBD_TEARDOWN_ERROR_MESSAGE="${message}"
+  ftctl_vmware_mover_nbd_write_quarantine "${device}" "${role}" "${method}" "${code}" "${message}" || true
+}
+
+ftctl_vmware_mover_nbd_drain() {
+  local device="${1-}" role="${2-}" method="${3-}" started now disconnect_rc=0
+  [[ -n "${device}" ]] || return 0
+  started="$(ftctl_vmware_mover_now_ms)"
+  [[ "${FTCTL_DR_NBD_TEARDOWN_STARTED_AT_MS}" != "0" ]] ||
+    FTCTL_DR_NBD_TEARDOWN_STARTED_AT_MS="${started}"
+  FTCTL_DR_NBD_TEARDOWN_STATE="DRAINING"
+
+  if [[ "${role}" == "TARGET" ]] && ! blockdev --flushbufs "${device}" >/dev/null 2>&1; then
+    ftctl_vmware_mover_nbd_set_failure "${device}" "${role}" "${method}" \
+      "DR_NBD_TARGET_FLUSH_FAILED" "Target NBD flush failed"
+    return 96
+  fi
+  if command -v udevadm >/dev/null 2>&1; then
+    udevadm settle --timeout="${FTCTL_DR_NBD_UDEV_SETTLE_TIMEOUT_SEC}" >/dev/null 2>&1 || true
+  fi
+  if command -v partx >/dev/null 2>&1; then
+    partx -d "${device}" >/dev/null 2>&1 || true
+  fi
+  if command -v udevadm >/dev/null 2>&1; then
+    udevadm settle --timeout="${FTCTL_DR_NBD_UDEV_SETTLE_TIMEOUT_SEC}" >/dev/null 2>&1 || true
+  fi
+
+  case "${method}" in
+    QEMU_NBD) qemu-nbd --disconnect "${device}" >/dev/null 2>&1 || disconnect_rc=$? ;;
+    NBD_CLIENT) nbd-client -d "${device}" >/dev/null 2>&1 || disconnect_rc=$? ;;
+    *) disconnect_rc=2 ;;
+  esac
+  if ! ftctl_vmware_mover_nbd_wait_stable_free "${device}"; then
+    if [[ "${disconnect_rc}" != "0" ]]; then
+      ftctl_vmware_mover_nbd_set_failure "${device}" "${role}" "${method}" \
+        "DR_NBD_DISCONNECT_FAILED" "NBD disconnect failed and the device remained busy"
+      return 93
+    else
+      ftctl_vmware_mover_nbd_set_failure "${device}" "${role}" "${method}" \
+        "DR_NBD_TEARDOWN_TIMEOUT" "NBD device did not reach stable-free before timeout"
+      return 92
+    fi
+  fi
+  if command -v udevadm >/dev/null 2>&1; then
+    udevadm settle --timeout="${FTCTL_DR_NBD_UDEV_SETTLE_TIMEOUT_SEC}" >/dev/null 2>&1 || true
+  fi
+  ftctl_vmware_mover_nbd_is_stable_free "${device}" || {
+    ftctl_vmware_mover_nbd_set_failure "${device}" "${role}" "${method}" \
+      "DR_NBD_DEVICE_BUSY" "NBD partition, holder, or mount remained after disconnect"
+    return 94
+  }
+  ftctl_vmware_mover_nbd_clear_quarantine "${device}"
+  now="$(ftctl_vmware_mover_now_ms)"
+  FTCTL_DR_NBD_TEARDOWN_COMPLETED_AT_MS="${now}"
+  FTCTL_DR_NBD_TEARDOWN_DURATION_MS=$((FTCTL_DR_NBD_TEARDOWN_DURATION_MS + now - started))
+  FTCTL_DR_NBD_TEARDOWN_STATE="DRAINED"
+  return 0
+}
+
+ftctl_vmware_mover_nbd_cleanup_pair() {
+  local target_dev="${1-}" source_dev="${2-}" first_rc=0 rc=0
+  if [[ -n "${target_dev}" ]]; then
+    ftctl_vmware_mover_nbd_drain "${target_dev}" "TARGET" "QEMU_NBD" || rc=$?
+    [[ "${first_rc}" != "0" ]] || first_rc="${rc}"
+  fi
+  rc=0
+  if [[ -n "${source_dev}" ]]; then
+    ftctl_vmware_mover_nbd_drain "${source_dev}" "SOURCE" "NBD_CLIENT" || rc=$?
+    [[ "${first_rc}" != "0" ]] || first_rc="${rc}"
+  fi
+  return "${first_rc}"
+}
+
+ftctl_vmware_mover_nbd_die() {
+  local rc="${1-92}" code
+  case "${rc}" in
+    93) code="DR_NBD_DISCONNECT_FAILED" ;;
+    94) code="DR_NBD_DEVICE_BUSY" ;;
+    95) code="DR_NBD_DEVICE_QUARANTINED" ;;
+    96) code="DR_NBD_TARGET_FLUSH_FAILED" ;;
+    *) rc=92; code="DR_NBD_TEARDOWN_TIMEOUT" ;;
+  esac
+  ftctl_vmware_mover_die "${rc}" "${code}: ${FTCTL_DR_NBD_TEARDOWN_ERROR_MESSAGE:-NBD teardown failed}"
+}
+
+ftctl_vmware_mover_nbd_append_metrics() {
+  local metrics_path="${1-}"
+  python3 - "${metrics_path}" "${FTCTL_DR_NBD_TEARDOWN_STATE}" \
+    "${FTCTL_DR_NBD_TEARDOWN_STARTED_AT_MS}" "${FTCTL_DR_NBD_TEARDOWN_COMPLETED_AT_MS}" \
+    "${FTCTL_DR_NBD_TEARDOWN_DURATION_MS}" "${FTCTL_DR_NBD_SOURCE_DEVICE_COUNT}" \
+    "${FTCTL_DR_NBD_TARGET_DEVICE_COUNT}" "${FTCTL_DR_NBD_QUARANTINED_DEVICE_COUNT}" \
+    "${FTCTL_DR_NBD_TEARDOWN_ERROR_CODE}" "${FTCTL_DR_NBD_TEARDOWN_ERROR_MESSAGE}" <<'PY'
+import json
+import os
+import sys
+
+path, state, started, completed, duration, source_count, target_count, quarantined_count, error_code, error_message = sys.argv[1:11]
+with open(path, "r", encoding="utf-8") as handle:
+    payload = json.load(handle)
+payload.update({
+    "nbdTeardownState": state,
+    "nbdTeardownStartedAtEpochMs": int(started or 0),
+    "nbdTeardownCompletedAtEpochMs": int(completed or 0),
+    "nbdTeardownDurationMs": int(duration or 0),
+    "nbdSourceDeviceCount": int(source_count or 0),
+    "nbdTargetDeviceCount": int(target_count or 0),
+    "nbdQuarantinedDeviceCount": int(quarantined_count or 0),
+    "nbdTeardownErrorCode": error_code,
+    "nbdTeardownErrorMessage": error_message,
+})
+tmp = path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as handle:
+    json.dump(payload, handle, sort_keys=True, separators=(",", ":"))
+    handle.write("\n")
+    handle.flush()
+    os.fsync(handle.fileno())
+os.replace(tmp, path)
+PY
+}
+
+ftctl_vmware_mover_nbd_recover_quarantine() {
+  local plan="${1-}" plan_dir record device role method rc=0 failed=0
+  [[ -n "${plan}" ]] || return 2
+  plan_dir="${FTCTL_DR_NBD_QUARANTINE_ROOT}/${plan}"
+  [[ -d "${plan_dir}" ]] || return 0
+  for record in "${plan_dir}"/*.json; do
+    [[ -f "${record}" ]] || continue
+    device="/dev/$(jq -r '.deviceName // ""' "${record}")"
+    role="$(jq -r '.role // ""' "${record}")"
+    method="$(jq -r '.attachMethod // ""' "${record}")"
+    rc=0
+    FTCTL_DR_PLAN_UUID="${plan}" ftctl_vmware_mover_nbd_drain "${device}" "${role}" "${method}" || rc=$?
+    if [[ "${rc}" == "0" ]]; then
+      rm -f "${record}"
+    else
+      failed=$((failed + 1))
+    fi
+  done
+  rmdir "${plan_dir}" 2>/dev/null || true
+  [[ "${failed}" == "0" ]]
 }
 
 ftctl_vmware_mover_wait_block_device_ready() {
@@ -475,7 +763,17 @@ ftctl_vmware_mover_patch_disk() {
   local endpoint="${7-}" username="${8-}" password_file="${9-}" tls_verify="${10-}" thumbprint="${11-}" libdir="${12-}"
   local areas_path="${13-}" metrics_path="${14-}" expected_bytes="${15-}" work_dir socket_path pid="" source_opts safe_label nbdkit_log qemu_info_log transports
   local source_dev="" target_dev="" patch_helper lock_file="${FTCTL_DR_VMWARE_NBD_LOCK:-/run/ablestack-vm-ftctl/dr-runtime/nbd.lock}"
-  local attach_attempt ready=false
+  local attach_attempt ready=false attached=false cleanup_rc=0
+
+  FTCTL_DR_NBD_TEARDOWN_STATE="NOT_APPLICABLE"
+  FTCTL_DR_NBD_TEARDOWN_STARTED_AT_MS=0
+  FTCTL_DR_NBD_TEARDOWN_COMPLETED_AT_MS=0
+  FTCTL_DR_NBD_TEARDOWN_DURATION_MS=0
+  FTCTL_DR_NBD_SOURCE_DEVICE_COUNT=0
+  FTCTL_DR_NBD_TARGET_DEVICE_COUNT=0
+  FTCTL_DR_NBD_QUARANTINED_DEVICE_COUNT=0
+  FTCTL_DR_NBD_TEARDOWN_ERROR_CODE=""
+  FTCTL_DR_NBD_TEARDOWN_ERROR_MESSAGE=""
 
   [[ -s "${areas_path}" ]] || ftctl_vmware_mover_die 84 "DR_CBT_EXTENT_INVALID: changed-area payload is missing for ${label}"
   work_dir="$(mktemp -d -t ftctl.vmware.patch.XXXXXX)"
@@ -522,31 +820,51 @@ ftctl_vmware_mover_patch_disk() {
     ftctl_vmware_mover_cleanup_nbdkit "${pid}" "${work_dir}"
     ftctl_vmware_mover_die 86 "DR_CBT_PATCH_FAILED: source NBD attach failed"
   fi
+  FTCTL_DR_NBD_SOURCE_DEVICE_COUNT=1
   if ! ftctl_vmware_mover_wait_block_device_ready "${source_dev}" "${expected_bytes}"; then
-    nbd-client -d "${source_dev}" >/dev/null 2>&1 || true
+    cleanup_rc=0
+    ftctl_vmware_mover_nbd_cleanup_pair "" "${source_dev}" || cleanup_rc=$?
     flock -u 9
     ftctl_vmware_mover_cleanup_nbdkit "${pid}" "${work_dir}"
+    [[ "${cleanup_rc}" == "0" ]] || ftctl_vmware_mover_nbd_die "${cleanup_rc}"
     ftctl_vmware_mover_die 89 "DR_SOURCE_NBD_SIZE_NOT_READY: expected=${expected_bytes} observed=${FTCTL_DR_NBD_LAST_OBSERVED_BYTES:-0} sysfs=${FTCTL_DR_NBD_LAST_SYSFS_BYTES:-0} elapsedMs=${FTCTL_DR_NBD_LAST_ELAPSED_MS:-0}"
   fi
   target_dev="$(ftctl_vmware_mover_free_nbd "${source_dev}" || true)"
   if [[ -z "${target_dev}" ]]; then
-    nbd-client -d "${source_dev}" >/dev/null 2>&1 || true
+    cleanup_rc=0
+    ftctl_vmware_mover_nbd_cleanup_pair "" "${source_dev}" || cleanup_rc=$?
     flock -u 9
     ftctl_vmware_mover_cleanup_nbdkit "${pid}" "${work_dir}"
+    [[ "${cleanup_rc}" == "0" ]] || ftctl_vmware_mover_nbd_die "${cleanup_rc}"
     ftctl_vmware_mover_die 86 "DR_CBT_PATCH_FAILED: no free target NBD device"
   fi
   for ((attach_attempt=1; attach_attempt<=FTCTL_DR_NBD_ATTACH_ATTEMPTS; attach_attempt++)); do
-    if qemu-nbd --connect="${target_dev}" --format="${target_format:-raw}" "${target_uri}" >/dev/null &&
-        ftctl_vmware_mover_wait_block_device_ready "${target_dev}" "${expected_bytes}"; then
-      ready=true
-      break
+    attached=false
+    if qemu-nbd --connect="${target_dev}" --format="${target_format:-raw}" "${target_uri}" >/dev/null; then
+      attached=true
+      FTCTL_DR_NBD_TARGET_DEVICE_COUNT=1
+      if ftctl_vmware_mover_wait_block_device_ready "${target_dev}" "${expected_bytes}"; then
+        ready=true
+        break
+      fi
     fi
-    qemu-nbd --disconnect "${target_dev}" >/dev/null 2>&1 || true
+    if [[ "${attached}" == "true" ]]; then
+      cleanup_rc=0
+      ftctl_vmware_mover_nbd_cleanup_pair "${target_dev}" "" || cleanup_rc=$?
+      [[ "${cleanup_rc}" == "0" ]] || {
+        flock -u 9
+        ftctl_vmware_mover_nbd_cleanup_pair "" "${source_dev}" >/dev/null 2>&1 || true
+        ftctl_vmware_mover_cleanup_nbdkit "${pid}" "${work_dir}"
+        ftctl_vmware_mover_nbd_die "${cleanup_rc}"
+      }
+    fi
   done
   if [[ "${ready}" != "true" ]]; then
-    nbd-client -d "${source_dev}" >/dev/null 2>&1 || true
+    cleanup_rc=0
+    ftctl_vmware_mover_nbd_cleanup_pair "" "${source_dev}" || cleanup_rc=$?
     flock -u 9
     ftctl_vmware_mover_cleanup_nbdkit "${pid}" "${work_dir}"
+    [[ "${cleanup_rc}" == "0" ]] || ftctl_vmware_mover_nbd_die "${cleanup_rc}"
     ftctl_vmware_mover_die 89 "DR_TARGET_NBD_SIZE_NOT_READY: expected=${expected_bytes} observed=${FTCTL_DR_NBD_LAST_OBSERVED_BYTES:-0} sysfs=${FTCTL_DR_NBD_LAST_SYSFS_BYTES:-0} elapsedMs=${FTCTL_DR_NBD_LAST_ELAPSED_MS:-0} attempts=${FTCTL_DR_NBD_ATTACH_ATTEMPTS}"
   fi
   flock -u 9
@@ -554,15 +872,17 @@ ftctl_vmware_mover_patch_disk() {
   patch_helper="${FTCTL_DR_VMWARE_EXTENT_PATCH_HELPER:-${FTCTL_DR_VMWARE_MOVER_LIB_DIR}/dr_extent_patch.py}"
   if ! python3 "${patch_helper}" --source "${source_dev}" --target "${target_dev}" --areas-json "${areas_path}" \
       --expected-source-size "${expected_bytes}" --expected-target-size "${expected_bytes}" > "${metrics_path}"; then
-    qemu-nbd --disconnect "${target_dev}" >/dev/null 2>&1 || true
-    nbd-client -d "${source_dev}" >/dev/null 2>&1 || true
+    cleanup_rc=0
+    ftctl_vmware_mover_nbd_cleanup_pair "${target_dev}" "${source_dev}" || cleanup_rc=$?
     ftctl_vmware_mover_cleanup_nbdkit "${pid}" "${work_dir}"
+    [[ "${cleanup_rc}" == "0" ]] || ftctl_vmware_mover_nbd_die "${cleanup_rc}"
     ftctl_vmware_mover_die 86 "DR_CBT_PATCH_FAILED: extent apply failed for ${label}"
   fi
-  blockdev --flushbufs "${target_dev}" >/dev/null 2>&1 || true
-  qemu-nbd --disconnect "${target_dev}" >/dev/null 2>&1 || true
-  nbd-client -d "${source_dev}" >/dev/null 2>&1 || true
+  cleanup_rc=0
+  ftctl_vmware_mover_nbd_cleanup_pair "${target_dev}" "${source_dev}" || cleanup_rc=$?
   ftctl_vmware_mover_cleanup_nbdkit "${pid}" "${work_dir}"
+  [[ "${cleanup_rc}" == "0" ]] || ftctl_vmware_mover_nbd_die "${cleanup_rc}"
+  ftctl_vmware_mover_nbd_append_metrics "${metrics_path}"
 }
 
 ftctl_vmware_mover_safe_label() {
@@ -1228,6 +1548,18 @@ else:
 incremental_verified = bool(disks) and all(bool(item.get("incrementalVerified")) for item in disks)
 if effective_mode in ("FULL_SEED", "FULL_RESEED"):
     incremental_verified = False
+for item in disks:
+    if item.get("effectiveMode") == "CBT_INCREMENTAL" and item.get("nbdTeardownState") != "DRAINED":
+        raise SystemExit("incremental cycle cannot commit before NBD teardown is DRAINED")
+
+nbd_states = {str(item.get("nbdTeardownState") or "NOT_APPLICABLE") for item in disks}
+if "QUARANTINED" in nbd_states or "DRAINING" in nbd_states:
+    raise SystemExit("cycle contains an incomplete NBD teardown")
+nbd_teardown_state = "DRAINED" if "DRAINED" in nbd_states else "NOT_APPLICABLE"
+nbd_started_values = [int(item.get("nbdTeardownStartedAtEpochMs") or 0) for item in disks]
+nbd_completed_values = [int(item.get("nbdTeardownCompletedAtEpochMs") or 0) for item in disks]
+nbd_started_values = [value for value in nbd_started_values if value > 0]
+nbd_completed_values = [value for value in nbd_completed_values if value > 0]
 
 sum_fields = (
     "virtualBytes", "changedBytes", "sourceReadBytes", "targetWrittenBytes",
@@ -1255,6 +1587,15 @@ metrics.update({
     "baselineGeneration": generation,
     "cycleCommitState": "LOCAL_DURABLE",
     "targetDurableAtEpochMs": int(time.time() * 1000),
+    "nbdTeardownState": nbd_teardown_state,
+    "nbdTeardownStartedAtEpochMs": min(nbd_started_values) if nbd_started_values else 0,
+    "nbdTeardownCompletedAtEpochMs": max(nbd_completed_values) if nbd_completed_values else 0,
+    "nbdTeardownDurationMs": sum(int(item.get("nbdTeardownDurationMs") or 0) for item in disks),
+    "nbdSourceDeviceCount": sum(int(item.get("nbdSourceDeviceCount") or 0) for item in disks),
+    "nbdTargetDeviceCount": sum(int(item.get("nbdTargetDeviceCount") or 0) for item in disks),
+    "nbdQuarantinedDeviceCount": sum(int(item.get("nbdQuarantinedDeviceCount") or 0) for item in disks),
+    "nbdTeardownErrorCode": "",
+    "nbdTeardownErrorMessage": "",
     "disks": disks,
 })
 os.makedirs(os.path.dirname(metrics_path) or ".", exist_ok=True)
@@ -1284,6 +1625,10 @@ main() {
 
   [[ -n "${disk_map}" && -f "${disk_map}" ]] || ftctl_vmware_mover_die 65 "FTCTL_DR_DISK_MAP is required"
   [[ -n "${credentials_file}" && -f "${credentials_file}" ]] || ftctl_vmware_mover_die 65 "FTCTL_DR_CREDENTIALS_FILE is required"
+  if [[ -n "${FTCTL_DR_PLAN_UUID:-}" && -d "${FTCTL_DR_NBD_QUARANTINE_ROOT}/${FTCTL_DR_PLAN_UUID}" ]] &&
+      find "${FTCTL_DR_NBD_QUARANTINE_ROOT}/${FTCTL_DR_PLAN_UUID}" -maxdepth 1 -type f -name '*.json' -print -quit 2>/dev/null | grep -q .; then
+    ftctl_vmware_mover_die 95 "DR_NBD_DEVICE_QUARANTINED: cleanup-only recovery is required before the next cycle"
+  fi
   ftctl_vmware_mover_require jq 65
   ftctl_vmware_mover_require python3 65
   ftctl_vmware_mover_require nbdkit 65
@@ -1446,5 +1791,9 @@ main() {
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
-  main "$@"
+  if [[ "${1-}" == "--recover-nbd" ]]; then
+    ftctl_vmware_mover_nbd_recover_quarantine "${2-}"
+  else
+    main "$@"
+  fi
 fi

@@ -8427,6 +8427,119 @@ EOF
   fi
 }
 
+selftest_case_dr_vmware_nbd_deterministic_drain() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR VMware NBD drain waits for partition and sysfs teardown"
+
+  local fakebin="${SELFTEST_ROOT}/nbd-drain-bin"
+  local sysfs="${SELFTEST_ROOT}/nbd-drain-sysfs"
+  local quarantine="${SELFTEST_ROOT}/nbd-quarantine"
+  local call_log="${SELFTEST_ROOT}/nbd-drain.log"
+  mkdir -p "${fakebin}" "${sysfs}/nbd-test/holders" "${sysfs}/nbd-testp1"
+  printf '4242\n' > "${sysfs}/nbd-test/pid"
+  printf '2048\n' > "${sysfs}/nbd-test/size"
+  : > "${call_log}"
+
+  cat > "${fakebin}/blockdev" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'blockdev:%s\n' "$*" >> "${FTCTL_FAKE_CALL_LOG}"
+exit 0
+EOF
+  cat > "${fakebin}/udevadm" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'udevadm:%s\n' "$*" >> "${FTCTL_FAKE_CALL_LOG}"
+exit 0
+EOF
+  cat > "${fakebin}/partx" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'partx:%s\n' "$*" >> "${FTCTL_FAKE_CALL_LOG}"
+rm -rf "${FTCTL_DR_NBD_SYSFS_ROOT}/nbd-testp1"
+exit 0
+EOF
+  cat > "${fakebin}/qemu-nbd" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'qemu-nbd:%s\n' "$*" >> "${FTCTL_FAKE_CALL_LOG}"
+rm -f "${FTCTL_DR_NBD_SYSFS_ROOT}/nbd-test/pid"
+printf '0\n' > "${FTCTL_DR_NBD_SYSFS_ROOT}/nbd-test/size"
+exit 0
+EOF
+  cat > "${fakebin}/lsblk" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod +x "${fakebin}/blockdev" "${fakebin}/udevadm" "${fakebin}/partx" \
+    "${fakebin}/qemu-nbd" "${fakebin}/lsblk"
+
+  # shellcheck source=/dev/null
+  source "${ROOT_DIR}/lib/ftctl/dr_vmware_mover.sh"
+  FTCTL_FAKE_CALL_LOG="${call_log}"
+  FTCTL_DR_NBD_SYSFS_ROOT="${sysfs}"
+  FTCTL_DR_NBD_QUARANTINE_ROOT="${quarantine}"
+  FTCTL_DR_NBD_DRAIN_TIMEOUT_MS=500
+  FTCTL_DR_NBD_DRAIN_POLL_MS=10
+  FTCTL_DR_NBD_STABLE_POLLS=2
+  FTCTL_DR_PLAN_UUID="plan-nbd-drain"
+  PATH="${fakebin}:${PATH}"
+  export FTCTL_FAKE_CALL_LOG FTCTL_DR_NBD_SYSFS_ROOT FTCTL_DR_NBD_QUARANTINE_ROOT FTCTL_DR_PLAN_UUID PATH
+
+  ftctl_vmware_mover_nbd_drain /dev/nbd-test TARGET QEMU_NBD ||
+    selftest_fail "deterministic NBD drain should succeed"
+  selftest_assert_file_contains "${call_log}" "blockdev:--flushbufs /dev/nbd-test"
+  selftest_assert_file_contains "${call_log}" "partx:-d /dev/nbd-test"
+  selftest_assert_file_contains "${call_log}" "qemu-nbd:--disconnect /dev/nbd-test"
+  selftest_assert_eq "${FTCTL_DR_NBD_TEARDOWN_STATE}" "DRAINED" "NBD teardown state"
+  [[ ! -e "${sysfs}/nbd-testp1" ]] || selftest_fail "NBD partition child should be removed"
+  [[ ! -d "${quarantine}/plan-nbd-drain" ]] ||
+    [[ -z "$(find "${quarantine}/plan-nbd-drain" -type f -print -quit 2>/dev/null)" ]] ||
+    selftest_fail "successful NBD drain must not leave quarantine records"
+}
+
+selftest_case_dr_vmware_nbd_quarantine_on_timeout() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR VMware quarantines NBD devices that do not drain"
+
+  local fakebin="${SELFTEST_ROOT}/nbd-timeout-bin"
+  local sysfs="${SELFTEST_ROOT}/nbd-timeout-sysfs"
+  local quarantine="${SELFTEST_ROOT}/nbd-timeout-quarantine"
+  local rc=0
+  mkdir -p "${fakebin}" "${sysfs}/nbd-test/holders"
+  printf '4242\n' > "${sysfs}/nbd-test/pid"
+  printf '2048\n' > "${sysfs}/nbd-test/size"
+  for command in blockdev udevadm partx qemu-nbd nbd-client; do
+    cat > "${fakebin}/${command}" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    chmod +x "${fakebin}/${command}"
+  done
+  cat > "${fakebin}/lsblk" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod +x "${fakebin}/lsblk"
+
+  # shellcheck source=/dev/null
+  source "${ROOT_DIR}/lib/ftctl/dr_vmware_mover.sh"
+  FTCTL_DR_NBD_SYSFS_ROOT="${sysfs}"
+  FTCTL_DR_NBD_QUARANTINE_ROOT="${quarantine}"
+  FTCTL_DR_NBD_DRAIN_TIMEOUT_MS=30
+  FTCTL_DR_NBD_DRAIN_POLL_MS=10
+  FTCTL_DR_NBD_STABLE_POLLS=2
+  FTCTL_DR_PLAN_UUID="plan-nbd-timeout"
+  PATH="${fakebin}:${PATH}"
+  export FTCTL_DR_NBD_SYSFS_ROOT FTCTL_DR_NBD_QUARANTINE_ROOT FTCTL_DR_PLAN_UUID PATH
+
+  ftctl_vmware_mover_nbd_drain /dev/nbd-test SOURCE NBD_CLIENT || rc=$?
+  selftest_assert_eq "${rc}" "92" "NBD teardown timeout exit code"
+  selftest_assert_eq "${FTCTL_DR_NBD_TEARDOWN_STATE}" "QUARANTINED" "NBD quarantine state"
+  selftest_assert_file_contains "${quarantine}/plan-nbd-timeout/nbd-test.json" \
+    '"errorCode":"DR_NBD_TEARDOWN_TIMEOUT"'
+}
+
 selftest_case_dr_vmware_automatic_reseed_mode() {
   selftest_reset_env
   selftest_info "FTCTL_DR VMware preserves baseline rows and separates requested/effective mode"
@@ -8648,6 +8761,8 @@ selftest_main() {
   selftest_case_dr_vmware_cycle_result_contract
   selftest_case_dr_runtime_state_snapshot_consistency
   selftest_case_dr_vmware_nbd_readiness_barrier
+  selftest_case_dr_vmware_nbd_deterministic_drain
+  selftest_case_dr_vmware_nbd_quarantine_on_timeout
   selftest_case_dr_vmware_automatic_reseed_mode
   selftest_case_dr_vmware_mover_uses_raw_over_nbd_image_opts
   selftest_case_events_json

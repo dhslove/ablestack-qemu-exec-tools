@@ -110,7 +110,7 @@ ftctl_dr_scheduler_launch_via_systemd() {
 }
 
 ftctl_dr_scheduler_run_from_launch() {
-  local plan="${1-}" json="${2-0}" launch_path run profile_file state_path status_path
+  local plan="${1-}" json="${2-0}" launch_path run profile_file state_path status_path rc=0
   ftctl_dr_runtime_require_plan "${plan}" || return 2
   launch_path="$(ftctl_dr_scheduler_launch_state_path "${plan}")"
   [[ -f "${launch_path}" ]] || {
@@ -124,7 +124,29 @@ ftctl_dr_scheduler_run_from_launch() {
   [[ -n "${run}" && -f "${profile_file}" && -f "${state_path}" && -n "${status_path}" ]] || return 30
   export FTCTL_DR_RUNTIME_WORKER=1
   export FTCTL_DR_SCHEDULER_FOREGROUND=1
-  ftctl_dr_scheduler_worker "${plan}" "${run}" "${profile_file}" "${state_path}" "${status_path}"
+  ftctl_dr_scheduler_worker "${plan}" "${run}" "${profile_file}" "${state_path}" "${status_path}" || rc=$?
+  if [[ "$(ftctl_dr_runtime_state_get_from_path "${status_path}" "nbd_teardown_state")" == "QUARANTINED" ]]; then
+    return 0
+  fi
+  return "${rc}"
+}
+
+ftctl_dr_scheduler_recover_nbd_quarantine() {
+  local plan="${1-}" state_path="${2-}" status_path="${3-}" mover rc=0
+  [[ "$(ftctl_dr_runtime_state_get_from_path "${status_path}" "nbd_teardown_state")" == "QUARANTINED" ]] || return 0
+  mover="$(ftctl_dr_vmware_resolve_mover 2>/dev/null || true)"
+  [[ -n "${mover}" ]] || return 65
+  "${mover}" --recover-nbd "${plan}" || rc=$?
+  [[ "${rc}" == "0" ]] || return "${rc}"
+  ftctl_dr_scheduler_update_state "${state_path}" "${status_path}" \
+    "nbd_teardown_state=DRAINED" \
+    "nbd_quarantined_device_count=0" \
+    "nbd_teardown_error_code=" \
+    "nbd_teardown_error_message=" \
+    "scheduler_recovery_state=RECOVERING" \
+    "error_code=" \
+    "error_message=" \
+    "updated_at=$(ftctl_now_iso8601)" || true
 }
 
 ftctl_dr_scheduler_recover() {
@@ -141,6 +163,7 @@ ftctl_dr_scheduler_recover() {
     ""|IDLE|COMPLETED|SUCCEEDED) ;;
     *) return 43 ;;
   esac
+  ftctl_dr_scheduler_recover_nbd_quarantine "${plan}" "${state_path}" "${status_path}" || return $?
   if ftctl_dr_scheduler_active_worker_valid "${plan}" ""; then
     return 0
   fi
@@ -169,7 +192,8 @@ ftctl_dr_scheduler_reconcile_plan() {
   active_side="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "active_side")"
   control_state="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "control_state")"
   transition_state="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "transition_state")"
-  [[ "${state}" == "READY" || "${state}" == "SYNCING" ]] || return 0
+  [[ "${state}" == "READY" || "${state}" == "SYNCING" ||
+    "$(ftctl_dr_runtime_state_get_from_path "${status_path}" "nbd_teardown_state")" == "QUARANTINED" ]] || return 0
   [[ "${active_side^^}" != "TARGET" ]] || return 0
   [[ "${control_state}" == "RUNNING" ]] || return 0
   case "${transition_state}" in
@@ -861,6 +885,9 @@ if metrics:
         "incrementalVerified", "baselineGeneration", "cycleCommitState",
         "virtualBytes", "changedBytes", "sourceReadBytes", "targetWrittenBytes",
         "transferPayloadBytes", "changedExtentCount", "durationMs", "throughputBps",
+        "nbdTeardownState", "nbdTeardownStartedAtEpochMs", "nbdTeardownCompletedAtEpochMs",
+        "nbdTeardownDurationMs", "nbdSourceDeviceCount", "nbdTargetDeviceCount",
+        "nbdQuarantinedDeviceCount", "nbdTeardownErrorCode", "nbdTeardownErrorMessage",
     ):
         if key in metrics:
             record[key] = metrics[key]
@@ -1002,6 +1029,8 @@ ftctl_dr_scheduler_worker() {
   local output rc manifest_path checkpoint_path source_at target_at rpo now error_code error_message data_commit_state cycle_retry_mode checkpoint_ref
   local requested_mode effective_mode automatic_reseed mode_decision_code reseed_reason invalid_baseline_disk_count
   local incremental_verified metrics_estimated virtual_bytes changed_bytes source_read_bytes target_written_bytes transfer_payload_bytes changed_extent_count duration_ms throughput_bps baseline_generation cycle_token cycle_metrics_path
+  local nbd_teardown_state nbd_teardown_started_at_ms nbd_teardown_completed_at_ms nbd_teardown_duration_ms
+  local nbd_source_device_count nbd_target_device_count nbd_quarantined_device_count nbd_teardown_error_code nbd_teardown_error_message
   local cycle_started_epoch next_cycle_epoch next_cycle_at wait_seconds control_generation
   local session lease_epoch authority_sequence start_ticks owner_lock_path
 
@@ -1208,6 +1237,11 @@ ftctl_dr_scheduler_worker() {
         89) error_code="DR_TARGET_NBD_SIZE_NOT_READY" ;;
         90) error_code="DR_CBT_RESEED_LOOP_DETECTED" ;;
         91) error_code="DR_CBT_BASELINE_NOT_DURABLE" ;;
+        92) error_code="DR_NBD_TEARDOWN_TIMEOUT" ;;
+        93) error_code="DR_NBD_DISCONNECT_FAILED" ;;
+        94) error_code="DR_NBD_DEVICE_BUSY" ;;
+        95) error_code="DR_NBD_DEVICE_QUARANTINED" ;;
+        96) error_code="DR_NBD_TARGET_FLUSH_FAILED" ;;
         66) error_code="DR_UNSUPPORTED_DIRECTION" ;;
         *) error_code="DR_REPLICATION_CYCLE_FAILED" ;;
       esac
@@ -1227,6 +1261,16 @@ ftctl_dr_scheduler_worker() {
           data_commit_state="BLOCKED"
           cycle_retry_mode="OPERATOR_REPAIR_REQUIRED"
           ;;
+        DR_NBD_TEARDOWN_TIMEOUT|DR_NBD_DISCONNECT_FAILED|DR_NBD_DEVICE_BUSY|DR_NBD_DEVICE_QUARANTINED)
+          error_message="Target data may be durable, but NBD cleanup did not complete"
+          data_commit_state="TARGET_DURABLE_CLEANUP_PENDING"
+          cycle_retry_mode="CLEANUP_ONLY"
+          ;;
+        DR_NBD_TARGET_FLUSH_FAILED)
+          error_message="Target NBD data flush failed before cycle commit"
+          data_commit_state="FAILED"
+          cycle_retry_mode="FULL_RETRY"
+          ;;
         *)
           error_message="FTCTL DR replication cycle failed"
           data_commit_state="FAILED"
@@ -1241,7 +1285,7 @@ ftctl_dr_scheduler_worker() {
         "progress=100" \
         "accepted=false" \
         "scheduler_state=ERROR" \
-        "scheduler_health=DEAD" \
+        "scheduler_health=$([[ "${cycle_retry_mode}" == "CLEANUP_ONLY" ]] && printf RECOVERY_REQUIRED || printf DEAD)" \
         "cycle_state=FAILED" \
         "replication_activity=STOPPED" \
         "protection_state=DEGRADED" \
@@ -1264,6 +1308,11 @@ ftctl_dr_scheduler_worker() {
         "metadata_committed=false" \
         "target_durable=false" \
         "cycle_retry_mode=${cycle_retry_mode}" \
+        "nbd_teardown_state=$([[ "${cycle_retry_mode}" == "CLEANUP_ONLY" ]] && printf QUARANTINED || printf FAILED)" \
+        "nbd_quarantined_device_count=$([[ "${cycle_retry_mode}" == "CLEANUP_ONLY" ]] && printf 1 || printf 0)" \
+        "nbd_teardown_error_code=${error_code}" \
+        "nbd_teardown_error_message=${error_message}" \
+        "scheduler_recovery_state=$([[ "${cycle_retry_mode}" == "CLEANUP_ONLY" ]] && printf REQUIRED || printf FAILED)" \
         "updated_at=${now}" || true
       ftctl_log_event "dr-runtime" "dr.scheduler.cycle" "fail" "" "${rc}" \
         "plan=${plan} run=${run} sequence=${sequence} error=${error_code}"
@@ -1298,6 +1347,15 @@ ftctl_dr_scheduler_worker() {
     baseline_generation="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "baselineGeneration" integer || true)"
     cycle_token="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "cycleToken" || true)"
     cycle_metrics_path="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "cycleMetricsPath" || true)"
+    nbd_teardown_state="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "nbdTeardownState" || true)"
+    nbd_teardown_started_at_ms="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "nbdTeardownStartedAtEpochMs" integer || true)"
+    nbd_teardown_completed_at_ms="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "nbdTeardownCompletedAtEpochMs" integer || true)"
+    nbd_teardown_duration_ms="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "nbdTeardownDurationMs" integer || true)"
+    nbd_source_device_count="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "nbdSourceDeviceCount" integer || true)"
+    nbd_target_device_count="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "nbdTargetDeviceCount" integer || true)"
+    nbd_quarantined_device_count="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "nbdQuarantinedDeviceCount" integer || true)"
+    nbd_teardown_error_code="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "nbdTeardownErrorCode" || true)"
+    nbd_teardown_error_message="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "nbdTeardownErrorMessage" || true)"
     ftctl_dr_scheduler_append_restore_point "${restore_points_path}" "${plan}" "${run}" "${sequence}" "${cycle_type}" "${driver}" "${manifest_path}" "${checkpoint_path}" || return $?
     now="$(ftctl_now_iso8601)"
     authority_sequence="$(ftctl_dr_scheduler_next_authority_sequence "${plan}")"
@@ -1371,6 +1429,19 @@ ftctl_dr_scheduler_worker() {
       "latest_completed_baseline_generation=${baseline_generation}" \
       "latest_completed_cycle_token=${cycle_token}" \
       "latest_completed_cycle_metrics_path=${cycle_metrics_path}" \
+      "latest_completed_nbd_teardown_state=${nbd_teardown_state}" \
+      "latest_completed_nbd_teardown_started_at_ms=${nbd_teardown_started_at_ms}" \
+      "latest_completed_nbd_teardown_completed_at_ms=${nbd_teardown_completed_at_ms}" \
+      "latest_completed_nbd_teardown_duration_ms=${nbd_teardown_duration_ms}" \
+      "latest_completed_nbd_source_device_count=${nbd_source_device_count}" \
+      "latest_completed_nbd_target_device_count=${nbd_target_device_count}" \
+      "latest_completed_nbd_quarantined_device_count=${nbd_quarantined_device_count:-0}" \
+      "latest_completed_nbd_teardown_error_code=${nbd_teardown_error_code}" \
+      "latest_completed_nbd_teardown_error_message=${nbd_teardown_error_message}" \
+      "nbd_teardown_state=${nbd_teardown_state}" \
+      "nbd_quarantined_device_count=${nbd_quarantined_device_count:-0}" \
+      "nbd_teardown_error_code=${nbd_teardown_error_code}" \
+      "nbd_teardown_error_message=${nbd_teardown_error_message}" \
       "scheduler_recovery_state=SUCCEEDED" \
       "scheduler_recovered_at=${now}" \
       "data_commit_state=LOCAL_DURABLE" \
