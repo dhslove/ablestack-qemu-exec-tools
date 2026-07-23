@@ -357,6 +357,38 @@ ftctl_vmware_mover_nbd_mounted_count() {
   fi
 }
 
+ftctl_vmware_mover_nbd_release_partition_holders() {
+  local device="${1-}" name entry holder holder_name mounts
+  name="${device#/dev/}"
+  shopt -s nullglob
+  for entry in "${FTCTL_DR_NBD_SYSFS_ROOT}/${name}"p*/holders/*; do
+    [[ -e "${entry}" ]] || continue
+    holder="$(readlink -f "${entry}" 2>/dev/null || printf '%s' "${entry}")"
+    holder_name="${holder##*/}"
+    [[ "${holder_name}" == dm-* ]] || {
+      shopt -u nullglob
+      return 1
+    }
+    command -v dmsetup >/dev/null 2>&1 || {
+      shopt -u nullglob
+      return 1
+    }
+    mounts="$(lsblk -nrpo MOUNTPOINTS "/dev/${holder_name}" 2>/dev/null |
+      awk 'NF {print; exit}')"
+    [[ -z "${mounts}" ]] || {
+      shopt -u nullglob
+      return 1
+    }
+    blockdev --flushbufs "/dev/${holder_name}" >/dev/null 2>&1 || true
+    dmsetup remove --retry "/dev/${holder_name}" >/dev/null 2>&1 || {
+      shopt -u nullglob
+      return 1
+    }
+  done
+  shopt -u nullglob
+  return 0
+}
+
 ftctl_vmware_mover_nbd_is_stable_free() {
   local device="${1-}" name pid="" sectors=0 holders=0 partitions=0 mounted=0
   name="${device#/dev/}"
@@ -453,6 +485,14 @@ ftctl_vmware_mover_nbd_drain() {
     ftctl_vmware_mover_nbd_set_failure "${device}" "${role}" "${method}" \
       "DR_NBD_TARGET_FLUSH_FAILED" "Target NBD flush failed"
     return 96
+  fi
+  if command -v udevadm >/dev/null 2>&1; then
+    udevadm settle --timeout="${FTCTL_DR_NBD_UDEV_SETTLE_TIMEOUT_SEC}" >/dev/null 2>&1 || true
+  fi
+  if ! ftctl_vmware_mover_nbd_release_partition_holders "${device}"; then
+    ftctl_vmware_mover_nbd_set_failure "${device}" "${role}" "${method}" \
+      "DR_NBD_DEVICE_BUSY" "Mounted, active, or unsupported NBD partition holder remained"
+    return 94
   fi
   if command -v udevadm >/dev/null 2>&1; then
     udevadm settle --timeout="${FTCTL_DR_NBD_UDEV_SETTLE_TIMEOUT_SEC}" >/dev/null 2>&1 || true

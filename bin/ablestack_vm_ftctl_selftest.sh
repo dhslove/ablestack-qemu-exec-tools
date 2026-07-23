@@ -8435,7 +8435,8 @@ selftest_case_dr_vmware_nbd_deterministic_drain() {
   local sysfs="${SELFTEST_ROOT}/nbd-drain-sysfs"
   local quarantine="${SELFTEST_ROOT}/nbd-quarantine"
   local call_log="${SELFTEST_ROOT}/nbd-drain.log"
-  mkdir -p "${fakebin}" "${sysfs}/nbd-test/holders" "${sysfs}/nbd-testp1"
+  mkdir -p "${fakebin}" "${sysfs}/nbd-test/holders" \
+    "${sysfs}/nbd-testp1/holders/dm-test"
   printf '4242\n' > "${sysfs}/nbd-test/pid"
   printf '2048\n' > "${sysfs}/nbd-test/size"
   : > "${call_log}"
@@ -8459,6 +8460,13 @@ printf 'partx:%s\n' "$*" >> "${FTCTL_FAKE_CALL_LOG}"
 rm -rf "${FTCTL_DR_NBD_SYSFS_ROOT}/nbd-testp1"
 exit 0
 EOF
+  cat > "${fakebin}/dmsetup" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'dmsetup:%s\n' "$*" >> "${FTCTL_FAKE_CALL_LOG}"
+rm -rf "${FTCTL_DR_NBD_SYSFS_ROOT}/nbd-testp1/holders/dm-test"
+exit 0
+EOF
   cat > "${fakebin}/qemu-nbd" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -8472,7 +8480,7 @@ EOF
 exit 0
 EOF
   chmod +x "${fakebin}/blockdev" "${fakebin}/udevadm" "${fakebin}/partx" \
-    "${fakebin}/qemu-nbd" "${fakebin}/lsblk"
+    "${fakebin}/dmsetup" "${fakebin}/qemu-nbd" "${fakebin}/lsblk"
 
   # shellcheck source=/dev/null
   source "${ROOT_DIR}/lib/ftctl/dr_vmware_mover.sh"
@@ -8489,6 +8497,7 @@ EOF
   ftctl_vmware_mover_nbd_drain /dev/nbd-test TARGET QEMU_NBD ||
     selftest_fail "deterministic NBD drain should succeed"
   selftest_assert_file_contains "${call_log}" "blockdev:--flushbufs /dev/nbd-test"
+  selftest_assert_file_contains "${call_log}" "dmsetup:remove --retry /dev/dm-test"
   selftest_assert_file_contains "${call_log}" "partx:-d /dev/nbd-test"
   selftest_assert_file_contains "${call_log}" "qemu-nbd:--disconnect /dev/nbd-test"
   selftest_assert_eq "${FTCTL_DR_NBD_TEARDOWN_STATE}" "DRAINED" "NBD teardown state"
@@ -8496,6 +8505,56 @@ EOF
   [[ ! -d "${quarantine}/plan-nbd-drain" ]] ||
     [[ -z "$(find "${quarantine}/plan-nbd-drain" -type f -print -quit 2>/dev/null)" ]] ||
     selftest_fail "successful NBD drain must not leave quarantine records"
+}
+
+selftest_case_dr_vmware_nbd_holder_safety_barrier() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR VMware NBD drain preserves mounted partition holders"
+
+  local fakebin="${SELFTEST_ROOT}/nbd-holder-bin"
+  local sysfs="${SELFTEST_ROOT}/nbd-holder-sysfs"
+  local quarantine="${SELFTEST_ROOT}/nbd-holder-quarantine"
+  local call_log="${SELFTEST_ROOT}/nbd-holder.log"
+  local rc=0
+  mkdir -p "${fakebin}" "${sysfs}/nbd-test/holders" \
+    "${sysfs}/nbd-testp1/holders/dm-test"
+  printf '4242\n' > "${sysfs}/nbd-test/pid"
+  printf '2048\n' > "${sysfs}/nbd-test/size"
+  : > "${call_log}"
+
+  for command in blockdev udevadm partx qemu-nbd; do
+    cat > "${fakebin}/${command}" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    chmod +x "${fakebin}/${command}"
+  done
+  cat > "${fakebin}/lsblk" <<'EOF'
+#!/usr/bin/env bash
+printf '/mnt/guest\n'
+EOF
+  cat > "${fakebin}/dmsetup" <<'EOF'
+#!/usr/bin/env bash
+printf 'dmsetup:%s\n' "$*" >> "${FTCTL_FAKE_CALL_LOG}"
+exit 0
+EOF
+  chmod +x "${fakebin}/lsblk" "${fakebin}/dmsetup"
+
+  # shellcheck source=/dev/null
+  source "${ROOT_DIR}/lib/ftctl/dr_vmware_mover.sh"
+  FTCTL_FAKE_CALL_LOG="${call_log}"
+  FTCTL_DR_NBD_SYSFS_ROOT="${sysfs}"
+  FTCTL_DR_NBD_QUARANTINE_ROOT="${quarantine}"
+  FTCTL_DR_PLAN_UUID="plan-nbd-holder"
+  PATH="${fakebin}:${PATH}"
+  export FTCTL_FAKE_CALL_LOG FTCTL_DR_NBD_SYSFS_ROOT FTCTL_DR_NBD_QUARANTINE_ROOT FTCTL_DR_PLAN_UUID PATH
+
+  ftctl_vmware_mover_nbd_drain /dev/nbd-test TARGET QEMU_NBD || rc=$?
+  selftest_assert_eq "${rc}" "94" "mounted NBD holder exit code"
+  selftest_assert_eq "${FTCTL_DR_NBD_TEARDOWN_STATE}" "QUARANTINED" \
+    "mounted NBD holder quarantine state"
+  [[ ! -s "${call_log}" ]] ||
+    selftest_fail "mounted NBD holder must not be removed"
 }
 
 selftest_case_dr_vmware_nbd_quarantine_on_timeout() {
@@ -8762,6 +8821,7 @@ selftest_main() {
   selftest_case_dr_runtime_state_snapshot_consistency
   selftest_case_dr_vmware_nbd_readiness_barrier
   selftest_case_dr_vmware_nbd_deterministic_drain
+  selftest_case_dr_vmware_nbd_holder_safety_barrier
   selftest_case_dr_vmware_nbd_quarantine_on_timeout
   selftest_case_dr_vmware_automatic_reseed_mode
   selftest_case_dr_vmware_mover_uses_raw_over_nbd_image_opts

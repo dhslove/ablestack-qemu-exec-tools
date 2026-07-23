@@ -69,6 +69,8 @@ disconnect 직후 커널 오류가 발생했다. 확인 시점의 `/dev/nbd1`은
 ```text
 target flush
   -> udevadm settle
+  -> 비활성 NBD partition device-mapper holder 제거
+  -> udevadm settle
   -> partx -d
   -> udevadm settle
   -> qemu-nbd 또는 nbd-client disconnect
@@ -223,15 +225,23 @@ ftctl_vmware_mover_nbd_drain DEVICE ROLE ATTACH_METHOD
 1. 전역 NBD lock을 획득한다.
 2. TARGET이면 `blockdev --flushbufs` 성공을 필수로 확인한다.
 3. `udevadm settle --timeout=<sec>`를 bounded 실행한다.
-4. `partx -d <device>`를 실행한다. partition이 없는 결과는 성공으로 취급한다.
+4. NBD partition holder가 device-mapper이고 mount/swap 사용 흔적이 없을
+   때만 `dmsetup remove --retry`로 제거한다.
 5. 다시 `udevadm settle`을 실행한다.
-6. `QEMU_NBD`는 `qemu-nbd --disconnect`, `NBD_CLIENT`는
+6. `partx -d <device>`를 실행한다. partition이 없는 결과는 성공으로 취급한다.
+7. 다시 `udevadm settle`을 실행한다.
+8. `QEMU_NBD`는 `qemu-nbd --disconnect`, `NBD_CLIENT`는
    `nbd-client -d`를 bounded 실행한다.
-7. `wait_stable_free`로 pid/size/holder/partition/mount가 모두 비워지는지
+9. `wait_stable_free`로 pid/size/holder/partition/mount가 모두 비워지는지
    확인한다.
-8. post-disconnect `udevadm settle` 후 stable-free를 다시 확인한다.
-9. 성공 이벤트를 기록하고 registry에서 제거한다.
-10. 실패 시 quarantine record를 atomic write하고 lock을 해제한다.
+10. post-disconnect `udevadm settle` 후 stable-free를 다시 확인한다.
+11. 성공 이벤트를 기록하고 registry에서 제거한다.
+12. 실패 시 quarantine record를 atomic write하고 lock을 해제한다.
+
+holder 제거는 NBD partition의 sysfs holder로 직접 확인된 장치에만 적용한다.
+mount, 활성 swap 또는 비 device-mapper holder는 임의로 해제하지 않고
+`DR_NBD_DEVICE_BUSY`로 격리한다. 따라서 호스트 루트 VG나 다른 VM 장치를
+이름만으로 비활성화하지 않는다.
 
 source NBD를 drain하기 전에 nbdkit process를 종료하지 않는다. source가
 `DRAINED`된 후에만 `ftctl_vmware_mover_cleanup_nbdkit()`을 실행한다.
@@ -355,6 +365,8 @@ no-partition 결과는 warning으로 남기지 않는다.
 | `dr-nbd-free-requires-zero-size` | pid가 없어도 size가 남으면 할당하지 않음 |
 | `dr-nbd-free-rejects-partitions` | child partition이 남으면 할당하지 않음 |
 | `dr-nbd-target-drain-order` | flush -> settle -> partx -> disconnect -> wait 순서 |
+| `dr-nbd-partition-holder-release` | 비활성 NBD 전용 device-mapper holder 제거 |
+| `dr-nbd-mounted-holder-safety` | mount/swap holder 제거 거부 및 격리 |
 | `dr-nbd-source-drain-before-nbdkit-stop` | source detach 후 nbdkit 종료 |
 | `dr-nbd-drain-delayed-sysfs` | 지연된 pid/size 제거를 bounded poll로 대기 |
 | `dr-nbd-drain-timeout-quarantine` | timeout 시 atomic quarantine 기록 |
@@ -393,6 +405,7 @@ no-partition 결과는 warning으로 남기지 않는다.
 | 종료 코드 | 분기마다 직접 disconnect | registry와 공통 deterministic drain |
 | target 내구성 | flush 실패 무시 | flush 성공이 필수 commit gate |
 | disconnect | command 반환 후 즉시 진행 | udev/partition drain과 sysfs 안정화 확인 |
+| 게스트 LVM holder | host device-mapper에 남아 partx 실패 | 미사용 NBD holder만 제한 제거, 사용 중 holder는 격리 |
 | 실패 장치 | 다음 cycle에서 재사용 가능 | Plan 단위 quarantine |
 | cycle 완료 | patch/flush 직후 완료 가능 | 모든 NBD `DRAINED` 후 완료 |
 | CBT baseline | teardown 실패와 무관하게 전진 가능 | 이전 committed baseline 유지 |
