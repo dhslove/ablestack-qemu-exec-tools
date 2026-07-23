@@ -36,6 +36,10 @@ FTCTL_DR_NBD_DRAIN_POLL_MS="${FTCTL_DR_NBD_DRAIN_POLL_MS:-50}"
 FTCTL_DR_NBD_UDEV_SETTLE_TIMEOUT_SEC="${FTCTL_DR_NBD_UDEV_SETTLE_TIMEOUT_SEC:-10}"
 FTCTL_DR_NBD_STABLE_POLLS="${FTCTL_DR_NBD_STABLE_POLLS:-2}"
 FTCTL_DR_NBD_QUARANTINE_ROOT="${FTCTL_DR_NBD_QUARANTINE_ROOT:-/run/ablestack-vm-ftctl/dr-runtime/nbd-quarantine}"
+FTCTL_DR_NBD_DEVICE_START="${FTCTL_DR_NBD_DEVICE_START:-16}"
+FTCTL_DR_NBD_DEVICE_END="${FTCTL_DR_NBD_DEVICE_END:-31}"
+FTCTL_DR_NBD_MODULE_MAX_DEVICES="${FTCTL_DR_NBD_MODULE_MAX_DEVICES:-32}"
+FTCTL_DR_NBD_MODULE_MAX_PARTITIONS="${FTCTL_DR_NBD_MODULE_MAX_PARTITIONS:-16}"
 FTCTL_DR_NBD_TEARDOWN_STATE="NOT_APPLICABLE"
 FTCTL_DR_NBD_TEARDOWN_STARTED_AT_MS=0
 FTCTL_DR_NBD_TEARDOWN_COMPLETED_AT_MS=0
@@ -282,9 +286,18 @@ ftctl_vmware_mover_query_cbt() {
 }
 
 ftctl_vmware_mover_free_nbd() {
-  local excluded="${1-}" dev name
-  modprobe nbd max_part=16 >/dev/null 2>&1 || true
-  for dev in /dev/nbd{0..31}; do
+  local excluded="${1-}" dev name idx
+  local start="${FTCTL_DR_NBD_DEVICE_START}" end="${FTCTL_DR_NBD_DEVICE_END}"
+  [[ "${start}" =~ ^[0-9]+$ ]] || start=16
+  [[ "${end}" =~ ^[0-9]+$ ]] || end=31
+  (( start <= end )) || {
+    start=16
+    end=31
+  }
+  modprobe nbd "nbds_max=${FTCTL_DR_NBD_MODULE_MAX_DEVICES}" \
+    "max_part=${FTCTL_DR_NBD_MODULE_MAX_PARTITIONS}" >/dev/null 2>&1 || true
+  for ((idx = start; idx <= end; idx++)); do
+    dev="/dev/nbd${idx}"
     [[ -b "${dev}" && "${dev}" != "${excluded}" ]] || continue
     name="${dev#/dev/}"
     if ftctl_vmware_mover_nbd_is_stable_free "${dev}" &&

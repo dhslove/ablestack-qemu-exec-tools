@@ -57,6 +57,8 @@ install -d %{buildroot}/etc/ablestack
 install -m 0644 etc/ablestack-vm-ftctl.conf %{buildroot}/etc/ablestack/ablestack-vm-ftctl.conf
 install -m 0644 etc/ablestack-vm-ftctl-cluster.conf %{buildroot}/etc/ablestack/ablestack-vm-ftctl-cluster.conf
 install -d %{buildroot}/etc/ablestack/ftctl-cluster.d/hosts
+install -d %{buildroot}/usr/lib/udev/rules.d
+install -m 0644 etc/10-ablestack-ftctl-nbd.rules %{buildroot}/usr/lib/udev/rules.d/10-ablestack-ftctl-nbd.rules
 
 install -d %{buildroot}%{_unitdir}
 install -m 0644 lib/ftctl/systemd/ablestack-vm-ftctl.service %{buildroot}%{_unitdir}/ablestack-vm-ftctl.service
@@ -71,6 +73,9 @@ install -m 0644 completions/%{name} %{buildroot}%{_datadir}/bash-completion/comp
 %systemd_post ablestack-vm-ftctl.timer
 if [ -x /usr/local/bin/ablestack_vm_ftctl_firewalld ]; then
   /usr/local/bin/ablestack_vm_ftctl_firewalld apply >/dev/null 2>&1 || true
+fi
+if command -v udevadm >/dev/null 2>&1; then
+  udevadm control --reload-rules >/dev/null 2>&1 || true
 fi
 missing_tools=""
 for tool in virsh qemu-img socat nc ping firewall-cmd; do
@@ -93,6 +98,9 @@ fi
 if [ "$1" -eq 0 ] && [ -x /usr/local/bin/ablestack_vm_ftctl_firewalld ]; then
   /usr/local/bin/ablestack_vm_ftctl_firewalld remove >/dev/null 2>&1 || true
 fi
+if command -v udevadm >/dev/null 2>&1; then
+  udevadm control --reload-rules >/dev/null 2>&1 || true
+fi
 
 %files
 %license LICENSE
@@ -104,6 +112,7 @@ fi
 %config(noreplace) /etc/ablestack/ablestack-vm-ftctl-cluster.conf
 %dir /etc/ablestack/ftctl-cluster.d
 %dir /etc/ablestack/ftctl-cluster.d/hosts
+/usr/lib/udev/rules.d/10-ablestack-ftctl-nbd.rules
 %{_unitdir}/ablestack-vm-ftctl.service
 %{_unitdir}/ablestack-vm-ftctl.timer
 %{_unitdir}/ablestack-vm-ftctl-dr@.service

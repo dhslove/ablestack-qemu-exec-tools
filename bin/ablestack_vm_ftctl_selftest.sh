@@ -8427,6 +8427,24 @@ EOF
   fi
 }
 
+selftest_case_dr_vmware_nbd_reserved_pool_contract() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR VMware uses the udev-isolated reserved NBD pool"
+
+  unset FTCTL_DR_NBD_DEVICE_START FTCTL_DR_NBD_DEVICE_END
+  unset FTCTL_DR_NBD_MODULE_MAX_DEVICES FTCTL_DR_NBD_MODULE_MAX_PARTITIONS
+  # shellcheck source=/dev/null
+  source "${ROOT_DIR}/lib/ftctl/dr_vmware_mover.sh"
+  selftest_assert_eq "${FTCTL_DR_NBD_DEVICE_START}" "16" "reserved NBD pool start"
+  selftest_assert_eq "${FTCTL_DR_NBD_DEVICE_END}" "31" "reserved NBD pool end"
+  selftest_assert_eq "${FTCTL_DR_NBD_MODULE_MAX_DEVICES}" "32" "NBD module device count"
+  selftest_assert_eq "${FTCTL_DR_NBD_MODULE_MAX_PARTITIONS}" "16" "NBD partition compatibility"
+  selftest_assert_file_contains "${ROOT_DIR}/etc/10-ablestack-ftctl-nbd.rules" \
+    'UDEV_DISABLE_PERSISTENT_STORAGE_BLKID_FLAG'
+  selftest_assert_file_contains "${ROOT_DIR}/etc/10-ablestack-ftctl-nbd.rules" \
+    'KERNEL=="nbd1'
+}
+
 selftest_case_dr_vmware_nbd_deterministic_drain() {
   selftest_reset_env
   selftest_info "FTCTL_DR VMware NBD drain waits for partition and sysfs teardown"
@@ -8820,6 +8838,7 @@ selftest_main() {
   selftest_case_dr_vmware_cycle_result_contract
   selftest_case_dr_runtime_state_snapshot_consistency
   selftest_case_dr_vmware_nbd_readiness_barrier
+  selftest_case_dr_vmware_nbd_reserved_pool_contract
   selftest_case_dr_vmware_nbd_deterministic_drain
   selftest_case_dr_vmware_nbd_holder_safety_barrier
   selftest_case_dr_vmware_nbd_quarantine_on_timeout

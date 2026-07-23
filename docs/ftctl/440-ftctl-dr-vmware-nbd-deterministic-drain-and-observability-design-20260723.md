@@ -88,6 +88,12 @@ target flush
 
 따라서 구현은 단순 sleep이 아니라 위 순서와 종료 조건을 그대로 사용한다.
 
+추가 Preflight에서 `max_part=0`은 오류를 제거했지만 module 전역 설정이라
+v2k의 partition 사용 경로와 충돌할 수 있음을 확인했다. 최종 구현은
+`/dev/nbd16`~`/dev/nbd31`을 FTCTL 전용 pool로 예약하고, 이 범위에만 udev
+blkid/LVM 자동 탐색 억제 rule을 적용한다. lower NBD pool은 v2k 등 기존
+도구의 동작을 유지한다.
+
 ## 4. 상태 계약
 
 ### 4.1 NBD teardown 상태
@@ -402,6 +408,8 @@ no-partition 결과는 warning으로 남기지 않는다.
 | 항목 | AS-IS | TO-BE |
 |---|---|---|
 | NBD 할당 | sysfs pid 부재만 확인 | pid/size/holder/partition/mount/quarantine stable-free |
+| NBD pool | v2k와 동일한 전체 범위 | FTCTL은 nbd16~31 예약, lower pool과 분리 |
+| host 자동 탐색 | udev blkid/LVM이 게스트 파티션 탐색 | FTCTL 예약 pool만 blkid/LVM 자동 탐색 억제 |
 | 종료 코드 | 분기마다 직접 disconnect | registry와 공통 deterministic drain |
 | target 내구성 | flush 실패 무시 | flush 성공이 필수 commit gate |
 | disconnect | command 반환 후 즉시 진행 | udev/partition drain과 sysfs 안정화 확인 |
