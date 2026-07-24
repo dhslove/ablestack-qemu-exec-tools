@@ -3,6 +3,7 @@
 - Date: 2026-07-22
 - Status: implementation design; read-only provider preflight verified
 - Cloud normative design: `ablestack-cloud/docs/ftctl/567-cross-hypervisor-dr-real-failover-cutover-manifest-and-rollback-design-20260722.md`
+- Reprotect authority addendum: `441-ftctl-dr-reprotect-canonical-authority-preservation-design-20260723.md`
 - Scope: `lib/ftctl/guestprep.sh`, new manifest normalizer, DR runtime status, and self-tests
 
 ## 1. Problem
@@ -457,3 +458,20 @@ Running, and FTCTL CUTOVER_READY.
 | RPO | forward checkpoint age continues growing | cutover RPO freezes until reverse protection starts |
 | Retry | no durable acknowledgement cursor | monotonic Cloud authority generation |
 | Safety | later actions infer from stale fields | failback/reprotect receive a reconciled target-active profile |
+
+## 14. Reprotect Authority Preservation Addendum (2026-07-23)
+
+`dr-cutover-commit` is not complete if its TARGET authority exists only in the
+current `status.state`. A later delegated Run currently replaces that file
+before its worker reads eligibility.
+
+The normative correction is document
+`441-ftctl-dr-reprotect-canonical-authority-preservation-design-20260723.md`.
+It adds an atomic Plan authority document, embeds a validated authority
+snapshot in every finite operation envelope, and prevents Reprotect/Failback
+workers from using mutable status as their authority source.
+
+For VMware-to-ABLESTACK Reprotect, FTCTL must also complete a non-mutating
+`KVM_TO_VMWARE` provider preflight before reverse data transfer or active
+profile replacement. A failed preflight preserves TARGET authority and the
+committed failover session.

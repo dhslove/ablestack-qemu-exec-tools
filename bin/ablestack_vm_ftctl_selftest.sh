@@ -8013,12 +8013,14 @@ selftest_case_dr_runtime_reprotect_starts_reverse_protection_checkpoint() {
   local profile="${SELFTEST_ROOT}/dr-reprotect-profile.json"
   local plan_dir="${SELFTEST_ROOT}/run/dr-runtime/plans/${plan}"
   local status_path="${plan_dir}/status.state"
+  local failover_dir="${plan_dir}/failovers"
   local active_profile="${plan_dir}/profile.json"
+  local authority_spec="${SELFTEST_ROOT}/dr-reprotect-authority.json"
   local fakebin="${SELFTEST_ROOT}/fakebin"
   local call_log="${SELFTEST_ROOT}/qemu-img-reprotect.log"
   local out="" session_path="" active_path="" reverse_profile="" reverse_points=""
 
-  mkdir -p "${plan_dir}" "${fakebin}" "${SELFTEST_ROOT}/source" "${SELFTEST_ROOT}/target"
+  mkdir -p "${plan_dir}" "${failover_dir}" "${fakebin}" "${SELFTEST_ROOT}/source" "${SELFTEST_ROOT}/target"
   cat > "${fakebin}/qemu-img" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "${call_log}"
@@ -8061,6 +8063,24 @@ EOF
   }
 }
 JSON
+  cat > "${authority_spec}" <<JSON
+{
+  "contractVersion": "2026-07-23",
+  "planUuid": "${plan}",
+  "runUuid": "run-reprotect",
+  "expectedActiveSide": "TARGET",
+  "authorityGeneration": 7,
+  "cutoverSessionId": "cloud-cutover-session-7",
+  "checkpointSequence": 5,
+  "targetVmId": 256,
+  "targetExternalRef": "target-vm-uuid",
+  "targetInstanceName": "i-2-256-VM",
+  "targetPowerState": "POWERED_ON",
+  "targetMaterialized": true,
+  "targetPromotionState": "PROMOTED",
+  "bootValidationState": "POWER_STATE_VALIDATED"
+}
+JSON
   cat > "${status_path}" <<EOF
 plan=${plan}
 run=run-failover
@@ -8079,21 +8099,60 @@ target_ready_rpo_seconds=3
 error_code=
 updated_at=2026-07-01T02:10:04Z
 EOF
+  cat > "${failover_dir}/active.json" <<JSON
+{
+  "version": 1,
+  "planUuid": "${plan}",
+  "runUuid": "run-failover",
+  "sessionId": "${plan}:run-failover",
+  "state": "FAILED_OVER",
+  "activeSide": "TARGET",
+  "cloudAuthorityGeneration": 7,
+  "restorePoint": {"checkpointSequence": 5},
+  "targetPromotion": {"state": "PROMOTED", "powerState": "POWERED_ON"}
+}
+JSON
+  cat > "${status_path}" <<EOF
+plan=${plan}
+run=stale-status
+action=dr-sync-start
+state=READY
+step=target-checkpoint-ready
+progress=100
+accepted=true
+active_side=SOURCE
+checkpoint_sequence=1
+error_code=
+updated_at=2026-07-01T02:11:00Z
+EOF
 
-  out="$(FTCTL_DR_REPROTECT_FOREGROUND=1 PATH="${fakebin}:$PATH" bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-reprotect \
+  out="$(PATH="${fakebin}:$PATH" bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-reprotect \
     --config "${SELFTEST_CONFIG}" \
     --plan "${plan}" \
     --run run-reprotect \
     --profile-json "${profile}" \
+    --authority-spec-json "${authority_spec}" \
     --wait=false \
     --json)"
   selftest_assert_contains "${out}" '"result":"accepted"' "reprotect accepted"
-  selftest_assert_contains "${out}" '"state":"READY"' "reprotect ready"
+  for _ in $(seq 1 100); do
+    out="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-status \
+      --config "${SELFTEST_CONFIG}" \
+      --plan "${plan}" \
+      --run run-reprotect \
+      --json)"
+    [[ "${out}" == *'"state":"READY"'* || "${out}" == *'"state":"ERROR"'* ]] && break
+    sleep 0.05
+  done
+  selftest_assert_contains "${out}" '"state":"READY"' "delegated reprotect ready"
   selftest_assert_contains "${out}" '"step":"reprotect-ready"' "reprotect final step"
   selftest_assert_contains "${out}" '"active_side":"TARGET"' "reprotect target active"
   selftest_assert_contains "${out}" '"reprotect_mode":"reverse"' "reprotect reverse mode"
   selftest_assert_contains "${out}" '"reprotect_restore_point_sequence":6' "reprotect reverse checkpoint sequence"
   selftest_assert_contains "${out}" '"reverse_direction":"KVM_TO_KVM"' "reprotect reverse direction"
+  selftest_assert_file_contains "${plan_dir}/runs/run-reprotect.state" "authority_source=failover-session"
+  selftest_assert_file_contains "${plan_dir}/runs/run-reprotect.state" "cloud_authority_generation=7"
+  selftest_assert_file_contains "${plan_dir}/runs/run-reprotect.authority.json" '"targetInstanceName": "i-2-256-VM"'
 
   reverse_profile="${SELFTEST_ROOT}/run/dr-runtime/plans/${plan}/reverse-profiles/run-reprotect-reprotect.json"
   reverse_points="${SELFTEST_ROOT}/run/dr-runtime/plans/${plan}/reverse-restore-points.jsonl"

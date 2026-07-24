@@ -108,6 +108,21 @@ The engine must also reject prebuilt file-based FT pairs when the following virt
 - secondary hidden overlay
 - secondary active overlay
 
+## 2.2 DR Reprotect Authority Boundary
+
+After Cloud commits real Failover, Reprotect starts from TARGET authority. A
+delegated Reprotect Run must preserve the committed authority generation,
+cutover session, checkpoint, target identity, and target power/promotion state.
+It must not infer authority from mutable Plan `status.state`.
+
+For VMware-to-ABLESTACK protection, Reprotect builds and validates the reverse
+`KVM_TO_VMWARE` path, creates a durable reverse seed, and only then starts the
+target-side scheduler. A failed preflight or reverse seed leaves TARGET
+authority unchanged.
+
+The normative code-level design is:
+`441-ftctl-dr-reprotect-canonical-authority-preservation-design-20260723.md`.
+
 ## 3. Failback Disk Map
 
 Default:

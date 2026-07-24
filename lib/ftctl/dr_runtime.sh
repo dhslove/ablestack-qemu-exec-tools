@@ -39,6 +39,11 @@ ftctl_dr_runtime_artifact_spec_path() {
   printf '%s/test-sessions/%s.artifact-spec.json\n' "$(ftctl_dr_runtime_plan_dir "${plan}")" "$(ftctl_dr_runtime_key "${run}")"
 }
 
+ftctl_dr_runtime_authority_spec_path() {
+  local plan="${1-}" run="${2-}"
+  printf '%s/%s.authority.json\n' "$(ftctl_dr_runtime_run_dir "${plan}")" "$(ftctl_dr_runtime_key "${run}")"
+}
+
 ftctl_dr_runtime_credential_path() {
   local plan="${1-}"
   printf '%s/credentials.json\n' "$(ftctl_dr_runtime_plan_dir "${plan}")"
@@ -92,6 +97,113 @@ ftctl_dr_runtime_failover_session_path() {
 ftctl_dr_runtime_active_failover_session_path() {
   local plan="${1-}"
   printf '%s/active.json\n' "$(ftctl_dr_runtime_failover_dir "${plan}")"
+}
+
+ftctl_dr_runtime_capture_authority_context() {
+  local plan="${1-}" run_path="${2-}" prior_status_path="${3-}" authority_spec_path="${4-}"
+  local active_path snapshot_path active_side authority_state checkpoint_sequence
+  local target_power_state target_promotion_state session_id authority_generation authority_source
+
+  active_path="$(ftctl_dr_runtime_active_failover_session_path "${plan}")"
+  snapshot_path="$(mktemp -t ftctl.dr.authority.XXXXXX)"
+  if [[ -f "${active_path}" ]]; then
+    python3 - "${active_path}" "${snapshot_path}" <<'PY' || true
+import json
+import sys
+
+source, target = sys.argv[1:3]
+try:
+    with open(source, "r", encoding="utf-8") as fh:
+        session = json.load(fh)
+except (OSError, json.JSONDecodeError):
+    session = {}
+
+promotion = session.get("targetPromotion")
+if not isinstance(promotion, dict):
+    promotion = {}
+restore_point = session.get("restorePoint")
+if not isinstance(restore_point, dict):
+    restore_point = {}
+
+values = {
+    "active_side": session.get("activeSide"),
+    "authority_state": session.get("state"),
+    "checkpoint_sequence": restore_point.get("checkpointSequence"),
+    "target_power_state": promotion.get("powerState"),
+    "target_promotion_state": promotion.get("state"),
+    "cloud_cutover_session_id": session.get("sessionId"),
+    "cloud_authority_generation": session.get("cloudAuthorityGeneration"),
+}
+with open(target, "w", encoding="utf-8") as fh:
+    for key, value in values.items():
+        fh.write(f"{key}={'' if value is None else value}\n")
+PY
+  fi
+
+  active_side="$(ftctl_dr_runtime_state_get_from_path "${snapshot_path}" "active_side")"
+  authority_state="$(ftctl_dr_runtime_state_get_from_path "${snapshot_path}" "authority_state")"
+  checkpoint_sequence="$(ftctl_dr_runtime_state_get_from_path "${snapshot_path}" "checkpoint_sequence")"
+  target_power_state="$(ftctl_dr_runtime_state_get_from_path "${snapshot_path}" "target_power_state")"
+  target_promotion_state="$(ftctl_dr_runtime_state_get_from_path "${snapshot_path}" "target_promotion_state")"
+  session_id="$(ftctl_dr_runtime_state_get_from_path "${snapshot_path}" "cloud_cutover_session_id")"
+  authority_generation="$(ftctl_dr_runtime_state_get_from_path "${snapshot_path}" "cloud_authority_generation")"
+  authority_source=""
+
+  if [[ "${active_side}" == "TARGET" && "${authority_state}" == "FAILED_OVER" ]]; then
+    authority_source="failover-session"
+  else
+    active_side="$(ftctl_dr_runtime_state_get_from_path "${prior_status_path}" "active_side")"
+    authority_state="$(ftctl_dr_runtime_state_get_from_path "${prior_status_path}" "state")"
+    checkpoint_sequence="$(ftctl_dr_runtime_state_get_from_path "${prior_status_path}" "checkpoint_sequence")"
+    target_power_state="$(ftctl_dr_runtime_state_get_from_path "${prior_status_path}" "target_power_state")"
+    target_promotion_state="$(ftctl_dr_runtime_state_get_from_path "${prior_status_path}" "target_promotion_state")"
+    session_id="$(ftctl_dr_runtime_state_get_from_path "${prior_status_path}" "cloud_cutover_session_id")"
+    authority_generation="$(ftctl_dr_runtime_state_get_from_path "${prior_status_path}" "cloud_authority_generation")"
+    if [[ "${active_side}" == "TARGET" && "${authority_state}" == "FAILED_OVER" ]]; then
+      authority_source="status-compat"
+    fi
+  fi
+
+  if [[ -n "${authority_spec_path}" && -f "${authority_spec_path}" ]]; then
+    local expected_side spec_generation spec_checkpoint spec_power spec_promotion spec_session
+    expected_side="$(ftctl_dr_runtime_profile_value "${authority_spec_path}" "expectedActiveSide" 2>/dev/null || true)"
+    spec_generation="$(ftctl_dr_runtime_profile_value "${authority_spec_path}" "authorityGeneration" 2>/dev/null || true)"
+    spec_checkpoint="$(ftctl_dr_runtime_profile_value "${authority_spec_path}" "checkpointSequence" 2>/dev/null || true)"
+    spec_power="$(ftctl_dr_runtime_profile_value "${authority_spec_path}" "targetPowerState" 2>/dev/null || true)"
+    spec_promotion="$(ftctl_dr_runtime_profile_value "${authority_spec_path}" "targetPromotionState" 2>/dev/null || true)"
+    spec_session="$(ftctl_dr_runtime_profile_value "${authority_spec_path}" "cutoverSessionId" 2>/dev/null || true)"
+    if [[ -n "${active_side}" && "${active_side}" != "${expected_side}" ]]; then
+      rm -f "${snapshot_path}" 2>/dev/null || true
+      return 79
+    fi
+    if [[ -n "${authority_generation}" && -n "${spec_generation}" && "${authority_generation}" != "${spec_generation}" ]]; then
+      rm -f "${snapshot_path}" 2>/dev/null || true
+      return 79
+    fi
+    if [[ -n "${checkpoint_sequence}" && -n "${spec_checkpoint}" && "${checkpoint_sequence}" != "${spec_checkpoint}" ]]; then
+      rm -f "${snapshot_path}" 2>/dev/null || true
+      return 79
+    fi
+    [[ -n "${active_side}" ]] || active_side="${expected_side}"
+    [[ -n "${authority_state}" ]] || authority_state="FAILED_OVER"
+    [[ -n "${authority_generation}" ]] || authority_generation="${spec_generation}"
+    [[ -n "${checkpoint_sequence}" ]] || checkpoint_sequence="${spec_checkpoint}"
+    [[ -n "${target_power_state}" ]] || target_power_state="${spec_power}"
+    [[ -n "${target_promotion_state}" ]] || target_promotion_state="${spec_promotion}"
+    [[ -n "${session_id}" ]] || session_id="${spec_session}"
+    [[ -n "${authority_source}" ]] || authority_source="cloud-command"
+  fi
+  rm -f "${snapshot_path}" 2>/dev/null || true
+
+  ftctl_dr_runtime_path_set "${run_path}" \
+    "authority_source=${authority_source}" \
+    "authority_state=${authority_state}" \
+    "active_side=${active_side}" \
+    "checkpoint_sequence=${checkpoint_sequence}" \
+    "target_power_state=${target_power_state}" \
+    "target_promotion_state=${target_promotion_state}" \
+    "cloud_cutover_session_id=${session_id}" \
+    "cloud_authority_generation=${authority_generation}"
 }
 
 ftctl_dr_runtime_failback_dir() {
@@ -364,6 +476,47 @@ for index, disk in enumerate(disks):
     else:
         sys.stderr.write(f"ERROR: disk {index} provider {provider} is unsupported\n")
         sys.exit(54)
+PY
+  ftctl_state_write_json_file "${out_path}" "$(cat "${spec_file}")" || return $?
+  chmod 0600 "${out_path}" 2>/dev/null || true
+}
+
+ftctl_dr_runtime_save_authority_spec() {
+  local plan="${1-}" run="${2-}" spec_file="${3-}" out_path
+
+  [[ -n "${spec_file}" && -f "${spec_file}" ]] || return 2
+  out_path="$(ftctl_dr_runtime_authority_spec_path "${plan}" "${run}")"
+  ftctl_dr_runtime_ensure_plan_dirs "${plan}"
+  python3 - "${spec_file}" "${plan}" "${run}" <<'PY' || return $?
+import json
+import sys
+
+path, plan, run = sys.argv[1:4]
+try:
+    with open(path, "r", encoding="utf-8") as fh:
+        spec = json.load(fh)
+except (OSError, ValueError) as exc:
+    sys.stderr.write(f"ERROR: invalid authority spec JSON: {exc}\n")
+    sys.exit(79)
+if str(spec.get("contractVersion") or "") != "2026-07-23":
+    sys.stderr.write("ERROR: authority contractVersion 2026-07-23 is required\n")
+    sys.exit(79)
+if spec.get("planUuid") != plan or spec.get("runUuid") != run:
+    sys.stderr.write("ERROR: authority spec plan/run correlation mismatch\n")
+    sys.exit(79)
+if str(spec.get("expectedActiveSide") or "").upper() != "TARGET":
+    sys.stderr.write("ERROR: authority spec requires TARGET active side\n")
+    sys.exit(79)
+for key in ("authorityGeneration", "checkpointSequence", "targetVmId"):
+    try:
+        if int(spec.get(key)) <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        sys.stderr.write(f"ERROR: authority spec requires positive {key}\n")
+        sys.exit(79)
+if not str(spec.get("cutoverSessionId") or "").strip():
+    sys.stderr.write("ERROR: authority spec requires cutoverSessionId\n")
+    sys.exit(79)
 PY
   ftctl_state_write_json_file "${out_path}" "$(cat "${spec_file}")" || return $?
   chmod 0600 "${out_path}" 2>/dev/null || true
@@ -1983,9 +2136,9 @@ ftctl_dr_runtime_failback_worker() {
 
   worker_profile="${profile_file}"
   [[ -n "${worker_profile}" && -f "${worker_profile}" ]] || worker_profile="$(ftctl_dr_runtime_profile_path "${plan}")"
-  active_side="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "active_side")"
-  current_state="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "state")"
-  previous_checkpoint_sequence="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "checkpoint_sequence")"
+  active_side="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "active_side")"
+  current_state="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "authority_state")"
+  previous_checkpoint_sequence="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "checkpoint_sequence")"
   if [[ "${active_side}" != "TARGET" && "${current_state}" != "FAILED_OVER" ]]; then
     ftctl_dr_runtime_path_set "${run_path}" \
       "state=ERROR" \
@@ -1993,6 +2146,7 @@ ftctl_dr_runtime_failback_worker() {
       "progress=100" \
       "accepted=false" \
       "error_code=DR_FAILBACK_REQUIRES_TARGET_ACTIVE" \
+      "error_message=Committed target authority was not available for failback" \
       "updated_at=$(ftctl_now_iso8601)" || true
     cp -f "${run_path}" "${status_path}" 2>/dev/null || true
     return 47
@@ -2151,9 +2305,9 @@ ftctl_dr_runtime_reprotect_worker() {
 
   worker_profile="${profile_file}"
   [[ -n "${worker_profile}" && -f "${worker_profile}" ]] || worker_profile="$(ftctl_dr_runtime_profile_path "${plan}")"
-  active_side="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "active_side")"
-  current_state="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "state")"
-  previous_checkpoint_sequence="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "checkpoint_sequence")"
+  active_side="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "active_side")"
+  current_state="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "authority_state")"
+  previous_checkpoint_sequence="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "checkpoint_sequence")"
   if [[ "${active_side}" != "TARGET" && "${current_state}" != "FAILED_OVER" ]]; then
     ftctl_dr_runtime_path_set "${run_path}" \
       "state=ERROR" \
@@ -2161,6 +2315,7 @@ ftctl_dr_runtime_reprotect_worker() {
       "progress=100" \
       "accepted=false" \
       "error_code=DR_REPROTECT_REQUIRES_TARGET_ACTIVE" \
+      "error_message=Committed target authority was not available for reprotect" \
       "updated_at=$(ftctl_now_iso8601)" || true
     cp -f "${run_path}" "${status_path}" 2>/dev/null || true
     return 47
@@ -3199,7 +3354,7 @@ ftctl_dr_runtime_should_delegate_action() {
 }
 
 ftctl_dr_runtime_start_background_worker() {
-  local action="${1-}" plan="${2-}" run="${3-}" role="${4-}" mode="${5-}" restore_point="${6-}" force="${7-0}" dry_run="${8-0}" artifact_spec_path="${9-}" log_path ftctl_bin profile_path
+  local action="${1-}" plan="${2-}" run="${3-}" role="${4-}" mode="${5-}" restore_point="${6-}" force="${7-0}" dry_run="${8-0}" artifact_spec_path="${9-}" authority_spec_path="${10-}" log_path ftctl_bin profile_path
   local run_path status_path now worker_pid
   local -a worker_cmd
 
@@ -3229,6 +3384,7 @@ ftctl_dr_runtime_start_background_worker() {
   [[ -n "${mode}" ]] && worker_cmd+=("--mode" "${mode}")
   [[ -n "${restore_point}" ]] && worker_cmd+=("--restore-point" "${restore_point}")
   [[ -n "${artifact_spec_path}" && -f "${artifact_spec_path}" ]] && worker_cmd+=("--artifact-spec-json" "${artifact_spec_path}")
+  [[ -n "${authority_spec_path}" && -f "${authority_spec_path}" ]] && worker_cmd+=("--authority-spec-json" "${authority_spec_path}")
   [[ "${force}" == "1" ]] && worker_cmd+=("--force")
   [[ "${dry_run}" == "1" ]] && worker_cmd+=("--dry-run")
   worker_cmd+=("--wait=true" "--json")
@@ -3266,9 +3422,9 @@ ftctl_dr_runtime_mark_worker_terminal() {
 }
 
 ftctl_dr_runtime_action() {
-  local action="${1-}" plan="${2-}" run="${3-}" profile_file="${4-}" role="${5-}" mode="${6-}" restore_point="${7-}" force="${8-0}" dry_run="${9-0}" wait_value="${10-}" json="${11-0}" artifact_spec_file="${12-}"
+  local action="${1-}" plan="${2-}" run="${3-}" profile_file="${4-}" role="${5-}" mode="${6-}" restore_point="${7-}" force="${8-0}" dry_run="${9-0}" wait_value="${10-}" json="${11-0}" artifact_spec_file="${12-}" authority_spec_file="${13-}"
   local state_tuple state step progress run_path status_path external_ref rc error_code
-  local target_vm_id target_external_ref checkpoint_lease_path test_sequence persisted_artifact_spec=""
+  local target_vm_id target_external_ref checkpoint_lease_path test_sequence persisted_artifact_spec="" persisted_authority_spec=""
 
   ftctl_dr_runtime_require_plan "${plan}" || return 2
   ftctl_dr_runtime_require_run "${run}" || return 2
@@ -3288,6 +3444,15 @@ ftctl_dr_runtime_action() {
     }
     persisted_artifact_spec="$(ftctl_dr_runtime_artifact_spec_path "${plan}" "${run}")"
   fi
+  if [[ "${action}" == "dr-reprotect" && -n "${authority_spec_file}" ]]; then
+    ftctl_dr_runtime_save_authority_spec "${plan}" "${run}" "${authority_spec_file}" || {
+      rc=$?
+      [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_error_json "${action}" "${plan}" "${run}" \
+        "DR_REPROTECT_AUTHORITY_INVALID" "committed authority contract is missing or invalid" "${rc}"
+      return "${rc}"
+    }
+    persisted_authority_spec="$(ftctl_dr_runtime_authority_spec_path "${plan}" "${run}")"
+  fi
 
   state_tuple="$(ftctl_dr_runtime_action_state "${action}")"
   IFS='|' read -r state step progress <<< "${state_tuple}"
@@ -3295,6 +3460,15 @@ ftctl_dr_runtime_action() {
   run_path="$(ftctl_dr_runtime_run_path "${plan}" "${run}")"
   status_path="$(ftctl_dr_runtime_status_path "${plan}")"
   ftctl_dr_runtime_write_state "${run_path}" "${plan}" "${run}" "${action}" "${state}" "${step}" "${progress}" "${external_ref}" ""
+  case "${action}" in
+    dr-failback|dr-reprotect)
+      ftctl_dr_runtime_capture_authority_context "${plan}" "${run_path}" "${status_path}" "${persisted_authority_spec}" || {
+        [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_error_json "${action}" "${plan}" "${run}" \
+          "DR_REPROTECT_AUTHORITY_CONFLICT" "committed authority state does not match FTCTL runtime" 79
+        return 79
+      }
+      ;;
+  esac
   if [[ -n "${profile_file}" && -f "${profile_file}" ]]; then
     target_vm_id="$(ftctl_dr_runtime_profile_value "${profile_file}" "target.vmId" || true)"
     [[ -n "${target_vm_id}" ]] || target_vm_id="$(ftctl_dr_runtime_profile_value "${profile_file}" "target.id" || true)"
@@ -3350,7 +3524,7 @@ ftctl_dr_runtime_action() {
     cp -f "${run_path}" "${status_path}"
     chmod 0644 "${status_path}" 2>/dev/null || true
     command -v ftctl_lock_release >/dev/null 2>&1 && ftctl_lock_release || true
-    ftctl_dr_runtime_start_background_worker "${action}" "${plan}" "${run}" "${role}" "${mode}" "${restore_point}" "${force}" "${dry_run}" "${persisted_artifact_spec}"
+    ftctl_dr_runtime_start_background_worker "${action}" "${plan}" "${run}" "${role}" "${mode}" "${restore_point}" "${force}" "${dry_run}" "${persisted_artifact_spec}" "${persisted_authority_spec}"
     ftctl_log_event "dr-runtime" "dr.action.accepted" "ok" "" "" \
       "plan=${plan} run=${run} action=${action} role=${role:-} mode=${mode:-} restore_point=${restore_point:-} force=${force} dry_run=${dry_run} wait=${wait_value:-} delegated=1"
     if [[ "${json}" == "1" ]]; then
