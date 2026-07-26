@@ -370,3 +370,24 @@ Negative checks:
 - restart management during reverse sync and verify `Continue failback` becomes the recovery path.
 - expire the context and verify no secret remains in memory after cleanup.
 - verify no API key or secret key appears in DB, VM details, qemu profiles, host files, management logs, or qemu events.
+
+## 13. 2026-07-25 Site-Derived Async Context Addendum
+
+The registered DR Site credential model removes raw credential values from the
+operator request and bounded failback operation context.
+
+The durable async context contains only:
+
+- Plan/Run identity;
+- active and destination Site UUID;
+- provider types;
+- credential validation evidence without secret material;
+- current failback stage and engine operation identity.
+
+Each lifecycle stage resolves the current configured Site credential through
+Cloud immediately before use. A management restart therefore resumes by
+reloading the non-secret Run context and resolving the registered credential
+again; it does not ask the operator to re-enter API keys or secrets.
+
+`Continue failback` remains a state-recovery action when engine/lifecycle
+progress needs reconciliation, not a credential re-entry action.

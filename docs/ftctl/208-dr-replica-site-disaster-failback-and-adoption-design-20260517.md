@@ -251,3 +251,21 @@ Design-level verification:
 - adopted/released replica VM can be protected again as a normal primary candidate.
 - source Mold credentials are optional and best-effort during adoption.
 - no API key or secret key is persisted.
+
+## 12. 2026-07-25 Registered Replacement Site Addendum
+
+Full replica-controller recovery may still target a restored or newly installed
+Site, but the operator does not enter raw target credentials in the recovery
+action.
+
+The replacement target must first be:
+
+1. registered as a DR Site;
+2. assigned an encrypted Site credential;
+3. health checked;
+4. inventoried and mapped for VM, volume, network, storage, and host placement.
+
+The recovery action selects that registered Site and stores only Site/Plan
+identity and non-secret validation evidence. The replica controller resolves
+the target credential at execution time. Adoption remains the separate choice
+to keep the current replica as production.

@@ -162,3 +162,18 @@ Runtime checks:
 - The delegated call reaches the source Mold and starts the source-side `failbackFtctlProtection` job.
 - The source Mold continues the already validated failback path.
 - If the source protection row is absent, the error tells the operator that full replica-controller recovery is required.
+
+## 9. 2026-07-25 Registered-Site Delegation Addendum
+
+Delegated failback no longer collects current replica Mold credentials or
+target/source Mold credentials in the action dialog.
+
+The delegated request carries non-secret controller and Plan identity plus an
+authenticated delegation assertion. The source controller resolves its
+registered source/target Site credentials and starts the same
+source-controller failback path.
+
+If trusted controller delegation or the source protection authority is not
+available, the UI must not fall back to raw credential input. It routes the
+operator to full replica-controller recovery with a registered replacement
+Site or to adoption.

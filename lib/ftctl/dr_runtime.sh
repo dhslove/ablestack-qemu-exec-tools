@@ -2210,7 +2210,7 @@ ftctl_dr_runtime_failback_worker() {
   ftctl_dr_runtime_write_operation_session \
     "$(ftctl_dr_runtime_failback_session_path "${plan}" "${run}")" \
     "$(ftctl_dr_runtime_active_failback_session_path "${plan}")" \
-    "${plan}" "${run}" "failback" "READY" "SOURCE" \
+    "${plan}" "${run}" "failback" "DATA_READY" "TARGET" \
     "${worker_profile}" "${reverse_profile}" "${run_path}" "${requested_at}" "${completed_at}"
   sequence="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "checkpoint_sequence")"
   manifest_path="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "manifest_path")"
@@ -2240,10 +2240,12 @@ else:
 PY
 )"
   ftctl_dr_runtime_path_set "${run_path}" \
-    "state=READY" \
-    "step=active-side-restore" \
-    "progress=100" \
+    "state=FAILBACK_DATA_READY" \
+    "step=cloud-lifecycle-pending" \
+    "progress=70" \
     "scheduler_state=STOPPED" \
+    "failback_phase=DATA_READY" \
+    "cloud_lifecycle_state=PENDING" \
     "failback_session_id=${plan}:${run}" \
     "failback_mode=planned" \
     "failback_restore_point_ref=ftctl:${plan}:${sequence}" \
@@ -2253,14 +2255,16 @@ PY
     "failback_requested_at=${requested_at}" \
     "reverse_sync_started_at=${requested_at}" \
     "reverse_target_ready_at=${completed_at}" \
-    "source_promote_started_at=${completed_at}" \
-    "source_power_on_at=${completed_at}" \
-    "failback_completed_at=${completed_at}" \
+    "source_promote_started_at=" \
+    "source_power_on_at=" \
+    "failback_completed_at=" \
     "failback_rto_actual_seconds=${rto_actual_seconds}" \
     "rto_actual_seconds=${rto_actual_seconds}" \
-    "active_side=SOURCE" \
-    "source_power_state=POWER_ON_DELEGATED" \
-    "source_promotion_state=PROMOTED" \
+    "active_side=TARGET" \
+    "source_power_state=POWERED_OFF" \
+    "source_promotion_state=STANDBY" \
+    "target_power_state=POWERED_ON" \
+    "engine_ack_state=PENDING" \
     "reverse_direction=${reverse_direction}" \
     "reverse_profile_path=${reverse_profile}" \
     "reverse_restore_points_path=${reverse_restore_points_path}" \
@@ -2269,7 +2273,7 @@ PY
   cp -f "${run_path}" "${status_path}" 2>/dev/null || true
   chmod 0644 "${status_path}" 2>/dev/null || true
   ftctl_log_event "dr-runtime" "dr.failback" "ok" "" "" \
-    "plan=${plan} run=${run} restore_point=ftctl:${plan}:${sequence} active_side=SOURCE"
+    "plan=${plan} run=${run} restore_point=ftctl:${plan}:${sequence} phase=DATA_READY active_side=TARGET"
 }
 
 ftctl_dr_runtime_start_failback() {
@@ -2555,7 +2559,8 @@ ftctl_dr_runtime_emit_state_json() {
   local guest_prep_state guest_family guestprep_manifest_path manifest_schema_version manifest_sha256
   local guestprep_checkpoint_sequence source_fence_state scheduler_recovery_state
   local test_domain_name test_domain_state test_boot_validation_mode
-  local failback_session_id failback_mode failback_restore_point_ref failback_restore_point_sequence
+  local failback_session_id failback_mode failback_phase cloud_lifecycle_state
+  local failback_restore_point_ref failback_restore_point_sequence
   local failback_manifest_path failback_checkpoint_path failback_requested_at reverse_sync_started_at
   local reverse_target_ready_at source_promote_started_at source_power_on_at failback_completed_at
   local failback_rto_actual_seconds source_power_state source_promotion_state failback_worker_pid
@@ -2855,6 +2860,8 @@ PY
   failover_worker_pid="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "failover_worker_pid")"
   failback_session_id="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "failback_session_id")"
   failback_mode="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "failback_mode")"
+  failback_phase="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "failback_phase")"
+  cloud_lifecycle_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "cloud_lifecycle_state")"
   failback_restore_point_ref="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "failback_restore_point_ref")"
   failback_restore_point_sequence="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "failback_restore_point_sequence")"
   failback_manifest_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "failback_manifest_path")"
@@ -3125,6 +3132,8 @@ PY
   ftctl_dr_runtime_json_number_field "failover_worker_pid" "${failover_worker_pid}"
   ftctl_dr_runtime_json_string_field "failback_session_id" "${failback_session_id}"
   ftctl_dr_runtime_json_string_field "failback_mode" "${failback_mode}"
+  ftctl_dr_runtime_json_string_field "failback_phase" "${failback_phase}"
+  ftctl_dr_runtime_json_string_field "cloud_lifecycle_state" "${cloud_lifecycle_state}"
   ftctl_dr_runtime_json_string_field "failback_restore_point_ref" "${failback_restore_point_ref}"
   ftctl_dr_runtime_json_number_field "failback_restore_point_sequence" "${failback_restore_point_sequence}"
   ftctl_dr_runtime_json_string_field "failback_manifest_path" "${failback_manifest_path}"
@@ -4074,9 +4083,141 @@ PY
   fi
 }
 
+ftctl_dr_runtime_failback_commit() {
+  local plan="${1-}" run="${2-}" session_id="${3-}" checkpoint_sequence="${4-}"
+  local authority_generation="${5-}" target_power_state="${6-}" source_power_state="${7-}"
+  local boot_validation_state="${8-}" json="${9-0}"
+  local run_path status_path session_path active_path state current_session current_checkpoint now rc=0
+
+  ftctl_dr_runtime_require_plan "${plan}" || return 2
+  ftctl_dr_runtime_require_run "${run}" || return 2
+  if [[ -z "${session_id}" || ! "${checkpoint_sequence}" =~ ^[0-9]+$ || ! "${authority_generation}" =~ ^[0-9]+$ ]]; then
+    [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_error_json "dr-failback-commit" "${plan}" "${run}" \
+      "DR_FAILBACK_COMMIT_INVALID" "session id, checkpoint sequence, and authority generation are required" 2
+    return 2
+  fi
+  [[ "${target_power_state}" == "POWERED_OFF" ]] || {
+    [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_error_json "dr-failback-commit" "${plan}" "${run}" \
+      "DR_FAILBACK_TARGET_STILL_RUNNING" "Cloud target must be POWERED_OFF before source authority commit" 78
+    return 78
+  }
+  [[ "${source_power_state}" == "POWERED_ON" ]] || {
+    [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_error_json "dr-failback-commit" "${plan}" "${run}" \
+      "DR_FAILBACK_SOURCE_NOT_RUNNING" "Cloud source must be POWERED_ON before source authority commit" 78
+    return 78
+  }
+  case "${boot_validation_state}" in
+    POWER_STATE_VALIDATED|GUEST_HEARTBEAT_VALIDATED) ;;
+    *)
+      [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_error_json "dr-failback-commit" "${plan}" "${run}" \
+        "DR_FAILBACK_BOOT_VALIDATION_INCOMPLETE" "Cloud source boot validation is incomplete" 78
+      return 78
+      ;;
+  esac
+
+  run_path="$(ftctl_dr_runtime_run_path "${plan}" "${run}")"
+  status_path="$(ftctl_dr_runtime_status_path "${plan}")"
+  session_path="$(ftctl_dr_runtime_failback_session_path "${plan}" "${run}")"
+  active_path="$(ftctl_dr_runtime_active_failback_session_path "${plan}")"
+  [[ -f "${run_path}" && -f "${status_path}" ]] || return 44
+  state="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "state")"
+  current_session="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "failback_session_id")"
+  current_checkpoint="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "failback_restore_point_sequence")"
+  [[ "${current_session}" == "${session_id}" ]] || return 79
+  [[ "${current_checkpoint}" == "${checkpoint_sequence}" ]] || return 79
+  [[ "${state}" == "FAILBACK_DATA_READY" || "${state}" == "SYNCING" || "${state}" == "READY" ]] || return 79
+
+  now="$(ftctl_now_iso8601)"
+  ftctl_dr_runtime_path_set "${run_path}" \
+    "action=dr-failback-commit" \
+    "state=SYNCING" \
+    "step=protection-resuming" \
+    "progress=90" \
+    "failback_phase=PROTECTION_RESUMING" \
+    "cloud_lifecycle_state=COMMITTED" \
+    "active_side=SOURCE" \
+    "target_power_state=POWERED_OFF" \
+    "target_promotion_state=STANDBY" \
+    "source_power_state=POWERED_ON" \
+    "source_promotion_state=PROMOTED" \
+    "boot_validation_state=${boot_validation_state}" \
+    "cloud_authority_generation=${authority_generation}" \
+    "engine_ack_state=ACKNOWLEDGED" \
+    "engine_ack_at=${now}" \
+    "source_promote_started_at=${now}" \
+    "source_power_on_at=${now}" \
+    "scheduler_state=STARTING" \
+    "accepted=true" \
+    "retryable=false" \
+    "error_code=" \
+    "error_message=" \
+    "updated_at=${now}" || return 2
+  cp -f "${run_path}" "${status_path}" || return 2
+
+  if [[ -f "${session_path}" ]]; then
+    python3 - "${session_path}" "${active_path}" "${authority_generation}" "${boot_validation_state}" "${now}" <<'PY' || return 2
+import json
+import os
+import shutil
+import sys
+path, active_path, generation, validation_state, now = sys.argv[1:6]
+with open(path, "r", encoding="utf-8") as fh:
+    session = json.load(fh)
+session["state"] = "PROTECTION_RESUMING"
+session["activeSide"] = "SOURCE"
+session["cloudAuthorityGeneration"] = int(generation)
+session["bootValidationState"] = validation_state
+session["sourcePowerState"] = "POWERED_ON"
+session["targetPowerState"] = "POWERED_OFF"
+session["engineAckState"] = "ACKNOWLEDGED"
+session["engineAckAt"] = now
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(session, fh, sort_keys=True, separators=(",", ":"))
+    fh.write("\n")
+os.makedirs(os.path.dirname(active_path), exist_ok=True)
+shutil.copyfile(path, active_path)
+PY
+  fi
+  if command -v ftctl_dr_scheduler_resume_after_transition >/dev/null 2>&1; then
+    ftctl_dr_scheduler_resume_after_transition "${plan}" "${run}" "failback-commit" "${run_path}" "${status_path}" || rc=$?
+  fi
+  if [[ "${rc}" != "0" ]]; then
+    ftctl_dr_runtime_path_set "${run_path}" \
+      "state=ERROR" "step=protection-resume-failed" "failback_phase=PROTECTION_RESUME_FAILED" \
+      "error_code=DR_FAILBACK_PROTECTION_RESUME_FAILED" "updated_at=$(ftctl_now_iso8601)" || true
+    cp -f "${run_path}" "${status_path}" 2>/dev/null || true
+    return "${rc}"
+  fi
+  ftctl_log_event "dr-runtime" "dr.failback.commit" "ok" "" "" \
+    "plan=${plan} run=${run} session=${session_id} generation=${authority_generation}"
+  [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_state_json "dr-failback-commit" "ok" "${plan}" "${run}" "${run_path}" "0"
+}
+
+ftctl_dr_runtime_failback_abort() {
+  local plan="${1-}" run="${2-}" session_id="${3-}" json="${4-0}"
+  local run_path status_path current_session now
+  ftctl_dr_runtime_require_plan "${plan}" || return 2
+  ftctl_dr_runtime_require_run "${run}" || return 2
+  run_path="$(ftctl_dr_runtime_run_path "${plan}" "${run}")"
+  status_path="$(ftctl_dr_runtime_status_path "${plan}")"
+  current_session="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "failback_session_id")"
+  [[ -n "${session_id}" && "${current_session}" == "${session_id}" ]] || return 79
+  now="$(ftctl_now_iso8601)"
+  ftctl_dr_runtime_path_set "${run_path}" \
+    "action=dr-failback-abort" "state=FAILED_OVER" "step=failback-aborted" "progress=100" \
+    "failback_phase=ABORTED" "cloud_lifecycle_state=ABORTED" "active_side=TARGET" \
+    "source_power_state=POWERED_OFF" "source_promotion_state=STANDBY" \
+    "target_power_state=POWERED_ON" "target_promotion_state=PROMOTED" \
+    "engine_ack_state=ABORTED" "accepted=false" "updated_at=${now}" || return 2
+  cp -f "${run_path}" "${status_path}" || return 2
+  ftctl_log_event "dr-runtime" "dr.failback.abort" "warn" "" "" \
+    "plan=${plan} run=${run} session=${session_id}"
+  [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_state_json "dr-failback-abort" "ok" "${plan}" "${run}" "${run_path}" "0"
+}
+
 ftctl_dr_runtime_capabilities() {
   local json="${1-0}" version="${PROG_VERSION:-unknown}"
-  local schema="20260722" action_contract="2026-07-22"
+  local schema="20260726" action_contract="2026-07-26"
   local commands=(
     "dr-plan-apply"
     "dr-sync-start"
@@ -4092,6 +4233,8 @@ ftctl_dr_runtime_capabilities() {
     "dr-reprotect"
     "dr-target-materialized"
     "dr-cutover-commit"
+    "dr-failback-commit"
+    "dr-failback-abort"
     "dr-release"
     "dr-status"
     "dr-reconcile"
@@ -4107,7 +4250,7 @@ ftctl_dr_runtime_capabilities() {
       first="0"
       printf '"%s"' "$(ftctl__json_escape "${command}")"
     done
-    printf '],"supported_features":["async-run","status-projection","status-scope-v2","target-materialized-notify","target-materialized-idempotent","hardware-contract-projection","control-protocol-v2","control-protocol-v3","dr-scheduler-singleton-v1","dr-scheduler-self-owner-repair-v1","dr-scheduler-systemd-unit-v1","dr-sync-recover-v1","dr-local-reconcile-fence-v1","dr-checkpoint-producer-v1","dr-nbd-deterministic-drain-v1","dr-nbd-cleanup-recovery-v1","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","guest-preparation-v1","guest-preparation-v2","test-domain-lifecycle-v1","test-artifact-lifecycle-v2","cloud-managed-test-vm-v1","cutover-ready-v1","cutover-manifest-v2","cutover-preflight-v1","cloud-cutover-commit-v1"]}\n'
+    printf '],"supported_features":["async-run","status-projection","status-scope-v2","target-materialized-notify","target-materialized-idempotent","hardware-contract-projection","control-protocol-v2","control-protocol-v3","dr-scheduler-singleton-v1","dr-scheduler-self-owner-repair-v1","dr-scheduler-systemd-unit-v1","dr-sync-recover-v1","dr-local-reconcile-fence-v1","dr-checkpoint-producer-v1","dr-nbd-deterministic-drain-v1","dr-nbd-cleanup-recovery-v1","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","guest-preparation-v1","guest-preparation-v2","test-domain-lifecycle-v1","test-artifact-lifecycle-v2","cloud-managed-test-vm-v1","cutover-ready-v1","cutover-manifest-v2","cutover-preflight-v1","cloud-cutover-commit-v1","cloud-failback-lifecycle-v1"]}\n'
     return 0
   fi
 

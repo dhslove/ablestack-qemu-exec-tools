@@ -299,3 +299,26 @@ Regression checks:
 - HA failback still follows the validated local Cloud-managed path.
 - DR registration still follows document 201 resource ownership.
 - Fence clear still follows document 205 and does not auto-rearm through qemu.
+
+## 13. 2026-07-25 Site-Derived Credential Addendum
+
+The cross-hypervisor DR Site credential model now supersedes the one-time
+operator credential wording in this document for normal source-controller
+failback.
+
+- The primary-side UI does not collect remote or target Mold URL, API key, or
+  secret key.
+- Cloud derives the active Site from `plan.target_site_id` and the normal
+  failback destination from `plan.source_site_id`.
+- Cloud resolves both Site credentials through `DrSiteCredentialService`.
+- The internal target type is not a public operator input.
+- Secrets must not be written to `dr_run.request_json`.
+- Agent and FTCTL continue to receive only the runtime credential material
+  derived by Cloud and keep it in root-only runtime storage.
+
+If the original source Site is destroyed or replaced, that is replica-controller
+recovery to a registered Site, not a request to enter a new Mold in this
+dialog.
+
+The normative Cloud code-level contract is document 571,
+`cross-hypervisor-dr-site-derived-failback-contract-design-20260725.md`.

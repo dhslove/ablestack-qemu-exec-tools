@@ -108,3 +108,35 @@ The current UI must therefore:
 - Replica-side `Failback` is visibly distinct from adoption and calls only the delegated source-controller path unless the future full replica-controller workflow is implemented.
 - Missing source protection on the target/source Mold produces an actionable error instead of silently treating adoption as failback.
 - English and Korean locale keys describe the same behavior.
+
+## 6. 2026-07-25 Registered-Site UX Addendum
+
+The registered DR Site credential model replaces the remaining one-time
+credential fields described in sections 3 and 4 for normal source-controller
+failback.
+
+The operator-facing failback modal now shows:
+
+- the current active Site;
+- the registered original/source destination Site;
+- Site health and credential validation summaries;
+- latest durable synchronization evidence;
+- reason and acknowledgement.
+
+It does not show:
+
+- `current`, `original-primary`, or `new`;
+- remote Mold API URL/key/secret;
+- target Mold API URL/key/secret;
+- internal credential references.
+
+Cloud resolves provider-specific credentials from the Plan's registered Sites.
+A replacement or newly installed Site must first be registered and validated,
+then used by a separate replica-controller recovery workflow. It is not an
+option inside the normal source-controller failback modal.
+
+This addendum supersedes lines that require the primary-side or delegated
+normal failback UI to collect one-time Mold credentials. The controller
+boundary remains unchanged: source-controller failback, delegated
+source-controller failback, replica-controller disaster recovery, and adopt
+remain distinct workflows.

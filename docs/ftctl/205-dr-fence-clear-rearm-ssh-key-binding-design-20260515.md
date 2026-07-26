@@ -311,3 +311,19 @@ End-to-end DR-WIN retest:
 - Do not make remote Mold one-time UI credentials durable automation credentials.
 - Do not assume DR failback always returns to the original primary Mold.
 - Do not change the validated HA manual-block behavior except to share the same Cloud-managed fence-clear rearm guard where applicable.
+
+## 12. 2026-07-25 Registered-Site Credential Addendum
+
+The one-time credential entry in verification step 9 is superseded by the
+registered DR Site credential model.
+
+- Fence-clear and normal failback UI actions do not collect raw Mold
+  credentials.
+- Cloud resolves the owning remote Site from the Plan and uses its configured
+  `MOLD_API` credential.
+- A disconnected or unconfigured Site blocks the action and directs the
+  operator to DR Site maintenance.
+- qemu SSH key binding and data-plane fencing behavior in this document do not
+  change.
+
+No API key or secret is stored in the action Run JSON.

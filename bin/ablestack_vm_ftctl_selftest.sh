@@ -7897,7 +7897,7 @@ JSON
 
 selftest_case_dr_runtime_failback_restores_source_after_reverse_checkpoint() {
   selftest_reset_env
-  selftest_info "FTCTL_DR failback runs reverse checkpoint and restores source active side"
+  selftest_info "FTCTL_DR failback waits for Cloud lifecycle commit before restoring source authority"
 
   local plan="plan-failback"
   local profile="${SELFTEST_ROOT}/dr-failback-profile.json"
@@ -7905,7 +7905,7 @@ selftest_case_dr_runtime_failback_restores_source_after_reverse_checkpoint() {
   local status_path="${plan_dir}/status.state"
   local fakebin="${SELFTEST_ROOT}/fakebin"
   local call_log="${SELFTEST_ROOT}/qemu-img-failback.log"
-  local out="" session_path="" active_path="" reverse_profile="" reverse_points=""
+  local out="" session_path="" active_path="" reverse_profile="" reverse_points="" rc=0
 
   mkdir -p "${plan_dir}" "${fakebin}" "${SELFTEST_ROOT}/source" "${SELFTEST_ROOT}/target"
   cat > "${fakebin}/qemu-img" <<EOF
@@ -7977,11 +7977,12 @@ EOF
     --wait=false \
     --json)"
   selftest_assert_contains "${out}" '"result":"accepted"' "failback accepted"
-  selftest_assert_contains "${out}" '"state":"READY"' "failback returns ready"
-  selftest_assert_contains "${out}" '"step":"active-side-restore"' "failback final step"
-  selftest_assert_contains "${out}" '"active_side":"SOURCE"' "failback active source"
-  selftest_assert_contains "${out}" '"source_power_state":"POWER_ON_DELEGATED"' "failback source power delegated"
-  selftest_assert_contains "${out}" '"source_promotion_state":"PROMOTED"' "failback source promoted"
+  selftest_assert_contains "${out}" '"state":"FAILBACK_DATA_READY"' "failback returns data ready"
+  selftest_assert_contains "${out}" '"step":"cloud-lifecycle-pending"' "failback waits for Cloud lifecycle"
+  selftest_assert_contains "${out}" '"active_side":"TARGET"' "target authority retained before Cloud commit"
+  selftest_assert_contains "${out}" '"source_power_state":"POWERED_OFF"' "source remains powered off before Cloud commit"
+  selftest_assert_contains "${out}" '"source_promotion_state":"STANDBY"' "source remains standby before Cloud commit"
+  selftest_assert_contains "${out}" '"engine_ack_state":"PENDING"' "engine commit is pending"
   selftest_assert_contains "${out}" '"failback_restore_point_sequence":4' "failback reverse checkpoint sequence"
   selftest_assert_contains "${out}" '"reverse_direction":"KVM_TO_KVM"' "failback reverse direction"
   selftest_assert_contains "${out}" '"failback_rto_actual_seconds":' "failback RTO field"
@@ -7994,15 +7995,45 @@ EOF
   selftest_assert_file_contains "${reverse_profile}" "\"targetPath\":\"${SELFTEST_ROOT}/source/root.qcow2\""
   selftest_assert_file_contains "${reverse_points}" '"cycleType":"failback-final"'
   selftest_assert_file_contains "${session_path}" '"operation":"failback"'
-  selftest_assert_file_contains "${active_path}" '"activeSide":"SOURCE"'
+  selftest_assert_file_contains "${active_path}" '"activeSide":"TARGET"'
   selftest_assert_file_contains "${call_log}" "convert --force-share -p -n -S"
 
   out="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-status \
     --config "${SELFTEST_CONFIG}" \
     --plan "${plan}" \
     --json)"
-  selftest_assert_contains "${out}" '"state":"READY"' "failback status ready"
-  selftest_assert_contains "${out}" '"active_side":"SOURCE"' "failback status source active"
+  selftest_assert_contains "${out}" '"state":"FAILBACK_DATA_READY"' "failback status data ready"
+  selftest_assert_contains "${out}" '"active_side":"TARGET"' "failback status target active"
+  selftest_assert_contains "${out}" '"failback_phase":"DATA_READY"' "failback status phase"
+  selftest_assert_contains "${out}" '"cloud_lifecycle_state":"PENDING"' "Cloud lifecycle is pending"
+
+  set +e
+  out="$(ftctl_dr_runtime_failback_commit "${plan}" "run-failback" "${plan}:run-failback" \
+    "4" "4" "POWERED_ON" "POWERED_ON" "POWER_STATE_VALIDATED" "1" 2>&1)"
+  rc=$?
+  set -e
+  selftest_assert_eq "${rc}" "78" "running target blocks source authority commit"
+  selftest_assert_contains "${out}" "DR_FAILBACK_TARGET_STILL_RUNNING" "target power preflight error"
+
+  out="$(
+    ftctl_dr_scheduler_resume_after_transition() {
+      ftctl_dr_runtime_path_set "$4" "scheduler_state=RUNNING" "control_state=RUNNING"
+      cp -f "$4" "$5"
+      return 0
+    }
+    ftctl_dr_runtime_failback_commit "${plan}" "run-failback" "${plan}:run-failback" \
+      "4" "4" "POWERED_OFF" "POWERED_ON" "POWER_STATE_VALIDATED" "1"
+  )"
+  selftest_assert_contains "${out}" '"state":"SYNCING"' "Cloud commit resumes protection"
+  selftest_assert_contains "${out}" '"active_side":"SOURCE"' "Cloud commit restores source authority"
+  selftest_assert_contains "${out}" '"engine_ack_state":"ACKNOWLEDGED"' "Cloud commit is acknowledged"
+  selftest_assert_contains "${out}" '"failback_phase":"PROTECTION_RESUMING"' "protection resume phase"
+  selftest_assert_file_contains "${active_path}" '"activeSide":"SOURCE"'
+
+  out="$(ftctl_dr_runtime_failback_abort "${plan}" "run-failback" "${plan}:run-failback" "1")"
+  selftest_assert_contains "${out}" '"state":"FAILED_OVER"' "abort restores failed-over state"
+  selftest_assert_contains "${out}" '"active_side":"TARGET"' "abort restores target authority"
+  selftest_assert_contains "${out}" '"failback_phase":"ABORTED"' "abort phase is explicit"
 }
 
 selftest_case_dr_runtime_reprotect_starts_reverse_protection_checkpoint() {
