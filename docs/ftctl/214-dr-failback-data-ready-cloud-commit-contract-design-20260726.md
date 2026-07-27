@@ -268,3 +268,22 @@ post-failback durable checkpoint exists
 ```
 
 그 전 상태는 데이터 전송이 완료됐더라도 `DATA_READY`다.
+
+## 10. 2026-07-27 Commit Generation과 Rollback Fence 보강
+
+실환경 재검증에서 `FAILBACK_COMMIT`이 실패로 반환됐지만 scheduler가
+`RUNNING`이 되는 generation 경합이 확인됐다. 또한 기존 abort는 scheduler를
+정지하지 않아 TARGET 서비스가 복구된 뒤에도 정방향 복제가 남을 수 있다.
+
+다음 항목은 문서 215의 계약으로 대체한다.
+
+- commit당 control generation은 하나만 생성한다.
+- 새 worker는 pending generation을 채택하고 같은 generation을 ACK한다.
+- commit은 durable journal에서 멱등 재개한다.
+- rollback은 scheduler `STOPPED` ACK, VM lifecycle 복구, TARGET authority
+  commit의 2단계 fence를 사용한다.
+- 기존 stub 기반 failback selftest 외에 실제 worker generation 통합 테스트를
+  필수로 수행한다.
+
+상세 설계:
+`215-dr-failback-commit-generation-and-rollback-fence-design-20260727.md`.

@@ -409,3 +409,15 @@ Cleanup-only recovery preserves the previous committed CBT baseline and does
 not create a VMware snapshot, query CBT, write target data, or increment the
 cycle sequence. If cleanup still fails, the Plan remains recovery-required and
 the Scheduler must not automatically start another copy cycle.
+
+## 16. Failback Commit Generation Addendum (2026-07-27)
+
+Failback commit 중 scheduler를 새로 시작할 때 systemd worker는 자체
+`scheduler-start` generation으로 Cloud 요청 generation을 덮어쓰지 않는다.
+transition control path가 생성한 pending generation을 launch state로 전달하고,
+worker가 같은 generation을 채택해 `RUNNING` ACK를 기록한다.
+
+Failback rollback은 일반 scheduler recovery보다 우선한다. rollback prepare가
+`STOPPED/IDLE` ACK를 확보하기 전에는 TARGET VM lifecycle 복구나 자동 scheduler
+recovery를 실행하지 않는다. 상세 control protocol, commit journal, 2단계 abort
+계약은 문서 215를 따른다.

@@ -21,7 +21,7 @@ FTCTL_DR_SCHEDULER_DISABLE="${FTCTL_DR_SCHEDULER_DISABLE:-0}"
 FTCTL_DR_CONTROL_ACK_TIMEOUT_SEC="${FTCTL_DR_CONTROL_ACK_TIMEOUT_SEC:-600}"
 FTCTL_DR_TRANSITION_LOCK_TIMEOUT_SEC="${FTCTL_DR_TRANSITION_LOCK_TIMEOUT_SEC:-5}"
 FTCTL_DR_SCHEDULER_HEARTBEAT_TIMEOUT_SEC="${FTCTL_DR_SCHEDULER_HEARTBEAT_TIMEOUT_SEC:-30}"
-FTCTL_DR_CONTROL_PROTOCOL_VERSION="3"
+FTCTL_DR_CONTROL_PROTOCOL_VERSION="4"
 
 ftctl_dr_scheduler_dir() {
   local plan="${1-}"
@@ -786,7 +786,7 @@ ftctl_dr_scheduler_transition_end() {
 
 ftctl_dr_scheduler_resume_after_transition() {
   local plan="${1-}" run="${2-}" reason="${3-transition-complete}" run_path="${4-}" status_path="${5-}"
-  local generation now profile_file scheduler_run scheduler_run_path producer_run
+  local generation now profile_file scheduler_run scheduler_run_path producer_run session
   profile_file="$(ftctl_dr_runtime_profile_path "${plan}")"
   scheduler_run="${run}"
   scheduler_run_path="${run_path}"
@@ -797,8 +797,11 @@ ftctl_dr_scheduler_resume_after_transition() {
       scheduler_run_path="$(ftctl_dr_runtime_run_path "${plan}" "${producer_run}")"
     fi
   fi
+  session="$(ftctl_dr_scheduler_session_uuid "${plan}" "${profile_file}")"
+  generation="$(ftctl_dr_scheduler_control_set "${plan}" "run" "${reason}" "${run}" "false")" || return $?
   ftctl_dr_scheduler_ensure_running "${plan}" "${scheduler_run}" "${profile_file}" "${scheduler_run_path}" "${status_path}" || return $?
-  generation="$(ftctl_dr_scheduler_request_and_wait "${plan}" "run" "RUNNING" "${reason}" "${run}" "false")" || return $?
+  ftctl_dr_scheduler_wait_for_ack "${plan}" "${generation}" "RUNNING" \
+    "${FTCTL_DR_CONTROL_ACK_TIMEOUT_SEC}" "${run}" "${session}" || return $?
   now="$(ftctl_now_iso8601)"
   ftctl_dr_scheduler_update_state "${run_path}" "${status_path}" \
     "control_protocol_version=${FTCTL_DR_CONTROL_PROTOCOL_VERSION}" \
@@ -1065,7 +1068,10 @@ ftctl_dr_scheduler_worker() {
   driver="$(ftctl_dr_scheduler_driver_name "${source_provider}" "${target_provider}")"
 
   printf '%s\n' "$$" > "${pid_path}"
-  control_generation="$(ftctl_dr_scheduler_control_set "${plan}" "run" "scheduler-start" "${run}")"
+  control_generation="$(ftctl_dr_scheduler_control_generation "${plan}")"
+  if [[ "$(ftctl_dr_scheduler_control_command "${plan}")" != "run" || ! "${control_generation}" =~ ^[1-9][0-9]*$ ]]; then
+    control_generation="$(ftctl_dr_scheduler_control_set "${plan}" "run" "scheduler-start" "${run}")"
+  fi
   ftctl_dr_scheduler_control_ack "${plan}" "${control_generation}" "RUNNING" "IDLE" "${run}" \
     "${session}" "${lease_epoch}" "$$" "${start_ticks}"
   authority_sequence="$(ftctl_dr_scheduler_next_authority_sequence "${plan}")"

@@ -7625,8 +7625,9 @@ EOF
   selftest_assert_file_contains "${SELFTEST_ROOT}/run/dr-runtime/plans/${plan}/test-sessions/active.json" '"sessionId":"plan-test-session:run-test-session"'
 
   (
-    local control_path="$(ftctl_dr_scheduler_control_path "${plan}")"
-    local generation="" command="" last_generation="$(ftctl_dr_scheduler_control_generation "${plan}")"
+    local control_path="" generation="" command="" last_generation=""
+    control_path="$(ftctl_dr_scheduler_control_path "${plan}")"
+    last_generation="$(ftctl_dr_scheduler_control_generation "${plan}")"
     while true; do
       generation="$(ftctl_state_read_kv "${control_path}" generation 2>/dev/null || true)"
       command="$(ftctl_state_read_kv "${control_path}" command 2>/dev/null || true)"
@@ -7681,13 +7682,20 @@ selftest_case_dr_scheduler_resume_recovers_missing_worker() {
   cp -f "${run_path}" "${status_path}"
 
   (
+    ftctl_dr_scheduler_session_uuid() {
+      printf 'session-resume-recovery\n'
+    }
+    ftctl_dr_scheduler_control_set() {
+      printf 'set:%s:%s:%s:%s\n' "$1" "$2" "$3" "$4" >> "${call_log}"
+      printf '7\n'
+    }
     ftctl_dr_scheduler_ensure_running() {
       printf 'ensure:%s:%s:%s\n' "$1" "$2" "$3" >> "${call_log}"
       return 0
     }
-    ftctl_dr_scheduler_request_and_wait() {
-      printf 'request:%s:%s:%s\n' "$1" "$2" "$3" >> "${call_log}"
-      printf '7\n'
+    ftctl_dr_scheduler_wait_for_ack() {
+      printf 'wait:%s:%s:%s:%s:%s\n' "$1" "$2" "$3" "$5" "$6" >> "${call_log}"
+      return 0
     }
     ftctl_dr_scheduler_update_state() {
       printf 'update:%s:%s\n' "$1" "$2" >> "${call_log}"
@@ -7696,9 +7704,12 @@ selftest_case_dr_scheduler_resume_recovers_missing_worker() {
     ftctl_dr_scheduler_resume_after_transition "${plan}" "${run}" "test-cleanup" "${run_path}" "${status_path}"
   )
 
+  selftest_assert_file_contains "${call_log}" "set:${plan}:run:test-cleanup:${run}"
   selftest_assert_file_contains "${call_log}" "ensure:${plan}:${producer_run}:${plan_dir}/profile.json"
-  selftest_assert_file_contains "${call_log}" "request:${plan}:run:RUNNING"
-  selftest_assert_eq "$(sed -n '1p' "${call_log}" | cut -d: -f1)" "ensure" "scheduler recovery must precede RUN request"
+  selftest_assert_file_contains "${call_log}" "wait:${plan}:7:RUNNING:${run}:session-resume-recovery"
+  selftest_assert_eq "$(sed -n '1p' "${call_log}" | cut -d: -f1)" "set" "RUN generation must be durable before scheduler recovery"
+  selftest_assert_eq "$(sed -n '2p' "${call_log}" | cut -d: -f1)" "ensure" "scheduler recovery follows the durable RUN generation"
+  selftest_assert_eq "$(sed -n '3p' "${call_log}" | cut -d: -f1)" "wait" "resume waits for the same durable RUN generation"
 }
 
 selftest_case_dr_runtime_planned_failover_promotes_latest_checkpoint() {
@@ -8017,6 +8028,10 @@ EOF
 
   out="$(
     ftctl_dr_scheduler_resume_after_transition() {
+      ftctl_state_write_kv_all "$(ftctl_dr_scheduler_control_path "$1")" \
+        "version=4" "generation=11" "command=run" "owner_run=$2"
+      ftctl_state_write_kv_all "$(ftctl_dr_scheduler_control_ack_path "$1")" \
+        "version=4" "generation=11" "state=RUNNING" "request_run_uuid=$2"
       ftctl_dr_runtime_path_set "$4" "scheduler_state=RUNNING" "control_state=RUNNING"
       cp -f "$4" "$5"
       return 0
@@ -8029,11 +8044,36 @@ EOF
   selftest_assert_contains "${out}" '"engine_ack_state":"ACKNOWLEDGED"' "Cloud commit is acknowledged"
   selftest_assert_contains "${out}" '"failback_phase":"PROTECTION_RESUMING"' "protection resume phase"
   selftest_assert_file_contains "${active_path}" '"activeSide":"SOURCE"'
+  selftest_assert_file_contains "${plan_dir}/failbacks/run-failback.commit.state" "phase=ACKNOWLEDGED"
+  selftest_assert_file_contains "${plan_dir}/failbacks/run-failback.commit.state" "control_generation=11"
 
-  out="$(ftctl_dr_runtime_failback_abort "${plan}" "run-failback" "${plan}:run-failback" "1")"
+  out="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-failback-commit-status \
+    --config "${SELFTEST_CONFIG}" --plan "${plan}" --run run-failback \
+    --session-id "${plan}:run-failback" --json)"
+  selftest_assert_contains "${out}" '"failback_commit_outcome":"ACKNOWLEDGED"' "commit status projects durable acknowledgement"
+
+  out="$(
+    ftctl_dr_scheduler_request_and_wait() {
+      printf '12\n'
+    }
+    ftctl_dr_runtime_failback_abort "${plan}" "run-failback" "${plan}:run-failback" \
+      "prepare" "POWERED_OFF" "POWERED_ON" "1"
+  )"
+  selftest_assert_contains "${out}" '"rollback_state":"FENCED"' "rollback prepare fences the scheduler"
+  selftest_assert_contains "${out}" '"failback_phase":"ROLLBACK_FENCING"' "rollback prepare phase is explicit"
+
+  out="$(
+    ftctl_dr_scheduler_request_and_wait() {
+      printf '13\n'
+    }
+    ftctl_dr_runtime_failback_abort "${plan}" "run-failback" "${plan}:run-failback" \
+      "commit" "POWERED_ON" "POWERED_OFF" "1"
+  )"
   selftest_assert_contains "${out}" '"state":"FAILED_OVER"' "abort restores failed-over state"
   selftest_assert_contains "${out}" '"active_side":"TARGET"' "abort restores target authority"
   selftest_assert_contains "${out}" '"failback_phase":"ABORTED"' "abort phase is explicit"
+  selftest_assert_contains "${out}" '"rollback_state":"COMPLETED"' "rollback commit is durable"
+  selftest_assert_contains "${out}" '"failback_commit_outcome":"ROLLED_BACK"' "rollback outcome is typed"
 }
 
 selftest_case_dr_runtime_reprotect_starts_reverse_protection_checkpoint() {
