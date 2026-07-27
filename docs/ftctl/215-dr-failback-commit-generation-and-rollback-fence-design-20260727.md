@@ -444,3 +444,25 @@ worker to remain alive after its terminal ACK. Non-terminal ACKs such as
 The plan-scoped control self-test now writes a STOPPED ACK only after removing
 the active worker identity. The test passes only when the caller accepts that
 durable terminal ACK without a false timeout.
+
+## 19. Rollback Error Ownership
+
+A successful rollback commit is the terminal authority for the failed
+failback attempt. It must therefore clear the transient failback error fields
+from the run projection before copying that projection to the plan status:
+
+```text
+error_code=""
+error_message=""
+failed_component=""
+```
+
+The failed Cloud run remains immutable audit history. The cleared FTCTL fields
+mean only that the current serving state is no longer failed: target authority
+is restored, the source is powered off, and the scheduler is stopped.
+
+| Area | AS-IS | TO-BE |
+| --- | --- | --- |
+| Rollback result | `ROLLED_BACK`, but stale failback error remains current | `ROLLED_BACK` and current error fields are empty |
+| Cloud refresh | Reprojects the stale engine error onto the plan | Projects `FAILED_OVER_UNPROTECTED` without a current error |
+| Audit | Failed run and current state can be confused | Failed run is retained; current authority is healthy and explicit |

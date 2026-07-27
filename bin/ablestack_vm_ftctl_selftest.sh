@@ -8094,6 +8094,10 @@ EOF
   selftest_assert_contains "${out}" '"rollback_state":"FENCED"' "rollback prepare fences the scheduler"
   selftest_assert_contains "${out}" '"failback_phase":"ROLLBACK_FENCING"' "rollback prepare phase is explicit"
 
+  ftctl_dr_runtime_path_set "$(ftctl_dr_runtime_run_path "${plan}" "run-failback")" \
+    "error_code=DR_FAILBACK_PROTECTION_RESUME_FAILED" \
+    "error_message=stale protection resume failure" \
+    "failed_component=ftctl"
   out="$(
     ftctl_dr_scheduler_request_and_wait() {
       printf '13\n'
@@ -8106,6 +8110,9 @@ EOF
   selftest_assert_contains "${out}" '"failback_phase":"ABORTED"' "abort phase is explicit"
   selftest_assert_contains "${out}" '"rollback_state":"COMPLETED"' "rollback commit is durable"
   selftest_assert_contains "${out}" '"failback_commit_outcome":"ROLLED_BACK"' "rollback outcome is typed"
+  selftest_assert_contains "${out}" '"error_code":""' "rollback clears stale failback error"
+  selftest_assert_contains "${out}" '"error_message":""' "rollback clears stale failback message"
+  selftest_assert_contains "${out}" '"failed_component":""' "rollback clears stale failed component"
 }
 
 selftest_case_dr_runtime_reprotect_starts_reverse_protection_checkpoint() {

@@ -2586,6 +2586,11 @@ ftctl_dr_runtime_emit_state_json() {
   error_code="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "error_code")"
   error_message="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "error_message")"
   failed_component="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "failed_component")"
+  if [[ -z "${error_code}" ]]; then
+    failed_component=""
+  elif [[ -z "${failed_component}" ]]; then
+    failed_component="ftctl"
+  fi
   data_commit_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "data_commit_state")"
   data_copied="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "data_copied")"
   metadata_committed="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "metadata_committed")"
@@ -2970,7 +2975,7 @@ PY
   ftctl_dr_runtime_json_boolean_field "target_iothreads" "${target_iothreads}" || return $?
   ftctl_dr_runtime_json_string_field "error_code" "${error_code}"
   ftctl_dr_runtime_json_string_field "error_message" "${error_message}"
-  ftctl_dr_runtime_json_string_field "failed_component" "${failed_component:-ftctl}"
+  ftctl_dr_runtime_json_string_field "failed_component" "${failed_component}"
   ftctl_dr_runtime_json_string_field "data_commit_state" "${data_commit_state}"
   ftctl_dr_runtime_json_boolean_field "data_copied" "${data_copied}" || return $?
   ftctl_dr_runtime_json_boolean_field "metadata_committed" "${metadata_committed}" || return $?
@@ -4361,6 +4366,7 @@ ftctl_dr_runtime_failback_abort() {
     "engine_ack_state=ABORTED" "failback_commit_outcome=ROLLED_BACK" \
     "failback_commit_phase=ROLLED_BACK" "rollback_state=COMPLETED" \
     "scheduler_state=STOPPED" "scheduler_desired_state=STOPPED" \
+    "error_code=" "error_message=" "failed_component=" \
     "accepted=false" "retryable=false" "updated_at=${now}" || return 2
   cp -f "${run_path}" "${status_path}" || return 2
   ftctl_log_event "dr-runtime" "dr.failback.abort" "warn" "" "" \
