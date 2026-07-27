@@ -595,7 +595,8 @@ ftctl_dr_scheduler_control_ack() {
 
 ftctl_dr_scheduler_wait_for_ack() {
   local plan="${1-}" generation="${2-}" expected_state="${3-}" timeout_sec="${4-${FTCTL_DR_CONTROL_ACK_TIMEOUT_SEC}}"
-  local expected_request_run="${5-}" expected_session="${6-}"
+  local expected_request_run="${5-}" expected_session="${6-}" expected_epoch="${7-}"
+  local expected_pid="${8-}" expected_start_ticks="${9-}"
   local ack_path deadline ack_generation ack_state ack_request_run ack_session ack_epoch ack_pid ack_start_ticks
   ack_path="$(ftctl_dr_scheduler_control_ack_path "${plan}")"
   [[ "${timeout_sec}" =~ ^[0-9]+$ ]] || timeout_sec="${FTCTL_DR_CONTROL_ACK_TIMEOUT_SEC}"
@@ -611,11 +612,21 @@ ftctl_dr_scheduler_wait_for_ack() {
     if [[ "${ack_generation}" == "${generation}" && "${ack_state}" == "${expected_state}" \
           && ( -z "${expected_request_run}" || "${ack_request_run}" == "${expected_request_run}" ) \
           && ( -z "${expected_session}" || "${ack_session}" == "${expected_session}" ) \
-          && "${ack_epoch}" == "$(ftctl_dr_scheduler_active_value "${plan}" "lease_epoch")" \
-          && "${ack_pid}" == "$(ftctl_dr_scheduler_active_value "${plan}" "pid")" \
-          && "${ack_start_ticks}" == "$(ftctl_dr_scheduler_active_value "${plan}" "start_ticks")" ]] \
-          && ftctl_dr_scheduler_active_worker_valid "${plan}" "${expected_session}"; then
-      return 0
+          && ( -z "${expected_epoch}" || "${ack_epoch}" == "${expected_epoch}" ) \
+          && ( -z "${expected_pid}" || "${ack_pid}" == "${expected_pid}" ) \
+          && ( -z "${expected_start_ticks}" || "${ack_start_ticks}" == "${expected_start_ticks}" ) ]]; then
+      # STOPPED is a terminal acknowledgement. The worker exits immediately
+      # after writing it, so requiring a live active.pid here creates a race
+      # where a valid fence is reported as a timeout.
+      if [[ "${expected_state}" == "STOPPED" ]]; then
+        return 0
+      fi
+      if [[ "${ack_epoch}" == "$(ftctl_dr_scheduler_active_value "${plan}" "lease_epoch")" \
+            && "${ack_pid}" == "$(ftctl_dr_scheduler_active_value "${plan}" "pid")" \
+            && "${ack_start_ticks}" == "$(ftctl_dr_scheduler_active_value "${plan}" "start_ticks")" ]] \
+            && ftctl_dr_scheduler_active_worker_valid "${plan}" "${expected_session}"; then
+        return 0
+      fi
     fi
     sleep 1
   done
@@ -640,16 +651,20 @@ ftctl_dr_scheduler_has_live_worker() {
 
 ftctl_dr_scheduler_request_and_wait() {
   local plan="${1-}" command="${2-}" expected_state="${3-}" reason="${4-operator}" owner_run="${5-}" resume_after_cleanup="${6-false}"
-  local generation session
-  generation="$(ftctl_dr_scheduler_control_set "${plan}" "${command}" "${reason}" "${owner_run}" "${resume_after_cleanup}")" || return $?
+  local generation session lease_epoch worker_pid worker_start_ticks
   session="$(ftctl_dr_scheduler_active_value "${plan}" "scheduler_session_uuid")"
+  lease_epoch="$(ftctl_dr_scheduler_active_value "${plan}" "lease_epoch")"
+  worker_pid="$(ftctl_dr_scheduler_active_value "${plan}" "pid")"
+  worker_start_ticks="$(ftctl_dr_scheduler_active_value "${plan}" "start_ticks")"
+  generation="$(ftctl_dr_scheduler_control_set "${plan}" "${command}" "${reason}" "${owner_run}" "${resume_after_cleanup}")" || return $?
   if ! ftctl_dr_scheduler_has_live_worker "${plan}" && [[ "${command}" != "run" ]]; then
     ftctl_dr_scheduler_control_ack "${plan}" "${generation}" "${expected_state}" "IDLE" "${owner_run}"
     printf '%s\n' "${generation}"
     return 0
   fi
   ftctl_dr_scheduler_wait_for_ack "${plan}" "${generation}" "${expected_state}" \
-    "${FTCTL_DR_CONTROL_ACK_TIMEOUT_SEC}" "${owner_run}" "${session}" || return $?
+    "${FTCTL_DR_CONTROL_ACK_TIMEOUT_SEC}" "${owner_run}" "${session}" \
+    "${lease_epoch}" "${worker_pid}" "${worker_start_ticks}" || return $?
   printf '%s\n' "${generation}"
 }
 

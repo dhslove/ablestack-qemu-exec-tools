@@ -416,3 +416,31 @@ The implementation is accepted only when all of the following pass:
 | Rollback order | VM power recovery preceded engine fencing | STOP fence precedes all VM lifecycle recovery |
 | Retry | Could repeat authority changes | Idempotent by Plan, run, session, and generation |
 | Operator evidence | Generic command error | Typed outcome, generation, ACK, and rollback state |
+
+## 18. Live STOP ACK Race Verification
+
+The 2026-07-27 live rollback preflight exposed a terminal ACK race that the
+initial self-test did not model:
+
+```text
+control generation 16 -> STOPPED/IDLE ACK written
+worker exits immediately after ACK
+caller rechecks active.pid -> worker is gone
+valid rollback fence is reported as timeout
+```
+
+The scheduler request path now captures the immutable owner tuple before
+writing the request:
+
+```text
+scheduler session + lease epoch + PID + process start ticks
+```
+
+`STOPPED` success is decided by the requested generation, expected owner run,
+and that captured owner tuple in the durable ACK. It does not require the
+worker to remain alive after its terminal ACK. Non-terminal ACKs such as
+`RUNNING` and `PAUSED` still require a live matching worker.
+
+The plan-scoped control self-test now writes a STOPPED ACK only after removing
+the active worker identity. The test passes only when the caller accepts that
+durable terminal ACK without a false timeout.

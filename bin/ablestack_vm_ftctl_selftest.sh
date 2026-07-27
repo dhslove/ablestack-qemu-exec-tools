@@ -6513,10 +6513,41 @@ EOF
   wait "${worker_pid}" 2>/dev/null || true
 
   selftest_assert_eq "${generation}" "1" "first control generation"
-  selftest_assert_file_contains "$(ftctl_dr_scheduler_control_path "${plan}")" "version=3"
+  selftest_assert_file_contains "$(ftctl_dr_scheduler_control_path "${plan}")" "version=4"
   selftest_assert_file_contains "$(ftctl_dr_scheduler_control_path "${plan}")" "generation=1"
   selftest_assert_file_contains "$(ftctl_dr_scheduler_control_ack_path "${plan}")" "state=PAUSED"
   selftest_assert_file_contains "$(ftctl_dr_scheduler_control_ack_path "${plan}")" "cycle_state=IDLE"
+
+  bash -c 'while true; do sleep 1; done' -- --plan "${plan}" &
+  worker_pid="$!"
+  worker_start_ticks="$(ftctl_dr_scheduler_process_start_ticks "${worker_pid}")"
+  ftctl_state_write_kv_all "$(ftctl_dr_scheduler_active_pid_path "${plan}")" \
+    "pid=${worker_pid}" \
+    "start_ticks=${worker_start_ticks}" \
+    "scheduler_session_uuid=${plan}" \
+    "lease_epoch=2" \
+    "worker_run_uuid=${producer_run}" \
+    "heartbeat_at=$(ftctl_now_iso8601)"
+  (
+    local control_path control_generation
+    control_path="$(ftctl_dr_scheduler_control_path "${plan}")"
+    while [[ "$(ftctl_state_read_kv "${control_path}" command 2>/dev/null || true)" != "stop" ]]; do
+      sleep 1
+    done
+    control_generation="$(ftctl_state_read_kv "${control_path}" generation)"
+    kill "${worker_pid}" 2>/dev/null || true
+    wait "${worker_pid}" 2>/dev/null || true
+    rm -f "$(ftctl_dr_scheduler_active_pid_path "${plan}")"
+    ftctl_dr_scheduler_control_ack "${plan}" "${control_generation}" "STOPPED" "IDLE" "${producer_run}" \
+      "${plan}" "2" "${worker_pid}" "${worker_start_ticks}"
+  ) &
+  ack_pid="$!"
+  generation="$(FTCTL_DR_CONTROL_ACK_TIMEOUT_SEC=5 \
+    ftctl_dr_scheduler_request_and_wait "${plan}" stop STOPPED failback-abort "${run}" false)"
+  wait "${ack_pid}"
+  selftest_assert_eq "${generation}" "2" "terminal STOPPED acknowledgement generation"
+  selftest_assert_file_contains "$(ftctl_dr_scheduler_control_ack_path "${plan}")" "state=STOPPED"
+  selftest_assert_file_contains "$(ftctl_dr_scheduler_control_ack_path "${plan}")" "generation=2"
 
   lease_path="$(ftctl_dr_scheduler_checkpoint_lease_acquire "${plan}" 7 "${run}" "ftctl:${plan}:${run}:7")"
   selftest_assert_file_contains "${lease_path}" "state=LEASED"
@@ -6525,10 +6556,11 @@ EOF
   [[ ! -e "${lease_path}" ]] || selftest_fail "checkpoint lease should be released"
 
   capabilities="$(ftctl_dr_runtime_capabilities 1)"
-  selftest_assert_contains "${capabilities}" '"runtime_schema_version":"20260722"' "control schema version"
+  selftest_assert_contains "${capabilities}" '"runtime_schema_version":"20260726"' "control schema version"
   selftest_assert_contains "${capabilities}" '"cutover-manifest-v2"' "cutover manifest capability"
   selftest_assert_contains "${capabilities}" '"control-protocol-v2"' "control protocol capability"
   selftest_assert_contains "${capabilities}" '"control-protocol-v3"' "control protocol v3 capability"
+  selftest_assert_contains "${capabilities}" '"control-protocol-v4"' "control protocol v4 capability"
   selftest_assert_contains "${capabilities}" '"dr-scheduler-singleton-v1"' "singleton scheduler capability"
   selftest_assert_contains "${capabilities}" '"checkpoint-lease"' "checkpoint lease capability"
 }
