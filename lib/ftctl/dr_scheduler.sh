@@ -802,6 +802,7 @@ ftctl_dr_scheduler_transition_end() {
 ftctl_dr_scheduler_resume_after_transition() {
   local plan="${1-}" run="${2-}" reason="${3-transition-complete}" run_path="${4-}" status_path="${5-}"
   local generation now profile_file scheduler_run scheduler_run_path producer_run session
+  local wait_rc=0 ack_generation control_generation control_command control_state="RUNNING"
   profile_file="$(ftctl_dr_runtime_profile_path "${plan}")"
   scheduler_run="${run}"
   scheduler_run_path="${run_path}"
@@ -816,13 +817,29 @@ ftctl_dr_scheduler_resume_after_transition() {
   generation="$(ftctl_dr_scheduler_control_set "${plan}" "run" "${reason}" "${run}" "false")" || return $?
   ftctl_dr_scheduler_ensure_running "${plan}" "${scheduler_run}" "${profile_file}" "${scheduler_run_path}" "${status_path}" || return $?
   ftctl_dr_scheduler_wait_for_ack "${plan}" "${generation}" "RUNNING" \
-    "${FTCTL_DR_CONTROL_ACK_TIMEOUT_SEC}" "${run}" "${session}" || return $?
+    "${FTCTL_DR_CONTROL_ACK_TIMEOUT_SEC}" "${run}" "${session}" || wait_rc=$?
+  if [[ "${wait_rc}" != "0" ]]; then
+    control_generation="$(ftctl_dr_scheduler_control_generation "${plan}")"
+    control_command="$(ftctl_dr_scheduler_control_command "${plan}")"
+    if [[ "${wait_rc}" != "21" || "${control_generation}" != "${generation}" ||
+          "${control_command}" != "run" ]] ||
+        ! ftctl_dr_scheduler_active_worker_valid "${plan}" "${session}"; then
+      return "${wait_rc}"
+    fi
+    # A running worker can finish an in-flight RPO cycle before acknowledging
+    # the new generation. The live lease and unchanged RUN request prove that
+    # source protection is active while the protocol ACK converges.
+    control_state="RUNNING_PENDING_ACK"
+  fi
+  ack_generation="$(ftctl_state_read_kv "$(ftctl_dr_scheduler_control_ack_path "${plan}")" \
+    "generation" 2>/dev/null || true)"
+  [[ "${ack_generation}" =~ ^[0-9]+$ ]] || ack_generation=0
   now="$(ftctl_now_iso8601)"
   ftctl_dr_scheduler_update_state "${run_path}" "${status_path}" \
     "control_protocol_version=${FTCTL_DR_CONTROL_PROTOCOL_VERSION}" \
     "control_generation=${generation}" \
-    "control_ack_generation=${generation}" \
-    "control_state=RUNNING" \
+    "control_ack_generation=${ack_generation}" \
+    "control_state=${control_state}" \
     "cycle_state=IDLE" \
     "transition_state=COMPLETED" \
     "updated_at=${now}" || true

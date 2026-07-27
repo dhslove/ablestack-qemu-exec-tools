@@ -8018,6 +8018,46 @@ EOF
   selftest_assert_file_contains "${status_path}" "target_power_state=POWERED_OFF"
 )
 
+selftest_case_dr_scheduler_resume_accepts_live_worker_pending_ack() (
+  selftest_reset_env
+  selftest_info "FTCTL_DR resume accepts a live source worker while a cycle delays the RUN acknowledgement"
+
+  local plan="plan-resume-pending-ack" run="run-resume-pending-ack"
+  local plan_dir="${SELFTEST_ROOT}/run/dr-runtime/plans/${plan}"
+  local run_path="${plan_dir}/runs/${run}.state"
+  local status_path="${plan_dir}/status.state"
+  mkdir -p "${plan_dir}/runs"
+  printf '%s\n' '{"version":1,"planUuid":"plan-resume-pending-ack"}' > "${plan_dir}/profile.json"
+  printf '%s\n' "plan=${plan}" "run=${run}" > "${run_path}"
+  cp -f "${run_path}" "${status_path}"
+
+  # shellcheck disable=SC2317
+  ftctl_dr_scheduler_has_live_worker() { return 0; }
+  # shellcheck disable=SC2317
+  ftctl_dr_scheduler_session_uuid() { printf '%s\n' "${plan}"; }
+  # shellcheck disable=SC2317
+  ftctl_dr_scheduler_control_set() { printf '%s\n' "12"; }
+  # shellcheck disable=SC2317
+  ftctl_dr_scheduler_ensure_running() { return 0; }
+  # shellcheck disable=SC2317
+  ftctl_dr_scheduler_wait_for_ack() { return 21; }
+  # shellcheck disable=SC2317
+  ftctl_dr_scheduler_control_generation() { printf '%s\n' "12"; }
+  # shellcheck disable=SC2317
+  ftctl_dr_scheduler_control_command() { printf '%s\n' "run"; }
+  # shellcheck disable=SC2317
+  ftctl_dr_scheduler_active_worker_valid() { return 0; }
+  # shellcheck disable=SC2317
+  ftctl_dr_scheduler_control_ack_path() { printf '%s\n' "${plan_dir}/scheduler/control.ack"; }
+
+  ftctl_dr_scheduler_resume_after_transition \
+    "${plan}" "${run}" "failover-abort" "${run_path}" "${status_path}"
+  selftest_assert_file_contains "${run_path}" "control_generation=12"
+  selftest_assert_file_contains "${run_path}" "control_ack_generation=0"
+  selftest_assert_file_contains "${run_path}" "control_state=RUNNING_PENDING_ACK"
+  selftest_assert_file_contains "${run_path}" "transition_state=COMPLETED"
+)
+
 selftest_case_dr_runtime_failback_restores_source_after_reverse_checkpoint() {
   selftest_reset_env
   selftest_info "FTCTL_DR failback waits for Cloud lifecycle commit before restoring source authority"
@@ -9209,6 +9249,7 @@ selftest_main() {
   selftest_case_dr_runtime_cloud_cutover_commit_is_idempotent
   selftest_case_dr_runtime_status_hydrates_complete_cycle_evidence
   selftest_case_dr_runtime_failover_abort_resumes_source_protection
+  selftest_case_dr_scheduler_resume_accepts_live_worker_pending_ack
   selftest_case_dr_runtime_failback_restores_source_after_reverse_checkpoint
   selftest_case_dr_scheduler_wait_is_interrupted_by_new_generation
   selftest_case_dr_runtime_reprotect_starts_reverse_protection_checkpoint

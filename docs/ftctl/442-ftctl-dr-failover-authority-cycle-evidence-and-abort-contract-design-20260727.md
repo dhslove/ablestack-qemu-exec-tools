@@ -429,3 +429,21 @@ Cloud는 두 feature가 확인되기 전에는 새 자동 보상 경로를 사�
 | 준비 취소 | generic `dr-cancel`은 scheduler stop 의미 | 전용 멱등 `dr-failover-abort` |
 | source 전원 | 복구 동작이 불명확 | 자동 power-on 금지, offline은 pause |
 | rolling upgrade | 기능 버전 구분 없음 | capability 두 개로 명시적 gate |
+
+## 12. Scheduler acknowledgement convergence
+
+`dr-failover-abort` can resume an existing scheduler while that worker is
+finishing an in-flight RPO cycle. In that case the control acknowledgement may
+arrive after the normal command timeout even though the source replication
+worker is already active and healthy.
+
+The abort path accepts `RUNNING_PENDING_ACK` only when all of these facts hold:
+
+1. The wait result is the acknowledgement timeout code (`21`).
+2. The control generation still equals the generation written by the abort.
+3. The current control command is still `run`.
+4. The active worker matches the plan scheduler session and has a valid lease.
+
+The runtime keeps the last observed acknowledgement generation rather than
+fabricating an acknowledgement. Any generation change, non-`run` command, dead
+worker, or session mismatch remains a hard resume failure.
