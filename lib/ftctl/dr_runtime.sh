@@ -102,7 +102,8 @@ ftctl_dr_runtime_active_failover_session_path() {
 ftctl_dr_runtime_capture_authority_context() {
   local plan="${1-}" run_path="${2-}" prior_status_path="${3-}" authority_spec_path="${4-}"
   local active_path snapshot_path active_side authority_state checkpoint_sequence
-  local target_power_state target_promotion_state session_id authority_generation authority_source
+  local target_power_state target_promotion_state session_id authority_generation authority_source key value
+  local -a projection_updates=()
 
   active_path="$(ftctl_dr_runtime_active_failover_session_path "${plan}")"
   snapshot_path="$(mktemp -t ftctl.dr.authority.XXXXXX)"
@@ -203,7 +204,58 @@ PY
     "target_power_state=${target_power_state}" \
     "target_promotion_state=${target_promotion_state}" \
     "cloud_cutover_session_id=${session_id}" \
-    "cloud_authority_generation=${authority_generation}"
+    "cloud_authority_generation=${authority_generation}" || return $?
+
+  # Preserve the last completed replication cycle as one Plan-owned
+  # projection when an operation Run is initialized from a fresh state file.
+  # Otherwise failback/reprotect can replace status.state with a Run that has
+  # authority fields but has silently dropped the durable checkpoint metrics.
+  for key in \
+    restore_points_path \
+    latest_completed_checkpoint_sequence \
+    latest_completed_checkpoint_cycle_type \
+    latest_completed_checkpoint_ref \
+    latest_completed_checkpoint_state \
+    latest_completed_producer_run_uuid \
+    latest_completed_source_checkpoint_at \
+    latest_completed_target_durable_at \
+    latest_completed_target_ready_rpo_seconds \
+    latest_completed_manifest_path \
+    latest_completed_checkpoint_path \
+    latest_completed_requested_mode \
+    latest_completed_effective_mode \
+    latest_completed_mode_decision_code \
+    latest_completed_reseed_reason \
+    latest_completed_automatic_reseed \
+    latest_completed_invalid_baseline_disk_count \
+    latest_completed_incremental_verified \
+    latest_completed_metrics_estimated \
+    latest_completed_virtual_bytes \
+    latest_completed_changed_bytes \
+    latest_completed_source_read_bytes \
+    latest_completed_target_written_bytes \
+    latest_completed_transfer_payload_bytes \
+    latest_completed_changed_extent_count \
+    latest_completed_duration_ms \
+    latest_completed_throughput_bps \
+    latest_completed_baseline_generation \
+    latest_completed_cycle_token \
+    latest_completed_cycle_metrics_path \
+    latest_completed_nbd_teardown_state \
+    latest_completed_nbd_teardown_started_at_ms \
+    latest_completed_nbd_teardown_completed_at_ms \
+    latest_completed_nbd_teardown_duration_ms \
+    latest_completed_nbd_source_device_count \
+    latest_completed_nbd_target_device_count \
+    latest_completed_nbd_quarantined_device_count \
+    latest_completed_nbd_teardown_error_code \
+    latest_completed_nbd_teardown_error_message
+  do
+    value="$(ftctl_state_read_kv "${prior_status_path}" "${key}" 2>/dev/null || true)"
+    [[ -n "${value}" ]] && projection_updates+=("${key}=${value}")
+  done
+  (( ${#projection_updates[@]} == 0 )) || \
+    ftctl_dr_runtime_path_set "${run_path}" "${projection_updates[@]}"
 }
 
 ftctl_dr_runtime_failback_dir() {
@@ -2574,7 +2626,7 @@ ftctl_dr_runtime_emit_state_json() {
   local reprotect_manifest_path reprotect_checkpoint_path reprotect_requested_at reprotect_completed_at
   local reprotect_rto_actual_seconds reverse_direction reverse_profile_path reverse_restore_points_path reprotect_worker_pid
   local target_vm_id target_external_ref target_materialized target_vm_present target_storage_present target_network_present restore_point_present
-  local status_scope profile_path source_firmware="" source_secure_boot="" source_hardware_fingerprint=""
+  local status_scope profile_path authority_state_path source_firmware="" source_secure_boot="" source_hardware_fingerprint=""
   local target_boot_type="" target_boot_mode="" target_io_policy="" target_iothreads=""
 
   ftctl_dr_runtime_state_snapshot_begin "${state_path}"
@@ -2713,7 +2765,14 @@ ftctl_dr_runtime_emit_state_json() {
   holder_command="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "holder_command")"
   holder_age_sec="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "holder_age_sec")"
   checkpoint_sequence="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "checkpoint_sequence")"
-  restore_points_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "restore_points_path")"
+  authority_state_path="$(ftctl_dr_runtime_status_path "${plan}")"
+  if [[ "${authority_state_path}" != "${state_path}" && -f "${authority_state_path}" ]]; then
+    ftctl_dr_runtime_state_snapshot_end
+    ftctl_dr_runtime_state_snapshot_begin "${authority_state_path}"
+  else
+    authority_state_path="${state_path}"
+  fi
+  restore_points_path="$(ftctl_dr_runtime_state_get_from_path "${authority_state_path}" "restore_points_path")"
   [[ -n "${restore_points_path}" ]] || restore_points_path="$(ftctl_dr_runtime_plan_dir "${plan}")/restore-points.jsonl"
   current_checkpoint_sequence="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "current_checkpoint_sequence")"
   current_checkpoint_cycle_type="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "current_checkpoint_cycle_type")"
@@ -2724,44 +2783,44 @@ ftctl_dr_runtime_emit_state_json() {
   current_checkpoint_invalid_baseline_disk_count="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "current_checkpoint_invalid_baseline_disk_count")"
   current_checkpoint_ref="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "current_checkpoint_ref")"
   current_checkpoint_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "current_checkpoint_state")"
-  latest_completed_checkpoint_sequence="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_checkpoint_sequence")"
-  latest_completed_checkpoint_cycle_type="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_checkpoint_cycle_type")"
-  latest_completed_checkpoint_ref="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_checkpoint_ref")"
-  latest_completed_checkpoint_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_checkpoint_state")"
-  latest_completed_producer_run_uuid="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_producer_run_uuid")"
-  latest_completed_source_checkpoint_at="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_source_checkpoint_at")"
-  latest_completed_target_durable_at="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_target_durable_at")"
-  latest_completed_target_ready_rpo_seconds="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_target_ready_rpo_seconds")"
-  latest_completed_manifest_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_manifest_path")"
-  latest_completed_checkpoint_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_checkpoint_path")"
-  latest_completed_requested_mode="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_requested_mode")"
-  latest_completed_effective_mode="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_effective_mode")"
-  latest_completed_mode_decision_code="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_mode_decision_code")"
-  latest_completed_reseed_reason="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_reseed_reason")"
-  latest_completed_automatic_reseed="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_automatic_reseed")"
-  latest_completed_invalid_baseline_disk_count="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_invalid_baseline_disk_count")"
-  latest_completed_incremental_verified="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_incremental_verified")"
-  latest_completed_metrics_estimated="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_metrics_estimated")"
-  latest_completed_virtual_bytes="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_virtual_bytes")"
-  latest_completed_changed_bytes="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_changed_bytes")"
-  latest_completed_source_read_bytes="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_source_read_bytes")"
-  latest_completed_target_written_bytes="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_target_written_bytes")"
-  latest_completed_transfer_payload_bytes="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_transfer_payload_bytes")"
-  latest_completed_changed_extent_count="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_changed_extent_count")"
-  latest_completed_duration_ms="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_duration_ms")"
-  latest_completed_throughput_bps="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_throughput_bps")"
-  latest_completed_baseline_generation="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_baseline_generation")"
-  latest_completed_cycle_token="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_cycle_token")"
-  latest_completed_cycle_metrics_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_cycle_metrics_path")"
-  latest_completed_nbd_teardown_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_nbd_teardown_state")"
-  latest_completed_nbd_teardown_started_at_ms="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_nbd_teardown_started_at_ms")"
-  latest_completed_nbd_teardown_completed_at_ms="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_nbd_teardown_completed_at_ms")"
-  latest_completed_nbd_teardown_duration_ms="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_nbd_teardown_duration_ms")"
-  latest_completed_nbd_source_device_count="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_nbd_source_device_count")"
-  latest_completed_nbd_target_device_count="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_nbd_target_device_count")"
-  latest_completed_nbd_quarantined_device_count="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_nbd_quarantined_device_count")"
-  latest_completed_nbd_teardown_error_code="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_nbd_teardown_error_code")"
-  latest_completed_nbd_teardown_error_message="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_nbd_teardown_error_message")"
+  latest_completed_checkpoint_sequence="$(ftctl_dr_runtime_state_get_from_path "${authority_state_path}" "latest_completed_checkpoint_sequence")"
+  latest_completed_checkpoint_cycle_type="$(ftctl_dr_runtime_state_get_from_path "${authority_state_path}" "latest_completed_checkpoint_cycle_type")"
+  latest_completed_checkpoint_ref="$(ftctl_dr_runtime_state_get_from_path "${authority_state_path}" "latest_completed_checkpoint_ref")"
+  latest_completed_checkpoint_state="$(ftctl_dr_runtime_state_get_from_path "${authority_state_path}" "latest_completed_checkpoint_state")"
+  latest_completed_producer_run_uuid="$(ftctl_dr_runtime_state_get_from_path "${authority_state_path}" "latest_completed_producer_run_uuid")"
+  latest_completed_source_checkpoint_at="$(ftctl_dr_runtime_state_get_from_path "${authority_state_path}" "latest_completed_source_checkpoint_at")"
+  latest_completed_target_durable_at="$(ftctl_dr_runtime_state_get_from_path "${authority_state_path}" "latest_completed_target_durable_at")"
+  latest_completed_target_ready_rpo_seconds="$(ftctl_dr_runtime_state_get_from_path "${authority_state_path}" "latest_completed_target_ready_rpo_seconds")"
+  latest_completed_manifest_path="$(ftctl_dr_runtime_state_get_from_path "${authority_state_path}" "latest_completed_manifest_path")"
+  latest_completed_checkpoint_path="$(ftctl_dr_runtime_state_get_from_path "${authority_state_path}" "latest_completed_checkpoint_path")"
+  latest_completed_requested_mode="$(ftctl_dr_runtime_state_get_from_path "${authority_state_path}" "latest_completed_requested_mode")"
+  latest_completed_effective_mode="$(ftctl_dr_runtime_state_get_from_path "${authority_state_path}" "latest_completed_effective_mode")"
+  latest_completed_mode_decision_code="$(ftctl_dr_runtime_state_get_from_path "${authority_state_path}" "latest_completed_mode_decision_code")"
+  latest_completed_reseed_reason="$(ftctl_dr_runtime_state_get_from_path "${authority_state_path}" "latest_completed_reseed_reason")"
+  latest_completed_automatic_reseed="$(ftctl_dr_runtime_state_get_from_path "${authority_state_path}" "latest_completed_automatic_reseed")"
+  latest_completed_invalid_baseline_disk_count="$(ftctl_dr_runtime_state_get_from_path "${authority_state_path}" "latest_completed_invalid_baseline_disk_count")"
+  latest_completed_incremental_verified="$(ftctl_dr_runtime_state_get_from_path "${authority_state_path}" "latest_completed_incremental_verified")"
+  latest_completed_metrics_estimated="$(ftctl_dr_runtime_state_get_from_path "${authority_state_path}" "latest_completed_metrics_estimated")"
+  latest_completed_virtual_bytes="$(ftctl_dr_runtime_state_get_from_path "${authority_state_path}" "latest_completed_virtual_bytes")"
+  latest_completed_changed_bytes="$(ftctl_dr_runtime_state_get_from_path "${authority_state_path}" "latest_completed_changed_bytes")"
+  latest_completed_source_read_bytes="$(ftctl_dr_runtime_state_get_from_path "${authority_state_path}" "latest_completed_source_read_bytes")"
+  latest_completed_target_written_bytes="$(ftctl_dr_runtime_state_get_from_path "${authority_state_path}" "latest_completed_target_written_bytes")"
+  latest_completed_transfer_payload_bytes="$(ftctl_dr_runtime_state_get_from_path "${authority_state_path}" "latest_completed_transfer_payload_bytes")"
+  latest_completed_changed_extent_count="$(ftctl_dr_runtime_state_get_from_path "${authority_state_path}" "latest_completed_changed_extent_count")"
+  latest_completed_duration_ms="$(ftctl_dr_runtime_state_get_from_path "${authority_state_path}" "latest_completed_duration_ms")"
+  latest_completed_throughput_bps="$(ftctl_dr_runtime_state_get_from_path "${authority_state_path}" "latest_completed_throughput_bps")"
+  latest_completed_baseline_generation="$(ftctl_dr_runtime_state_get_from_path "${authority_state_path}" "latest_completed_baseline_generation")"
+  latest_completed_cycle_token="$(ftctl_dr_runtime_state_get_from_path "${authority_state_path}" "latest_completed_cycle_token")"
+  latest_completed_cycle_metrics_path="$(ftctl_dr_runtime_state_get_from_path "${authority_state_path}" "latest_completed_cycle_metrics_path")"
+  latest_completed_nbd_teardown_state="$(ftctl_dr_runtime_state_get_from_path "${authority_state_path}" "latest_completed_nbd_teardown_state")"
+  latest_completed_nbd_teardown_started_at_ms="$(ftctl_dr_runtime_state_get_from_path "${authority_state_path}" "latest_completed_nbd_teardown_started_at_ms")"
+  latest_completed_nbd_teardown_completed_at_ms="$(ftctl_dr_runtime_state_get_from_path "${authority_state_path}" "latest_completed_nbd_teardown_completed_at_ms")"
+  latest_completed_nbd_teardown_duration_ms="$(ftctl_dr_runtime_state_get_from_path "${authority_state_path}" "latest_completed_nbd_teardown_duration_ms")"
+  latest_completed_nbd_source_device_count="$(ftctl_dr_runtime_state_get_from_path "${authority_state_path}" "latest_completed_nbd_source_device_count")"
+  latest_completed_nbd_target_device_count="$(ftctl_dr_runtime_state_get_from_path "${authority_state_path}" "latest_completed_nbd_target_device_count")"
+  latest_completed_nbd_quarantined_device_count="$(ftctl_dr_runtime_state_get_from_path "${authority_state_path}" "latest_completed_nbd_quarantined_device_count")"
+  latest_completed_nbd_teardown_error_code="$(ftctl_dr_runtime_state_get_from_path "${authority_state_path}" "latest_completed_nbd_teardown_error_code")"
+  latest_completed_nbd_teardown_error_message="$(ftctl_dr_runtime_state_get_from_path "${authority_state_path}" "latest_completed_nbd_teardown_error_message")"
   if [[ -z "${latest_completed_checkpoint_sequence}" && -s "${restore_points_path}" ]]; then
     mapfile -t completed_checkpoint_fields < <(python3 - "${restore_points_path}" <<'PY' 2>/dev/null
 import json
@@ -2827,6 +2886,10 @@ PY
   fi
   [[ -n "${latest_completed_producer_run_uuid}" ]] || latest_completed_producer_run_uuid="${active_worker_run_uuid}"
   [[ -n "${current_checkpoint_sequence}" ]] || current_checkpoint_sequence="${checkpoint_sequence}"
+  if [[ "${authority_state_path}" != "${state_path}" ]]; then
+    ftctl_dr_runtime_state_snapshot_end
+    ftctl_dr_runtime_state_snapshot_begin "${state_path}"
+  fi
   test_session_id="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "test_session_id")"
   test_session_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "test_session_path")"
   test_session_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "test_session_state")"
@@ -4102,6 +4165,167 @@ PY
   fi
 }
 
+ftctl_dr_runtime_update_failback_session_commit_ack() {
+  local session_path="${1-}" active_path="${2-}" authority_generation="${3-}"
+  local boot_validation_state="${4-}" now="${5-}" control_generation="${6-}"
+  local control_ack_generation="${7-}"
+  [[ -f "${session_path}" ]] || return 0
+  python3 - "${session_path}" "${active_path}" "${authority_generation}" "${boot_validation_state}" "${now}" \
+    "${control_generation}" "${control_ack_generation}" <<'PY'
+import json
+import os
+import shutil
+import sys
+
+path, active_path, generation, validation_state, now, control_generation, ack_generation = sys.argv[1:8]
+with open(path, "r", encoding="utf-8") as fh:
+    session = json.load(fh)
+session["state"] = "PROTECTION_RESUMING"
+session["activeSide"] = "SOURCE"
+session["cloudAuthorityGeneration"] = int(generation)
+session["bootValidationState"] = validation_state
+session["sourcePowerState"] = "POWERED_ON"
+session["targetPowerState"] = "POWERED_OFF"
+session["engineAckState"] = "ACKNOWLEDGED"
+session["engineAckAt"] = now
+session["commitOutcome"] = "ACKNOWLEDGED"
+session["schedulerGeneration"] = int(control_generation)
+session["schedulerAckGeneration"] = int(ack_generation)
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(session, fh, sort_keys=True, separators=(",", ":"))
+    fh.write("\n")
+os.makedirs(os.path.dirname(active_path), exist_ok=True)
+shutil.copyfile(path, active_path)
+PY
+}
+
+ftctl_dr_runtime_reconcile_failback_commit() {
+  local plan="${1-}" run="${2-}" session_id="${3-}"
+  local run_path status_path commit_path session_path active_path control_path ack_path now
+  local commit_plan commit_run commit_session commit_phase commit_outcome
+  local source_power_state target_power_state authority_generation checkpoint_sequence
+  local control_generation control_command control_owner
+  local ack_generation ack_state ack_owner ack_request_run ack_session ack_epoch ack_pid ack_start_ticks ack_owner_matched
+  local active_session active_epoch active_pid active_start_ticks
+
+  run_path="$(ftctl_dr_runtime_run_path "${plan}" "${run}")"
+  status_path="$(ftctl_dr_runtime_status_path "${plan}")"
+  commit_path="$(ftctl_dr_runtime_failback_commit_state_path "${plan}" "${run}")"
+  session_path="$(ftctl_dr_runtime_failback_session_path "${plan}" "${run}")"
+  active_path="$(ftctl_dr_runtime_active_failback_session_path "${plan}")"
+  control_path="$(ftctl_dr_scheduler_control_path "${plan}")"
+  ack_path="$(ftctl_dr_scheduler_control_ack_path "${plan}")"
+  [[ -f "${run_path}" && -f "${commit_path}" && -f "${control_path}" && -f "${ack_path}" ]] || return 1
+
+  ftctl_dr_scheduler_lock_acquire "${plan}" "failback-commit" 206 \
+    "${FTCTL_DR_TRANSITION_LOCK_TIMEOUT_SEC}" "reconcile:${run}" || return $?
+
+  commit_plan="$(ftctl_state_read_kv "${commit_path}" "plan" 2>/dev/null || true)"
+  commit_run="$(ftctl_state_read_kv "${commit_path}" "run" 2>/dev/null || true)"
+  commit_session="$(ftctl_state_read_kv "${commit_path}" "session_id" 2>/dev/null || true)"
+  commit_phase="$(ftctl_state_read_kv "${commit_path}" "phase" 2>/dev/null || true)"
+  commit_outcome="$(ftctl_state_read_kv "${commit_path}" "outcome" 2>/dev/null || true)"
+  authority_generation="$(ftctl_state_read_kv "${commit_path}" "authority_generation" 2>/dev/null || true)"
+  checkpoint_sequence="$(ftctl_state_read_kv "${commit_path}" "checkpoint_sequence" 2>/dev/null || true)"
+  source_power_state="$(ftctl_state_read_kv "${commit_path}" "source_power_state" 2>/dev/null || true)"
+  target_power_state="$(ftctl_state_read_kv "${commit_path}" "target_power_state" 2>/dev/null || true)"
+
+  if [[ "${commit_phase}" == "ACKNOWLEDGED" && "${commit_outcome}" == "ACKNOWLEDGED" ]]; then
+    ftctl_dr_scheduler_lock_release "${plan}" "failback-commit" 206
+    return 0
+  fi
+  if [[ "${commit_plan}" != "${plan}" || "${commit_run}" != "${run}" \
+        || "${commit_session}" != "${session_id}" \
+        || ! "${commit_phase}" =~ ^(AUTHORITY_COMMITTED|SCHEDULER_RESUMING)$ \
+        || ! "${commit_outcome}" =~ ^(PENDING|UNKNOWN)$ \
+        || "${source_power_state}" != "POWERED_ON" \
+        || "${target_power_state}" != "POWERED_OFF" ]]; then
+    ftctl_dr_scheduler_lock_release "${plan}" "failback-commit" 206
+    return 79
+  fi
+
+  control_generation="$(ftctl_state_read_kv "${control_path}" "generation" 2>/dev/null || true)"
+  control_command="$(ftctl_state_read_kv "${control_path}" "command" 2>/dev/null || true)"
+  control_owner="$(ftctl_state_read_kv "${control_path}" "owner_run" 2>/dev/null || true)"
+  ack_generation="$(ftctl_state_read_kv "${ack_path}" "generation" 2>/dev/null || true)"
+  ack_state="$(ftctl_state_read_kv "${ack_path}" "state" 2>/dev/null || true)"
+  ack_owner="$(ftctl_state_read_kv "${ack_path}" "owner_run" 2>/dev/null || true)"
+  ack_request_run="$(ftctl_state_read_kv "${ack_path}" "request_run_uuid" 2>/dev/null || true)"
+  ack_session="$(ftctl_state_read_kv "${ack_path}" "scheduler_session_uuid" 2>/dev/null || true)"
+  ack_epoch="$(ftctl_state_read_kv "${ack_path}" "lease_epoch" 2>/dev/null || true)"
+  ack_pid="$(ftctl_state_read_kv "${ack_path}" "worker_pid" 2>/dev/null || true)"
+  ack_start_ticks="$(ftctl_state_read_kv "${ack_path}" "worker_start_ticks" 2>/dev/null || true)"
+  ack_owner_matched="$(ftctl_state_read_kv "${ack_path}" "owner_matched" 2>/dev/null || true)"
+  active_session="$(ftctl_dr_scheduler_active_value "${plan}" "scheduler_session_uuid")"
+  active_epoch="$(ftctl_dr_scheduler_active_value "${plan}" "lease_epoch")"
+  active_pid="$(ftctl_dr_scheduler_active_value "${plan}" "pid")"
+  active_start_ticks="$(ftctl_dr_scheduler_active_value "${plan}" "start_ticks")"
+
+  if [[ ! "${control_generation}" =~ ^[1-9][0-9]*$ \
+        || "${control_command}" != "run" || "${control_owner}" != "${run}" \
+        || "${ack_generation}" != "${control_generation}" \
+        || "${ack_state}" != "RUNNING" \
+        || "${ack_owner}" != "${run}" || "${ack_request_run}" != "${run}" \
+        || "${ack_owner_matched}" != "true" \
+        || -z "${ack_session}" || "${ack_session}" != "${active_session}" \
+        || -z "${ack_epoch}" || "${ack_epoch}" != "${active_epoch}" \
+        || -z "${ack_pid}" || "${ack_pid}" != "${active_pid}" \
+        || -z "${ack_start_ticks}" || "${ack_start_ticks}" != "${active_start_ticks}" ]] \
+        || ! ftctl_dr_scheduler_active_worker_valid "${plan}" "${ack_session}"; then
+    ftctl_dr_scheduler_lock_release "${plan}" "failback-commit" 206
+    return 1
+  fi
+
+  now="$(ftctl_now_iso8601)"
+  ftctl_state_write_kv_all "${commit_path}" \
+    "version=2" "plan=${plan}" "run=${run}" "session_id=${session_id}" \
+    "checkpoint_sequence=${checkpoint_sequence}" "authority_generation=${authority_generation}" \
+    "phase=ACKNOWLEDGED" "outcome=ACKNOWLEDGED" \
+    "control_generation=${control_generation}" "control_ack_generation=${ack_generation}" \
+    "ack_owner_run=${ack_owner}" "ack_scheduler_session_uuid=${ack_session}" \
+    "ack_lease_epoch=${ack_epoch}" "ack_worker_pid=${ack_pid}" \
+    "ack_worker_start_ticks=${ack_start_ticks}" \
+    "source_power_state=${source_power_state}" "target_power_state=${target_power_state}" \
+    "recovered_from_late_ack=true" "recovered_at=${now}" "updated_at=${now}" || {
+      ftctl_dr_scheduler_lock_release "${plan}" "failback-commit" 206
+      return 2
+    }
+  ftctl_dr_runtime_path_set "${run_path}" \
+    "state=SYNCING" "step=protection-resuming" \
+    "failback_phase=PROTECTION_RESUMING" "cloud_lifecycle_state=COMMITTED" \
+    "active_side=SOURCE" "source_power_state=POWERED_ON" "target_power_state=POWERED_OFF" \
+    "engine_ack_state=ACKNOWLEDGED" "engine_ack_at=${now}" \
+    "failback_commit_outcome=ACKNOWLEDGED" "failback_commit_phase=ACKNOWLEDGED" \
+    "control_generation=${control_generation}" "control_ack_generation=${ack_generation}" \
+    "scheduler_state=RUNNING" "retryable=false" "error_code=" "error_message=" \
+    "updated_at=${now}" || {
+      ftctl_dr_scheduler_lock_release "${plan}" "failback-commit" 206
+      return 2
+    }
+  ftctl_dr_runtime_path_set "${status_path}" \
+    "state=SYNCING" "step=protection-resuming" \
+    "failback_phase=PROTECTION_RESUMING" "cloud_lifecycle_state=COMMITTED" \
+    "active_side=SOURCE" "source_power_state=POWERED_ON" "target_power_state=POWERED_OFF" \
+    "engine_ack_state=ACKNOWLEDGED" "engine_ack_at=${now}" \
+    "failback_commit_outcome=ACKNOWLEDGED" "failback_commit_phase=ACKNOWLEDGED" \
+    "control_generation=${control_generation}" "control_ack_generation=${ack_generation}" \
+    "scheduler_state=RUNNING" "retryable=false" "error_code=" "error_message=" \
+    "updated_at=${now}" || {
+      ftctl_dr_scheduler_lock_release "${plan}" "failback-commit" 206
+      return 2
+    }
+  ftctl_dr_runtime_update_failback_session_commit_ack "${session_path}" "${active_path}" \
+    "${authority_generation}" "$(ftctl_dr_runtime_state_get_from_path "${run_path}" "boot_validation_state")" \
+    "${now}" "${control_generation}" "${ack_generation}" || {
+      ftctl_dr_scheduler_lock_release "${plan}" "failback-commit" 206
+      return 2
+    }
+  ftctl_log_event "dr-runtime" "dr.failback.commit.recovered" "ok" "" "" \
+    "plan=${plan} run=${run} session=${session_id} generation=${control_generation}"
+  ftctl_dr_scheduler_lock_release "${plan}" "failback-commit" 206
+  return 0
+}
+
 ftctl_dr_runtime_failback_commit() {
   local plan="${1-}" run="${2-}" session_id="${3-}" checkpoint_sequence="${4-}"
   local authority_generation="${5-}" target_power_state="${6-}" source_power_state="${7-}"
@@ -4198,7 +4422,16 @@ ftctl_dr_runtime_failback_commit() {
     "error_code=" \
     "error_message=" \
     "updated_at=${now}" || return 2
-  cp -f "${run_path}" "${status_path}" || return 2
+  ftctl_dr_runtime_path_set "${status_path}" \
+    "state=SYNCING" "step=protection-resuming" "progress=90" \
+    "failback_phase=PROTECTION_RESUMING" "cloud_lifecycle_state=COMMITTED" \
+    "active_side=SOURCE" "target_power_state=POWERED_OFF" \
+    "target_promotion_state=STANDBY" "source_power_state=POWERED_ON" \
+    "source_promotion_state=PROMOTED" "boot_validation_state=${boot_validation_state}" \
+    "cloud_authority_generation=${authority_generation}" "engine_ack_state=PENDING" \
+    "engine_ack_at=" "failback_commit_outcome=PENDING" \
+    "failback_commit_phase=AUTHORITY_COMMITTED" "scheduler_state=STARTING" \
+    "retryable=false" "error_code=" "error_message=" "updated_at=${now}" || return 2
   ftctl_state_write_kv_all "${commit_path}" \
     "version=1" "plan=${plan}" "run=${run}" "session_id=${session_id}" \
     "checkpoint_sequence=${checkpoint_sequence}" "authority_generation=${authority_generation}" \
@@ -4208,85 +4441,47 @@ ftctl_dr_runtime_failback_commit() {
   if command -v ftctl_dr_scheduler_resume_after_transition >/dev/null 2>&1; then
     ftctl_dr_scheduler_resume_after_transition "${plan}" "${run}" "failback-commit" "${run_path}" "${status_path}" || rc=$?
   fi
-  if [[ "${rc}" != "0" ]]; then
-    control_generation="$(ftctl_dr_scheduler_control_generation "${plan}")"
-    control_ack_generation="$(ftctl_state_read_kv "$(ftctl_dr_scheduler_control_ack_path "${plan}")" "generation" 2>/dev/null || true)"
-    ftctl_state_write_kv_all "${commit_path}" \
-      "version=1" "plan=${plan}" "run=${run}" "session_id=${session_id}" \
-      "checkpoint_sequence=${checkpoint_sequence}" "authority_generation=${authority_generation}" \
-      "phase=SCHEDULER_RESUMING" "outcome=UNKNOWN" \
-      "control_generation=${control_generation}" "control_ack_generation=${control_ack_generation}" \
-      "source_power_state=${source_power_state}" "target_power_state=${target_power_state}" \
-      "updated_at=$(ftctl_now_iso8601)" || true
-    ftctl_dr_runtime_path_set "${run_path}" \
-      "state=SYNCING" "step=commit-verifying" "failback_phase=COMMIT_VERIFYING" \
-      "cloud_lifecycle_state=COMMIT_VERIFYING" "engine_ack_state=UNKNOWN" \
-      "failback_commit_outcome=UNKNOWN" "failback_commit_phase=SCHEDULER_RESUMING" \
-      "control_generation=${control_generation}" "control_ack_generation=${control_ack_generation}" \
-      "error_code=DR_FAILBACK_COMMIT_ACK_TIMEOUT" \
-      "error_message=Failback commit outcome requires status verification" \
-      "retryable=true" "updated_at=$(ftctl_now_iso8601)" || true
-    cp -f "${run_path}" "${status_path}" 2>/dev/null || true
-    [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_state_json \
-      "dr-failback-commit" "unknown" "${plan}" "${run}" "${run_path}" "0"
-    return "${rc}"
-  fi
   now="$(ftctl_now_iso8601)"
   control_generation="$(ftctl_dr_scheduler_control_generation "${plan}")"
   control_ack_generation="$(ftctl_state_read_kv "$(ftctl_dr_scheduler_control_ack_path "${plan}")" "generation" 2>/dev/null || true)"
   [[ "${control_generation}" =~ ^[0-9]+$ ]] || control_generation=0
   [[ "${control_ack_generation}" =~ ^[0-9]+$ ]] || control_ack_generation=0
-  ftctl_dr_runtime_path_set "${run_path}" \
-    "engine_ack_state=ACKNOWLEDGED" \
-    "engine_ack_at=${now}" \
-    "failback_commit_outcome=ACKNOWLEDGED" \
-    "failback_commit_phase=ACKNOWLEDGED" \
-    "control_generation=${control_generation}" \
-    "control_ack_generation=${control_ack_generation}" \
-    "scheduler_state=RUNNING" \
-    "retryable=false" \
-    "error_code=" \
-    "error_message=" \
-    "updated_at=${now}" || return 2
-  cp -f "${run_path}" "${status_path}" || return 2
   ftctl_state_write_kv_all "${commit_path}" \
-    "version=1" "plan=${plan}" "run=${run}" "session_id=${session_id}" \
+    "version=2" "plan=${plan}" "run=${run}" "session_id=${session_id}" \
     "checkpoint_sequence=${checkpoint_sequence}" "authority_generation=${authority_generation}" \
-    "phase=ACKNOWLEDGED" "outcome=ACKNOWLEDGED" \
+    "phase=SCHEDULER_RESUMING" "outcome=$([[ "${rc}" == "0" ]] && printf PENDING || printf UNKNOWN)" \
     "control_generation=${control_generation}" "control_ack_generation=${control_ack_generation}" \
     "source_power_state=${source_power_state}" "target_power_state=${target_power_state}" \
-    "updated_at=${now}" || return 2
-  if [[ -f "${session_path}" ]]; then
-    python3 - "${session_path}" "${active_path}" "${authority_generation}" "${boot_validation_state}" "${now}" \
-      "${control_generation}" "${control_ack_generation}" <<'PY' || return 2
-import json
-import os
-import shutil
-import sys
-path, active_path, generation, validation_state, now, control_generation, ack_generation = sys.argv[1:8]
-with open(path, "r", encoding="utf-8") as fh:
-    session = json.load(fh)
-session["state"] = "PROTECTION_RESUMING"
-session["activeSide"] = "SOURCE"
-session["cloudAuthorityGeneration"] = int(generation)
-session["bootValidationState"] = validation_state
-session["sourcePowerState"] = "POWERED_ON"
-session["targetPowerState"] = "POWERED_OFF"
-session["engineAckState"] = "ACKNOWLEDGED"
-session["engineAckAt"] = now
-session["commitOutcome"] = "ACKNOWLEDGED"
-session["schedulerGeneration"] = int(control_generation)
-session["schedulerAckGeneration"] = int(ack_generation)
-with open(path, "w", encoding="utf-8") as fh:
-    json.dump(session, fh, sort_keys=True, separators=(",", ":"))
-    fh.write("\n")
-os.makedirs(os.path.dirname(active_path), exist_ok=True)
-shutil.copyfile(path, active_path)
-PY
+    "updated_at=${now}" || true
+  ftctl_dr_runtime_path_set "${run_path}" \
+    "state=SYNCING" "step=commit-verifying" "failback_phase=COMMIT_VERIFYING" \
+    "cloud_lifecycle_state=COMMIT_VERIFYING" "engine_ack_state=UNKNOWN" \
+    "failback_commit_outcome=UNKNOWN" "failback_commit_phase=SCHEDULER_RESUMING" \
+    "control_generation=${control_generation}" \
+    "control_ack_generation=${control_ack_generation}" \
+    "error_code=DR_FAILBACK_COMMIT_ACK_PENDING" \
+    "error_message=Failback commit acknowledgement is pending verification" \
+    "retryable=true" "updated_at=${now}" || return 2
+  ftctl_dr_runtime_path_set "${status_path}" \
+    "state=SYNCING" "step=commit-verifying" "failback_phase=COMMIT_VERIFYING" \
+    "cloud_lifecycle_state=COMMIT_VERIFYING" "engine_ack_state=UNKNOWN" \
+    "failback_commit_outcome=UNKNOWN" "failback_commit_phase=SCHEDULER_RESUMING" \
+    "control_generation=${control_generation}" \
+    "control_ack_generation=${control_ack_generation}" \
+    "error_code=DR_FAILBACK_COMMIT_ACK_PENDING" \
+    "error_message=Failback commit acknowledgement is pending verification" \
+    "retryable=true" "updated_at=${now}" || return 2
+  if ftctl_dr_runtime_reconcile_failback_commit "${plan}" "${run}" "${session_id}"; then
+    ftctl_log_event "dr-runtime" "dr.failback.commit" "ok" "" "" \
+      "plan=${plan} run=${run} session=${session_id} generation=${authority_generation} control_generation=${control_generation}"
+    [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_state_json \
+      "dr-failback-commit" "ok" "${plan}" "${run}" "${run_path}" "0"
+    return 0
   fi
-  ftctl_log_event "dr-runtime" "dr.failback.commit" "ok" "" "" \
-    "plan=${plan} run=${run} session=${session_id} generation=${authority_generation} control_generation=${control_generation}"
-  [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_state_json "dr-failback-commit" "ok" "${plan}" "${run}" "${run_path}" "0"
+  [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_state_json \
+    "dr-failback-commit" "unknown" "${plan}" "${run}" "${run_path}" "0"
+  [[ "${rc}" != "0" ]] && return "${rc}"
+  return 21
 }
 
 ftctl_dr_runtime_failback_commit_status() {
@@ -4304,6 +4499,7 @@ ftctl_dr_runtime_failback_commit_status() {
       "DR_FAILBACK_COMMIT_NOT_FOUND" "Failback commit journal was not found" 44
     return 44
   }
+  ftctl_dr_runtime_reconcile_failback_commit "${plan}" "${run}" "${session_id}" || true
   [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_state_json \
     "dr-failback-commit-status" "ok" "${plan}" "${run}" "${run_path}" "0"
 }
@@ -4410,7 +4606,7 @@ ftctl_dr_runtime_capabilities() {
       first="0"
       printf '"%s"' "$(ftctl__json_escape "${command}")"
     done
-    printf '],"supported_features":["async-run","status-projection","status-scope-v2","target-materialized-notify","target-materialized-idempotent","hardware-contract-projection","control-protocol-v2","control-protocol-v3","control-protocol-v4","dr-scheduler-singleton-v1","dr-scheduler-self-owner-repair-v1","dr-scheduler-systemd-unit-v1","dr-sync-recover-v1","dr-local-reconcile-fence-v1","dr-checkpoint-producer-v1","dr-nbd-deterministic-drain-v1","dr-nbd-cleanup-recovery-v1","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","guest-preparation-v1","guest-preparation-v2","test-domain-lifecycle-v1","test-artifact-lifecycle-v2","cloud-managed-test-vm-v1","cutover-ready-v1","cutover-manifest-v2","cutover-preflight-v1","cloud-cutover-commit-v1","cloud-failback-lifecycle-v1","dr-failback-commit-journal-v1","dr-failback-rollback-fence-v1"]}\n'
+    printf '],"supported_features":["async-run","status-projection","status-scope-v2","target-materialized-notify","target-materialized-idempotent","hardware-contract-projection","control-protocol-v2","control-protocol-v3","control-protocol-v4","dr-scheduler-singleton-v1","dr-scheduler-self-owner-repair-v1","dr-scheduler-systemd-unit-v1","dr-sync-recover-v1","dr-local-reconcile-fence-v1","dr-checkpoint-producer-v1","dr-nbd-deterministic-drain-v1","dr-nbd-cleanup-recovery-v1","dr-plan-authority-snapshot-v1","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","guest-preparation-v1","guest-preparation-v2","test-domain-lifecycle-v1","test-artifact-lifecycle-v2","cloud-managed-test-vm-v1","cutover-ready-v1","cutover-manifest-v2","cutover-preflight-v1","cloud-cutover-commit-v1","cloud-failback-lifecycle-v1","dr-failback-commit-journal-v1","dr-failback-commit-journal-v2","dr-failback-late-ack-reconcile-v1","dr-failback-rollback-fence-v1"]}\n'
     return 0
   fi
 

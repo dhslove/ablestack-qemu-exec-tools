@@ -466,3 +466,24 @@ is restored, the source is powered off, and the scheduler is stopped.
 | Rollback result | `ROLLED_BACK`, but stale failback error remains current | `ROLLED_BACK` and current error fields are empty |
 | Cloud refresh | Reprojects the stale engine error onto the plan | Projects `FAILED_OVER_UNPROTECTED` without a current error |
 | Audit | Failed run and current state can be confused | Failed run is retained; current authority is healthy and explicit |
+
+## 2026-07-27 Late ACK and Authority Snapshot Convergence Addendum
+
+이 문서의 generation 및 rollback fence 계약은 유지한다. 다만 commit 호출이
+timeout된 뒤 동일 generation의 정상 ACK가 도착하는 경우와, failback operation
+Run과 재개된 scheduler의 producer Run이 다른 경우의 최종 판정은 문서 216을
+따른다.
+
+- `dr-failback-commit-status`는 과거 operation state만 반환하지 않고 현재
+  `control.state`와 `control.ack`를 다시 검증한다.
+- 요청 generation, owner Run, session/lease/PID lineage, SOURCE ON 및 TARGET OFF
+  증거가 모두 일치하면 late ACK를 `ACKNOWLEDGED`로 원자 수렴한다.
+- operation Run은 audit/transition 소유자이고, `status.state`는 Plan authority,
+  checkpoint의 `producer_run_id`는 복제 cycle 생산자다. 세 식별자를 서로
+  대체하지 않는다.
+- latest cycle은 한 개의 immutable checkpoint에서 원자적으로 읽으며 다른
+  Run의 NBD/CBT 필드를 섞지 않는다.
+
+상세 상태 파일 소유권, reconciliation 함수, status schema v2, selftest 및
+PASS 조건:
+[216-dr-failback-late-ack-and-authority-snapshot-convergence-design-20260727.md](216-dr-failback-late-ack-and-authority-snapshot-convergence-design-20260727.md).

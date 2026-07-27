@@ -965,12 +965,16 @@ ftctl_dr_scheduler_run_cycle() {
 }
 
 ftctl_dr_scheduler_sleep_or_stop() {
-  local plan="${1-}" interval="${2-}"
-  local slept=0 command session epoch run pid start_ticks
+  local plan="${1-}" interval="${2-}" expected_generation="${3-}"
+  local slept=0 command generation session epoch run pid start_ticks
   [[ "${interval}" =~ ^[0-9]+$ ]] || interval="0"
   while (( slept < interval )); do
     command="$(ftctl_dr_scheduler_control_command "${plan}")"
+    generation="$(ftctl_dr_scheduler_control_generation "${plan}")"
     [[ "${command}" != "stop" && "${command}" != "pause" ]] || return 1
+    if [[ "${expected_generation}" =~ ^[0-9]+$ && "${generation}" != "${expected_generation}" ]]; then
+      return 1
+    fi
     if ftctl_dr_scheduler_active_worker_valid "${plan}" ""; then
       session="$(ftctl_dr_scheduler_active_value "${plan}" "scheduler_session_uuid")"
       epoch="$(ftctl_dr_scheduler_active_value "${plan}" "lease_epoch")"
@@ -1498,7 +1502,7 @@ ftctl_dr_scheduler_worker() {
       "next_cycle_at=${next_cycle_at}" \
       "next_cycle_wait_seconds=${wait_seconds}" \
       "updated_at=$(ftctl_now_iso8601)" || true
-    ftctl_dr_scheduler_sleep_or_stop "${plan}" "${wait_seconds}" || true
+    ftctl_dr_scheduler_sleep_or_stop "${plan}" "${wait_seconds}" "${control_generation}" || true
   done
 
   ftctl_dr_scheduler_mark_lease_stopped "${plan}" "${session}" "${lease_epoch}" "${run}" "$$" "${start_ticks}"

@@ -8005,6 +8005,10 @@ active_side=TARGET
 target_power_state=POWER_ON_DELEGATED
 target_promotion_state=PROMOTED
 checkpoint_sequence=3
+latest_completed_checkpoint_sequence=3
+latest_completed_checkpoint_ref=ftctl:${plan}:run-before-failback:3
+latest_completed_checkpoint_state=READY
+latest_completed_baseline_generation=3
 last_source_checkpoint_at=2026-07-01T01:10:00Z
 last_target_durable_at=2026-07-01T01:10:03Z
 target_ready_rpo_seconds=3
@@ -8060,12 +8064,16 @@ EOF
 
   out="$(
     ftctl_dr_scheduler_resume_after_transition() {
+      ftctl_dr_scheduler_active_worker_valid() {
+        return 0
+      }
       ftctl_state_write_kv_all "$(ftctl_dr_scheduler_control_path "$1")" \
         "version=4" "generation=11" "command=run" "owner_run=$2"
-      ftctl_state_write_kv_all "$(ftctl_dr_scheduler_control_ack_path "$1")" \
-        "version=4" "generation=11" "state=RUNNING" "request_run_uuid=$2"
+      ftctl_dr_scheduler_write_heartbeat "$1" "scheduler-session-11" "11" \
+        "$2" "$$" "11111"
+      ftctl_dr_scheduler_control_ack "$1" "11" "RUNNING" "IDLE" "$2" \
+        "scheduler-session-11" "11" "$$" "11111"
       ftctl_dr_runtime_path_set "$4" "scheduler_state=RUNNING" "control_state=RUNNING"
-      cp -f "$4" "$5"
       return 0
     }
     ftctl_dr_runtime_failback_commit "${plan}" "run-failback" "${plan}:run-failback" \
@@ -8078,11 +8086,39 @@ EOF
   selftest_assert_file_contains "${active_path}" '"activeSide":"SOURCE"'
   selftest_assert_file_contains "${plan_dir}/failbacks/run-failback.commit.state" "phase=ACKNOWLEDGED"
   selftest_assert_file_contains "${plan_dir}/failbacks/run-failback.commit.state" "control_generation=11"
+  selftest_assert_file_contains "${status_path}" "latest_completed_checkpoint_sequence=3"
+  selftest_assert_file_contains "${status_path}" "latest_completed_baseline_generation=3"
 
   out="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-failback-commit-status \
     --config "${SELFTEST_CONFIG}" --plan "${plan}" --run run-failback \
     --session-id "${plan}:run-failback" --json)"
   selftest_assert_contains "${out}" '"failback_commit_outcome":"ACKNOWLEDGED"' "commit status projects durable acknowledgement"
+
+  out="$(
+    ftctl_dr_scheduler_active_worker_valid() {
+      return 0
+    }
+    ftctl_state_write_kv_all "${plan_dir}/failbacks/run-failback.commit.state" \
+      "version=2" "plan=${plan}" "run=run-failback" "session_id=${plan}:run-failback" \
+      "checkpoint_sequence=4" "authority_generation=4" \
+      "phase=SCHEDULER_RESUMING" "outcome=UNKNOWN" \
+      "control_generation=12" "control_ack_generation=11" \
+      "source_power_state=POWERED_ON" "target_power_state=POWERED_OFF"
+    ftctl_state_write_kv_all "$(ftctl_dr_scheduler_control_path "${plan}")" \
+      "version=4" "generation=12" "command=run" "owner_run=run-failback"
+    ftctl_dr_scheduler_write_heartbeat "${plan}" "scheduler-session-12" "12" \
+      "run-failback" "$$" "12121"
+    ftctl_dr_scheduler_control_ack "${plan}" "12" "RUNNING" "IDLE" "run-failback" \
+      "scheduler-session-12" "12" "$$" "12121"
+    ftctl_dr_runtime_path_set "$(ftctl_dr_runtime_run_path "${plan}" "run-failback")" \
+      "engine_ack_state=UNKNOWN" "failback_commit_outcome=UNKNOWN" \
+      "failback_commit_phase=SCHEDULER_RESUMING"
+    ftctl_dr_runtime_failback_commit_status "${plan}" "run-failback" \
+      "${plan}:run-failback" "1"
+  )"
+  selftest_assert_contains "${out}" '"failback_commit_outcome":"ACKNOWLEDGED"' "late ACK converges commit status"
+  selftest_assert_file_contains "${plan_dir}/failbacks/run-failback.commit.state" "recovered_from_late_ack=true"
+  selftest_assert_file_contains "${status_path}" "latest_completed_checkpoint_sequence=3"
 
   out="$(
     ftctl_dr_scheduler_request_and_wait() {
@@ -8113,6 +8149,25 @@ EOF
   selftest_assert_contains "${out}" '"error_code":""' "rollback clears stale failback error"
   selftest_assert_contains "${out}" '"error_message":""' "rollback clears stale failback message"
   selftest_assert_contains "${out}" '"failed_component":""' "rollback clears stale failed component"
+}
+
+selftest_case_dr_scheduler_wait_is_interrupted_by_new_generation() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR scheduler wakes from RPO wait when a newer control generation arrives"
+
+  local plan="plan-generation-wakeup"
+  local started finished elapsed
+  ftctl_dr_scheduler_control_set "${plan}" "run" "owner-1" >/dev/null
+  (
+    sleep 1
+    ftctl_state_write_kv_all "$(ftctl_dr_scheduler_control_path "${plan}")" \
+      "version=4" "generation=2" "command=run" "owner_run=owner-2"
+  ) &
+  started="$(date +%s)"
+  ftctl_dr_scheduler_sleep_or_stop "${plan}" "8" "1" || true
+  finished="$(date +%s)"
+  elapsed=$((finished - started))
+  (( elapsed < 5 )) || selftest_fail "new control generation did not interrupt scheduler wait"
 }
 
 selftest_case_dr_runtime_reprotect_starts_reverse_protection_checkpoint() {
@@ -9073,6 +9128,7 @@ selftest_main() {
   selftest_case_dr_runtime_planned_failover_promotes_latest_checkpoint
   selftest_case_dr_runtime_cloud_cutover_commit_is_idempotent
   selftest_case_dr_runtime_failback_restores_source_after_reverse_checkpoint
+  selftest_case_dr_scheduler_wait_is_interrupted_by_new_generation
   selftest_case_dr_runtime_reprotect_starts_reverse_protection_checkpoint
   selftest_case_dr_scheduler_vmware_requires_mover
   selftest_case_dr_vmware_cycle_result_contract
