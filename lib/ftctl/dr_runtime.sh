@@ -99,6 +99,92 @@ ftctl_dr_runtime_active_failover_session_path() {
   printf '%s/active.json\n' "$(ftctl_dr_runtime_failover_dir "${plan}")"
 }
 
+ftctl_dr_runtime_abort_failover_session() {
+  local plan="${1-}" run="${2-}" session_id="${3-}" now="${4-}"
+  local session_path active_path
+
+  session_path="$(ftctl_dr_runtime_failover_session_path "${plan}" "${run}")"
+  active_path="$(ftctl_dr_runtime_active_failover_session_path "${plan}")"
+  python3 - "${session_path}" "${active_path}" "${plan}" "${run}" "${session_id}" "${now}" <<'PY'
+import json
+import os
+import sys
+import tempfile
+
+session_path, active_path, plan, run, session_id, now = sys.argv[1:7]
+
+def read_session(path):
+    if not os.path.exists(path):
+        return None
+    with open(path, "r", encoding="utf-8") as fh:
+        return json.load(fh)
+
+def matches(session):
+    if not isinstance(session, dict):
+        return False
+    if str(session.get("planUuid") or "") != plan:
+        return False
+    if str(session.get("runUuid") or "") != run:
+        return False
+    return not session_id or str(session.get("sessionId") or "") == session_id
+
+def atomic_write(path, value):
+    directory = os.path.dirname(path)
+    os.makedirs(directory, exist_ok=True)
+    fd, temp_path = tempfile.mkstemp(prefix=f".{os.path.basename(path)}.", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(value, fh, sort_keys=True, separators=(",", ":"))
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(temp_path, path)
+        try:
+            dir_fd = os.open(directory, os.O_RDONLY)
+        except OSError:
+            dir_fd = None
+        if dir_fd is not None:
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+    finally:
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
+
+session = read_session(session_path)
+if session is not None:
+    if not matches(session):
+        sys.stderr.write("ERROR: failover session identity mismatch\n")
+        sys.exit(79)
+    session["state"] = "ABORTED"
+    session["activeSide"] = "SOURCE"
+    session["completedAt"] = now
+    session["engineAckState"] = "ABORTED"
+    promotion = session.setdefault("targetPromotion", {})
+    promotion["state"] = "STANDBY"
+    promotion["powerState"] = "POWERED_OFF"
+    atomic_write(session_path, session)
+
+active = read_session(active_path)
+if active is None:
+    sys.exit(0)
+if not matches(active):
+    # A newer failover session owns the active pointer. Never remove it.
+    sys.exit(0)
+os.unlink(active_path)
+try:
+    dir_fd = os.open(os.path.dirname(active_path), os.O_RDONLY)
+except OSError:
+    dir_fd = None
+if dir_fd is not None:
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+PY
+}
+
 ftctl_dr_runtime_capture_authority_context() {
   local plan="${1-}" run_path="${2-}" prior_status_path="${3-}" authority_spec_path="${4-}"
   local active_path snapshot_path active_side authority_state checkpoint_sequence
@@ -4622,6 +4708,8 @@ ftctl_dr_runtime_failover_abort() {
     return 79
   fi
   if [[ "${current_state}" == "ABORTED" && "${active_side}" == "SOURCE" ]]; then
+    now="$(ftctl_now_iso8601)"
+    ftctl_dr_runtime_abort_failover_session "${plan}" "${run}" "${current_session:-${session_id}}" "${now}" || return $?
     [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_state_json "dr-failover-abort" "ok" "${plan}" "${run}" "${run_path}" "0"
     return 0
   fi
@@ -4653,6 +4741,7 @@ ftctl_dr_runtime_failover_abort() {
   if [[ -n "${sequence}" ]]; then
     ftctl_dr_scheduler_checkpoint_lease_release "${plan}" "${sequence}" || true
   fi
+  ftctl_dr_runtime_abort_failover_session "${plan}" "${run}" "${current_session:-${session_id}}" "${now}" || return $?
   if command -v ftctl_dr_scheduler_transition_end >/dev/null 2>&1; then
     ftctl_dr_scheduler_transition_end "${plan}"
   fi

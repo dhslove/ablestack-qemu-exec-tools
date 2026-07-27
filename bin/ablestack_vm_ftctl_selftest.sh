@@ -7982,8 +7982,10 @@ selftest_case_dr_runtime_failover_abort_resumes_source_protection() (
   local plan_dir="${SELFTEST_ROOT}/run/dr-runtime/plans/${plan}"
   local run_path="${plan_dir}/runs/${run}.state"
   local status_path="${plan_dir}/status.state"
+  local session_path="${plan_dir}/failovers/${run}.json"
+  local active_path="${plan_dir}/failovers/active.json"
   local out=""
-  mkdir -p "${plan_dir}/runs"
+  mkdir -p "${plan_dir}/runs" "${plan_dir}/failovers"
   cat > "${plan_dir}/profile.json" <<JSON
 {"version":1,"engine":"FTCTL_DR","planUuid":"${plan}","direction":"VMWARE_TO_KVM"}
 JSON
@@ -8001,6 +8003,10 @@ target_power_state=POWERED_OFF
 target_promotion_state=CUTOVER_READY
 EOF
   cp -f "${run_path}" "${status_path}"
+  cat > "${session_path}" <<JSON
+{"version":1,"planUuid":"${plan}","runUuid":"${run}","sessionId":"${plan}:${run}","state":"CUTOVER_READY","activeSide":"SOURCE","targetPromotion":{"state":"CUTOVER_READY","powerState":"POWERED_OFF"}}
+JSON
+  cp -f "${session_path}" "${active_path}"
   # shellcheck disable=SC2317
   ftctl_dr_scheduler_resume_after_transition() {
     ftctl_dr_runtime_path_set "$4" "scheduler_state=RUNNING" "scheduler_desired_state=RUNNING"
@@ -8016,6 +8022,13 @@ EOF
   selftest_assert_contains "${out}" '"active_side":"SOURCE"' "source authority retained"
   selftest_assert_contains "${out}" '"scheduler_recovery_state":"RESUMED_AFTER_FAILOVER_ABORT"' "scheduler resumed"
   selftest_assert_file_contains "${status_path}" "target_power_state=POWERED_OFF"
+  selftest_assert_file_contains "${session_path}" '"state":"ABORTED"'
+  selftest_assert_file_contains "${session_path}" '"powerState":"POWERED_OFF"'
+  [[ ! -e "${active_path}" ]] || selftest_fail "active failover session should be removed"
+
+  out="$(ftctl_dr_runtime_failover_abort "${plan}" "${run}" "${plan}:${run}" 1)"
+  selftest_assert_contains "${out}" '"state":"ABORTED"' "idempotent abort terminal state"
+  [[ ! -e "${active_path}" ]] || selftest_fail "idempotent abort should keep the active pointer absent"
 )
 
 selftest_case_dr_scheduler_resume_accepts_live_worker_pending_ack() (

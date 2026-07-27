@@ -374,6 +374,18 @@ source를 격리했을 수 있으므로 power control은 Cloud/provider 또는 �
 같은 identity로 재호출할 때 이미 `ABORTED`이면 성공을 반환한다. 다른 Run이나
 다른 generation이 같은 Plan을 소유하고 있으면 실패한다.
 
+### 7.5 활성 세션 포인터 정합성
+
+`ABORTED` 투영은 `run.state`에만 기록하면 안 된다. FTCTL은
+`failovers/<runUuid>.json`의 `planUuid`, `runUuid`, `sessionId`가 요청과
+모두 일치하는지 검증한 뒤 세션을 `ABORTED/SOURCE/POWERED_OFF`로 원자
+갱신한다. `failovers/active.json`도 동일한 실행을 가리킬 때만 제거한다.
+다른 실행이 이미 활성 포인터를 소유하면 절대 삭제하지 않는다.
+
+이 정리는 중단 명령 재호출 시에도 수행한다. 따라서 이전 버전에서
+`run.state=ABORTED`만 남기고 종료한 경우에도 동일 명령을 다시 호출하면
+stale active pointer가 안전하게 수렴한다.
+
 ## 8. Capability
 
 `dr-capabilities`에 다음 feature를 추가한다.
