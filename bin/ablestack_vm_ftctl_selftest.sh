@@ -6556,7 +6556,7 @@ EOF
   [[ ! -e "${lease_path}" ]] || selftest_fail "checkpoint lease should be released"
 
   capabilities="$(ftctl_dr_runtime_capabilities 1)"
-  selftest_assert_contains "${capabilities}" '"runtime_schema_version":"20260726"' "control schema version"
+  selftest_assert_contains "${capabilities}" '"runtime_schema_version":"20260727"' "control schema version"
   selftest_assert_contains "${capabilities}" '"cutover-manifest-v2"' "cutover manifest capability"
   selftest_assert_contains "${capabilities}" '"control-protocol-v2"' "control protocol capability"
   selftest_assert_contains "${capabilities}" '"control-protocol-v3"' "control protocol v3 capability"
@@ -7938,6 +7938,86 @@ JSON
   selftest_assert_contains "${out}" 'DR_CUTOVER_GENERATION_STALE' "stale generation error code"
 }
 
+selftest_case_dr_runtime_status_hydrates_complete_cycle_evidence() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR status hydrates exact completed-cycle NBD evidence from restore points"
+
+  local plan="plan-cycle-evidence" run="run-cycle-evidence"
+  local plan_dir="${SELFTEST_ROOT}/run/dr-runtime/plans/${plan}"
+  local restore_points="${plan_dir}/restore-points.jsonl"
+  local status_path="${plan_dir}/status.state"
+  local out=""
+  mkdir -p "${plan_dir}"
+  cat > "${restore_points}" <<JSON
+{"planUuid":"other-plan","producerRunUuid":"wrong-run","checkpointSequence":99,"cycleType":"incremental","state":"READY","cycleToken":"other-plan:99","baselineGeneration":99,"effectiveMode":"CBT_INCREMENTAL","incrementalVerified":true,"nbdTeardownState":"DRAINED"}
+{"planUuid":"${plan}","producerRunUuid":"${run}","checkpointSequence":7,"checkpointRef":"ftctl:${plan}:${run}:7","cycleType":"incremental","state":"READY","sourceCheckpointAt":"2026-07-27T00:00:00Z","targetDurableAt":"2026-07-27T00:00:02Z","targetReadyRpoSeconds":2,"requestedMode":"CBT_INCREMENTAL","effectiveMode":"CBT_INCREMENTAL","incrementalVerified":true,"metricsEstimated":false,"virtualBytes":1073741824,"changedBytes":9306112,"sourceReadBytes":9306112,"targetWrittenBytes":9306112,"transferPayloadBytes":9306112,"changedExtentCount":94,"durationMs":2500,"throughputBps":3722444,"baselineGeneration":7,"cycleToken":"${plan}:7","nbdTeardownState":"DRAINED","nbdTeardownStartedAtEpochMs":1000,"nbdTeardownCompletedAtEpochMs":1100,"nbdTeardownDurationMs":100,"nbdSourceDeviceCount":1,"nbdTargetDeviceCount":1,"nbdQuarantinedDeviceCount":0,"nbdTeardownErrorCode":"","nbdTeardownErrorMessage":""}
+JSON
+  cat > "${status_path}" <<EOF
+plan=${plan}
+run=${run}
+action=dr-failover
+state=CUTOVER_READY
+step=cutover-ready
+progress=100
+active_side=SOURCE
+target_power_state=POWERED_OFF
+restore_points_path=${restore_points}
+EOF
+
+  out="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-status \
+    --config "${SELFTEST_CONFIG}" --plan "${plan}" --json)"
+  selftest_assert_contains "${out}" '"latest_completed_checkpoint_sequence":7' "exact plan checkpoint sequence"
+  selftest_assert_contains "${out}" '"latest_completed_producer_run_uuid":"run-cycle-evidence"' "producer identity"
+  selftest_assert_contains "${out}" '"latest_completed_cycle_token":"plan-cycle-evidence:7"' "cycle token"
+  selftest_assert_contains "${out}" '"latest_completed_nbd_teardown_state":"DRAINED"' "NBD drain state"
+  selftest_assert_contains "${out}" '"latest_completed_nbd_source_device_count":1' "NBD source count"
+  selftest_assert_contains "${out}" '"latest_completed_nbd_quarantined_device_count":0' "NBD quarantine count"
+}
+
+selftest_case_dr_runtime_failover_abort_resumes_source_protection() (
+  selftest_reset_env
+  selftest_info "FTCTL_DR failover abort resumes source protection before Cloud promotion"
+
+  local plan="plan-failover-abort" run="run-failover-abort"
+  local plan_dir="${SELFTEST_ROOT}/run/dr-runtime/plans/${plan}"
+  local run_path="${plan_dir}/runs/${run}.state"
+  local status_path="${plan_dir}/status.state"
+  local out=""
+  mkdir -p "${plan_dir}/runs"
+  cat > "${plan_dir}/profile.json" <<JSON
+{"version":1,"engine":"FTCTL_DR","planUuid":"${plan}","direction":"VMWARE_TO_KVM"}
+JSON
+  cat > "${run_path}" <<EOF
+plan=${plan}
+run=${run}
+action=dr-failover
+state=CUTOVER_READY
+step=cutover-ready
+progress=100
+failover_session_id=${plan}:${run}
+failover_restore_point_sequence=7
+active_side=SOURCE
+target_power_state=POWERED_OFF
+target_promotion_state=CUTOVER_READY
+EOF
+  cp -f "${run_path}" "${status_path}"
+  # shellcheck disable=SC2317
+  ftctl_dr_scheduler_resume_after_transition() {
+    ftctl_dr_runtime_path_set "$4" "scheduler_state=RUNNING" "scheduler_desired_state=RUNNING"
+    cp -f "$4" "$5"
+  }
+  # shellcheck disable=SC2317
+  ftctl_dr_scheduler_checkpoint_lease_release() { return 0; }
+  # shellcheck disable=SC2317
+  ftctl_dr_scheduler_transition_end() { return 0; }
+
+  out="$(ftctl_dr_runtime_failover_abort "${plan}" "${run}" "${plan}:${run}" 1)"
+  selftest_assert_contains "${out}" '"state":"ABORTED"' "abort terminal state"
+  selftest_assert_contains "${out}" '"active_side":"SOURCE"' "source authority retained"
+  selftest_assert_contains "${out}" '"scheduler_recovery_state":"RESUMED_AFTER_FAILOVER_ABORT"' "scheduler resumed"
+  selftest_assert_file_contains "${status_path}" "target_power_state=POWERED_OFF"
+)
+
 selftest_case_dr_runtime_failback_restores_source_after_reverse_checkpoint() {
   selftest_reset_env
   selftest_info "FTCTL_DR failback waits for Cloud lifecycle commit before restoring source authority"
@@ -9127,6 +9207,8 @@ selftest_main() {
   selftest_case_dr_scheduler_systemd_launch_contract
   selftest_case_dr_runtime_planned_failover_promotes_latest_checkpoint
   selftest_case_dr_runtime_cloud_cutover_commit_is_idempotent
+  selftest_case_dr_runtime_status_hydrates_complete_cycle_evidence
+  selftest_case_dr_runtime_failover_abort_resumes_source_protection
   selftest_case_dr_runtime_failback_restores_source_after_reverse_checkpoint
   selftest_case_dr_scheduler_wait_is_interrupted_by_new_generation
   selftest_case_dr_runtime_reprotect_starts_reverse_protection_checkpoint

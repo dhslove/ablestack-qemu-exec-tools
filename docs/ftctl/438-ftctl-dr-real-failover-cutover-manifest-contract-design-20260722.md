@@ -1,5 +1,10 @@
 # FTCTL DR Real Failover Cutover Manifest Contract Design
 
+> 2026-07-27 후속 계약: Failover operation이 Plan의 완료 cycle 및 NBD drain
+> 증거를 잃지 않도록 하는 authority snapshot, status hydration, 준비 취소 계약은
+> `442-ftctl-dr-failover-authority-cycle-evidence-and-abort-contract-design-20260727.md`
+> 를 따른다.
+
 - Date: 2026-07-22
 - Status: implementation design; read-only provider preflight verified
 - Cloud normative design: `ablestack-cloud/docs/ftctl/567-cross-hypervisor-dr-real-failover-cutover-manifest-and-rollback-design-20260722.md`

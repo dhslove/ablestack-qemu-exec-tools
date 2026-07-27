@@ -258,6 +258,7 @@ Commands:
   dr-target-materialized
                      Mark Cloud target VM/volume materialization complete
   dr-cutover-commit  Commit Cloud-owned target promotion to FTCTL authority state
+  dr-failover-abort  Abort failover preparation before target promotion
   dr-failback-commit Commit Cloud-owned source restoration to FTCTL authority state
   dr-failback-commit-status
                        Read the durable Cloud-owned failback commit outcome
@@ -363,7 +364,7 @@ parse_args() {
         print_version
         exit "${EXIT_OK}"
         ;;
-      protect|protect-start|status|reconcile|failover|failover-prepare|failback|failback-sync|failback-finalize|failback-reprotect|unprotect|fence-confirm|fence-clear|pause-protection|resume-protection|preflight-remote|dr-key-ensure|dr-key-install|dr-key-remove|check|health|events|snapshot|dr-plan-apply|dr-sync-start|dr-sync-recover|dr-sync-pause|dr-sync-resume|dr-scheduler-run|dr-reconcile|dr-test-failover|dr-test-cleanup|dr-test-prepare|dr-test-artifact-cleanup|dr-failover|dr-failback|dr-reprotect|dr-target-materialized|dr-cutover-commit|dr-failback-commit|dr-failback-commit-status|dr-failback-abort|dr-release|dr-status|dr-capabilities|dr-cancel|config)
+      protect|protect-start|status|reconcile|failover|failover-prepare|failback|failback-sync|failback-finalize|failback-reprotect|unprotect|fence-confirm|fence-clear|pause-protection|resume-protection|preflight-remote|dr-key-ensure|dr-key-install|dr-key-remove|check|health|events|snapshot|dr-plan-apply|dr-sync-start|dr-sync-recover|dr-sync-pause|dr-sync-resume|dr-scheduler-run|dr-reconcile|dr-test-failover|dr-test-cleanup|dr-test-prepare|dr-test-artifact-cleanup|dr-failover|dr-failover-abort|dr-failback|dr-reprotect|dr-target-materialized|dr-cutover-commit|dr-failback-commit|dr-failback-commit-status|dr-failback-abort|dr-release|dr-status|dr-capabilities|dr-cancel|config)
         [[ -z "${CLI_COMMAND}" ]] || {
           echo "ERROR: multiple commands specified" >&2
           exit "${EXIT_USAGE}"
@@ -763,6 +764,9 @@ dispatch() {
       ftctl_dr_runtime_cutover_commit "${CLI_PLAN}" "${CLI_RUN}" "${CLI_CUTOVER_SESSION_ID}" \
         "${CLI_CHECKPOINT_SEQUENCE}" "${CLI_AUTHORITY_GENERATION}" "${CLI_TARGET_POWER_STATE}" \
         "${CLI_BOOT_VALIDATION_STATE}" "${CLI_JSON}"
+      ;;
+    dr-failover-abort)
+      ftctl_dr_runtime_failover_abort "${CLI_PLAN}" "${CLI_RUN}" "${CLI_CUTOVER_SESSION_ID}" "${CLI_JSON}"
       ;;
     dr-failback-commit)
       ftctl_dr_runtime_failback_commit "${CLI_PLAN}" "${CLI_RUN}" "${CLI_CUTOVER_SESSION_ID}" \

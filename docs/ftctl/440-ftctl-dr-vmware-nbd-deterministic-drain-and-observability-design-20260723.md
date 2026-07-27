@@ -1,5 +1,10 @@
 # FTCTL DR VMware NBD Deterministic Drain And Observability Design
 
+> 2026-07-27 후속 계약: 이 문서에서 생성한 NBD drain 증거를 실제 Failover
+> operation status까지 손실 없이 전달하고 exact checkpoint로 복원하는 규칙은
+> `442-ftctl-dr-failover-authority-cycle-evidence-and-abort-contract-design-20260727.md`
+> 를 따른다.
+
 - 문서 번호: 440
 - 작성일: 2026-07-23
 - 상태: 실환경 Preflight 검증 완료, 구현 전 상세 설계

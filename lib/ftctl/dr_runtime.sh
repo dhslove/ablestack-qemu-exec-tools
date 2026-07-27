@@ -2822,20 +2822,29 @@ ftctl_dr_runtime_emit_state_json() {
   latest_completed_nbd_teardown_error_code="$(ftctl_dr_runtime_state_get_from_path "${authority_state_path}" "latest_completed_nbd_teardown_error_code")"
   latest_completed_nbd_teardown_error_message="$(ftctl_dr_runtime_state_get_from_path "${authority_state_path}" "latest_completed_nbd_teardown_error_message")"
   if [[ -z "${latest_completed_checkpoint_sequence}" && -s "${restore_points_path}" ]]; then
-    mapfile -t completed_checkpoint_fields < <(python3 - "${restore_points_path}" <<'PY' 2>/dev/null
+    mapfile -t completed_checkpoint_fields < <(python3 - "${restore_points_path}" "${plan}" <<'PY' 2>/dev/null
 import json
 import sys
 
 latest = None
+expected_plan = sys.argv[2]
 with open(sys.argv[1], "r", encoding="utf-8") as fh:
     for line in fh:
         try:
             candidate = json.loads(line)
         except (TypeError, ValueError):
             continue
-        if candidate.get("checkpointSequence") is not None:
+        if (candidate.get("checkpointSequence") is not None
+                and candidate.get("planUuid") == expected_plan
+                and candidate.get("state") in ("READY", "COMPLETED", "TARGET_READY")):
             latest = candidate
 if latest:
+    sequence = latest.get("checkpointSequence")
+    expected_token = f"{expected_plan}:{sequence}"
+    if latest.get("cycleToken") not in (None, "", expected_token):
+        sys.exit(0)
+    if latest.get("baselineGeneration") not in (None, "", sequence):
+        sys.exit(0)
     for key in (
         "checkpointSequence", "cycleType", "checkpointRef", "state",
         "sourceCheckpointAt", "targetDurableAt", "targetReadyRpoSeconds",
@@ -2845,12 +2854,21 @@ if latest:
         "metricsEstimated", "virtualBytes", "changedBytes", "sourceReadBytes",
         "targetWrittenBytes", "transferPayloadBytes", "changedExtentCount",
         "durationMs", "throughputBps", "baselineGeneration", "cycleToken",
+        "nbdTeardownState", "nbdTeardownStartedAtEpochMs",
+        "nbdTeardownCompletedAtEpochMs", "nbdTeardownDurationMs",
+        "nbdSourceDeviceCount", "nbdTargetDeviceCount",
+        "nbdQuarantinedDeviceCount", "nbdTeardownErrorCode",
+        "nbdTeardownErrorMessage",
     ):
         value = latest.get(key)
         print("" if value is None else value)
 PY
     )
-    if (( ${#completed_checkpoint_fields[@]} >= 28 )); then
+    if (( ${#completed_checkpoint_fields[@]} >= 37 )); then
+      local completed_checkpoint_field_index
+      for completed_checkpoint_field_index in "${!completed_checkpoint_fields[@]}"; do
+        completed_checkpoint_fields[completed_checkpoint_field_index]="${completed_checkpoint_fields[completed_checkpoint_field_index]%$'\r'}"
+      done
       latest_completed_checkpoint_sequence="${completed_checkpoint_fields[0]}"
       latest_completed_checkpoint_cycle_type="${completed_checkpoint_fields[1]}"
       latest_completed_checkpoint_ref="${completed_checkpoint_fields[2]}"
@@ -2879,6 +2897,15 @@ PY
       latest_completed_throughput_bps="${completed_checkpoint_fields[25]}"
       latest_completed_baseline_generation="${completed_checkpoint_fields[26]}"
       latest_completed_cycle_token="${completed_checkpoint_fields[27]}"
+      latest_completed_nbd_teardown_state="${completed_checkpoint_fields[28]}"
+      latest_completed_nbd_teardown_started_at_ms="${completed_checkpoint_fields[29]}"
+      latest_completed_nbd_teardown_completed_at_ms="${completed_checkpoint_fields[30]}"
+      latest_completed_nbd_teardown_duration_ms="${completed_checkpoint_fields[31]}"
+      latest_completed_nbd_source_device_count="${completed_checkpoint_fields[32]}"
+      latest_completed_nbd_target_device_count="${completed_checkpoint_fields[33]}"
+      latest_completed_nbd_quarantined_device_count="${completed_checkpoint_fields[34]}"
+      latest_completed_nbd_teardown_error_code="${completed_checkpoint_fields[35]}"
+      latest_completed_nbd_teardown_error_message="${completed_checkpoint_fields[36]}"
     fi
   fi
   if [[ -z "${latest_completed_producer_run_uuid}" && "${latest_completed_checkpoint_ref}" == ftctl:* ]]; then
@@ -3552,10 +3579,10 @@ ftctl_dr_runtime_action() {
   status_path="$(ftctl_dr_runtime_status_path "${plan}")"
   ftctl_dr_runtime_write_state "${run_path}" "${plan}" "${run}" "${action}" "${state}" "${step}" "${progress}" "${external_ref}" ""
   case "${action}" in
-    dr-failback|dr-reprotect)
+    dr-failover|dr-failback|dr-reprotect)
       ftctl_dr_runtime_capture_authority_context "${plan}" "${run_path}" "${status_path}" "${persisted_authority_spec}" || {
         [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_error_json "${action}" "${plan}" "${run}" \
-          "DR_REPROTECT_AUTHORITY_CONFLICT" "committed authority state does not match FTCTL runtime" 79
+          "DR_AUTHORITY_CONTEXT_CONFLICT" "committed authority state does not match FTCTL runtime" 79
         return 79
       }
       ;;
@@ -4570,9 +4597,82 @@ ftctl_dr_runtime_failback_abort() {
   [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_state_json "dr-failback-abort" "ok" "${plan}" "${run}" "${run_path}" "0"
 }
 
+ftctl_dr_runtime_failover_abort() {
+  local plan="${1-}" run="${2-}" session_id="${3-}" json="${4-0}"
+  local run_path status_path current_session current_state active_side target_power_state sequence now rc=0
+
+  ftctl_dr_runtime_require_plan "${plan}" || return 2
+  ftctl_dr_runtime_require_run "${run}" || return 2
+  run_path="$(ftctl_dr_runtime_run_path "${plan}" "${run}")"
+  status_path="$(ftctl_dr_runtime_status_path "${plan}")"
+  [[ -f "${run_path}" ]] || {
+    [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_error_json "dr-failover-abort" "${plan}" "${run}" \
+      "DR_CUTOVER_SESSION_NOT_FOUND" "FTCTL failover preparation runtime was not found" 44
+    return 44
+  }
+
+  current_session="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "failover_session_id")"
+  current_state="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "state")"
+  active_side="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "active_side")"
+  target_power_state="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "target_power_state")"
+  sequence="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "failover_restore_point_sequence")"
+  if [[ -n "${session_id}" && -n "${current_session}" && "${current_session}" != "${session_id}" ]]; then
+    [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_error_json "dr-failover-abort" "${plan}" "${run}" \
+      "DR_CUTOVER_SESSION_MISMATCH" "Cloud cutover session does not match FTCTL runtime" 79
+    return 79
+  fi
+  if [[ "${current_state}" == "ABORTED" && "${active_side}" == "SOURCE" ]]; then
+    [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_state_json "dr-failover-abort" "ok" "${plan}" "${run}" "${run_path}" "0"
+    return 0
+  fi
+  if [[ "${active_side}" == "TARGET" || "${target_power_state}" == "POWERED_ON" ]]; then
+    [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_error_json "dr-failover-abort" "${plan}" "${run}" \
+      "DR_FAILOVER_ABORT_UNSAFE" "Target authority or power-on evidence prevents failover preparation abort" 78
+    return 78
+  fi
+
+  now="$(ftctl_now_iso8601)"
+  if command -v ftctl_dr_scheduler_resume_after_transition >/dev/null 2>&1; then
+    ftctl_dr_scheduler_resume_after_transition "${plan}" "${run}" "failover-abort" "${run_path}" "${status_path}" || rc=$?
+  else
+    ftctl_dr_scheduler_control_action "dr-sync-resume" "${plan}" "${run_path}" "${status_path}" \
+      "$(ftctl_dr_runtime_profile_path "${plan}")" || rc=$?
+  fi
+  if [[ "${rc}" != "0" ]]; then
+    ftctl_dr_runtime_path_set "${run_path}" \
+      "state=ERROR" "step=failover-abort-resume-failed" \
+      "scheduler_recovery_state=REQUIRES_AUTHORIZED_RECOVERY" \
+      "error_code=DR_FAILOVER_ABORT_RESUME_FAILED" \
+      "error_message=Scheduler resume acknowledgement was not received" \
+      "retryable=true" "updated_at=${now}" || true
+    cp -f "${run_path}" "${status_path}" 2>/dev/null || true
+    [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_state_json "dr-failover-abort" "error" "${plan}" "${run}" "${run_path}" "0"
+    return "${rc}"
+  fi
+
+  if [[ -n "${sequence}" ]]; then
+    ftctl_dr_scheduler_checkpoint_lease_release "${plan}" "${sequence}" || true
+  fi
+  if command -v ftctl_dr_scheduler_transition_end >/dev/null 2>&1; then
+    ftctl_dr_scheduler_transition_end "${plan}"
+  fi
+  ftctl_dr_runtime_path_set "${run_path}" \
+    "action=dr-failover-abort" "state=ABORTED" "step=failover-preparation-aborted" "progress=100" \
+    "active_side=SOURCE" "target_power_state=POWERED_OFF" "target_promotion_state=STANDBY" \
+    "scheduler_state=RUNNING" "scheduler_desired_state=RUNNING" \
+    "scheduler_recovery_state=RESUMED_AFTER_FAILOVER_ABORT" \
+    "checkpoint_lease_state=RELEASED" "engine_ack_state=ABORTED" \
+    "accepted=false" "retryable=false" "error_code=" "error_message=" "updated_at=${now}" || return 2
+  cp -f "${run_path}" "${status_path}" || return 2
+  chmod 0644 "${status_path}" 2>/dev/null || true
+  ftctl_log_event "dr-runtime" "dr.failover.abort" "warn" "" "" \
+    "plan=${plan} run=${run} session=${current_session:-${session_id}} sequence=${sequence}"
+  [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_state_json "dr-failover-abort" "ok" "${plan}" "${run}" "${run_path}" "0"
+}
+
 ftctl_dr_runtime_capabilities() {
   local json="${1-0}" version="${PROG_VERSION:-unknown}"
-  local schema="20260726" action_contract="2026-07-26"
+  local schema="20260727" action_contract="2026-07-27"
   local commands=(
     "dr-plan-apply"
     "dr-sync-start"
@@ -4588,6 +4688,7 @@ ftctl_dr_runtime_capabilities() {
     "dr-reprotect"
     "dr-target-materialized"
     "dr-cutover-commit"
+    "dr-failover-abort"
     "dr-failback-commit"
     "dr-failback-commit-status"
     "dr-failback-abort"
@@ -4606,7 +4707,7 @@ ftctl_dr_runtime_capabilities() {
       first="0"
       printf '"%s"' "$(ftctl__json_escape "${command}")"
     done
-    printf '],"supported_features":["async-run","status-projection","status-scope-v2","target-materialized-notify","target-materialized-idempotent","hardware-contract-projection","control-protocol-v2","control-protocol-v3","control-protocol-v4","dr-scheduler-singleton-v1","dr-scheduler-self-owner-repair-v1","dr-scheduler-systemd-unit-v1","dr-sync-recover-v1","dr-local-reconcile-fence-v1","dr-checkpoint-producer-v1","dr-nbd-deterministic-drain-v1","dr-nbd-cleanup-recovery-v1","dr-plan-authority-snapshot-v1","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","guest-preparation-v1","guest-preparation-v2","test-domain-lifecycle-v1","test-artifact-lifecycle-v2","cloud-managed-test-vm-v1","cutover-ready-v1","cutover-manifest-v2","cutover-preflight-v1","cloud-cutover-commit-v1","cloud-failback-lifecycle-v1","dr-failback-commit-journal-v1","dr-failback-commit-journal-v2","dr-failback-late-ack-reconcile-v1","dr-failback-rollback-fence-v1"]}\n'
+    printf '],"supported_features":["async-run","status-projection","status-scope-v2","target-materialized-notify","target-materialized-idempotent","hardware-contract-projection","control-protocol-v2","control-protocol-v3","control-protocol-v4","dr-scheduler-singleton-v1","dr-scheduler-self-owner-repair-v1","dr-scheduler-systemd-unit-v1","dr-sync-recover-v1","dr-local-reconcile-fence-v1","dr-checkpoint-producer-v1","dr-nbd-deterministic-drain-v1","dr-nbd-cleanup-recovery-v1","dr-plan-authority-snapshot-v1","dr-failover-authority-snapshot-v1","dr-completed-cycle-evidence-v2","dr-failover-abort-v1","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","guest-preparation-v1","guest-preparation-v2","test-domain-lifecycle-v1","test-artifact-lifecycle-v2","cloud-managed-test-vm-v1","cutover-ready-v1","cutover-manifest-v2","cutover-preflight-v1","cloud-cutover-commit-v1","cloud-failback-lifecycle-v1","dr-failback-commit-journal-v1","dr-failback-commit-journal-v2","dr-failback-late-ack-reconcile-v1","dr-failback-rollback-fence-v1"]}\n'
     return 0
   fi
 
