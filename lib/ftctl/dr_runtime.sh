@@ -1149,7 +1149,7 @@ ftctl_dr_runtime_failover_final_checkpoint() {
 ftctl_dr_runtime_prepare_test_session() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" restore_point="${4-}" run_path="${5-}" status_path="${6-}"
   local session_path active_path selection_path restore_points_path profile_path
-  local test_session_id test_restore_point_ref test_restore_point_sequence test_manifest_path test_checkpoint_path
+  local test_session_id test_lease_owner_run test_restore_point_ref test_restore_point_sequence test_manifest_path test_checkpoint_path
   local last_source last_target target_rpo now rc=0
 
   ftctl_dr_runtime_ensure_plan_dirs "${plan}"
@@ -1318,6 +1318,7 @@ with open(session_path, "w", encoding="utf-8") as fh:
 shutil.copyfile(session_path, active_path)
 with open(selection_path, "w", encoding="utf-8") as fh:
     fh.write(f"test_session_id={session_id}\n")
+    fh.write(f"test_lease_owner_run={session.get('runUuid', '') or ''}\n")
     fh.write("test_session_state=READY\n")
     fh.write(f"test_restore_point_ref={restore_ref}\n")
     sequence = record_sequence(selected)
@@ -1335,6 +1336,7 @@ PY
   fi
 
   test_session_id="$(ftctl_dr_runtime_state_get_from_path "${selection_path}" "test_session_id")"
+  test_lease_owner_run="$(ftctl_dr_runtime_state_get_from_path "${selection_path}" "test_lease_owner_run")"
   test_restore_point_ref="$(ftctl_dr_runtime_state_get_from_path "${selection_path}" "test_restore_point_ref")"
   test_restore_point_sequence="$(ftctl_dr_runtime_state_get_from_path "${selection_path}" "test_restore_point_sequence")"
   test_manifest_path="$(ftctl_dr_runtime_state_get_from_path "${selection_path}" "test_manifest_path")"
@@ -1350,6 +1352,7 @@ PY
     "step=test-session-ready" \
     "progress=100" \
     "test_session_id=${test_session_id}" \
+    "test_lease_owner_run=${test_lease_owner_run}" \
     "test_session_path=${session_path}" \
     "test_session_state=READY" \
     "test_restore_point_ref=${test_restore_point_ref}" \
@@ -1366,7 +1369,7 @@ PY
 ftctl_dr_runtime_cleanup_test_session() {
   local plan="${1-}" run="${2-}" run_path="${3-}" status_path="${4-}"
   local active_path session_path selection_path now rc=0
-  local test_session_id test_restore_point_ref test_restore_point_sequence test_manifest_path test_checkpoint_path
+  local test_session_id test_lease_owner_run test_restore_point_ref test_restore_point_sequence test_manifest_path test_checkpoint_path
   local last_source last_target target_rpo restore_points_path test_artifacts_state test_artifacts_path test_artifact_count
 
   ftctl_dr_runtime_ensure_plan_dirs "${plan}"
@@ -1441,6 +1444,7 @@ if os.path.exists(active_path):
     os.unlink(active_path)
 with open(selection_path, "w", encoding="utf-8") as fh:
     fh.write(f"test_session_id={session_id}\n")
+    fh.write(f"test_lease_owner_run={session.get('runUuid', '') or ''}\n")
     fh.write("test_session_state=CLEANED\n")
     fh.write(f"test_restore_point_ref={restore.get('ref', '')}\n")
     sequence = restore.get("checkpointSequence")
@@ -1460,6 +1464,7 @@ PY
   }
 
   test_session_id="$(ftctl_dr_runtime_state_get_from_path "${selection_path}" "test_session_id")"
+  test_lease_owner_run="$(ftctl_dr_runtime_state_get_from_path "${selection_path}" "test_lease_owner_run")"
   test_restore_point_ref="$(ftctl_dr_runtime_state_get_from_path "${selection_path}" "test_restore_point_ref")"
   test_restore_point_sequence="$(ftctl_dr_runtime_state_get_from_path "${selection_path}" "test_restore_point_sequence")"
   test_manifest_path="$(ftctl_dr_runtime_state_get_from_path "${selection_path}" "test_manifest_path")"
@@ -1479,6 +1484,7 @@ PY
     "step=test-cleanup-completed" \
     "progress=100" \
     "test_session_id=${test_session_id}" \
+    "test_lease_owner_run=${test_lease_owner_run}" \
     "test_session_state=CLEANED" \
     "test_restore_point_ref=${test_restore_point_ref}" \
     "test_restore_point_sequence=${test_restore_point_sequence}" \
@@ -1491,7 +1497,59 @@ PY
     "test_artifacts_state=${test_artifacts_state}" \
     "test_artifacts_path=${test_artifacts_path}" \
     "test_artifact_count=${test_artifact_count}" \
+    "test_cleanup_state=CLEANED" \
+    "cleanup_required=false" \
     "updated_at=${now}"
+}
+
+ftctl_dr_runtime_finalize_failed_test() {
+  local plan="${1-}" run="${2-}" run_path="${3-}" status_path="${4-}"
+  local failure_rc="${5-1}" error_code="${6-DR_TEST_FAILOVER_FAILED}" failed_step="${7-test-failed}"
+  local cleanup_rc=0 resume_rc=0 lease_rc=0 sequence lease_owner_run cleanup_state cleanup_required=true
+
+  ftctl_dr_runtime_cleanup_test_session "${plan}" "${run}" "${run_path}" "${status_path}" || cleanup_rc=$?
+  sequence="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "test_restore_point_sequence")"
+  lease_owner_run="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "test_lease_owner_run")"
+  [[ -n "${lease_owner_run}" ]] || lease_owner_run="${run}"
+  if [[ -n "${sequence}" ]]; then
+    ftctl_dr_scheduler_checkpoint_lease_release_owned "${plan}" "${sequence}" "${lease_owner_run}" || lease_rc=$?
+  fi
+  if [[ "${lease_rc}" == "0" ]]; then
+    ftctl_dr_runtime_path_set "${run_path}" \
+      "checkpoint_lease_state=RELEASED" \
+      "checkpoint_lease_path=" || true
+  fi
+  if command -v ftctl_dr_scheduler_resume_after_transition >/dev/null 2>&1; then
+    ftctl_dr_scheduler_resume_after_transition "${plan}" "${run}" "test-failover-rollback" \
+      "${run_path}" "${status_path}" || resume_rc=$?
+  fi
+  command -v ftctl_dr_scheduler_transition_end >/dev/null 2>&1 && \
+    ftctl_dr_scheduler_transition_end "${plan}"
+
+  cleanup_state="FAILED"
+  if [[ "${cleanup_rc}" == "0" && "${lease_rc}" == "0" ]]; then
+    cleanup_state="CLEANED"
+    cleanup_required=false
+  fi
+  ftctl_dr_runtime_path_set "${run_path}" \
+    "state=ERROR" \
+    "step=${failed_step}" \
+    "progress=100" \
+    "accepted=false" \
+    "worker_state=FAILED" \
+    "worker_pid=$$" \
+    "worker_exit_code=${failure_rc}" \
+    "test_cleanup_state=${cleanup_state}" \
+    "cleanup_required=${cleanup_required}" \
+    "scheduler_recovery_state=$([[ "${resume_rc}" == "0" ]] && printf RUNNING || printf RECOVERY_FAILED)" \
+    "error_code=${error_code}" \
+    "updated_at=$(ftctl_now_iso8601)" || true
+  cp -f "${run_path}" "${status_path}" 2>/dev/null || true
+  chmod 0644 "${status_path}" 2>/dev/null || true
+  ftctl_log_event "dr-runtime" "dr.test.failure-finalized" \
+    "$([[ "${cleanup_required}" == "false" && "${resume_rc}" == "0" ]] && printf ok || printf fail)" "" "${error_code}" \
+    "plan=${plan} run=${run} failure_rc=${failure_rc} cleanup_rc=${cleanup_rc} lease_rc=${lease_rc} resume_rc=${resume_rc}"
+  return 0
 }
 
 ftctl_dr_runtime_materialize_test_artifacts() {
@@ -2693,7 +2751,7 @@ ftctl_dr_runtime_emit_state_json() {
   local -a completed_checkpoint_fields=()
   local test_session_id test_session_path test_session_state test_restore_point_ref test_restore_point_sequence
   local test_manifest_path test_checkpoint_path
-  local test_artifacts_state test_artifacts_path test_artifact_count
+  local test_artifacts_state test_artifacts_path test_artifact_count test_cleanup_state cleanup_required
   local failover_session_id failover_mode failover_restore_point_ref failover_restore_point_sequence
   local failover_manifest_path failover_checkpoint_path failover_requested_at restore_point_locked_at
   local target_promote_started_at target_power_on_at failover_completed_at rto_actual_seconds
@@ -3013,6 +3071,8 @@ PY
   test_artifacts_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "test_artifacts_state")"
   test_artifacts_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "test_artifacts_path")"
   test_artifact_count="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "test_artifact_count")"
+  test_cleanup_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "test_cleanup_state")"
+  cleanup_required="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "cleanup_required")"
   guest_prep_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "guest_prep_state")"
   guest_family="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "guest_family")"
   guestprep_manifest_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "guestprep_manifest_path")"
@@ -3289,6 +3349,8 @@ PY
   ftctl_dr_runtime_json_string_field "test_artifacts_state" "${test_artifacts_state}"
   ftctl_dr_runtime_json_string_field "test_artifacts_path" "${test_artifacts_path}"
   ftctl_dr_runtime_json_number_field "test_artifact_count" "${test_artifact_count}"
+  ftctl_dr_runtime_json_string_field "test_cleanup_state" "${test_cleanup_state}"
+  ftctl_dr_runtime_json_boolean_field "cleanup_required" "${cleanup_required:-false}" || return $?
   ftctl_dr_runtime_json_string_field "guest_prep_state" "${guest_prep_state}"
   ftctl_dr_runtime_json_string_field "guest_family" "${guest_family}"
   ftctl_dr_runtime_json_string_field "guestprep_manifest_path" "${guestprep_manifest_path}"
@@ -3799,6 +3861,9 @@ ftctl_dr_runtime_action() {
       fi
       ftctl_dr_runtime_prepare_test_session "${plan}" "${run}" "${profile_file}" "${restore_point}" "${run_path}" "${status_path}" || rc=$?
       if [[ "${rc}" == "0" ]]; then
+        ftctl_guestprep_preflight_test_session "$(ftctl_dr_runtime_test_session_path "${plan}" "${run}")" "${run_path}" || rc=$?
+      fi
+      if [[ "${rc}" == "0" ]]; then
         ftctl_dr_runtime_materialize_test_artifacts "${plan}" "${run}" "$(ftctl_dr_runtime_test_session_path "${plan}" "${run}")" "${run_path}" \
           "$(ftctl_dr_runtime_artifact_spec_path "${plan}" "${run}")" || rc=$?
       fi
@@ -3808,22 +3873,25 @@ ftctl_dr_runtime_action() {
         else
           ftctl_guestprep_prepare_and_start "$(ftctl_dr_runtime_test_session_path "${plan}" "${run}")" "${run_path}" || rc=$?
         fi
+      fi
+      if [[ "${rc}" == "0" ]]; then
         cp -f "$(ftctl_dr_runtime_test_session_path "${plan}" "${run}")" "$(ftctl_dr_runtime_active_test_session_path "${plan}")" 2>/dev/null || true
         test_sequence="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "test_restore_point_sequence")"
         checkpoint_lease_path="$(ftctl_dr_scheduler_checkpoint_lease_acquire "${plan}" "${test_sequence}" "${run}" "$(ftctl_dr_runtime_state_get_from_path "${run_path}" "test_restore_point_ref")")"
         ftctl_dr_runtime_path_set "${run_path}" \
           "checkpoint_lease_state=LEASED" \
           "checkpoint_lease_path=${checkpoint_lease_path}" \
+          "test_cleanup_state=PENDING" \
+          "cleanup_required=true" \
           "transition_state=TEST_ACTIVE" \
           "updated_at=$(ftctl_now_iso8601)" || true
       fi
       if [[ "${rc}" != "0" ]]; then
-        ftctl_dr_runtime_cleanup_test_session "${plan}" "${run}" "${run_path}" "${status_path}" >/dev/null 2>&1 || true
         error_code="DR_RESTORE_POINT_NOT_FOUND"
         [[ "${rc}" == "45" ]] && error_code="DR_TARGET_NOT_READY"
         [[ "${rc}" == "46" ]] && error_code="DR_TEST_MATERIALIZATION_FAILED"
         [[ "${rc}" == "47" ]] && error_code="DR_GUEST_PREP_RUNTIME_UNAVAILABLE"
-        [[ "${rc}" == "48" ]] && error_code="DR_GUEST_OS_UNSUPPORTED"
+        [[ "${rc}" == "48" ]] && error_code="DR_GUEST_OS_UNRESOLVED"
         [[ "${rc}" == "49" ]] && error_code="DR_GUEST_PREPARATION_FAILED"
         [[ "${rc}" == "50" ]] && error_code="DR_TEST_DOMAIN_DEFINE_FAILED"
         [[ "${rc}" == "51" ]] && error_code="DR_TEST_BOOT_TIMEOUT"
@@ -3833,20 +3901,10 @@ ftctl_dr_runtime_action() {
         local failed_step="test-session-restore-point-missing"
         [[ "${rc}" == "46" ]] && failed_step="test-materialization-failed"
         [[ "${rc}" -ge 47 ]] && failed_step="test-guest-preparation-failed"
-        ftctl_dr_runtime_path_set "${run_path}" \
-          "state=ERROR" \
-          "step=${failed_step}" \
-          "progress=100" \
-          "accepted=false" \
-          "error_code=${error_code}" \
-          "updated_at=$(ftctl_now_iso8601)" || true
-        cp -f "${run_path}" "${status_path}" 2>/dev/null || true
-        chmod 0644 "${status_path}" 2>/dev/null || true
+        ftctl_dr_runtime_finalize_failed_test "${plan}" "${run}" "${run_path}" "${status_path}" \
+          "${rc}" "${error_code}" "${failed_step}"
         ftctl_log_event "dr-runtime" "dr.test.failover" "fail" "" "${error_code}" \
           "plan=${plan} run=${run} restore_point=${restore_point:-} rc=${rc}"
-        command -v ftctl_dr_scheduler_resume_after_transition >/dev/null 2>&1 && \
-          ftctl_dr_scheduler_resume_after_transition "${plan}" "${run}" "test-failover-rollback" "${run_path}" "${status_path}" || true
-        command -v ftctl_dr_scheduler_transition_end >/dev/null 2>&1 && ftctl_dr_scheduler_transition_end "${plan}"
         if [[ "${json}" == "1" ]]; then
           ftctl_dr_runtime_emit_state_json "${action}" "error" "${plan}" "${run}" "${run_path}" "0"
         else
@@ -3903,7 +3961,10 @@ ftctl_dr_runtime_action() {
         return "${rc}"
       fi
       test_sequence="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "test_restore_point_sequence")"
-      [[ -n "${test_sequence}" ]] && ftctl_dr_scheduler_checkpoint_lease_release "${plan}" "${test_sequence}"
+      local test_lease_owner_run
+      test_lease_owner_run="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "test_lease_owner_run")"
+      [[ -n "${test_lease_owner_run}" ]] || test_lease_owner_run="${run}"
+      [[ -n "${test_sequence}" ]] && ftctl_dr_scheduler_checkpoint_lease_release_owned "${plan}" "${test_sequence}" "${test_lease_owner_run}"
       ftctl_dr_runtime_path_set "${run_path}" "checkpoint_lease_state=RELEASED" "checkpoint_lease_path=" || true
       if command -v ftctl_dr_scheduler_resume_after_transition >/dev/null 2>&1; then
         ftctl_dr_scheduler_resume_after_transition "${plan}" "${run}" "test-cleanup" "${run_path}" "${status_path}" || rc=$?

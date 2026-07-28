@@ -769,6 +769,16 @@ ftctl_dr_scheduler_checkpoint_lease_release() {
   rm -f "$(ftctl_dr_scheduler_checkpoint_lease_path "${plan}" "${sequence}")" 2>/dev/null || true
 }
 
+ftctl_dr_scheduler_checkpoint_lease_release_owned() {
+  local plan="${1-}" sequence="${2-}" run="${3-}" lease_path owner
+  [[ -n "${plan}" && -n "${sequence}" && -n "${run}" ]] || return 2
+  lease_path="$(ftctl_dr_scheduler_checkpoint_lease_path "${plan}" "${sequence}")"
+  [[ -f "${lease_path}" ]] || return 0
+  owner="$(ftctl_state_read_kv "${lease_path}" "run" 2>/dev/null || true)"
+  [[ "${owner}" == "${run}" ]] || return 3
+  rm -f "${lease_path}"
+}
+
 ftctl_dr_scheduler_transition_begin() {
   local plan="${1-}" run="${2-}" action="${3-}" run_path="${4-}" status_path="${5-}"
   local generation now

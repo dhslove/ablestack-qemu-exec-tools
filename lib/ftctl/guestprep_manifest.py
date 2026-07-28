@@ -352,6 +352,27 @@ def build_disks(disk_map):
     return result, storage_types.pop(), formats.pop()
 
 
+def write_manifest(manifest, output, checkpoint_sequence=0):
+    validate_manifest(manifest)
+    os.makedirs(os.path.dirname(os.path.abspath(output)), exist_ok=True)
+    encoded = json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n"
+    temporary = output + ".tmp"
+    with open(temporary, "w", encoding="utf-8") as handle:
+        handle.write(encoded)
+    os.replace(temporary, output)
+    digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    print(json.dumps({
+        "result": "ok",
+        "schemaVersion": SCHEMA_VERSION,
+        "manifest": output,
+        "sha256": digest,
+        "checkpointSequence": checkpoint_sequence,
+        "diskCount": len(arr(manifest.get("disks"))),
+        "guestFamily": nested(manifest, "source", "vm", "guestFamily"),
+        "guestId": nested(manifest, "source", "vm", "guestId"),
+    }, sort_keys=True, separators=(",", ":")))
+
+
 def build_manifest(args):
     profile = load_json(args.profile)
     disk_map = load_json(args.disk_map)
@@ -380,18 +401,114 @@ def build_manifest(args):
         },
         "disks": disks,
     }
-    validate_manifest(manifest)
-    os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
-    encoded = json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n"
-    temporary = args.output + ".tmp"
-    with open(temporary, "w", encoding="utf-8") as handle:
-        handle.write(encoded)
-    os.replace(temporary, args.output)
-    digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    write_manifest(manifest, args.output, checkpoint.get("sequence", 0))
+
+
+def build_test_disks(session):
+    artifacts = obj(session.get("testArtifacts"))
+    records = arr(artifacts.get("records"))
+    result = []
+    storage_types = set()
+    formats = set()
+    for index, record in enumerate(records):
+        if not isinstance(record, dict) or first(record.get("state")) != "CREATED":
+            continue
+        artifact_type = first(record.get("type")).lower()
+        locator = first(record.get("clone"), record.get("path"))
+        if artifact_type == "rbd-clone":
+            if not locator.startswith("rbd:"):
+                fail("DR_TARGET_DISK_LOCATOR_INVALID", f"invalid RBD test artifact: {locator}", 63)
+            storage_type, disk_format = "rbd", "raw"
+        elif artifact_type == "qcow2-overlay":
+            if not os.path.isabs(locator):
+                fail("DR_TARGET_DISK_LOCATOR_INVALID", f"invalid file test artifact: {locator}", 63)
+            storage_type, disk_format = "file", "qcow2"
+        else:
+            fail("DR_TARGET_DISK_LOCATOR_INVALID", f"unsupported test artifact type: {artifact_type}", 63)
+        size_bytes = integer(record.get("sizeBytes"), minimum=1)
+        if size_bytes <= 0:
+            fail("DR_TARGET_DISK_MAP_MISSING", f"test artifact size is unresolved: {locator}", 62)
+        device = first(record.get("device"), f"sd{chr(ord('a') + index)}")
+        result.append({
+            "disk_id": device,
+            "source_disk_key": device,
+            "device": device,
+            "boot": index == 0,
+            "size_bytes": size_bytes,
+            "controller": {"type": "VirtualSCSIController"},
+            "storage": {"type": storage_type, "format": disk_format, "locator": locator},
+            "transfer": {"target_path": locator},
+        })
+        storage_types.add(storage_type)
+        formats.add(disk_format)
+    if not result:
+        fail("DR_TARGET_DISK_MAP_MISSING", "test session contains no created artifacts", 62)
+    if len(storage_types) != 1 or len(formats) != 1:
+        fail("DR_CUTOVER_MANIFEST_INVALID", "mixed test storage type or format is not supported", 60)
+    return result, storage_types.pop(), formats.pop()
+
+
+def build_test_manifest(args):
+    session = load_json(args.session)
+    profile = obj(session.get("profile"))
+    source = source_vm(profile)
+    request = obj(session.get("request"))
+    if first(request.get("networkMode"), "ISOLATED").upper() == "ISOLATED":
+        source["nics"] = []
+    else:
+        source["nics"] = arr(nested(profile, "mapping", "source", "workload", "nics"))
+    disks, storage_type, disk_format = build_test_disks(session)
+    restore = obj(session.get("restorePoint"))
+    sequence = integer(restore.get("checkpointSequence"), minimum=0)
+    checkpoint = {
+        "ref": first(restore.get("ref"), f"ftctl:{first(session.get('planUuid'))}:{sequence}"),
+        "sequence": sequence,
+        "state": "TARGET_READY",
+        "commitState": "LOCAL_DURABLE",
+        "path": first(restore.get("checkpoint")),
+        "manifest": first(restore.get("manifest")),
+        "sourceCheckpointAt": first(restore.get("sourceCheckpointAt")),
+        "targetDurableAt": first(restore.get("targetDurableAt")),
+        "targetReadyRpoSeconds": integer(restore.get("targetReadyRpoSeconds")),
+    }
+    target_mapping = obj(nested(profile, "mapping", "target"))
+    target_hw = obj(target_mapping.get("hardware"))
+    manifest = {
+        "version": 1,
+        "schemaVersion": SCHEMA_VERSION,
+        "planUuid": first(session.get("planUuid"), profile.get("planUuid")),
+        "runUuid": first(session.get("runUuid"), profile.get("runUuid")),
+        "checkpoint": checkpoint,
+        "source": {"vm": source},
+        "target": {
+            "storage": {"type": storage_type},
+            "format": disk_format,
+            "libvirt": {"name": args.domain},
+            "rootDiskController": first(target_hw.get("rootDiskController"), "scsi"),
+            "ioPolicy": first(target_hw.get("ioPolicy"), target_mapping.get("ioPolicy"), "io_uring"),
+            "ioThreads": boolean(
+                target_hw.get("ioThreads"),
+                target_hw.get("ioThreadsEnabled"),
+                target_mapping.get("ioThreads"),
+                True,
+            ),
+        },
+        "disks": disks,
+    }
+    write_manifest(manifest, args.output, sequence)
+
+
+def inspect_command(args):
+    profile = load_json(args.profile)
+    source = source_vm(profile)
     print(json.dumps({
-        "result": "ok", "schemaVersion": SCHEMA_VERSION, "manifest": args.output,
-        "sha256": digest, "checkpointSequence": checkpoint.get("sequence", 0),
-        "diskCount": len(disks), "guestFamily": source.get("guestFamily"),
+        "result": "ok",
+        "guestFamily": source.get("guestFamily"),
+        "guestId": source.get("guestId"),
+        "firmware": source.get("firmware"),
+        "secureBoot": source.get("secure_boot"),
+        "cpu": source.get("cpu"),
+        "memoryMb": source.get("memory_mb"),
     }, sort_keys=True, separators=(",", ":")))
 
 
@@ -436,6 +553,12 @@ def parser():
     build.add_argument("--plan", default="")
     build.add_argument("--run", default="")
     build.add_argument("--output", required=True)
+    build_test = subparsers.add_parser("build-test")
+    build_test.add_argument("--session", required=True)
+    build_test.add_argument("--domain", required=True)
+    build_test.add_argument("--output", required=True)
+    inspect = subparsers.add_parser("inspect")
+    inspect.add_argument("--profile", required=True)
     validate = subparsers.add_parser("validate")
     validate.add_argument("--manifest", required=True)
     return result
@@ -446,6 +569,10 @@ def main():
     try:
         if args.command == "build":
             build_manifest(args)
+        elif args.command == "build-test":
+            build_test_manifest(args)
+        elif args.command == "inspect":
+            inspect_command(args)
         else:
             validate_command(args)
     except ManifestError as exc:

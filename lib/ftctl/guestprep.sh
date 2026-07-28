@@ -33,88 +33,54 @@ ftctl_guestprep_v2k_lib_dir() {
 
 ftctl_guestprep_write_manifest() {
   local session_path="${1-}" manifest_path="${2-}" test_domain_name="${3-}"
-  python3 - "${session_path}" "${manifest_path}" "${test_domain_name}" <<'PY'
-import json
-import os
-import sys
-
-session_path, manifest_path, test_domain_name = sys.argv[1:4]
-with open(session_path, "r", encoding="utf-8") as fh:
-    session = json.load(fh)
-
-profile = session.get("profile") if isinstance(session.get("profile"), dict) else {}
-mapping = profile.get("mapping") if isinstance(profile.get("mapping"), dict) else {}
-source_mapping = mapping.get("source") if isinstance(mapping.get("source"), dict) else {}
-target_mapping = mapping.get("target") if isinstance(mapping.get("target"), dict) else {}
-source_hw = source_mapping.get("hardware") if isinstance(source_mapping.get("hardware"), dict) else {}
-target_hw = target_mapping.get("hardware") if isinstance(target_mapping.get("hardware"), dict) else {}
-workload = source_mapping.get("workload") if isinstance(source_mapping.get("workload"), dict) else {}
-artifacts = session.get("testArtifacts") if isinstance(session.get("testArtifacts"), dict) else {}
-records = artifacts.get("records") if isinstance(artifacts.get("records"), list) else []
-request = session.get("request") if isinstance(session.get("request"), dict) else {}
-
-def first(*values):
-    for value in values:
-        if value is not None and str(value).strip() and str(value).lower() != "null":
-            return value
-    return None
-
-firmware_value = str(first(source_hw.get("firmware"), source_hw.get("bootType"), target_hw.get("bootType"), "bios"))
-secure_value = first(source_hw.get("secureBoot"), target_hw.get("bootMode") == "SECURE", False)
-guest_family = str(first(
-    workload.get("guestFamily"), workload.get("guestfamily"),
-    source_hw.get("guestFamily"), source_mapping.get("guestFamily"), ""
-))
-guest_id = str(first(workload.get("guestId"), workload.get("guestid"), source_mapping.get("guestId"), ""))
-guest_name = str(first(workload.get("name"), source_mapping.get("name"), profile.get("source", {}).get("externalRef"), test_domain_name))
-cpu = first(target_mapping.get("cpuNumber"), target_mapping.get("cpu"), source_hw.get("cpu"), 2)
-memory = first(target_mapping.get("memory"), target_mapping.get("memoryMb"), source_hw.get("memoryMb"), 2048)
-
-disks = []
-storage_type = "file"
-for index, record in enumerate(records):
-    if not isinstance(record, dict) or record.get("state") != "CREATED":
-        continue
-    artifact_type = str(record.get("type") or "")
-    path = record.get("path") or record.get("clone")
-    if artifact_type == "rbd-clone":
-        storage_type = "rbd"
-        path = record.get("clone") or path
-    if not path:
-        continue
-    disks.append({
-        "disk_id": str(record.get("device") or f"disk{index}"),
-        "size_bytes": int(record.get("sizeBytes") or 0),
-        "controller": {"type": "VirtualSCSIController"},
-        "transfer": {"target_path": str(path)},
-    })
-
-manifest = {
-    "version": 1,
-    "source": {
-        "vm": {
-            "name": guest_name,
-            "cpu": int(cpu or 2),
-            "memory_mb": int(memory or 2048),
-            "firmware": "efi" if "EFI" in firmware_value.upper() or "UEFI" in firmware_value.upper() else "bios",
-            "secure_boot": bool(secure_value is True or str(secure_value).lower() in {"true", "1", "yes", "secure"}),
-            "guestFamily": guest_family,
-            "guestId": guest_id,
-            "nics": [] if str(request.get("networkMode") or "ISOLATED").upper() == "ISOLATED" else workload.get("nics", []),
-        }
-    },
-    "target": {
-        "storage": {"type": storage_type},
-        "format": "raw" if storage_type == "rbd" else "qcow2",
-        "libvirt": {"name": test_domain_name},
-    },
-    "disks": disks,
+  local tool
+  tool="$(ftctl_guestprep_manifest_tool || true)"
+  [[ -n "${tool}" ]] || return 47
+  python3 "${tool}" build-test \
+    --session "${session_path}" \
+    --domain "${test_domain_name}" \
+    --output "${manifest_path}"
 }
-os.makedirs(os.path.dirname(manifest_path), exist_ok=True)
-with open(manifest_path, "w", encoding="utf-8") as fh:
-    json.dump(manifest, fh, sort_keys=True, separators=(",", ":"))
-    fh.write("\n")
-PY
+
+ftctl_guestprep_preflight_test_session() {
+  local session_path="${1-}" run_path="${2-}"
+  local tool profile_path inspection family guest_id firmware secure_boot v2k_dir
+  local winpe_iso virtio_iso
+  [[ -n "${session_path}" && -f "${session_path}" ]] || return 47
+  tool="$(ftctl_guestprep_manifest_tool || true)"
+  [[ -n "${tool}" ]] || return 47
+  v2k_dir="$(ftctl_guestprep_v2k_lib_dir || true)"
+  [[ -n "${v2k_dir}" ]] || return 47
+
+  profile_path="$(mktemp -t ftctl.dr.guestprep.profile.XXXXXX)"
+  jq -c '.profile // {}' "${session_path}" > "${profile_path}" 2>/dev/null || {
+    rm -f "${profile_path}"
+    return 47
+  }
+  inspection="$(python3 "${tool}" inspect --profile "${profile_path}" 2>/dev/null)" || {
+    rm -f "${profile_path}"
+    return 48
+  }
+  rm -f "${profile_path}"
+
+  family="$(jq -r '.guestFamily // empty' <<< "${inspection}" 2>/dev/null || true)"
+  guest_id="$(jq -r '.guestId // empty' <<< "${inspection}" 2>/dev/null || true)"
+  firmware="$(jq -r '.firmware // empty' <<< "${inspection}" 2>/dev/null || true)"
+  secure_boot="$(jq -r '.secureBoot // false' <<< "${inspection}" 2>/dev/null || true)"
+  [[ "${family}" == "linux" || "${family}" == "windows" ]] || return 48
+  if [[ "${family}" == "windows" ]]; then
+    winpe_iso="${FTCTL_DR_WINPE_ISO:-/usr/share/ablestack/v2k/winpe/winpe-ablestack-v2k-amd64.iso}"
+    virtio_iso="${FTCTL_DR_VIRTIO_ISO:-/usr/share/virtio-win/virtio-win.iso}"
+    [[ -r "${winpe_iso}" && -s "${winpe_iso}" ]] || return 47
+    [[ -r "${virtio_iso}" && -s "${virtio_iso}" ]] || return 47
+  fi
+  ftctl_dr_runtime_path_set "${run_path}" \
+    "guest_preflight_state=READY" \
+    "guest_family=${family}" \
+    "guest_id=${guest_id}" \
+    "guest_firmware=${firmware}" \
+    "guest_secure_boot=${secure_boot}" \
+    "updated_at=$(ftctl_now_iso8601)"
 }
 
 ftctl_guestprep_detect_family() {
