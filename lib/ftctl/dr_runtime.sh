@@ -2746,6 +2746,7 @@ ftctl_dr_runtime_emit_state_json() {
   local runtime_generation scheduler_pid_alive baseline_state reseed_reason consecutive_automatic_reseed_count
   local control_protocol_version control_generation control_ack_generation control_state cycle_state
   local scheduler_session_uuid scheduler_lease_epoch authority_sequence plan_cycle_sequence scheduler_health
+  local resume_baseline_checkpoint_sequence minimum_completed_checkpoint_sequence immediate_cycle_pending immediate_cycle_owner_run
   local replication_activity protection_state active_worker_run_uuid active_worker_pid active_worker_start_ticks
   local worker_heartbeat_at control_request_run_uuid owner_matched
   local scheduler_desired_state scheduler_service_unit scheduler_unit_active_state scheduler_unit_sub_state
@@ -2862,6 +2863,10 @@ ftctl_dr_runtime_emit_state_json() {
   scheduler_lease_epoch="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "scheduler_lease_epoch")"
   authority_sequence="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "authority_sequence")"
   plan_cycle_sequence="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "plan_cycle_sequence")"
+  resume_baseline_checkpoint_sequence="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "resume_baseline_checkpoint_sequence")"
+  minimum_completed_checkpoint_sequence="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "minimum_completed_checkpoint_sequence")"
+  immediate_cycle_pending="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "immediate_cycle_pending")"
+  immediate_cycle_owner_run="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "immediate_cycle_owner_run")"
   scheduler_health="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "scheduler_health")"
   replication_activity="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "replication_activity")"
   protection_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "protection_state")"
@@ -2923,6 +2928,10 @@ ftctl_dr_runtime_emit_state_json() {
   fi
   authority_sequence="$(ftctl_dr_scheduler_current_authority_sequence "${plan}")"
   plan_cycle_sequence="$(ftctl_state_read_kv "$(ftctl_dr_scheduler_sequence_path "${plan}")" "plan_cycle_sequence" 2>/dev/null || true)"
+  resume_baseline_checkpoint_sequence="$(ftctl_state_read_kv "$(ftctl_dr_scheduler_sequence_path "${plan}")" "resume_baseline_checkpoint_sequence" 2>/dev/null || true)"
+  minimum_completed_checkpoint_sequence="$(ftctl_state_read_kv "$(ftctl_dr_scheduler_sequence_path "${plan}")" "minimum_completed_checkpoint_sequence" 2>/dev/null || true)"
+  immediate_cycle_pending="$(ftctl_state_read_kv "$(ftctl_dr_scheduler_sequence_path "${plan}")" "immediate_cycle_pending" 2>/dev/null || true)"
+  immediate_cycle_owner_run="$(ftctl_state_read_kv "$(ftctl_dr_scheduler_sequence_path "${plan}")" "immediate_cycle_owner_run" 2>/dev/null || true)"
   control_request_run_uuid="$(ftctl_dr_scheduler_control_value "${plan}" "owner_run")"
   [[ -n "${replication_activity}" ]] || replication_activity="IDLE"
   [[ -n "${protection_state}" ]] || protection_state="${state}"
@@ -3266,6 +3275,10 @@ PY
   ftctl_dr_runtime_json_number_field "scheduler_lease_epoch" "${scheduler_lease_epoch}"
   ftctl_dr_runtime_json_number_field "authority_sequence" "${authority_sequence}"
   ftctl_dr_runtime_json_number_field "plan_cycle_sequence" "${plan_cycle_sequence}"
+  ftctl_dr_runtime_json_number_field "resume_baseline_checkpoint_sequence" "${resume_baseline_checkpoint_sequence}"
+  ftctl_dr_runtime_json_number_field "minimum_completed_checkpoint_sequence" "${minimum_completed_checkpoint_sequence}"
+  ftctl_dr_runtime_json_boolean_field "immediate_cycle_pending" "${immediate_cycle_pending}" || return $?
+  ftctl_dr_runtime_json_string_field "immediate_cycle_owner_run" "${immediate_cycle_owner_run}"
   ftctl_dr_runtime_json_string_field "scheduler_health" "${scheduler_health}"
   ftctl_dr_runtime_json_string_field "scheduler_desired_state" "${scheduler_desired_state}"
   ftctl_dr_runtime_json_string_field "scheduler_service_unit" "${scheduler_service_unit}"
@@ -4528,6 +4541,9 @@ ftctl_dr_runtime_failback_commit() {
   local plan="${1-}" run="${2-}" session_id="${3-}" checkpoint_sequence="${4-}"
   local authority_generation="${5-}" target_power_state="${6-}" source_power_state="${7-}"
   local boot_validation_state="${8-}" json="${9-0}"
+  local resume_baseline_checkpoint_sequence="${10-${checkpoint_sequence}}"
+  local minimum_completed_checkpoint_sequence="${11-}"
+  local force_immediate_cycle="${12-true}"
   local run_path status_path session_path active_path commit_path state current_session current_checkpoint now rc=0
   local commit_phase control_generation control_ack_generation
 
@@ -4536,6 +4552,14 @@ ftctl_dr_runtime_failback_commit() {
   if [[ -z "${session_id}" || ! "${checkpoint_sequence}" =~ ^[0-9]+$ || ! "${authority_generation}" =~ ^[0-9]+$ ]]; then
     [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_error_json "dr-failback-commit" "${plan}" "${run}" \
       "DR_FAILBACK_COMMIT_INVALID" "session id, checkpoint sequence, and authority generation are required" 2
+    return 2
+  fi
+  [[ "${resume_baseline_checkpoint_sequence}" =~ ^[0-9]+$ ]] || resume_baseline_checkpoint_sequence="${checkpoint_sequence}"
+  [[ "${minimum_completed_checkpoint_sequence}" =~ ^[0-9]+$ ]] \
+    || minimum_completed_checkpoint_sequence=$((resume_baseline_checkpoint_sequence + 1))
+  if (( minimum_completed_checkpoint_sequence <= resume_baseline_checkpoint_sequence )); then
+    [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_error_json "dr-failback-commit" "${plan}" "${run}" \
+      "DR_FAILBACK_RESUME_SEQUENCE_INVALID" "minimum completed checkpoint must be greater than the resume baseline" 2
     return 2
   fi
   [[ "${target_power_state}" == "POWERED_OFF" ]] || {
@@ -4611,6 +4635,10 @@ ftctl_dr_runtime_failback_commit() {
     "engine_ack_at=" \
     "failback_commit_outcome=PENDING" \
     "failback_commit_phase=AUTHORITY_COMMITTED" \
+    "resume_baseline_checkpoint_sequence=${resume_baseline_checkpoint_sequence}" \
+    "minimum_completed_checkpoint_sequence=${minimum_completed_checkpoint_sequence}" \
+    "immediate_cycle_pending=${force_immediate_cycle}" \
+    "immediate_cycle_owner_run=${run}" \
     "rollback_state=NONE" \
     "source_promote_started_at=${now}" \
     "source_power_on_at=${now}" \
@@ -4628,15 +4656,26 @@ ftctl_dr_runtime_failback_commit() {
     "source_promotion_state=PROMOTED" "boot_validation_state=${boot_validation_state}" \
     "cloud_authority_generation=${authority_generation}" "engine_ack_state=PENDING" \
     "engine_ack_at=" "failback_commit_outcome=PENDING" \
-    "failback_commit_phase=AUTHORITY_COMMITTED" "scheduler_state=STARTING" \
+    "failback_commit_phase=AUTHORITY_COMMITTED" \
+    "resume_baseline_checkpoint_sequence=${resume_baseline_checkpoint_sequence}" \
+    "minimum_completed_checkpoint_sequence=${minimum_completed_checkpoint_sequence}" \
+    "immediate_cycle_pending=${force_immediate_cycle}" \
+    "immediate_cycle_owner_run=${run}" "scheduler_state=STARTING" \
     "retryable=false" "error_code=" "error_message=" "updated_at=${now}" || return 2
   ftctl_state_write_kv_all "${commit_path}" \
     "version=1" "plan=${plan}" "run=${run}" "session_id=${session_id}" \
     "checkpoint_sequence=${checkpoint_sequence}" "authority_generation=${authority_generation}" \
     "phase=AUTHORITY_COMMITTED" "outcome=PENDING" \
+    "resume_baseline_checkpoint_sequence=${resume_baseline_checkpoint_sequence}" \
+    "minimum_completed_checkpoint_sequence=${minimum_completed_checkpoint_sequence}" \
+    "immediate_cycle_pending=${force_immediate_cycle}" \
     "source_power_state=${source_power_state}" "target_power_state=${target_power_state}" \
     "updated_at=$(ftctl_now_iso8601)" || return 2
-  if command -v ftctl_dr_scheduler_resume_after_transition >/dev/null 2>&1; then
+  if [[ "${force_immediate_cycle}" == "true" || "${force_immediate_cycle}" == "1" ]]; then
+    ftctl_dr_scheduler_seed_resume_checkpoint "${plan}" \
+      "${resume_baseline_checkpoint_sequence}" "${minimum_completed_checkpoint_sequence}" "${run}" || rc=$?
+  fi
+  if [[ "${rc}" == "0" ]] && command -v ftctl_dr_scheduler_resume_after_transition >/dev/null 2>&1; then
     ftctl_dr_scheduler_resume_after_transition "${plan}" "${run}" "failback-commit" "${run_path}" "${status_path}" || rc=$?
   fi
   now="$(ftctl_now_iso8601)"
@@ -4647,6 +4686,9 @@ ftctl_dr_runtime_failback_commit() {
   ftctl_state_write_kv_all "${commit_path}" \
     "version=2" "plan=${plan}" "run=${run}" "session_id=${session_id}" \
     "checkpoint_sequence=${checkpoint_sequence}" "authority_generation=${authority_generation}" \
+    "resume_baseline_checkpoint_sequence=${resume_baseline_checkpoint_sequence}" \
+    "minimum_completed_checkpoint_sequence=${minimum_completed_checkpoint_sequence}" \
+    "immediate_cycle_pending=${force_immediate_cycle}" \
     "phase=SCHEDULER_RESUMING" "outcome=$([[ "${rc}" == "0" ]] && printf PENDING || printf UNKNOWN)" \
     "control_generation=${control_generation}" "control_ack_generation=${control_ack_generation}" \
     "source_power_state=${source_power_state}" "target_power_state=${target_power_state}" \

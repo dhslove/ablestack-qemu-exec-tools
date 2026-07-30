@@ -54,6 +54,28 @@ ftctl_state_write_kv_all() {
   chmod 0644 "${path}" 2>/dev/null || true
 }
 
+ftctl_state_set_path() {
+  local path="${1-}"
+  local tmp key value
+  shift
+  [[ -n "${path}" ]] || return 1
+  mkdir -p "$(dirname "${path}")" 2>/dev/null || true
+  tmp="$(mktemp -t ftctl.state.set.XXXXXX)"
+  [[ -f "${path}" ]] && cp -f "${path}" "${tmp}"
+  while (($#)); do
+    key="${1%%=*}"
+    value="${1#*=}"
+    if grep -q "^${key}=" "${tmp}" 2>/dev/null; then
+      sed -i "s#^${key}=.*#${key}=${value}#" "${tmp}"
+    else
+      printf "%s=%s\n" "${key}" "${value}" >> "${tmp}"
+    fi
+    shift
+  done
+  mv -f "${tmp}" "${path}"
+  chmod 0644 "${path}" 2>/dev/null || true
+}
+
 ftctl_state_write_json_file() {
   local path="${1-}"
   local json="${2-}"
@@ -101,24 +123,11 @@ ftctl_state_init_vm() {
 
 ftctl_state_set() {
   local vm="${1-}"
-  local path tmp key value
+  local path
   shift
   path="$(ftctl_state_path "${vm}")"
   [[ -f "${path}" ]] || ftctl_state_init_vm "${vm}"
-  tmp="$(mktemp -t ftctl.state.set.XXXXXX)"
-  cp -f "${path}" "${tmp}"
-  while (($#)); do
-    key="${1%%=*}"
-    value="${1#*=}"
-    if grep -q "^${key}=" "${tmp}"; then
-      sed -i "s#^${key}=.*#${key}=${value}#" "${tmp}"
-    else
-      printf "%s=%s\n" "${key}" "${value}" >> "${tmp}"
-    fi
-    shift
-  done
-  mv -f "${tmp}" "${path}"
-  chmod 0644 "${path}" 2>/dev/null || true
+  ftctl_state_set_path "${path}" "$@"
 }
 
 ftctl_state_get() {

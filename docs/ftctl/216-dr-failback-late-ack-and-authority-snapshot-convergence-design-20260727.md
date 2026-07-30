@@ -387,3 +387,44 @@ selftest_case_dr_runtime_state_snapshot_consistency
 
 배포 후에는 설치된 호스트 스크립트에서 위 capability와 late-ACK reconcile 함수를 확인하고,
 Cloud의 `PLAN_AUTHORITY` 조회가 최신 post-failback checkpoint를 반환하는지 검증한다.
+
+## 17. 배포 및 실환경 검증 결과 (2026-07-27)
+
+- 소스 커밋: `99f7b0c` (`fix: reconcile failback late acknowledgements`)
+- GitHub Actions run: `30237953593`
+- 배포 RPM: `ablestack_vm_ftctl-0.9.1-1.noarch`
+- RPM SHA256:
+  `e4f3ce07ad540034753d3fb46228b27abc1e45ed8458cd43b5072b1a9e98c68d`
+- `10.10.32.1`, `10.10.32.2`, `10.10.32.3`에 동일 RPM을 배포했고,
+  FTCTL timer와 Mold Agent가 모두 active임을 확인했다.
+- 설치된 스크립트에서 `ftctl_dr_runtime_reconcile_failback_commit`과
+  `ftctl_dr_scheduler_sleep_or_stop` 함수가 확인되었다.
+- 대상 Plan `2514a846-64a2-4bc7-ba88-38a874410782`의 지연 ACK를
+  `dr-failback-commit-status`로 재검증한 결과, commit journal version 2가
+  `ACKNOWLEDGED`로 수렴했다.
+- 요청 generation과 ACK generation은 모두 `21`, ACK owner는 failback Run
+  `77ee629a-bc8a-44b2-b05b-cf24b4696d32`로 일치했다.
+- failback 기준 checkpoint `440` 이후 checkpoint `478` 이상이 확인됐고,
+  스케줄러 재기동 후에도 `RUNNING/HEALTHY`로 복구됐다.
+- 재기동 후 첫 증분 주기에서 checkpoint `481`,
+  `effective_mode=CBT_INCREMENTAL`, `changed_bytes=1048576`이 확인됐다.
+
+## 18. Cloud Current Authority Projection Boundary - 2026-07-28
+
+후속 검증에서 FTCTL은 Failback 뒤 `SOURCE`, scheduler `RUNNING`,
+generation/ACK `27/27`, post-failback incremental checkpoint `585`를 정상
+제공했다. 남은 문제는 Cloud가 과거 `PROMOTED` cutover session을 현재
+권한으로 표시한 control-plane projection 결함이다.
+
+FTCTL은 Cloud session history나 UI action eligibility를 관리하지 않는다.
+이번 보정은 신규 FTCTL command나 state field 없이 Cloud의 current/history
+조회 경계를 수정한다. 세부 경계는
+`217-dr-cloud-current-authority-projection-boundary-design-20260728.md`와
+Cloud 문서 578을 따른다.
+## 19. 2026-07-30 Post-Commit Sequence Handoff Amendment
+
+late ACK 수렴만으로는 첫 원본 방향 checkpoint의 단조 증가를 보장하지 않는다.
+Failback reverse-final checkpoint `N`을 scheduler의 Plan sequence baseline으로
+원자 인계하고, 첫 resumed cycle을 `N+1` 이상으로 즉시 실행한다. operation ACK와
+`PLAN_AUTHORITY` checkpoint의 소유권은 계속 분리한다. 상세 FTCTL 함수, 상태 파일,
+idempotency 및 self-test 계약은 문서 219를 따른다.

@@ -8219,6 +8219,9 @@ EOF
   selftest_assert_file_contains "${active_path}" '"activeSide":"SOURCE"'
   selftest_assert_file_contains "${plan_dir}/failbacks/run-failback.commit.state" "phase=ACKNOWLEDGED"
   selftest_assert_file_contains "${plan_dir}/failbacks/run-failback.commit.state" "control_generation=11"
+  selftest_assert_file_contains "$(ftctl_dr_scheduler_sequence_path "${plan}")" "resume_baseline_checkpoint_sequence=4"
+  selftest_assert_file_contains "$(ftctl_dr_scheduler_sequence_path "${plan}")" "minimum_completed_checkpoint_sequence=5"
+  selftest_assert_file_contains "$(ftctl_dr_scheduler_sequence_path "${plan}")" "immediate_cycle_pending=true"
   selftest_assert_file_contains "${status_path}" "latest_completed_checkpoint_sequence=3"
   selftest_assert_file_contains "${status_path}" "latest_completed_baseline_generation=3"
 

@@ -340,6 +340,13 @@ ftctl_dr_scheduler_current_authority_sequence() {
   printf '%s\n' "${sequence}"
 }
 
+ftctl_dr_scheduler_current_plan_sequence() {
+  local plan="${1-}" sequence
+  sequence="$(ftctl_state_read_kv "$(ftctl_dr_scheduler_sequence_path "${plan}")" "plan_cycle_sequence" 2>/dev/null || true)"
+  [[ "${sequence}" =~ ^[0-9]+$ ]] || sequence=0
+  printf '%s\n' "${sequence}"
+}
+
 ftctl_dr_scheduler_next_authority_sequence() {
   local plan="${1-}" sequence_path cycle_sequence authority_sequence
   sequence_path="$(ftctl_dr_scheduler_sequence_path "${plan}")"
@@ -348,7 +355,7 @@ ftctl_dr_scheduler_next_authority_sequence() {
   authority_sequence="$(ftctl_dr_scheduler_current_authority_sequence "${plan}")"
   [[ "${cycle_sequence}" =~ ^[0-9]+$ ]] || cycle_sequence=0
   authority_sequence=$((authority_sequence + 1))
-  ftctl_state_write_kv_all "${sequence_path}" \
+  ftctl_state_set_path "${sequence_path}" \
     "plan_cycle_sequence=${cycle_sequence}" \
     "authority_sequence=${authority_sequence}"
   printf '%s\n' "${authority_sequence}"
@@ -360,10 +367,42 @@ ftctl_dr_scheduler_record_plan_sequence() {
   ftctl_ensure_dir "$(dirname "${sequence_path}")" "0755"
   authority_sequence="$(ftctl_dr_scheduler_current_authority_sequence "${plan}")"
   authority_sequence=$((authority_sequence + 1))
-  ftctl_state_write_kv_all "${sequence_path}" \
+  ftctl_state_set_path "${sequence_path}" \
     "plan_cycle_sequence=${cycle_sequence}" \
     "authority_sequence=${authority_sequence}"
   printf '%s\n' "${authority_sequence}"
+}
+
+ftctl_dr_scheduler_seed_resume_checkpoint() {
+  local plan="${1-}" baseline="${2-}" minimum="${3-}" owner_run="${4-}"
+  local sequence_path current authority_sequence
+  [[ "${baseline}" =~ ^[0-9]+$ && "${minimum}" =~ ^[0-9]+$ ]] || return 2
+  (( minimum > baseline )) || return 2
+  sequence_path="$(ftctl_dr_scheduler_sequence_path "${plan}")"
+  current="$(ftctl_dr_scheduler_current_plan_sequence "${plan}")"
+  (( current >= baseline )) || current="${baseline}"
+  authority_sequence="$(ftctl_dr_scheduler_current_authority_sequence "${plan}")"
+  ftctl_state_set_path "${sequence_path}" \
+    "plan_cycle_sequence=${current}" \
+    "authority_sequence=${authority_sequence}" \
+    "resume_baseline_checkpoint_sequence=${baseline}" \
+    "minimum_completed_checkpoint_sequence=${minimum}" \
+    "immediate_cycle_pending=true" \
+    "immediate_cycle_owner_run=${owner_run}" \
+    "resume_checkpoint_seeded_at=$(ftctl_now_iso8601)"
+}
+
+ftctl_dr_scheduler_mark_resume_checkpoint_completed() {
+  local plan="${1-}" completed="${2-}" sequence_path minimum pending
+  sequence_path="$(ftctl_dr_scheduler_sequence_path "${plan}")"
+  minimum="$(ftctl_state_read_kv "${sequence_path}" "minimum_completed_checkpoint_sequence" 2>/dev/null || true)"
+  pending="$(ftctl_state_read_kv "${sequence_path}" "immediate_cycle_pending" 2>/dev/null || true)"
+  [[ "${pending}" == "true" && "${minimum}" =~ ^[0-9]+$ && "${completed}" =~ ^[0-9]+$ ]] || return 0
+  (( completed >= minimum )) || return 0
+  ftctl_state_set_path "${sequence_path}" \
+    "immediate_cycle_pending=false" \
+    "resume_checkpoint_completed_sequence=${completed}" \
+    "resume_checkpoint_completed_at=$(ftctl_now_iso8601)"
 }
 
 ftctl_dr_scheduler_write_heartbeat() {
@@ -1107,6 +1146,9 @@ ftctl_dr_scheduler_worker() {
   restore_points_path="$(ftctl_dr_scheduler_restore_points_path "${plan}")"
   sequence="$(ftctl_dr_scheduler_last_sequence "${restore_points_path}" "${plan}" "${run}" || printf '0')"
   [[ "${sequence}" =~ ^[0-9]+$ ]] || sequence=0
+  local persisted_sequence
+  persisted_sequence="$(ftctl_dr_scheduler_current_plan_sequence "${plan}")"
+  (( sequence >= persisted_sequence )) || sequence="${persisted_sequence}"
   interval="$(ftctl_dr_scheduler_interval "${profile_file}")"
   max_cycles="$(ftctl_dr_scheduler_max_cycles "${profile_file}")"
   source_provider="$(ftctl_dr_scheduler_profile_provider "${profile_file}" source)"
@@ -1216,6 +1258,8 @@ ftctl_dr_scheduler_worker() {
       "cycle_state=IDLE" \
       "updated_at=$(ftctl_now_iso8601)" || true
 
+    persisted_sequence="$(ftctl_dr_scheduler_current_plan_sequence "${plan}")"
+    (( sequence >= persisted_sequence )) || sequence="${persisted_sequence}"
     sequence=$((sequence + 1))
     authority_sequence="$(ftctl_dr_scheduler_record_plan_sequence "${plan}" "${sequence}")"
     cycle_type="$(ftctl_dr_scheduler_cycle_type "${sequence}" "${source_provider}" "${state_path}")"
@@ -1409,6 +1453,7 @@ ftctl_dr_scheduler_worker() {
     nbd_teardown_error_code="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "nbdTeardownErrorCode" || true)"
     nbd_teardown_error_message="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "nbdTeardownErrorMessage" || true)"
     ftctl_dr_scheduler_append_restore_point "${restore_points_path}" "${plan}" "${run}" "${sequence}" "${cycle_type}" "${driver}" "${manifest_path}" "${checkpoint_path}" || return $?
+    ftctl_dr_scheduler_mark_resume_checkpoint_completed "${plan}" "${sequence}" || true
     now="$(ftctl_now_iso8601)"
     authority_sequence="$(ftctl_dr_scheduler_next_authority_sequence "${plan}")"
     ftctl_dr_scheduler_update_state "${state_path}" "${status_path}" \

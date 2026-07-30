@@ -105,6 +105,9 @@ CLI_TARGET_READY_RPO_SECONDS=""
 CLI_CUTOVER_SESSION_ID=""
 CLI_CHECKPOINT_SEQUENCE=""
 CLI_AUTHORITY_GENERATION=""
+CLI_RESUME_BASELINE_CHECKPOINT_SEQUENCE=""
+CLI_MINIMUM_COMPLETED_CHECKPOINT_SEQUENCE=""
+CLI_FORCE_IMMEDIATE_CYCLE="false"
 CLI_TARGET_POWER_STATE=""
 CLI_SOURCE_POWER_STATE=""
 CLI_BOOT_VALIDATION_STATE=""
@@ -315,6 +318,12 @@ Global options:
                      Durable checkpoint used for target promotion
       --authority-generation N
                      Monotonic Cloud promotion generation
+      --resume-baseline-checkpoint-sequence N
+                     Last durable sequence before source protection resumes
+      --minimum-completed-checkpoint-sequence N
+                     First sequence that must complete after failback
+      --force-immediate-cycle
+                     Start the required post-failback replication cycle immediately
       --target-power-state STATE
       --source-power-state STATE
       --boot-validation-state STATE
@@ -633,6 +642,18 @@ parse_args() {
         CLI_AUTHORITY_GENERATION="${2-}"
         shift 2
         ;;
+      --resume-baseline-checkpoint-sequence)
+        CLI_RESUME_BASELINE_CHECKPOINT_SEQUENCE="${2-}"
+        shift 2
+        ;;
+      --minimum-completed-checkpoint-sequence)
+        CLI_MINIMUM_COMPLETED_CHECKPOINT_SEQUENCE="${2-}"
+        shift 2
+        ;;
+      --force-immediate-cycle)
+        CLI_FORCE_IMMEDIATE_CYCLE="true"
+        shift
+        ;;
       --target-power-state)
         CLI_TARGET_POWER_STATE="${2-}"
         shift 2
@@ -771,7 +792,9 @@ dispatch() {
     dr-failback-commit)
       ftctl_dr_runtime_failback_commit "${CLI_PLAN}" "${CLI_RUN}" "${CLI_CUTOVER_SESSION_ID}" \
         "${CLI_CHECKPOINT_SEQUENCE}" "${CLI_AUTHORITY_GENERATION}" "${CLI_TARGET_POWER_STATE}" \
-        "${CLI_SOURCE_POWER_STATE}" "${CLI_BOOT_VALIDATION_STATE}" "${CLI_JSON}"
+        "${CLI_SOURCE_POWER_STATE}" "${CLI_BOOT_VALIDATION_STATE}" "${CLI_JSON}" \
+        "${CLI_RESUME_BASELINE_CHECKPOINT_SEQUENCE}" "${CLI_MINIMUM_COMPLETED_CHECKPOINT_SEQUENCE}" \
+        "${CLI_FORCE_IMMEDIATE_CYCLE}"
       ;;
     dr-failback-commit-status)
       ftctl_dr_runtime_failback_commit_status "${CLI_PLAN}" "${CLI_RUN}" "${CLI_CUTOVER_SESSION_ID}" "${CLI_JSON}"
