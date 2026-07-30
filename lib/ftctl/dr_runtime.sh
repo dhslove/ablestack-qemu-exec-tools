@@ -736,6 +736,31 @@ ftctl_dr_runtime_path_set() {
   sync -f "${dir}" 2>/dev/null || true
 }
 
+ftctl_dr_runtime_publish_status() {
+  local run_path="${1-}" status_path="${2-}"
+  [[ -n "${run_path}" && -f "${run_path}" && -n "${status_path}" ]] || return 1
+  ftctl_dr_runtime_atomic_copy "${run_path}" "${status_path}" "0644"
+}
+
+ftctl_dr_runtime_apply_target_authority_terminal_state() {
+  local state_path="${1-}" now="${2-$(ftctl_now_iso8601)}"
+  [[ -n "${state_path}" && -f "${state_path}" ]] || return 1
+  ftctl_dr_runtime_path_set "${state_path}" \
+    "scheduler_state=STOPPED" \
+    "scheduler_desired_state=STOPPED" \
+    "scheduler_health=SUPPRESSED" \
+    "scheduler_recovery_state=SUPPRESSED" \
+    "replication_activity=STOPPED" \
+    "scheduler_pid_alive=false" \
+    "owner_matched=false" \
+    "active_worker_run_uuid=" \
+    "active_worker_pid=" \
+    "active_worker_start_ticks=" \
+    "worker_heartbeat_at=" \
+    "control_state=STOPPED" \
+    "updated_at=${now}"
+}
+
 ftctl_dr_runtime_record_lock_conflict() {
   local lock_file="${1-}" command_name="${2-}" holder_pid="${3-}" holder_command="${4-}" holder_age="${5-}" exit_code="${6-20}"
   local plan="${CLI_PLAN:-}" run="${CLI_RUN:-}" run_path status_path now
@@ -758,8 +783,7 @@ ftctl_dr_runtime_record_lock_conflict() {
     "holder_age_sec=${holder_age}" \
     "error_code=DR_ENGINE_BUSY_RETRYABLE" \
     "updated_at=${now}" || true
-  cp -f "${run_path}" "${status_path}" 2>/dev/null || true
-  chmod 0644 "${status_path}" 2>/dev/null || true
+  ftctl_dr_runtime_publish_status "${run_path}" "${status_path}" 2>/dev/null || true
 }
 
 ftctl_dr_runtime_json_string_field() {
@@ -2037,8 +2061,8 @@ PY
     "restore_points_path=${restore_points_path}" \
     "error_code=" \
     "updated_at=${failover_completed_at}"
-  cp -f "${run_path}" "${status_path}" 2>/dev/null || true
-  chmod 0644 "${status_path}" 2>/dev/null || true
+  ftctl_dr_runtime_apply_target_authority_terminal_state "${run_path}" "${failover_completed_at}" || return 2
+  ftctl_dr_runtime_publish_status "${run_path}" "${status_path}" || return 2
 }
 
 ftctl_dr_runtime_failover_worker() {
@@ -4299,8 +4323,8 @@ ftctl_dr_runtime_cutover_commit() {
     "error_code=" \
     "error_message=" \
     "updated_at=${now}" || return 2
-  cp -f "${run_path}" "${status_path}"
-  chmod 0644 "${status_path}" 2>/dev/null || true
+  ftctl_dr_runtime_apply_target_authority_terminal_state "${run_path}" "${now}" || return 2
+  ftctl_dr_runtime_publish_status "${run_path}" "${status_path}" || return 2
 
   if [[ -f "${session_path}" ]]; then
     python3 - "${session_path}" "${active_path}" "${authority_generation}" "${boot_validation_state}" "${now}" <<'PY' || return 2
@@ -4738,7 +4762,8 @@ ftctl_dr_runtime_failback_abort() {
     "scheduler_state=STOPPED" "scheduler_desired_state=STOPPED" \
     "error_code=" "error_message=" "failed_component=" \
     "accepted=false" "retryable=false" "updated_at=${now}" || return 2
-  cp -f "${run_path}" "${status_path}" || return 2
+  ftctl_dr_runtime_apply_target_authority_terminal_state "${run_path}" "${now}" || return 2
+  ftctl_dr_runtime_publish_status "${run_path}" "${status_path}" || return 2
   ftctl_log_event "dr-runtime" "dr.failback.abort" "warn" "" "" \
     "plan=${plan} run=${run} session=${session_id} generation=${generation}"
   [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_state_json "dr-failback-abort" "ok" "${plan}" "${run}" "${run_path}" "0"
