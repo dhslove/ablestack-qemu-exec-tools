@@ -4906,6 +4906,57 @@ ftctl_dr_runtime_failover_abort() {
   [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_state_json "dr-failover-abort" "ok" "${plan}" "${run}" "${run_path}" "0"
 }
 
+ftctl_dr_runtime_transition_preflight() {
+  local plan="${1-}" operation="${2-}" expected_authority="${3-TARGET}"
+  local expected_generation="${4-}" json="${5-0}"
+  local status_path active_side authority_generation target_power_state source_fence_state source_power_state
+  local ready="true" error_code="" message=""
+
+  ftctl_dr_runtime_require_plan "${plan}" || return 2
+  operation="${operation,,}"
+  expected_authority="${expected_authority^^}"
+  if [[ "${operation}" != "failback" && "${operation}" != "reprotect" ]]; then
+    error_code="DR_TRANSITION_PREFLIGHT_OPERATION_INVALID"
+    message="operation must be failback or reprotect"
+  elif [[ "${expected_authority}" != "TARGET" ]]; then
+    error_code="DR_TRANSITION_PREFLIGHT_AUTHORITY_INVALID"
+    message="transition preflight requires TARGET authority"
+  fi
+
+  status_path="$(ftctl_dr_runtime_status_path "${plan}")"
+  if [[ -z "${error_code}" && ! -f "${status_path}" ]]; then
+    error_code="DR_TRANSITION_PREFLIGHT_STATE_MISSING"
+    message="FTCTL plan authority state is missing"
+  fi
+  if [[ -z "${error_code}" ]]; then
+    active_side="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "active_side")"
+    authority_generation="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "cloud_authority_generation")"
+    target_power_state="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "target_power_state")"
+    source_fence_state="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "source_fence_state")"
+    source_power_state="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "source_power_state")"
+    if [[ "${active_side^^}" != "${expected_authority}" ]]; then
+      error_code="DR_TRANSITION_PREFLIGHT_AUTHORITY_MISMATCH"
+      message="FTCTL authority does not match the Cloud transition authority"
+    elif [[ -n "${expected_generation}" && "${authority_generation}" != "${expected_generation}" ]]; then
+      error_code="DR_TRANSITION_PREFLIGHT_GENERATION_MISMATCH"
+      message="FTCTL authority generation does not match the committed Cloud generation"
+    elif [[ "${target_power_state^^}" != "POWERED_ON" ]]; then
+      error_code="DR_TRANSITION_PREFLIGHT_TARGET_NOT_SERVING"
+      message="FTCTL target authority is not recorded as powered on"
+    fi
+  fi
+
+  [[ -z "${error_code}" ]] || ready="false"
+  if [[ "${json}" == "1" ]]; then
+    printf '{"command":"dr-transition-preflight","result":"%s","ready":%s,"plan_uuid":"%s","operation":"%s","expected_authority":"%s","active_side":"%s","expected_generation":%s,"authority_generation":%s,"target_power_state":"%s","source_fence_state":"%s","source_power_state":"%s","error_code":"%s","message":"%s","exit_code":%s}\n' "$( [[ "${ready}" == "true" ]] && printf ok || printf error )" "${ready}" "$(ftctl__json_escape "${plan}")" "$(ftctl__json_escape "${operation}")" "$(ftctl__json_escape "${expected_authority}")" "$(ftctl__json_escape "${active_side}")" "${expected_generation:-null}" "${authority_generation:-null}" "$(ftctl__json_escape "${target_power_state}")" "$(ftctl__json_escape "${source_fence_state}")" "$(ftctl__json_escape "${source_power_state}")" "$(ftctl__json_escape "${error_code}")" "$(ftctl__json_escape "${message}")" "$( [[ "${ready}" == "true" ]] && printf 0 || printf 79 )"
+  elif [[ "${ready}" == "true" ]]; then
+    printf 'DR transition preflight ready: plan=%s operation=%s authority=%s generation=%s\n' "${plan}" "${operation}" "${active_side}" "${authority_generation}"
+  else
+    printf 'ERROR: %s: %s\n' "${error_code}" "${message}" >&2
+  fi
+  [[ "${ready}" == "true" ]]
+}
+
 ftctl_dr_runtime_capabilities() {
   local json="${1-0}" version="${PROG_VERSION:-unknown}"
   local schema="20260727" action_contract="2026-07-27"
@@ -4930,6 +4981,7 @@ ftctl_dr_runtime_capabilities() {
     "dr-failback-abort"
     "dr-release"
     "dr-status"
+    "dr-transition-preflight"
     "dr-reconcile"
     "dr-cancel"
   )
@@ -4943,7 +4995,7 @@ ftctl_dr_runtime_capabilities() {
       first="0"
       printf '"%s"' "$(ftctl__json_escape "${command}")"
     done
-    printf '],"supported_features":["async-run","status-projection","status-scope-v2","target-materialized-notify","target-materialized-idempotent","hardware-contract-projection","control-protocol-v2","control-protocol-v3","control-protocol-v4","dr-scheduler-singleton-v1","dr-scheduler-self-owner-repair-v1","dr-scheduler-systemd-unit-v1","dr-sync-recover-v1","dr-local-reconcile-fence-v1","dr-checkpoint-producer-v1","dr-nbd-deterministic-drain-v1","dr-nbd-cleanup-recovery-v1","dr-plan-authority-snapshot-v1","dr-failover-authority-snapshot-v1","dr-completed-cycle-evidence-v2","dr-failover-abort-v1","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","guest-preparation-v1","guest-preparation-v2","test-domain-lifecycle-v1","test-artifact-lifecycle-v2","cloud-managed-test-vm-v1","cutover-ready-v1","cutover-manifest-v2","cutover-preflight-v1","cloud-cutover-commit-v1","cloud-failback-lifecycle-v1","dr-failback-commit-journal-v1","dr-failback-commit-journal-v2","dr-failback-late-ack-reconcile-v1","dr-failback-rollback-fence-v1"]}\n'
+    printf '],"supported_features":["async-run","status-projection","status-scope-v2","target-materialized-notify","target-materialized-idempotent","hardware-contract-projection","control-protocol-v2","control-protocol-v3","control-protocol-v4","dr-scheduler-singleton-v1","dr-scheduler-self-owner-repair-v1","dr-scheduler-systemd-unit-v1","dr-sync-recover-v1","dr-local-reconcile-fence-v1","dr-checkpoint-producer-v1","dr-nbd-deterministic-drain-v1","dr-nbd-cleanup-recovery-v1","dr-plan-authority-snapshot-v1","dr-failover-authority-snapshot-v1","dr-completed-cycle-evidence-v2","dr-failover-abort-v1","dr-transition-preflight-v1","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","guest-preparation-v1","guest-preparation-v2","test-domain-lifecycle-v1","test-artifact-lifecycle-v2","cloud-managed-test-vm-v1","cutover-ready-v1","cutover-manifest-v2","cutover-preflight-v1","cloud-cutover-commit-v1","cloud-failback-lifecycle-v1","dr-failback-commit-journal-v1","dr-failback-commit-journal-v2","dr-failback-late-ack-reconcile-v1","dr-failback-rollback-fence-v1"]}\n'
     return 0
   fi
 

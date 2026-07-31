@@ -9187,6 +9187,30 @@ selftest_case_dr_full_resync_request_is_one_shot() {
     "completed request mode"
 }
 
+selftest_case_dr_transition_preflight_is_read_only() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR transition preflight is typed and read-only"
+
+  local plan="plan-transition-preflight"
+  local status_path before_sha after_sha out rc=0
+  ftctl_dr_runtime_ensure_plan_dirs "${plan}"
+  status_path="$(ftctl_dr_runtime_status_path "${plan}")"
+  ftctl_dr_runtime_write_state "${status_path}" "${plan}" "" "dr-status" "FAILED_OVER" "cloud-promotion-committed" "100" "" ""
+  ftctl_dr_runtime_path_set "${status_path}" "active_side=TARGET" "cloud_authority_generation=7" "target_power_state=POWERED_ON" "source_fence_state=ACKNOWLEDGED" "source_power_state=POWERED_OFF"
+  before_sha="$(sha256sum "${status_path}" | awk '{print $1}')"
+
+  out="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-transition-preflight --config "${SELFTEST_CONFIG}" --plan "${plan}" --operation failback --expected-authority TARGET --authority-generation 7 --json)"
+  selftest_assert_contains "${out}" '"command":"dr-transition-preflight"' "transition preflight command"
+  selftest_assert_contains "${out}" '"ready":true' "transition preflight ready"
+  selftest_assert_contains "${out}" '"authority_generation":7' "transition preflight generation"
+  after_sha="$(sha256sum "${status_path}" | awk '{print $1}')"
+  selftest_assert_eq "${after_sha}" "${before_sha}" "transition preflight does not mutate status"
+
+  out="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-transition-preflight --config "${SELFTEST_CONFIG}" --plan "${plan}" --operation reprotect --expected-authority TARGET --authority-generation 8 --json 2>/dev/null)" || rc=$?
+  selftest_assert_eq "${rc}" "1" "generation mismatch exit"
+  selftest_assert_contains "${out}" '"error_code":"DR_TRANSITION_PREFLIGHT_GENERATION_MISMATCH"' "generation mismatch is typed"
+}
+
 selftest_main() {
   selftest_run_lint
   selftest_case_cluster_cli
@@ -9328,6 +9352,7 @@ selftest_main() {
   selftest_case_dr_runtime_failover_abort_resumes_source_protection
   selftest_case_dr_scheduler_resume_accepts_live_worker_pending_ack
   selftest_case_dr_runtime_failback_restores_source_after_reverse_checkpoint
+  selftest_case_dr_transition_preflight_is_read_only
   selftest_case_dr_scheduler_wait_is_interrupted_by_new_generation
   selftest_case_dr_runtime_reprotect_starts_reverse_protection_checkpoint
   selftest_case_dr_scheduler_vmware_requires_mover

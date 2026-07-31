@@ -25,7 +25,7 @@ _ablestack_vm_ftctl()
     protect status reconcile failover failover-prepare failback failback-sync failback-reprotect unprotect fence-confirm fence-clear
     pause-protection resume-protection check health
     dr-plan-apply dr-sync-start dr-sync-pause dr-sync-resume dr-test-failover dr-test-cleanup
-    dr-failover dr-failback dr-reprotect dr-target-materialized dr-cutover-commit dr-release dr-status dr-capabilities dr-cancel
+    dr-failover dr-failback dr-reprotect dr-target-materialized dr-cutover-commit dr-release dr-status dr-transition-preflight dr-capabilities dr-cancel
     config
   )
 
@@ -147,6 +147,9 @@ _ablestack_vm_ftctl()
       ;;
     dr-status)
       COMPREPLY=( $(compgen -W "--plan --run --events-offset --events-limit --json --config --policy" -- "${cur}") )
+      ;;
+    dr-transition-preflight)
+      COMPREPLY=( $(compgen -W "--plan --operation --expected-authority --authority-generation --json --config --policy" -- "${cur}") )
       ;;
     dr-capabilities)
       COMPREPLY=( $(compgen -W "--json --config --policy" -- "${cur}") )

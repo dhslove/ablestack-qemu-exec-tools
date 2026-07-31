@@ -105,6 +105,8 @@ CLI_TARGET_READY_RPO_SECONDS=""
 CLI_CUTOVER_SESSION_ID=""
 CLI_CHECKPOINT_SEQUENCE=""
 CLI_AUTHORITY_GENERATION=""
+CLI_OPERATION=""
+CLI_EXPECTED_AUTHORITY=""
 CLI_RESUME_BASELINE_CHECKPOINT_SEQUENCE=""
 CLI_MINIMUM_COMPLETED_CHECKPOINT_SEQUENCE=""
 CLI_FORCE_IMMEDIATE_CYCLE="false"
@@ -268,6 +270,8 @@ Commands:
   dr-failback-abort  Abort Cloud-owned failback lifecycle and retain target authority
   dr-release         Release DR runtime state
   dr-status          Show DR runtime status for a plan/run
+  dr-transition-preflight
+                     Validate failback/reprotect authority without changing runtime state
   dr-capabilities    Show FTCTL_DR runtime command capabilities
   dr-cancel          Cancel a DR runtime run
   config             Manage cluster/host inventory
@@ -373,7 +377,7 @@ parse_args() {
         print_version
         exit "${EXIT_OK}"
         ;;
-      protect|protect-start|status|reconcile|failover|failover-prepare|failback|failback-sync|failback-finalize|failback-reprotect|unprotect|fence-confirm|fence-clear|pause-protection|resume-protection|preflight-remote|dr-key-ensure|dr-key-install|dr-key-remove|check|health|events|snapshot|dr-plan-apply|dr-sync-start|dr-sync-recover|dr-sync-pause|dr-sync-resume|dr-scheduler-run|dr-reconcile|dr-test-failover|dr-test-cleanup|dr-test-prepare|dr-test-artifact-cleanup|dr-failover|dr-failover-abort|dr-failback|dr-reprotect|dr-target-materialized|dr-cutover-commit|dr-failback-commit|dr-failback-commit-status|dr-failback-abort|dr-release|dr-status|dr-capabilities|dr-cancel|config)
+      protect|protect-start|status|reconcile|failover|failover-prepare|failback|failback-sync|failback-finalize|failback-reprotect|unprotect|fence-confirm|fence-clear|pause-protection|resume-protection|preflight-remote|dr-key-ensure|dr-key-install|dr-key-remove|check|health|events|snapshot|dr-plan-apply|dr-sync-start|dr-sync-recover|dr-sync-pause|dr-sync-resume|dr-scheduler-run|dr-reconcile|dr-test-failover|dr-test-cleanup|dr-test-prepare|dr-test-artifact-cleanup|dr-failover|dr-failover-abort|dr-failback|dr-reprotect|dr-target-materialized|dr-cutover-commit|dr-failback-commit|dr-failback-commit-status|dr-failback-abort|dr-release|dr-status|dr-transition-preflight|dr-capabilities|dr-cancel|config)
         [[ -z "${CLI_COMMAND}" ]] || {
           echo "ERROR: multiple commands specified" >&2
           exit "${EXIT_USAGE}"
@@ -642,6 +646,14 @@ parse_args() {
         CLI_AUTHORITY_GENERATION="${2-}"
         shift 2
         ;;
+      --operation)
+        CLI_OPERATION="${2-}"
+        shift 2
+        ;;
+      --expected-authority)
+        CLI_EXPECTED_AUTHORITY="${2-}"
+        shift 2
+        ;;
       --resume-baseline-checkpoint-sequence)
         CLI_RESUME_BASELINE_CHECKPOINT_SEQUENCE="${2-}"
         shift 2
@@ -806,6 +818,10 @@ dispatch() {
       ;;
     dr-status)
       ftctl_dr_runtime_status "${CLI_PLAN}" "${CLI_RUN}" "${CLI_EVENTS_OFFSET}" "${CLI_EVENTS_LIMIT}" "${CLI_JSON}"
+      ;;
+    dr-transition-preflight)
+      ftctl_dr_runtime_transition_preflight "${CLI_PLAN}" "${CLI_OPERATION}" "${CLI_EXPECTED_AUTHORITY}" \
+        "${CLI_AUTHORITY_GENERATION}" "${CLI_JSON}"
       ;;
     dr-capabilities)
       ftctl_dr_runtime_capabilities "${CLI_JSON}"
