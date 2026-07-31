@@ -4954,7 +4954,10 @@ ftctl_dr_runtime_transition_preflight() {
   else
     printf 'ERROR: %s: %s\n' "${error_code}" "${message}" >&2
   fi
-  [[ "${ready}" == "true" ]]
+  if [[ "${ready}" == "true" ]]; then
+    return 0
+  fi
+  return 79
 }
 
 ftctl_dr_runtime_capabilities() {

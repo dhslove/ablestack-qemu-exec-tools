@@ -9207,7 +9207,7 @@ selftest_case_dr_transition_preflight_is_read_only() {
   selftest_assert_eq "${after_sha}" "${before_sha}" "transition preflight does not mutate status"
 
   out="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-transition-preflight --config "${SELFTEST_CONFIG}" --plan "${plan}" --operation reprotect --expected-authority TARGET --authority-generation 8 --json 2>/dev/null)" || rc=$?
-  selftest_assert_eq "${rc}" "1" "generation mismatch exit"
+  selftest_assert_eq "${rc}" "79" "generation mismatch exit"
   selftest_assert_contains "${out}" '"error_code":"DR_TRANSITION_PREFLIGHT_GENERATION_MISMATCH"' "generation mismatch is typed"
 }
 
