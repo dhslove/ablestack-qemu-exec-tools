@@ -605,6 +605,72 @@ ftctl_dr_scheduler_control_value() {
   ftctl_state_read_kv "${control_path}" "${key}" 2>/dev/null || true
 }
 
+ftctl_dr_scheduler_project_requested_cycle_run() {
+  local plan="${1-}" owner_run="${2-}" status_path="${3-}" state="${4-}" step="${5-}" progress="${6-}"
+  local error_code="${7-}" error_message="${8-}" run_path now
+
+  [[ -n "${plan}" && -n "${owner_run}" && -n "${status_path}" && -f "${status_path}" ]] || return 2
+  run_path="$(ftctl_dr_runtime_run_path "${plan}" "${owner_run}")"
+  now="$(ftctl_now_iso8601)"
+  if command -v ftctl_dr_runtime_atomic_copy >/dev/null 2>&1; then
+    ftctl_dr_runtime_atomic_copy "${status_path}" "${run_path}" "0644" || return $?
+  else
+    cp -f "${status_path}" "${run_path}" || return $?
+    chmod 0644 "${run_path}" 2>/dev/null || true
+  fi
+  ftctl_state_set_path "${run_path}" \
+    "plan=${plan}" \
+    "run=${owner_run}" \
+    "action=dr-sync-start" \
+    "state=${state}" \
+    "step=${step}" \
+    "progress=${progress}" \
+    "accepted=true" \
+    "requested_cycle_mode=FULL_RESEED" \
+    "requested_cycle_owner_run=${owner_run}" \
+    "error_code=${error_code}" \
+    "error_message=${error_message}" \
+    "updated_at=${now}"
+}
+
+ftctl_dr_scheduler_request_cycle() {
+  local plan="${1-}" owner_run="${2-}" requested_mode="${3-}" run_path="${4-}" status_path="${5-}" force_immediate="${6-true}"
+  local sequence_path generation now normalized_mode
+
+  normalized_mode="$(printf '%s' "${requested_mode}" | tr '[:lower:]' '[:upper:]')"
+  [[ -n "${plan}" && -n "${owner_run}" && "${normalized_mode}" == "FULL_RESEED" ]] || return 2
+  sequence_path="$(ftctl_dr_scheduler_sequence_path "${plan}")"
+  now="$(ftctl_now_iso8601)"
+  ftctl_dr_scheduler_lock_acquire "${plan}" "plan" 204 "${FTCTL_DR_TRANSITION_LOCK_TIMEOUT_SEC}" \
+    "cycle-request:${normalized_mode}:${owner_run}" || return $?
+  if ! ftctl_state_set_path "${sequence_path}" \
+      "requested_cycle_mode=${normalized_mode}" \
+      "requested_cycle_owner_run=${owner_run}" \
+      "requested_cycle_state=PENDING" \
+      "requested_cycle_sequence=" \
+      "requested_cycle_at=${now}" \
+      "requested_cycle_completed_at=" \
+      "requested_cycle_error="; then
+    ftctl_dr_scheduler_lock_release "${plan}" "plan" 204
+    return 2
+  fi
+  ftctl_dr_scheduler_lock_release "${plan}" "plan" 204
+
+  generation="$(ftctl_dr_scheduler_control_set "${plan}" "run" "manual-full-resync" "${owner_run}" "false")" || return $?
+  ftctl_dr_scheduler_update_state "${run_path}" "${status_path}" \
+    "state=SYNCING" \
+    "step=full-resync-queued" \
+    "progress=1" \
+    "accepted=true" \
+    "requested_cycle_mode=${normalized_mode}" \
+    "requested_cycle_owner_run=${owner_run}" \
+    "requested_cycle_state=PENDING" \
+    "control_generation=${generation}" \
+    "control_state=RUNNING" \
+    "force_immediate_cycle=${force_immediate}" \
+    "updated_at=${now}" || true
+}
+
 ftctl_dr_scheduler_control_ack() {
   local plan="${1-}" generation="${2-}" state="${3-}" cycle_state="${4-IDLE}" worker_run="${5-}"
   local session="${6-}" lease_epoch="${7-}" worker_pid="${8-}" worker_start_ticks="${9-}"
@@ -1120,6 +1186,7 @@ ftctl_dr_scheduler_worker() {
   local nbd_teardown_state nbd_teardown_started_at_ms nbd_teardown_completed_at_ms nbd_teardown_duration_ms
   local nbd_source_device_count nbd_target_device_count nbd_quarantined_device_count nbd_teardown_error_code nbd_teardown_error_message
   local cycle_started_epoch next_cycle_epoch next_cycle_at wait_seconds control_generation
+  local cycle_run cycle_request_mode cycle_request_owner cycle_request_state cycle_request_bound sequence_path
   local session lease_epoch authority_sequence start_ticks owner_lock_path
 
   [[ -n "${plan}" && -n "${run}" && -f "${profile_file}" && -f "${state_path}" ]] || return 2
@@ -1144,6 +1211,7 @@ ftctl_dr_scheduler_worker() {
   ftctl_dr_scheduler_write_heartbeat "${plan}" "${session}" "${lease_epoch}" "${run}" "$$" "${start_ticks}"
   pid_path="$(ftctl_dr_scheduler_pid_path "${plan}" "${run}")"
   restore_points_path="$(ftctl_dr_scheduler_restore_points_path "${plan}")"
+  sequence_path="$(ftctl_dr_scheduler_sequence_path "${plan}")"
   sequence="$(ftctl_dr_scheduler_last_sequence "${restore_points_path}" "${plan}" "${run}" || printf '0')"
   [[ "${sequence}" =~ ^[0-9]+$ ]] || sequence=0
   local persisted_sequence
@@ -1262,14 +1330,31 @@ ftctl_dr_scheduler_worker() {
     (( sequence >= persisted_sequence )) || sequence="${persisted_sequence}"
     sequence=$((sequence + 1))
     authority_sequence="$(ftctl_dr_scheduler_record_plan_sequence "${plan}" "${sequence}")"
-    cycle_type="$(ftctl_dr_scheduler_cycle_type "${sequence}" "${source_provider}" "${state_path}")"
-    checkpoint_ref="ftctl:${plan}:${run}:${sequence}"
+    cycle_run="${run}"
+    cycle_request_bound="false"
+    cycle_request_state="$(ftctl_state_read_kv "${sequence_path}" "requested_cycle_state" 2>/dev/null || true)"
+    cycle_request_mode="$(ftctl_state_read_kv "${sequence_path}" "requested_cycle_mode" 2>/dev/null || true)"
+    cycle_request_owner="$(ftctl_state_read_kv "${sequence_path}" "requested_cycle_owner_run" 2>/dev/null || true)"
+    if [[ "${cycle_request_state}" == "PENDING" && "${cycle_request_mode}" == "FULL_RESEED" ]]; then
+      cycle_type="full-reseed"
+      [[ -n "${cycle_request_owner}" ]] && cycle_run="${cycle_request_owner}"
+      cycle_request_bound="true"
+    else
+      cycle_type="$(ftctl_dr_scheduler_cycle_type "${sequence}" "${source_provider}" "${state_path}")"
+    fi
+    checkpoint_ref="ftctl:${plan}:${cycle_run}:${sequence}"
     cycle_started_epoch="$(date +%s)"
     now="$(ftctl_now_iso8601)"
     if ! ftctl_dr_scheduler_lock_acquire "${plan}" "cycle" 202 0 "${run}:${sequence}"; then
       sequence=$((sequence - 1))
       sleep 1
       continue
+    fi
+    if [[ "${cycle_request_bound}" == "true" ]]; then
+      ftctl_state_set_path "${sequence_path}" \
+        "requested_cycle_state=RUNNING" \
+        "requested_cycle_sequence=${sequence}" \
+        "requested_cycle_started_at=${now}" || true
     fi
     ftctl_dr_scheduler_update_state "${state_path}" "${status_path}" \
       "state=$([[ "${sequence}" -gt 1 ]] && printf READY || printf SYNCING)" \
@@ -1304,9 +1389,13 @@ ftctl_dr_scheduler_worker() {
       "baseline_state=$([[ "${cycle_type}" == "full-reseed" ]] && printf REBUILDING || printf COMMITTED)" \
       "reseed_reason=$([[ "${cycle_type}" == "full-reseed" ]] && printf MISSING_OR_INVALID_COMMITTED_BASELINE || printf '')" \
       "updated_at=${now}" || true
+    if [[ "${cycle_request_bound}" == "true" ]]; then
+      ftctl_dr_scheduler_project_requested_cycle_run "${plan}" "${cycle_run}" "${status_path}" \
+        "SYNCING" "full-reseed-transfer" "40" "" "" || true
+    fi
 
     rc=0
-    output="$(ftctl_dr_scheduler_run_cycle "${plan}" "${run}" "${profile_file}" "${sequence}" "${cycle_type}")" || rc=$?
+    output="$(ftctl_dr_scheduler_run_cycle "${plan}" "${cycle_run}" "${profile_file}" "${sequence}" "${cycle_type}")" || rc=$?
     ftctl_dr_scheduler_lock_release "${plan}" "cycle" 202
     if [[ "${rc}" != "0" ]]; then
       case "${rc}" in
@@ -1411,7 +1500,15 @@ ftctl_dr_scheduler_worker() {
         "scheduler_recovery_state=$([[ "${cycle_retry_mode}" == "CLEANUP_ONLY" ]] && printf REQUIRED || printf FAILED)" \
         "updated_at=${now}" || true
       ftctl_log_event "dr-runtime" "dr.scheduler.cycle" "fail" "" "${rc}" \
-        "plan=${plan} run=${run} sequence=${sequence} error=${error_code}"
+        "plan=${plan} run=${cycle_run} sequence=${sequence} error=${error_code}"
+      if [[ "${cycle_request_bound}" == "true" ]]; then
+        ftctl_state_set_path "${sequence_path}" \
+          "requested_cycle_state=FAILED" \
+          "requested_cycle_error=${error_code}" \
+          "requested_cycle_completed_at=${now}" || true
+        ftctl_dr_scheduler_project_requested_cycle_run "${plan}" "${cycle_run}" "${status_path}" \
+          "ERROR" "full-resync-failed" "100" "${error_code}" "${error_message}" || true
+      fi
       rm -f "${pid_path}" 2>/dev/null || true
       ftctl_dr_scheduler_mark_lease_stopped "${plan}" "${session}" "${lease_epoch}" "${run}" "$$" "${start_ticks}"
       flock -u 205 2>/dev/null || true
@@ -1452,7 +1549,7 @@ ftctl_dr_scheduler_worker() {
     nbd_quarantined_device_count="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "nbdQuarantinedDeviceCount" integer || true)"
     nbd_teardown_error_code="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "nbdTeardownErrorCode" || true)"
     nbd_teardown_error_message="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "nbdTeardownErrorMessage" || true)"
-    ftctl_dr_scheduler_append_restore_point "${restore_points_path}" "${plan}" "${run}" "${sequence}" "${cycle_type}" "${driver}" "${manifest_path}" "${checkpoint_path}" || return $?
+    ftctl_dr_scheduler_append_restore_point "${restore_points_path}" "${plan}" "${cycle_run}" "${sequence}" "${cycle_type}" "${driver}" "${manifest_path}" "${checkpoint_path}" || return $?
     ftctl_dr_scheduler_mark_resume_checkpoint_completed "${plan}" "${sequence}" || true
     now="$(ftctl_now_iso8601)"
     authority_sequence="$(ftctl_dr_scheduler_next_authority_sequence "${plan}")"
@@ -1495,7 +1592,7 @@ ftctl_dr_scheduler_worker() {
       "latest_completed_requested_mode=${requested_mode}" \
       "latest_completed_checkpoint_ref=${checkpoint_ref}" \
       "latest_completed_checkpoint_state=READY" \
-      "latest_completed_producer_run_uuid=${run}" \
+      "latest_completed_producer_run_uuid=${cycle_run}" \
       "latest_completed_source_checkpoint_at=${source_at}" \
       "latest_completed_target_durable_at=${target_at}" \
       "latest_completed_target_ready_rpo_seconds=${rpo}" \
@@ -1553,7 +1650,15 @@ ftctl_dr_scheduler_worker() {
       "failed_component=" \
       "updated_at=${now}" || true
     ftctl_log_event "dr-runtime" "dr.scheduler.cycle" "ok" "" "" \
-      "plan=${plan} run=${run} sequence=${sequence} type=${cycle_type} checkpoint=${checkpoint_path} rpo=${rpo}"
+      "plan=${plan} run=${cycle_run} sequence=${sequence} type=${cycle_type} checkpoint=${checkpoint_path} rpo=${rpo}"
+    if [[ "${cycle_request_bound}" == "true" ]]; then
+      ftctl_state_set_path "${sequence_path}" \
+        "requested_cycle_state=COMPLETED" \
+        "requested_cycle_error=" \
+        "requested_cycle_completed_at=${now}" || true
+      ftctl_dr_scheduler_project_requested_cycle_run "${plan}" "${cycle_run}" "${status_path}" \
+        "READY" "full-resync-completed" "100" "" "" || true
+    fi
 
     if [[ "${max_cycles}" =~ ^[1-9][0-9]*$ && "${sequence}" -ge "${max_cycles}" ]]; then
       now="$(ftctl_now_iso8601)"

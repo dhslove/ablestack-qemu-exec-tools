@@ -248,6 +248,13 @@ import sys
 profile_path, out_path = sys.argv[1], sys.argv[2]
 with open(profile_path, "r", encoding="utf-8") as fh:
     profile = json.load(fh)
+existing = {}
+if os.path.exists(out_path):
+    try:
+        with open(out_path, "r", encoding="utf-8") as fh:
+            existing = json.load(fh)
+    except (OSError, TypeError, ValueError):
+        existing = {}
 
 def obj(value):
     return value if isinstance(value, dict) else {}
@@ -354,6 +361,10 @@ def normalize_disk(item, index):
             value_at(target, "sizeBytes", "virtualSize", "capacityBytes", "bytesTotal"),
         ),
         "changeId": first_str(value_at(item, "changeId", "change_id", "cbtChangeId"), value_at(source, "changeId", "change_id", "cbtChangeId")),
+        "cbtChangeId": first_str(value_at(item, "cbtChangeId", "changeId", "change_id"), value_at(source, "cbtChangeId", "changeId", "change_id")),
+        "baselineGeneration": first_any_int(value_at(item, "baselineGeneration"), value_at(source, "baselineGeneration")) or 0,
+        "lastSyncSequence": first_any_int(value_at(item, "lastSyncSequence"), value_at(source, "lastSyncSequence")) or 0,
+        "baselineState": first_str(value_at(item, "baselineState"), value_at(source, "baselineState")),
         "snapshotRef": first_str(value_at(item, "snapshotRef", "snapshot", "snapshotId"), value_at(source, "snapshotRef", "snapshot", "snapshotId")),
     }
 
@@ -400,6 +411,35 @@ else:
             target_disks[idx] if idx < len(target_disks) else {},
             idx,
         ))
+
+def disk_identity(item):
+    item = obj(item)
+    for key in ("sourceDiskKey", "cbtDiskId", "sourceDiskRef", "sourceVmdkPath", "device"):
+        value = first_str(item.get(key))
+        if value:
+            return f"{key}:{value}"
+    return ""
+
+existing_disks = {
+    disk_identity(item): item
+    for item in arr(obj(existing).get("disks"))
+    if disk_identity(item)
+}
+runtime_fields = (
+    "changeId", "cbtChangeId", "baselineGeneration", "lastSyncSequence", "baselineState",
+)
+for disk in disks:
+    previous = existing_disks.get(disk_identity(disk))
+    if not isinstance(previous, dict):
+        continue
+    previous_generation = first_any_int(previous.get("baselineGeneration")) or 0
+    current_generation = first_any_int(disk.get("baselineGeneration")) or 0
+    if previous_generation < current_generation:
+        continue
+    for key in runtime_fields:
+        value = previous.get(key)
+        if value not in (None, ""):
+            disk[key] = value
 
 out = {
     "planUuid": profile.get("planUuid", ""),

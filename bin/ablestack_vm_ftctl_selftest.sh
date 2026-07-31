@@ -9128,6 +9128,65 @@ JSON
   selftest_assert_eq "${rc}" "42" "PAUSED control state suppresses scheduler recovery"
 }
 
+selftest_case_dr_vmware_canonical_profile_preserves_committed_baseline() {
+  selftest_reset_env
+  selftest_info "DR VMware canonical profile preserves committed CBT baseline"
+  local work profile disk_map
+  work="${SELFTEST_ROOT}/dr-vmware-canonical-baseline"
+  profile="${work}/profile.json"
+  disk_map="${work}/vmware-disks.json"
+  rm -rf "${work}"
+  mkdir -p "${work}"
+  cat > "${profile}" <<'JSON'
+{"planUuid":"plan-full-resync","source":{"provider":"VMWARE","vmId":"vm-42"},"target":{"provider":"ABLESTACK"},"mapping":{"disks":[{"sourceDiskKey":"2000","cbtDiskId":"scsi0:0","sourceVmdkPath":"[ds] vm/root.vmdk","targetDiskRef":"rbd/target-root","sizeBytes":1048576}]}}
+JSON
+  cat > "${disk_map}" <<'JSON'
+{"disks":[{"sourceDiskKey":"2000","cbtDiskId":"scsi0:0","sourceVmdkPath":"[ds] vm/root.vmdk","targetDiskRef":"rbd/target-root","sizeBytes":1048576,"changeId":"change-42","cbtChangeId":"change-42","baselineGeneration":42,"lastSyncSequence":42,"baselineState":"LOCAL_DURABLE"}]}
+JSON
+
+  ftctl_dr_vmware_canonicalize_profile "${profile}" "${disk_map}"
+
+  selftest_assert_eq "$(jq -r '.disks[0].changeId' "${disk_map}")" "change-42" "canonical changeId"
+  selftest_assert_eq "$(jq -r '.disks[0].baselineGeneration' "${disk_map}")" "42" "canonical baseline generation"
+  selftest_assert_eq "$(jq -r '.disks[0].baselineState' "${disk_map}")" "LOCAL_DURABLE" "canonical baseline state"
+}
+
+selftest_case_dr_full_resync_request_is_one_shot() {
+  selftest_reset_env
+  selftest_info "DR full resync request is recorded as a one-shot scheduler cycle"
+  local plan="plan-full-resync-request" run="run-full-resync-request"
+  local plan_dir run_path status_path sequence_path
+  plan_dir="$(ftctl_dr_runtime_plan_dir "${plan}")"
+  run_path="$(ftctl_dr_runtime_run_path "${plan}" "${run}")"
+  status_path="$(ftctl_dr_runtime_status_path "${plan}")"
+  sequence_path="$(ftctl_dr_scheduler_sequence_path "${plan}")"
+  rm -rf "${plan_dir}"
+  mkdir -p "$(dirname "${run_path}")"
+  ftctl_state_write_kv_all "${run_path}" "plan=${plan}" "run=${run}" "state=READY"
+  cp -f "${run_path}" "${status_path}"
+
+  ftctl_dr_scheduler_request_cycle "${plan}" "${run}" "FULL_RESEED" "${run_path}" "${status_path}" "true"
+
+  selftest_assert_eq "$(ftctl_state_read_kv "${sequence_path}" requested_cycle_mode)" "FULL_RESEED" "requested cycle mode"
+  selftest_assert_eq "$(ftctl_state_read_kv "${sequence_path}" requested_cycle_owner_run)" "${run}" "requested cycle owner"
+  selftest_assert_eq "$(ftctl_state_read_kv "${sequence_path}" requested_cycle_state)" "PENDING" "requested cycle state"
+  selftest_assert_eq "$(ftctl_state_read_kv "${status_path}" step)" "full-resync-queued" "full resync projection step"
+
+  ftctl_state_set_path "${status_path}" \
+    "run=scheduler-owner-run" \
+    "latest_completed_producer_run_uuid=${run}" \
+    "latest_completed_requested_mode=FULL_RESEED" \
+    "latest_completed_target_durable_at=2026-07-31T00:00:02Z"
+  ftctl_dr_scheduler_project_requested_cycle_run "${plan}" "${run}" "${status_path}" \
+    "READY" "full-resync-completed" "100" "" ""
+  selftest_assert_eq "$(ftctl_state_read_kv "${run_path}" run)" "${run}" "completed request run identity"
+  selftest_assert_eq "$(ftctl_state_read_kv "${run_path}" state)" "READY" "completed request state"
+  selftest_assert_eq "$(ftctl_state_read_kv "${run_path}" latest_completed_producer_run_uuid)" "${run}" \
+    "completed request producer identity"
+  selftest_assert_eq "$(ftctl_state_read_kv "${run_path}" latest_completed_requested_mode)" "FULL_RESEED" \
+    "completed request mode"
+}
+
 selftest_main() {
   selftest_run_lint
   selftest_case_cluster_cli
@@ -9261,6 +9320,8 @@ selftest_main() {
   selftest_case_dr_runtime_test_failover_cleanup
   selftest_case_dr_scheduler_resume_recovers_missing_worker
   selftest_case_dr_scheduler_systemd_launch_contract
+  selftest_case_dr_vmware_canonical_profile_preserves_committed_baseline
+  selftest_case_dr_full_resync_request_is_one_shot
   selftest_case_dr_runtime_planned_failover_promotes_latest_checkpoint
   selftest_case_dr_runtime_cloud_cutover_commit_is_idempotent
   selftest_case_dr_runtime_status_hydrates_complete_cycle_evidence

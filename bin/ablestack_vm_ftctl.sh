@@ -769,7 +769,7 @@ dispatch() {
     dr-sync-start|dr-sync-recover|dr-sync-pause|dr-sync-resume|dr-test-failover|dr-test-cleanup|dr-test-prepare|dr-test-artifact-cleanup|dr-failover|dr-failback|dr-reprotect|dr-release)
       ftctl_dr_runtime_action "${CLI_COMMAND}" "${CLI_PLAN}" "${CLI_RUN}" "${CLI_PROFILE_JSON}" "${CLI_ROLE}" \
         "${CLI_MODE}" "${CLI_RESTORE_POINT}" "${CLI_FORCE}" "${CLI_DRY_RUN}" "${CLI_WAIT_VALUE}" "${CLI_JSON}" \
-        "${CLI_ARTIFACT_SPEC_JSON}" "${CLI_AUTHORITY_SPEC_JSON}"
+        "${CLI_ARTIFACT_SPEC_JSON}" "${CLI_AUTHORITY_SPEC_JSON}" "${CLI_FORCE_IMMEDIATE_CYCLE}"
       ;;
     dr-scheduler-run)
       ftctl_dr_scheduler_run_from_launch "${CLI_PLAN}" "${CLI_JSON}"
