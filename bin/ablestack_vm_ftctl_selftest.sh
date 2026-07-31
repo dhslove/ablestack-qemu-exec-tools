@@ -9193,6 +9193,9 @@ selftest_case_dr_transition_preflight_is_read_only() {
 
   local plan="plan-transition-preflight"
   local status_path before_sha after_sha out rc=0
+  if ftctl_command_requires_lock "dr-transition-preflight" ""; then
+    selftest_fail "DR transition preflight must not use the legacy global lock"
+  fi
   ftctl_dr_runtime_ensure_plan_dirs "${plan}"
   status_path="$(ftctl_dr_runtime_status_path "${plan}")"
   ftctl_dr_runtime_write_state "${status_path}" "${plan}" "" "dr-status" "FAILED_OVER" "cloud-promotion-committed" "100" "" ""
