@@ -1050,6 +1050,10 @@ ftctl_dr_scheduler_driver_name() {
   local source_provider="${1-}" target_provider="${2-}"
   if [[ "${source_provider}" == "ABLESTACK" && "${target_provider}" == "ABLESTACK" ]]; then
     printf 'ABLESTACK\n'
+  elif [[ "${source_provider}" == "ABLESTACK" && "${target_provider}" == "VMWARE" ]]; then
+    printf 'KVM_VDDK_WRITER\n'
+  elif [[ "${source_provider}" == "VMWARE" && "${target_provider}" == "ABLESTACK" ]]; then
+    printf 'VMWARE_CBT_READER\n'
   elif [[ "${source_provider}" == "VMWARE" && "${target_provider}" == "VMWARE" ]]; then
     printf 'VMWARE\n'
   else
@@ -1059,7 +1063,15 @@ ftctl_dr_scheduler_driver_name() {
 
 ftctl_dr_scheduler_cycle_type() {
   local sequence="${1-}" source_provider="${2-}" state_path="${3-}" disk_map=""
-  if [[ "${sequence}" == "1" ]]; then
+  local target_provider="${4-}" plan="${5-}" baseline=""
+  if [[ "${source_provider}" == "ABLESTACK" && "${target_provider}" == "VMWARE" ]]; then
+    baseline="$(ftctl_dr_kvm_vmware_baseline_path "${plan}" 2>/dev/null || true)"
+    if [[ ! -f "${baseline}" ]] || ! jq -e '.state == "LOCAL_DURABLE" and (.disks | length > 0)' "${baseline}" >/dev/null 2>&1; then
+      printf 'full-reverse-seed\n'
+    else
+      printf 'reverse-incremental\n'
+    fi
+  elif [[ "${sequence}" == "1" ]]; then
     printf 'full-seed\n'
   elif [[ "${source_provider}" == "VMWARE" ]]; then
     disk_map="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "source_disk_map_path")"
@@ -1089,7 +1101,11 @@ ftctl_dr_scheduler_run_cycle() {
     ftctl_dr_ablestack_replication_cycle "${plan}" "${run}" "${profile_file}" "${sequence}" "${cycle_type}"
     return $?
   fi
-  if [[ "${source_provider}" == "VMWARE" || "${target_provider}" == "VMWARE" ]]; then
+  if [[ "${source_provider}" == "ABLESTACK" && "${target_provider}" == "VMWARE" ]]; then
+    ftctl_dr_kvm_vmware_replication_cycle "${plan}" "${run}" "${profile_file}" "${sequence}" "${cycle_type}"
+    return $?
+  fi
+  if [[ "${source_provider}" == "VMWARE" ]]; then
     ftctl_dr_vmware_replication_cycle "${plan}" "${run}" "${profile_file}" "${sequence}" "${cycle_type}"
     return $?
   fi
@@ -1340,7 +1356,7 @@ ftctl_dr_scheduler_worker() {
       [[ -n "${cycle_request_owner}" ]] && cycle_run="${cycle_request_owner}"
       cycle_request_bound="true"
     else
-      cycle_type="$(ftctl_dr_scheduler_cycle_type "${sequence}" "${source_provider}" "${state_path}")"
+      cycle_type="$(ftctl_dr_scheduler_cycle_type "${sequence}" "${source_provider}" "${state_path}" "${target_provider}" "${plan}")"
     fi
     checkpoint_ref="ftctl:${plan}:${cycle_run}:${sequence}"
     cycle_started_epoch="$(date +%s)"

@@ -1,5 +1,9 @@
 # FTCTL DR Reprotect Canonical Authority Preservation Design
 
+> 2026-07-31 addendum: Reprotect keeps TARGET production authority and SOURCE
+> production isolation. It uses document 444 read-only preflight and never
+> depends on a standalone fence-clear action.
+
 - Date: 2026-07-23
 - Status: code-level design; live read-only preflight verified
 - Scope: `bin/ablestack_vm_ftctl.sh`, `lib/ftctl/dr_runtime.sh`,
@@ -327,3 +331,20 @@ Add exact regression coverage:
 | Failure | status loses TARGET fields | operation fails, authority and serving VM remain intact |
 | Success | reverse profile may replace early | replace only after durable reverse seed |
 | Status | authority and progress mixed | separate authority and operation projections |
+
+## 11. 2026-08-01 Bidirectional Data-Plane Correction
+
+Canonical authority preservation is necessary but not sufficient for
+Reprotect. A reversed profile must not be promoted merely because the endpoint
+roles were swapped. For `KVM_TO_VMWARE`, promotion additionally requires all of
+the following durable evidence:
+
+1. a KVM-side baseline and change-tracker generation;
+2. a committed KVM extent set read from that tracker;
+3. a VDDK write transaction into the VMware staging disks;
+4. reverse guest-compatibility preparation and isolated boot validation; and
+5. a checkpoint owned by the actual Reprotect Run.
+
+The current forward VMware mover and its global `vmware-disks.json` must never
+be reused as reverse-transfer proof. The normative data-plane design is
+[445-ftctl-dr-bidirectional-incremental-replication-and-reverse-guest-compatibility-design-20260801.md](445-ftctl-dr-bidirectional-incremental-replication-and-reverse-guest-compatibility-design-20260801.md).

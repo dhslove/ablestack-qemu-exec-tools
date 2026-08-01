@@ -159,6 +159,7 @@ ftctl_load_libs() {
     events.sh
     dr_ablestack.sh
     dr_vmware.sh
+    dr_kvm_vmware.sh
     dr_scheduler.sh
     guestprep.sh
     dr_runtime.sh
@@ -204,6 +205,8 @@ ftctl_load_libs() {
   source "${FTCTL_LIB_BASE}/ftctl/dr_ablestack.sh"
   # shellcheck source=/dev/null
   source "${FTCTL_LIB_BASE}/ftctl/dr_vmware.sh"
+  # shellcheck source=/dev/null
+  source "${FTCTL_LIB_BASE}/ftctl/dr_kvm_vmware.sh"
   # shellcheck source=/dev/null
   source "${FTCTL_LIB_BASE}/ftctl/dr_scheduler.sh"
   # shellcheck source=/dev/null

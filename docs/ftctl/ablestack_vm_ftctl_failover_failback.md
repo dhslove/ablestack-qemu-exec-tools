@@ -145,3 +145,16 @@ FTCTL_PROFILE_FAILBACK_DISK_MAP="vda=/primary/demo-vda.qcow2;vdb=/primary/demo-v
   - `transport_state=mirroring`
 - `remote-nbd` failback requires reverse NBD export orchestration and primary-side handoff.
 - FT block-backed failback now depends on the same cold conversion runtime XML and post-boot QMP graph attach path that is used for baseline protect.
+
+## 5. Cross-Hypervisor Bidirectional Replication Rule
+
+For VMware-to-KVM DR, Failover leaves TARGET authoritative and unprotected.
+Operators must complete Reprotect before Failback. Reprotect performs an
+initial reverse seed when no KVM baseline exists, then maintains
+`KVM_TO_VMWARE` incrementals. Failback is permitted only after a final
+quiesced reverse delta, reverse guest preparation, and isolated VMware boot
+validation have all committed successfully.
+
+Swapping the source and target fields of the forward profile is not a reverse
+replication implementation. FTCTL must reject that unsafe path. See
+[445-ftctl-dr-bidirectional-incremental-replication-and-reverse-guest-compatibility-design-20260801.md](445-ftctl-dr-bidirectional-incremental-replication-and-reverse-guest-compatibility-design-20260801.md).

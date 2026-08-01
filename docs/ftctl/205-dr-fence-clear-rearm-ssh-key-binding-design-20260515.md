@@ -1,5 +1,9 @@
 # 205. DR Fence Clear Re-arm And SSH Key Binding Design
 
+> 2026-07-31 scope correction: this document is limited to the legacy FTCTL
+> manual-fence recovery path. Cross-Hypervisor FTCTL_DR hides standalone fence
+> clear and uses the read-only transition preflight in document 444.
+
 Date: 2026-05-15
 
 ## 1. Purpose

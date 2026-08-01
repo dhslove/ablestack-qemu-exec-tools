@@ -1058,6 +1058,16 @@ request["reverse"] = True
 reverse["request"] = request
 mapping[disk_key] = reversed_disks
 reverse["mapping"] = mapping
+original_source_provider = first_str(source.get("provider")).upper()
+original_target_provider = first_str(target.get("provider")).upper()
+reverse["guestCompatibility"] = {
+    "state": "ORIGINAL_VMWARE_COMPATIBILITY_PRESERVED"
+        if original_source_provider == "VMWARE" and original_target_provider == "ABLESTACK"
+        else "REQUIRES_VALIDATION",
+    "sourceLineage": original_source_provider,
+    "targetProvider": first_str(reverse.get("target", {}).get("provider")).upper(),
+    "bootValidationRequired": True,
+}
 
 tmp = out_profile + ".tmp"
 with open(tmp, "w", encoding="utf-8") as fh:
@@ -1071,6 +1081,7 @@ ftctl_dr_runtime_reverse_checkpoint() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" run_path="${4-}" status_path="${5-}" cycle_type="${6-reverse-sync}" phase="${7-reverse}"
   local restore_points_path sequence output rc=0 manifest_path checkpoint_path
   local source_at target_at rpo source_provider target_provider driver now
+  local baseline_generation baseline_state tracker_state writer_state target_written write_verified guest_compatibility_state
 
   command -v ftctl_dr_scheduler_run_cycle >/dev/null 2>&1 || return 0
   restore_points_path="$(ftctl_dr_runtime_reverse_restore_points_path "${plan}")"
@@ -1095,6 +1106,13 @@ ftctl_dr_runtime_reverse_checkpoint() {
   source_provider="$(ftctl_dr_scheduler_profile_provider "${profile_file}" source)"
   target_provider="$(ftctl_dr_scheduler_profile_provider "${profile_file}" target)"
   driver="$(ftctl_dr_scheduler_driver_name "${source_provider}" "${target_provider}")"
+  baseline_generation="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "baselineGeneration" "integer" || true)"
+  baseline_state="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "baselineState" || true)"
+  tracker_state="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "trackerState" || true)"
+  writer_state="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "writerState" || true)"
+  target_written="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "targetWritten" "boolean" || true)"
+  write_verified="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "writeVerified" "boolean" || true)"
+  guest_compatibility_state="$(jq -r '.guestCompatibility.state // ""' "${profile_file}" 2>/dev/null || true)"
   ftctl_dr_scheduler_append_restore_point "${restore_points_path}" "${plan}" "${run}-${phase}" "${sequence}" "${cycle_type}" "${driver}" "${manifest_path}" "${checkpoint_path}" || return $?
   now="$(ftctl_now_iso8601)"
   ftctl_dr_runtime_path_set "${run_path}" \
@@ -1111,6 +1129,15 @@ ftctl_dr_runtime_reverse_checkpoint() {
     "last_source_checkpoint_at=${source_at}" \
     "last_target_durable_at=${target_at}" \
     "target_ready_rpo_seconds=${rpo}" \
+    "reverse_direction=${source_provider}_TO_${target_provider}" \
+    "provider_pair=${source_provider}_TO_${target_provider}" \
+    "baseline_generation=${baseline_generation}" \
+    "baseline_state=${baseline_state}" \
+    "tracker_state=${tracker_state}" \
+    "writer_state=${writer_state}" \
+    "target_written=${target_written}" \
+    "write_verified=${write_verified}" \
+    "reverse_guest_compatibility_state=${guest_compatibility_state}" \
     "updated_at=${now}" || true
   cp -f "${run_path}" "${status_path}" 2>/dev/null || true
 }

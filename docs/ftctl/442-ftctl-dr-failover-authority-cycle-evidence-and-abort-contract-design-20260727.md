@@ -1,5 +1,10 @@
 # 442. FTCTL DR Failover Authority Cycle Evidence and Abort Contract Design
 
+> 2026-07-28 후속 규약:
+> `218-dr-test-guest-identity-and-terminal-cleanup-contract-design-20260728.md`
+> 는 Test/real Failover의 guest identity resolver를 통합한다. 이 문서의
+> failover authority snapshot과 abort/compensation 규약은 계속 유효하다.
+
 - 작성일: 2026-07-27
 - 상태: 상세 설계 완료, 구현 대기
 - 적용 방향: VMware -> ABLESTACK 실제 Failover
@@ -459,3 +464,11 @@ The abort path accepts `RUNNING_PENDING_ACK` only when all of these facts hold:
 The runtime keeps the last observed acknowledgement generation rather than
 fabricating an acknowledgement. Any generation change, non-`run` command, dead
 worker, or session mismatch remains a hard resume failure.
+
+## 13. Post-Failover Scheduler Terminal Addendum
+
+After an acknowledged real Failover, a stopped forward scheduler is a terminal
+TARGET-authority condition, not a recovery failure. FTCTL writes
+`STOPPED/desired STOPPED/SUPPRESSED` and clears active worker identity. The
+detailed idempotency and status contract is document
+[218-dr-post-failover-scheduler-terminal-authority-contract-design-20260730.md](218-dr-post-failover-scheduler-terminal-authority-contract-design-20260730.md).

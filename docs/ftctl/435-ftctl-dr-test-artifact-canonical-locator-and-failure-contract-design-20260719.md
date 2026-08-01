@@ -6,6 +6,11 @@
 - Cloud normative design: `ablestack-cloud/docs/ftctl/562-cross-hypervisor-dr-test-artifact-contract-and-projection-isolation-design-20260719.md`
 - Cloud terminal design: `ablestack-cloud/docs/ftctl/563-cross-hypervisor-dr-test-failover-terminal-convergence-design-20260720.md`
 
+> Normative guest identity and terminal cleanup correction (2026-07-28):
+> `218-dr-test-guest-identity-and-terminal-cleanup-contract-design-20260728.md`
+> replaces the test-only inline guest parser and defines owner-checked lease
+> release plus atomic failed-operation cleanup proof.
+
 ## 1. Engine boundary
 
 Cloud owns the Test Session, temporary volumes, temporary VM, network,

@@ -74,6 +74,7 @@ def copy_extents(
     chunk: int,
     expected_source_size: int = 0,
     expected_target_size: int = 0,
+    verify: bool = False,
 ) -> Dict[str, int]:
     source_fd = os.open(source, os.O_RDONLY)
     target_fd = None
@@ -83,6 +84,7 @@ def copy_extents(
     started = time.monotonic_ns()
     bytes_read = 0
     bytes_written = 0
+    verified_bytes = 0
     try:
         source_size = device_size(source_fd)
         rbd_target = parse_rbd_target(target)
@@ -143,6 +145,22 @@ def copy_extents(
             image.flush()
         else:
             os.fsync(target_fd)
+        if verify:
+            for extent in normalized:
+                offset = extent["offset"]
+                remaining = extent["length"]
+                while remaining:
+                    amount = min(remaining, chunk)
+                    source_data = os.pread(source_fd, amount, offset)
+                    if image is not None:
+                        target_data = image.read(offset, amount)
+                    else:
+                        target_data = os.pread(target_fd, amount, offset)
+                    if source_data != target_data:
+                        raise IOError(f"target verification failed at offset={offset} length={amount}")
+                    verified_bytes += amount
+                    offset += amount
+                    remaining -= amount
         duration_ms = max(1, (time.monotonic_ns() - started) // 1_000_000)
         return {
             "changedExtentCount": len(normalized),
@@ -152,6 +170,8 @@ def copy_extents(
             "transferPayloadBytes": bytes_read,
             "durationMs": duration_ms,
             "throughputBps": (bytes_read * 1000) // duration_ms,
+            "writeVerified": bool(verify),
+            "verifiedBytes": verified_bytes,
         }
     finally:
         if image is not None:
@@ -173,6 +193,7 @@ def main() -> int:
     parser.add_argument("--chunk", type=int, default=8 * 1024 * 1024)
     parser.add_argument("--expected-source-size", type=int, default=0)
     parser.add_argument("--expected-target-size", type=int, default=0)
+    parser.add_argument("--verify", action="store_true")
     args = parser.parse_args()
     with open(args.areas_json, "r", encoding="utf-8") as handle:
         payload = json.load(handle)
@@ -183,6 +204,7 @@ def main() -> int:
         max(4096, args.chunk),
         max(0, args.expected_source_size),
         max(0, args.expected_target_size),
+        args.verify,
     )
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     return 0

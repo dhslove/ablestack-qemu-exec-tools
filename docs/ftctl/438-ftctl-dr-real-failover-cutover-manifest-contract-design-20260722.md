@@ -11,6 +11,11 @@
 - Reprotect authority addendum: `441-ftctl-dr-reprotect-canonical-authority-preservation-design-20260723.md`
 - Scope: `lib/ftctl/guestprep.sh`, new manifest normalizer, DR runtime status, and self-tests
 
+> Normative shared-parser correction (2026-07-28):
+> `218-dr-test-guest-identity-and-terminal-cleanup-contract-design-20260728.md`
+> requires both Test Failover and real Failover to use the existing canonical
+> `source_vm()` resolver and common manifest validation.
+
 ## 1. Problem
 
 The real VMware-to-KVM Failover path currently builds guest-preparation input
@@ -480,3 +485,24 @@ For VMware-to-ABLESTACK Reprotect, FTCTL must also complete a non-mutating
 `KVM_TO_VMWARE` provider preflight before reverse data transfer or active
 profile replacement. A failed preflight preserves TARGET authority and the
 committed failover session.
+
+## 15. Post-Failover Terminal State Addendum (2026-07-30)
+
+`dr-cutover-commit` must finalize scheduler desired, health, recovery, worker
+identity, and replication activity together with the TARGET authority ACK.
+The normative terminal-state contract is document
+[218-dr-post-failover-scheduler-terminal-authority-contract-design-20260730.md](218-dr-post-failover-scheduler-terminal-authority-contract-design-20260730.md).
+
+## 16. 2026-08-01 Reverse Guest Compatibility Addendum
+
+VMware-to-KVM guest preparation changes the replica disk after the last
+forward VMware checkpoint. The cutover manifest must therefore preserve an
+immutable KVM baseline immediately before those target-side mutations and
+record every later KVM write in a new tracker generation.
+
+Failback may not boot the original VMware VM after copying only block changes.
+It must first prepare a VMware-compatible staging guest: restore the expected
+storage and NIC drivers, repair Windows BCD/EFI state where required, preserve
+the Secure Boot policy, and pass an isolated VMware boot validation. The full
+contract is defined by
+[445-ftctl-dr-bidirectional-incremental-replication-and-reverse-guest-compatibility-design-20260801.md](445-ftctl-dr-bidirectional-incremental-replication-and-reverse-guest-compatibility-design-20260801.md).

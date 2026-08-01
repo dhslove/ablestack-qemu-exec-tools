@@ -91,6 +91,8 @@ source "${LIB_BASE}/ftctl/dr_ablestack.sh"
 # shellcheck source=/dev/null
 source "${LIB_BASE}/ftctl/dr_vmware.sh"
 # shellcheck source=/dev/null
+source "${LIB_BASE}/ftctl/dr_kvm_vmware.sh"
+# shellcheck source=/dev/null
 source "${LIB_BASE}/ftctl/dr_scheduler.sh"
 # shellcheck source=/dev/null
 source "${LIB_BASE}/ftctl/guestprep.sh"
@@ -323,6 +325,8 @@ selftest_run_lint() {
     "lib/ftctl/failover.sh"
     "lib/ftctl/events.sh"
     "lib/ftctl/dr_ablestack.sh"
+    "lib/ftctl/dr_kvm_vmware.sh"
+    "lib/ftctl/dr_kvm_vmware_mover.sh"
     "lib/ftctl/dr_vmware.sh"
     "lib/ftctl/dr_scheduler.sh"
     "lib/ftctl/dr_runtime.sh"
@@ -9214,6 +9218,81 @@ selftest_case_dr_transition_preflight_is_read_only() {
   selftest_assert_contains "${out}" '"error_code":"DR_TRANSITION_PREFLIGHT_GENERATION_MISMATCH"' "generation mismatch is typed"
 }
 
+selftest_case_dr_kvm_vmware_reverse_route_and_baseline_contract() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR KVM to VMware uses the reverse writer and direction-scoped baseline"
+
+  local plan="plan-kvm-vmware-reverse"
+  local profile="${SELFTEST_ROOT}/kvm-vmware-profile.json"
+  local map_path="${SELFTEST_ROOT}/kvm-vmware-map.json"
+  local baseline_path
+  local out
+  cat > "${profile}" <<JSON
+{
+  "planUuid":"${plan}",
+  "runUuid":"run-reverse",
+  "direction":"KVM_TO_VMWARE",
+  "source":{"provider":"ABLESTACK","externalRef":"target-vm"},
+  "target":{"provider":"VMWARE","externalRef":"vm-101"},
+  "mapping":{"disks":[{
+    "device":"sda",
+    "sourcePath":"/dev/rbd/rbd/w22-01-dr-disk-0",
+    "targetVmdkPath":"[datastore] w22-01/w22-01.vmdk",
+    "sizeBytes":1048576
+  }]}
+}
+
+JSON
+  ftctl_dr_kvm_vmware_canonicalize_profile "${profile}" "${map_path}"
+  selftest_assert_file_contains "${map_path}" '"providerPair":"ABLESTACK_TO_VMWARE"'
+  selftest_assert_file_contains "${map_path}" '"sourcePool":"rbd"'
+  selftest_assert_file_contains "${map_path}" '"sourceImage":"w22-01-dr-disk-0"'
+  selftest_assert_file_contains "${map_path}" '"targetVmRef":"vm-101"'
+
+  baseline_path="$(ftctl_dr_kvm_vmware_baseline_path "${plan}")"
+  selftest_assert_eq "$(ftctl_dr_kvm_vmware_cycle_type "${plan}" incremental)" "FULL_REVERSE_SEED" "missing reverse baseline forces seed"
+  mkdir -p "$(dirname "${baseline_path}")"
+  cat > "${baseline_path}" <<JSON
+{"state":"LOCAL_DURABLE","generation":1,"disks":[{"diskIndex":0,"snapshot":"baseline-1"}]}
+JSON
+  selftest_assert_eq "$(ftctl_dr_kvm_vmware_cycle_type "${plan}" incremental)" "REVERSE_INCREMENTAL" "durable reverse baseline enables incremental"
+  out="$({
+    ftctl_dr_kvm_vmware_replication_cycle() { printf 'reverse-writer:%s:%s\n' "$1" "$5"; }
+    ftctl_dr_vmware_replication_cycle() { printf 'wrong-forward-reader\n'; }
+    ftctl_dr_scheduler_run_cycle "${plan}" run-reverse "${profile}" 2 reverse-incremental
+  })"
+  selftest_assert_contains "${out}" "reverse-writer:${plan}:reverse-incremental" "provider pair routes to reverse writer"
+}
+
+selftest_case_dr_kvm_vmware_canonicalizes_cloud_rbd_volume_identity() {
+  local tmp profile output credentials password_file
+  tmp="$(mktemp -d)"
+  profile="${tmp}/reverse-profile.json"
+  output="${tmp}/disk-map.json"
+  credentials="${tmp}/credentials.json"
+  password_file="${tmp}/vcenter.password"
+  cat > "${profile}" <<'JSON'
+{"planUuid":"plan-rbd","runUuid":"run-rbd","direction":"KVM_TO_VMWARE","source":{"provider":"ABLESTACK"},"target":{"provider":"VMWARE","externalRef":"vm-6429"},"mapping":{"disks":[{"sizeBytes":"107374182400","sourcePath":"w22-01-dr-disk-0","targetVmdkPath":"[datastore] w22-01/w22-01.vmdk","source":{"storagePath":"rbd","volumeUuid":"7e74a011-47dc-4de5-acd3-a7af6aeaf9f6","name":"w22-01-dr-disk-0"}}]}}
+JSON
+  ftctl_dr_kvm_vmware_canonicalize_profile "${profile}" "${output}"
+  jq -e '.direction == "KVM_TO_VMWARE"
+    and .disks[0].sourcePool == "rbd"
+    and .disks[0].sourceImage == "w22-01-dr-disk-0"
+    and .disks[0].sourceVolumeUuid == "7e74a011-47dc-4de5-acd3-a7af6aeaf9f6"
+    and .disks[0].sourceUri == "rbd:rbd/w22-01-dr-disk-0"
+    and .disks[0].targetVmRef == "vm-6429"' "${output}" >/dev/null
+  cat > "${credentials}" <<'JSON'
+{"credentials":{"source":{"type":"VCENTER","endpoint":"10.10.21.10","principal":"administrator@example.local","auth":{"password":"vcenter-password"}},"target":{"type":"MOLD_API","endpoint":"http://10.10.32.10:8080/client/api","auth":{"password":"wrong-password"}}}}
+JSON
+  (
+    source "${LIB_BASE}/ftctl/dr_kvm_vmware_mover.sh"
+    FTCTL_DR_CREDENTIALS_FILE="${credentials}"
+    ftctl_kvm_vmware_write_password_file "${password_file}"
+  )
+  selftest_assert_file_contains "${password_file}" 'vcenter-password'
+  rm -rf "${tmp}"
+}
+
 selftest_main() {
   selftest_run_lint
   selftest_case_cluster_cli
@@ -9369,6 +9448,8 @@ selftest_main() {
   selftest_case_dr_vmware_nbd_quarantine_on_timeout
   selftest_case_dr_vmware_automatic_reseed_mode
   selftest_case_dr_vmware_mover_uses_raw_over_nbd_image_opts
+  selftest_case_dr_kvm_vmware_reverse_route_and_baseline_contract
+  selftest_case_dr_kvm_vmware_canonicalizes_cloud_rbd_volume_identity
   selftest_case_events_json
   selftest_info "all checks passed"
 }

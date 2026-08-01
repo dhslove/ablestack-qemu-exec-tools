@@ -1,5 +1,9 @@
 # 219. DR Failback Post-Commit Sequence Handoff Contract Design
 
+> 2026-07-31 addendum: SOURCE fence release is not a standalone FTCTL_DR user
+> action. Document 444 validates isolation and reverse-path readiness before
+> this post-commit sequence.
+
 ## 1. 목적
 
 Failback reverse-final checkpoint와 원본 방향으로 재개된 scheduler cycle이 같은
@@ -195,3 +199,16 @@ Deployment acceptance requires the installed host scripts to contain
 `resume_baseline_checkpoint_sequence`,
 `minimum_completed_checkpoint_sequence`, and
 `immediate_cycle_pending`.
+
+## 11. 2026-08-01 Directional Sequence Correction
+
+The Failback checkpoint `N` must represent a committed `KVM_TO_VMWARE`
+transaction owned by the Failback Run. A VMware CBT change ID advanced by a
+forward-source probe, an old Protection Run cycle, or a zero-byte forward
+cycle is not valid Failback evidence.
+
+Only after Cloud commits authority back to SOURCE may sequence `N+1` start in
+the original `VMWARE_TO_KVM` direction. Sequence handoff therefore validates
+`run_id`, `direction`, `source_generation`, `target_generation`, transferred
+bytes, and target durability together. The normative bidirectional contract is
+[445-ftctl-dr-bidirectional-incremental-replication-and-reverse-guest-compatibility-design-20260801.md](445-ftctl-dr-bidirectional-incremental-replication-and-reverse-guest-compatibility-design-20260801.md).
