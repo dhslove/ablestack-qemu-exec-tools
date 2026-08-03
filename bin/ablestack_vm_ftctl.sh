@@ -102,6 +102,8 @@ CLI_TARGET_VM_NAME=""
 CLI_TARGET_NETWORK_ID=""
 CLI_TARGET_VOLUME_MAP_JSON=""
 CLI_TARGET_READY_RPO_SECONDS=""
+CLI_MATERIALIZATION_SPEC_JSON=""
+CLI_MATERIALIZATION_SPEC_SHA256=""
 CLI_CUTOVER_SESSION_ID=""
 CLI_CHECKPOINT_SEQUENCE=""
 CLI_AUTHORITY_GENERATION=""
@@ -637,6 +639,14 @@ parse_args() {
         CLI_TARGET_READY_RPO_SECONDS="${2-}"
         shift 2
         ;;
+      --materialization-spec-json)
+        CLI_MATERIALIZATION_SPEC_JSON="${2-}"
+        shift 2
+        ;;
+      --materialization-spec-sha256)
+        CLI_MATERIALIZATION_SPEC_SHA256="${2-}"
+        shift 2
+        ;;
       --session-id)
         CLI_CUTOVER_SESSION_ID="${2-}"
         shift 2
@@ -794,7 +804,8 @@ dispatch() {
       ;;
     dr-target-materialized)
       ftctl_dr_runtime_target_materialized "${CLI_PLAN}" "${CLI_RUN}" "${CLI_TARGET_VM_ID}" "${CLI_TARGET_EXTERNAL_REF}" \
-        "${CLI_TARGET_VM_NAME}" "${CLI_TARGET_NETWORK_ID}" "${CLI_TARGET_VOLUME_MAP_JSON}" "${CLI_TARGET_READY_RPO_SECONDS}" "${CLI_JSON}"
+        "${CLI_TARGET_VM_NAME}" "${CLI_TARGET_NETWORK_ID}" "${CLI_TARGET_VOLUME_MAP_JSON}" "${CLI_TARGET_READY_RPO_SECONDS}" \
+        "${CLI_MATERIALIZATION_SPEC_JSON}" "${CLI_MATERIALIZATION_SPEC_SHA256}" "${CLI_JSON}"
       ;;
     dr-cutover-commit)
       ftctl_dr_runtime_cutover_commit "${CLI_PLAN}" "${CLI_RUN}" "${CLI_CUTOVER_SESSION_ID}" \

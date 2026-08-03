@@ -4307,8 +4307,9 @@ PY
 
 ftctl_dr_runtime_target_materialized() {
   local plan="${1-}" run="${2-}" target_vm_id="${3-}" target_external_ref="${4-}" target_vm_name="${5-}" target_network_id="${6-}"
-  local target_volume_map_json="${7-}" target_ready_rpo_seconds="${8-}" json="${9-0}"
-  local run_path status_path now updates
+  local target_volume_map_json="${7-}" target_ready_rpo_seconds="${8-}" materialization_spec_json="${9-}"
+  local materialization_spec_sha256="${10-}" json="${11-0}"
+  local run_path status_path now updates validation generation observed_power_state disk_digest replica_id previous_generation previous_digest rc
 
   ftctl_dr_runtime_require_plan "${plan}" || return 2
   ftctl_dr_runtime_require_run "${run}" || return 2
@@ -4317,10 +4318,81 @@ ftctl_dr_runtime_target_materialized() {
     [[ "${json}" == "1" ]] || printf 'dr-target-materialized: plan=%s run=%s target reference is required\n' "${plan}" "${run}" >&2
     return 2
   fi
+  if [[ -z "${materialization_spec_json}" || -z "${materialization_spec_sha256}" ]]; then
+    [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_error_json "dr-target-materialized" "${plan}" "${run}" \
+      "DR_MATERIALIZATION_CONTRACT_REQUIRED" "materialization contract v2 and SHA-256 are required" 78
+    return 78
+  fi
+
+  validation="$(python3 - "${materialization_spec_json}" "${materialization_spec_sha256}" "${plan}" "${run}" \
+      "${target_vm_id}" "${target_external_ref}" "${target_volume_map_json}" <<'PY'
+import hashlib
+import json
+import sys
+
+raw, supplied_hash, plan, run, target_vm_id, target_external_ref, volume_map_raw = sys.argv[1:8]
+actual_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+if actual_hash.lower() != supplied_hash.lower():
+    print("DR_MATERIALIZATION_DIGEST_MISMATCH")
+    raise SystemExit(78)
+try:
+    spec = json.loads(raw)
+    volume_map = json.loads(volume_map_raw)
+except Exception:
+    print("DR_MATERIALIZATION_SCHEMA_INVALID")
+    raise SystemExit(78)
+if spec.get("contractVersion") != 2 or spec.get("planUuid") != plan or spec.get("runUuid") != run:
+    print("DR_MATERIALIZATION_OWNERSHIP_MISMATCH")
+    raise SystemExit(78)
+replica_id = spec.get("replicaId")
+generation = spec.get("ownershipGeneration")
+if not isinstance(replica_id, int) or replica_id <= 0 or not isinstance(generation, int) or generation <= 0:
+    print("DR_MATERIALIZATION_SCHEMA_INVALID")
+    raise SystemExit(78)
+target = spec.get("targetVm") or {}
+if str(target.get("vmId", "")) != str(target_vm_id) or str(target.get("externalRef", "")) != str(target_external_ref):
+    print("DR_MATERIALIZATION_OWNERSHIP_MISMATCH")
+    raise SystemExit(78)
+power = target.get("observedPowerState")
+if power not in ("POWERED_OFF", "POWERED_ON"):
+    print("DR_MATERIALIZATION_POWER_STATE_MISMATCH")
+    raise SystemExit(80)
+spec_disks = (spec.get("targetVolumeMap") or {}).get("disks") or []
+arg_disks = (volume_map or {}).get("disks") or []
+if not spec_disks or spec_disks != arg_disks:
+    print("DR_MATERIALIZATION_DISK_MAP_MISMATCH")
+    raise SystemExit(81)
+for disk in spec_disks:
+    if not disk.get("targetVolumeId") or not disk.get("targetDiskRef"):
+        print("DR_MATERIALIZATION_DISK_MAP_MISMATCH")
+        raise SystemExit(81)
+disk_digest = hashlib.sha256(json.dumps(spec_disks, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+print(f"OK\t{generation}\t{supplied_hash.lower()}\t{power}\t{disk_digest}\t{replica_id}")
+PY
+  )" || rc=$?
+  rc="${rc:-0}"
+  if [[ "${rc}" != "0" ]]; then
+    [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_error_json "dr-target-materialized" "${plan}" "${run}" \
+      "${validation:-DR_MATERIALIZATION_CONTRACT_INVALID}" "materialization contract v2 validation failed" "${rc}"
+    return "${rc}"
+  fi
+  IFS=$'\t' read -r _ generation materialization_spec_sha256 observed_power_state disk_digest replica_id <<<"${validation}"
 
   ftctl_dr_runtime_ensure_plan_dirs "${plan}"
   run_path="$(ftctl_dr_runtime_run_path "${plan}" "${run}")"
   status_path="$(ftctl_dr_runtime_status_path "${plan}")"
+  previous_generation="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "materialization_ownership_generation" 2>/dev/null || true)"
+  previous_digest="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "materialization_spec_sha256" 2>/dev/null || true)"
+  if [[ "${previous_generation}" =~ ^[0-9]+$ ]] && (( generation < previous_generation )); then
+    [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_error_json "dr-target-materialized" "${plan}" "${run}" \
+      "DR_MATERIALIZATION_STALE_GENERATION" "materialization ownership generation is stale" 79
+    return 79
+  fi
+  if [[ "${previous_generation}" == "${generation}" && -n "${previous_digest}" && "${previous_digest}" != "${materialization_spec_sha256}" ]]; then
+    [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_error_json "dr-target-materialized" "${plan}" "${run}" \
+      "DR_MATERIALIZATION_GENERATION_CONFLICT" "materialization digest changed without generation advance" 79
+    return 79
+  fi
   if [[ ! -f "${run_path}" ]]; then
     if [[ -f "${status_path}" ]]; then
       cp -f "${status_path}" "${run_path}"
@@ -4346,6 +4418,12 @@ ftctl_dr_runtime_target_materialized() {
     "target_network_present=true"
     "restore_point_present=true"
     "target_materialized=true"
+    "materialization_contract_version=2"
+    "materialization_replica_id=${replica_id}"
+    "materialization_ownership_generation=${generation}"
+    "materialization_spec_sha256=${materialization_spec_sha256}"
+    "materialization_disk_map_sha256=${disk_digest}"
+    "materialization_observed_power_state=${observed_power_state}"
     "worker_state=SUCCEEDED"
     "worker_exit_code=0"
     "worker_updated_at=${now}"
@@ -5090,14 +5168,14 @@ ftctl_dr_runtime_capabilities() {
   local first="1" command
 
   if [[ "${json}" == "1" ]]; then
-    printf '{"command":"dr-capabilities","result":"ok","ftctl_version":"%s","runtime_schema_version":"%s","action_contract_version":"%s","supported_commands":[' \
+    printf '{"command":"dr-capabilities","result":"ok","ftctl_version":"%s","runtime_schema_version":"%s","action_contract_version":"%s","materialization_contract_version":2,"supported_commands":[' \
       "$(ftctl__json_escape "${version}")" "$(ftctl__json_escape "${schema}")" "$(ftctl__json_escape "${action_contract}")"
     for command in "${commands[@]}"; do
       [[ "${first}" == "1" ]] || printf ','
       first="0"
       printf '"%s"' "$(ftctl__json_escape "${command}")"
     done
-    printf '],"supported_features":["async-run","status-projection","status-scope-v2","target-materialized-notify","target-materialized-idempotent","hardware-contract-projection","control-protocol-v2","control-protocol-v3","control-protocol-v4","dr-scheduler-singleton-v1","dr-scheduler-self-owner-repair-v1","dr-scheduler-systemd-unit-v1","dr-sync-recover-v1","dr-local-reconcile-fence-v1","dr-checkpoint-producer-v1","dr-nbd-deterministic-drain-v1","dr-nbd-cleanup-recovery-v1","dr-plan-authority-snapshot-v1","dr-failover-authority-snapshot-v1","dr-completed-cycle-evidence-v2","dr-failover-abort-v1","dr-transition-preflight-v1","dr-transition-preflight-v2","dr-release-tombstone-v1","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","guest-preparation-v1","guest-preparation-v2","test-domain-lifecycle-v1","test-artifact-lifecycle-v2","cloud-managed-test-vm-v1","cutover-ready-v1","cutover-manifest-v2","cutover-preflight-v1","cloud-cutover-commit-v1","cloud-failback-lifecycle-v1","dr-failback-commit-journal-v1","dr-failback-commit-journal-v2","dr-failback-late-ack-reconcile-v1","dr-failback-rollback-fence-v1"]}\n'
+    printf '],"supported_features":["async-run","status-projection","status-scope-v2","target-materialized-notify","target-materialized-idempotent","target-materialization-manifest-v2","target-resource-ownership-generation-v1","hardware-contract-projection","control-protocol-v2","control-protocol-v3","control-protocol-v4","dr-scheduler-singleton-v1","dr-scheduler-self-owner-repair-v1","dr-scheduler-systemd-unit-v1","dr-sync-recover-v1","dr-local-reconcile-fence-v1","dr-checkpoint-producer-v1","dr-nbd-deterministic-drain-v1","dr-nbd-cleanup-recovery-v1","dr-plan-authority-snapshot-v1","dr-failover-authority-snapshot-v1","dr-completed-cycle-evidence-v2","dr-failover-abort-v1","dr-transition-preflight-v1","dr-transition-preflight-v2","dr-release-tombstone-v1","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","guest-preparation-v1","guest-preparation-v2","test-domain-lifecycle-v1","test-artifact-lifecycle-v2","cloud-managed-test-vm-v1","cutover-ready-v1","cutover-manifest-v2","cutover-preflight-v1","cloud-cutover-commit-v1","cloud-failback-lifecycle-v1","dr-failback-commit-journal-v1","dr-failback-commit-journal-v2","dr-failback-late-ack-reconcile-v1","dr-failback-rollback-fence-v1"]}\n'
     return 0
   fi
 

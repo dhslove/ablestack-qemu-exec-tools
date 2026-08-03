@@ -1,5 +1,10 @@
 # 201. DR Remote Mold Cloud-Managed Resource Ownership Design
 
+> Normative target materialization extension (2026-08-03):
+> [447. FTCTL DR Target Materialization Ownership Manifest Contract Design](447-ftctl-dr-target-materialization-ownership-manifest-contract-design-20260803.md)
+> requires FTCTL manifest generation/digest validation while preserving Cloud
+> as the sole VM, volume, artifact, and cleanup owner.
+
 Date: 2026-05-14
 
 ## 1. Purpose

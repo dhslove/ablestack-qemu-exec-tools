@@ -6404,6 +6404,70 @@ JSON
   python3 -c 'import json,sys; value=json.load(sys.stdin); assert value["profile_exists"] is False; assert value["source_firmware"] == ""; assert value["target_io_policy"] == ""' <<< "${status}"
 }
 
+selftest_case_dr_target_materialization_manifest_v2() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR target materialization manifest v2 ownership contract"
+
+  local plan="plan-materialization-v2" run="run-materialization-v2"
+  local profile="${SELFTEST_ROOT}/dr-materialization-profile.json"
+  local volume_map manifest digest out status rc=0
+  cat > "${profile}" <<JSON
+{"version":1,"engine":"FTCTL_DR","planUuid":"${plan}","direction":"VMWARE_TO_KVM","request":{"mode":"planned"}}
+JSON
+  bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-sync-start \
+    --config "${SELFTEST_CONFIG}" \
+    --plan "${plan}" \
+    --run "${run}" \
+    --profile-json "${profile}" \
+    --json >/dev/null
+
+  volume_map='{"disks":[{"diskIndex":0,"targetVolumeId":"501","targetDiskRef":"rbd/target-volume-501"}]}'
+  manifest="{\"contractVersion\":2,\"planUuid\":\"${plan}\",\"runUuid\":\"${run}\",\"replicaId\":41,\"ownershipGeneration\":2,\"targetVm\":{\"vmId\":\"301\",\"externalRef\":\"i-2-301-VM\",\"observedPowerState\":\"POWERED_OFF\"},\"targetVolumeMap\":${volume_map}}"
+  digest="$(printf '%s' "${manifest}" | sha256sum | awk '{print $1}')"
+  out="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-target-materialized \
+    --config "${SELFTEST_CONFIG}" \
+    --plan "${plan}" \
+    --run "${run}" \
+    --target-vm-id 301 \
+    --target-external-ref i-2-301-VM \
+    --target-vm-name target-vm \
+    --target-volume-map-json "${volume_map}" \
+    --materialization-spec-json "${manifest}" \
+    --materialization-spec-sha256 "${digest}" \
+    --json)"
+  selftest_assert_contains "${out}" '"result":"ok"' "materialization manifest accepted"
+  selftest_assert_contains "${out}" '"state":"READY"' "materialization state ready"
+
+  status="$(ftctl_dr_runtime_status_path "${plan}")"
+  selftest_assert_file_contains "${status}" "materialization_contract_version=2"
+  selftest_assert_file_contains "${status}" "materialization_replica_id=41"
+  selftest_assert_file_contains "${status}" "materialization_ownership_generation=2"
+  selftest_assert_file_contains "${status}" "materialization_spec_sha256=${digest}"
+  selftest_assert_file_contains "${status}" "materialization_observed_power_state=POWERED_OFF"
+
+  manifest="{\"contractVersion\":2,\"planUuid\":\"${plan}\",\"runUuid\":\"${run}\",\"replicaId\":41,\"ownershipGeneration\":1,\"targetVm\":{\"vmId\":\"301\",\"externalRef\":\"i-2-301-VM\",\"observedPowerState\":\"POWERED_OFF\"},\"targetVolumeMap\":${volume_map}}"
+  digest="$(printf '%s' "${manifest}" | sha256sum | awk '{print $1}')"
+  out="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-target-materialized \
+    --config "${SELFTEST_CONFIG}" --plan "${plan}" --run "${run}" \
+    --target-vm-id 301 --target-external-ref i-2-301-VM \
+    --target-volume-map-json "${volume_map}" \
+    --materialization-spec-json "${manifest}" \
+    --materialization-spec-sha256 "${digest}" --json 2>/dev/null)" || rc=$?
+  selftest_assert_eq "${rc}" "79" "stale ownership generation exit"
+  selftest_assert_contains "${out}" '"error_code":"DR_MATERIALIZATION_STALE_GENERATION"' "stale ownership generation is typed"
+
+  rc=0
+  volume_map='{"disks":[{"diskIndex":0,"targetVolumeId":"999","targetDiskRef":"rbd/foreign-volume"}]}'
+  out="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-target-materialized \
+    --config "${SELFTEST_CONFIG}" --plan "${plan}" --run "${run}" \
+    --target-vm-id 301 --target-external-ref i-2-301-VM \
+    --target-volume-map-json "${volume_map}" \
+    --materialization-spec-json "${manifest}" \
+    --materialization-spec-sha256 "${digest}" --json 2>/dev/null)" || rc=$?
+  selftest_assert_eq "${rc}" "81" "disk ownership mismatch exit"
+  selftest_assert_contains "${out}" '"error_code":"DR_MATERIALIZATION_DISK_MAP_MISMATCH"' "disk ownership mismatch is typed"
+}
+
 selftest_case_dr_runtime_control_actions() {
   selftest_reset_env
   selftest_info "FTCTL_DR runtime control actions"
@@ -9416,6 +9480,7 @@ selftest_main() {
   selftest_case_xcolo_primary_peer_wait_refreshes_krbd_paths
   selftest_case_cloud_managed_rollback_cleanup_does_not_restart_secondary
   selftest_case_dr_runtime_profile_status_cancel
+  selftest_case_dr_target_materialization_manifest_v2
   selftest_case_dr_runtime_control_actions
   selftest_case_dr_plan_scoped_control_protocol
   selftest_case_dr_ablestack_target_prepare
