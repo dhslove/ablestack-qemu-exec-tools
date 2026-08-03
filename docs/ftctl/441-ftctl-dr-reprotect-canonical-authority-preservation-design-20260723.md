@@ -1,5 +1,10 @@
 # FTCTL DR Reprotect Canonical Authority Preservation Design
 
+> 2026-08-03 latest contract:
+> [446-ftctl-dr-transition-preflight-v2-and-release-tombstone-contract-design-20260803.md](446-ftctl-dr-transition-preflight-v2-and-release-tombstone-contract-design-20260803.md)
+> adds the strict v2 preflight envelope, mixed-version capability gate, and
+> authority-preserving release tombstone. Document 446 wins on conflict.
+
 > 2026-07-31 addendum: Reprotect keeps TARGET production authority and SOURCE
 > production isolation. It uses document 444 read-only preflight and never
 > depends on a standalone fence-clear action.

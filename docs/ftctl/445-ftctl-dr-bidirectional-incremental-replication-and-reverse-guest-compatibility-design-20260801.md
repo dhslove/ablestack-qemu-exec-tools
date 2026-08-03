@@ -1,5 +1,10 @@
 # 445. FTCTL DR Bidirectional Incremental Replication And Reverse Guest Compatibility Design
 
+> 2026-08-03 latest contract:
+> [446-ftctl-dr-transition-preflight-v2-and-release-tombstone-contract-design-20260803.md](446-ftctl-dr-transition-preflight-v2-and-release-tombstone-contract-design-20260803.md)
+> requires a v2 transition preflight before reverse protection and preserves a
+> release tombstone without mutating the current serving VM.
+
 - Date: 2026-08-01
 - Status: code-level design; implementation pending
 - Scope: VMware <-> KVM continuous replication, Reprotect, planned Failback, Windows guest compatibility

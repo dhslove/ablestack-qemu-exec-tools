@@ -1,5 +1,10 @@
 # 444. FTCTL DR Source Isolation Internal Preflight Contract Design
 
+> 2026-08-03 최신 후속 규약:
+> [446-ftctl-dr-transition-preflight-v2-and-release-tombstone-contract-design-20260803.md](446-ftctl-dr-transition-preflight-v2-and-release-tombstone-contract-design-20260803.md)
+> 는 실제 구현 필드에 맞춘 v2 strict envelope와 종료 코드 0/79, Release
+> tombstone을 정의한다. 충돌 시 446을 우선한다.
+
 ## 1. 목적
 
 Cross-Hypervisor `FTCTL_DR`에서 독립 `FENCE_CONFIRM` 사용자 작업을 제거하고,
@@ -18,10 +23,10 @@ FTCTL은 preflight에서 VM power, production fence, profile, state를 변경하
 
 ```bash
 ftctl dr-transition-preflight \
-  --plan-id <uuid> \
+  --plan <uuid> \
   --operation failback|reprotect \
   --expected-authority target \
-  --expected-generation <n> \
+  --authority-generation <n> \
   --json
 ```
 
@@ -29,20 +34,30 @@ ftctl dr-transition-preflight \
 
 ```json
 {
-  "schema_version": "1",
+  "command": "dr-transition-preflight",
+  "schema_version": "2",
+  "contract_version": "dr-transition-preflight-v2",
+  "status_scope": "TRANSITION_PREFLIGHT",
   "result": "ready",
   "ready": true,
+  "plan_uuid": "<uuid>",
   "operation": "failback",
-  "authority_side": "target",
+  "expected_authority": "TARGET",
+  "active_side": "TARGET",
+  "expected_generation": 1494,
   "authority_generation": 1494,
-  "scheduler_state": "stopped",
+  "target_power_state": "POWERED_ON",
+  "source_fence_state": "ACKNOWLEDGED",
+  "source_power_state": "POWERED_OFF",
+  "scheduler_state": "STOPPED",
   "active_operation": "",
-  "source_fence_state": "acknowledged",
-  "reverse_write_path_state": "ready",
-  "split_brain_guard_state": "safe",
-  "reason_code": "",
+  "reverse_write_path_state": "READY",
+  "split_brain_guard_state": "SAFE",
+  "error_code": "",
+  "message": "transition preflight ready",
   "checked_at_epoch_ms": 1785466800000,
-  "retryable": false
+  "retryable": false,
+  "exit_code": 0
 }
 ```
 
@@ -51,11 +66,12 @@ ftctl dr-transition-preflight \
 | 코드 | 의미 |
 | --- | --- |
 | 0 | ready |
-| 20 | retryable lock/operation conflict |
-| 21 | authority mismatch |
-| 22 | reverse path not ready |
-| 23 | split-brain guard unsafe |
-| 2 | invalid request/profile |
+| 79 | typed preflight rejection; 세부 원인은 `error_code`/`retryable` 참조 |
+| 2 | invalid request/profile/JSON 생성 실패 |
+| 124/137 | timeout/forced termination |
+
+세분화된 원인은 process exit code가 아니라 strict JSON의 `error_code`로
+전달한다. 상세 v2 필드와 Release tombstone은 문서 446을 따른다.
 
 ## 4. 구현 계약
 
@@ -129,4 +145,3 @@ temporary handle은 `finally`에서 해제하고 persistent NBD/RBD mapping을 �
 | Authority | 실행 중 간접 확인 | side/generation 명시 확인 |
 | Reverse path | 실행 후 실패 가능 | 실행 전 read-only probe |
 | 오류 | 일반 문자열 | typed reason + retryable |
-

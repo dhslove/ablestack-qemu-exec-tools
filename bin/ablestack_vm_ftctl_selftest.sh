@@ -6461,6 +6461,12 @@ JSON
     --json)"
   selftest_assert_contains "${out}" '"state":"RELEASED"' "release state"
   selftest_assert_contains "${out}" '"step":"release-completed"' "release step"
+  local release_tombstone="${SELFTEST_ROOT}/run/dr-runtime/plans/plan-control/release.json"
+  [[ -f "${release_tombstone}" ]] || selftest_fail "release tombstone must be persisted"
+  selftest_assert_file_contains "${release_tombstone}" '"contract_version":"dr-release-tombstone-v1"'
+  selftest_assert_file_contains "${release_tombstone}" '"vm_mutated":false'
+  [[ ! -f "${SELFTEST_ROOT}/run/dr-runtime/plans/plan-control/profile.json" ]] \
+    || selftest_fail "release must remove the active DR profile"
 }
 
 selftest_case_dr_plan_scoped_control_protocol() {
@@ -9208,6 +9214,9 @@ selftest_case_dr_transition_preflight_is_read_only() {
 
   out="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-transition-preflight --config "${SELFTEST_CONFIG}" --plan "${plan}" --operation failback --expected-authority TARGET --authority-generation 7 --json)"
   selftest_assert_contains "${out}" '"command":"dr-transition-preflight"' "transition preflight command"
+  selftest_assert_contains "${out}" '"schema_version":2' "transition preflight schema"
+  selftest_assert_contains "${out}" '"contract_version":"dr-transition-preflight-v2"' "transition preflight contract"
+  selftest_assert_contains "${out}" '"status_scope":"TRANSITION_PREFLIGHT"' "transition preflight scope"
   selftest_assert_contains "${out}" '"ready":true' "transition preflight ready"
   selftest_assert_contains "${out}" '"authority_generation":7' "transition preflight generation"
   after_sha="$(sha256sum "${status_path}" | awk '{print $1}')"

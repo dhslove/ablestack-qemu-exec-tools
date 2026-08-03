@@ -54,6 +54,11 @@ ftctl_dr_runtime_status_path() {
   printf '%s/status.state\n' "$(ftctl_dr_runtime_plan_dir "${plan}")"
 }
 
+ftctl_dr_runtime_release_tombstone_path() {
+  local plan="${1-}"
+  printf '%s/release.json\n' "$(ftctl_dr_runtime_plan_dir "${plan}")"
+}
+
 ftctl_dr_runtime_run_dir() {
   local plan="${1-}"
   printf '%s/runs\n' "$(ftctl_dr_runtime_plan_dir "${plan}")"
@@ -3756,6 +3761,7 @@ ftctl_dr_runtime_action() {
   local force_immediate_cycle="${14-false}"
   local state_tuple state step progress run_path status_path external_ref rc error_code
   local target_vm_id target_external_ref checkpoint_lease_path test_sequence persisted_artifact_spec="" persisted_authority_spec=""
+  local release_authority_side="" release_authority_generation=""
 
   ftctl_dr_runtime_require_plan "${plan}" || return 2
   ftctl_dr_runtime_require_run "${run}" || return 2
@@ -3790,6 +3796,10 @@ ftctl_dr_runtime_action() {
   external_ref="${run}"
   run_path="$(ftctl_dr_runtime_run_path "${plan}" "${run}")"
   status_path="$(ftctl_dr_runtime_status_path "${plan}")"
+  if [[ "${action}" == "dr-release" && -f "${status_path}" ]]; then
+    release_authority_side="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "active_side")"
+    release_authority_generation="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "cloud_authority_generation")"
+  fi
   ftctl_dr_runtime_write_state "${run_path}" "${plan}" "${run}" "${action}" "${state}" "${step}" "${progress}" "${external_ref}" ""
   case "${action}" in
     dr-failover|dr-failback|dr-reprotect)
@@ -3900,6 +3910,10 @@ ftctl_dr_runtime_action() {
           [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_state_json "${action}" "error" "${plan}" "${run}" "${run_path}" "0"
           return "${rc}"
         fi
+      fi
+      if [[ "${action}" == "dr-release" && "${rc:-0}" == "0" ]]; then
+        ftctl_dr_runtime_write_release_tombstone "${plan}" "${run}" "${run_path}" "${status_path}" \
+          "${release_authority_side:-SOURCE}" "${release_authority_generation}" || return $?
       fi
       ;;
     dr-test-failover|dr-test-prepare)
@@ -4232,6 +4246,63 @@ ftctl_dr_runtime_action() {
   else
     printf '%s: plan=%s run=%s accepted state=%s step=%s\n' "${action}" "${plan}" "${run}" "${state}" "${step}"
   fi
+}
+
+ftctl_dr_runtime_write_release_tombstone() {
+  local plan="${1-}" run="${2-}" run_path="${3-}" status_path="${4-}"
+  local authority_side="${5-SOURCE}" authority_generation="${6-}"
+  local tombstone_path now
+
+  tombstone_path="$(ftctl_dr_runtime_release_tombstone_path "${plan}")"
+  now="$(ftctl_now_iso8601)"
+  ftctl_dr_runtime_path_set "${run_path}" \
+    "action=dr-release" "state=RELEASED" "step=release-completed" "progress=100" \
+    "active_side=${authority_side^^}" "cloud_authority_generation=${authority_generation}" \
+    "scheduler_state=STOPPED" "scheduler_desired_state=STOPPED" \
+    "control_state=STOPPED" "cycle_state=IDLE" "worker_state=SUCCEEDED" \
+    "protection_state=UNPROTECTED" "release_state=RELEASED" \
+    "profile_removed=true" "runtime_removed=false" \
+    "vm_mutated=false" "storage_mutated=false" "network_mutated=false" \
+    "released_at=${now}" "accepted=true" "retryable=false" \
+    "error_code=" "error_message=" "updated_at=${now}" || return 2
+  cp -f "${run_path}" "${status_path}" || return 2
+  chmod 0644 "${status_path}" 2>/dev/null || true
+  python3 - "${tombstone_path}" "${plan}" "${run}" "${authority_side^^}" \
+    "${authority_generation}" "${now}" <<'PY' || return 2
+import json
+import os
+import sys
+
+path, plan, run, active_side, generation, released_at = sys.argv[1:7]
+payload = {
+    "schema_version": 1,
+    "contract_version": "dr-release-tombstone-v1",
+    "plan_uuid": plan,
+    "run_uuid": run,
+    "state": "RELEASED",
+    "step": "release-completed",
+    "protection_state": "UNPROTECTED",
+    "active_side": active_side or "SOURCE",
+    "authority_generation": int(generation) if generation.isdigit() else None,
+    "scheduler_state": "STOPPED",
+    "worker_state": "IDLE",
+    "profile_removed": True,
+    "runtime_removed": False,
+    "vm_mutated": False,
+    "storage_mutated": False,
+    "network_mutated": False,
+    "released_at": released_at,
+}
+os.makedirs(os.path.dirname(path), exist_ok=True)
+tmp = path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as fh:
+    json.dump(payload, fh, sort_keys=True, separators=(",", ":"))
+    fh.write("\n")
+os.replace(tmp, path)
+PY
+  rm -f "$(ftctl_dr_runtime_profile_path "${plan}")"
+  ftctl_log_event "dr-runtime" "dr.release.tombstone" "ok" "" "" \
+    "plan=${plan} run=${run} active_side=${authority_side^^} generation=${authority_generation:-}"
 }
 
 ftctl_dr_runtime_target_materialized() {
@@ -4937,7 +5008,7 @@ ftctl_dr_runtime_transition_preflight() {
   local plan="${1-}" operation="${2-}" expected_authority="${3-TARGET}"
   local expected_generation="${4-}" json="${5-0}"
   local status_path active_side authority_generation target_power_state source_fence_state source_power_state
-  local ready="true" error_code="" message=""
+  local ready="true" error_code="" message="" retryable="false" checked_at_epoch_ms
 
   ftctl_dr_runtime_require_plan "${plan}" || return 2
   operation="${operation,,}"
@@ -4974,8 +5045,9 @@ ftctl_dr_runtime_transition_preflight() {
   fi
 
   [[ -z "${error_code}" ]] || ready="false"
+  checked_at_epoch_ms="$(python3 -c 'import time; print(int(time.time() * 1000))')"
   if [[ "${json}" == "1" ]]; then
-    printf '{"command":"dr-transition-preflight","result":"%s","ready":%s,"plan_uuid":"%s","operation":"%s","expected_authority":"%s","active_side":"%s","expected_generation":%s,"authority_generation":%s,"target_power_state":"%s","source_fence_state":"%s","source_power_state":"%s","error_code":"%s","message":"%s","exit_code":%s}\n' "$( [[ "${ready}" == "true" ]] && printf ok || printf error )" "${ready}" "$(ftctl__json_escape "${plan}")" "$(ftctl__json_escape "${operation}")" "$(ftctl__json_escape "${expected_authority}")" "$(ftctl__json_escape "${active_side}")" "${expected_generation:-null}" "${authority_generation:-null}" "$(ftctl__json_escape "${target_power_state}")" "$(ftctl__json_escape "${source_fence_state}")" "$(ftctl__json_escape "${source_power_state}")" "$(ftctl__json_escape "${error_code}")" "$(ftctl__json_escape "${message}")" "$( [[ "${ready}" == "true" ]] && printf 0 || printf 79 )"
+    printf '{"command":"dr-transition-preflight","schema_version":2,"contract_version":"dr-transition-preflight-v2","status_scope":"TRANSITION_PREFLIGHT","result":"%s","ready":%s,"retryable":%s,"plan_uuid":"%s","operation":"%s","expected_authority":"%s","active_side":"%s","expected_generation":%s,"authority_generation":%s,"target_power_state":"%s","source_fence_state":"%s","source_power_state":"%s","scheduler_state":"%s","active_operation":"%s","checked_at_epoch_ms":%s,"error_code":"%s","message":"%s","exit_code":%s}\n' "$( [[ "${ready}" == "true" ]] && printf ok || printf error )" "${ready}" "${retryable}" "$(ftctl__json_escape "${plan}")" "$(ftctl__json_escape "${operation}")" "$(ftctl__json_escape "${expected_authority}")" "$(ftctl__json_escape "${active_side}")" "${expected_generation:-null}" "${authority_generation:-null}" "$(ftctl__json_escape "${target_power_state}")" "$(ftctl__json_escape "${source_fence_state}")" "$(ftctl__json_escape "${source_power_state}")" "$(ftctl__json_escape "$(ftctl_dr_runtime_state_get_from_path "${status_path}" "scheduler_state")")" "$(ftctl__json_escape "$(ftctl_dr_runtime_state_get_from_path "${status_path}" "action")")" "${checked_at_epoch_ms}" "$(ftctl__json_escape "${error_code}")" "$(ftctl__json_escape "${message}")" "$( [[ "${ready}" == "true" ]] && printf 0 || printf 79 )"
   elif [[ "${ready}" == "true" ]]; then
     printf 'DR transition preflight ready: plan=%s operation=%s authority=%s generation=%s\n' "${plan}" "${operation}" "${active_side}" "${authority_generation}"
   else
@@ -5025,7 +5097,7 @@ ftctl_dr_runtime_capabilities() {
       first="0"
       printf '"%s"' "$(ftctl__json_escape "${command}")"
     done
-    printf '],"supported_features":["async-run","status-projection","status-scope-v2","target-materialized-notify","target-materialized-idempotent","hardware-contract-projection","control-protocol-v2","control-protocol-v3","control-protocol-v4","dr-scheduler-singleton-v1","dr-scheduler-self-owner-repair-v1","dr-scheduler-systemd-unit-v1","dr-sync-recover-v1","dr-local-reconcile-fence-v1","dr-checkpoint-producer-v1","dr-nbd-deterministic-drain-v1","dr-nbd-cleanup-recovery-v1","dr-plan-authority-snapshot-v1","dr-failover-authority-snapshot-v1","dr-completed-cycle-evidence-v2","dr-failover-abort-v1","dr-transition-preflight-v1","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","guest-preparation-v1","guest-preparation-v2","test-domain-lifecycle-v1","test-artifact-lifecycle-v2","cloud-managed-test-vm-v1","cutover-ready-v1","cutover-manifest-v2","cutover-preflight-v1","cloud-cutover-commit-v1","cloud-failback-lifecycle-v1","dr-failback-commit-journal-v1","dr-failback-commit-journal-v2","dr-failback-late-ack-reconcile-v1","dr-failback-rollback-fence-v1"]}\n'
+    printf '],"supported_features":["async-run","status-projection","status-scope-v2","target-materialized-notify","target-materialized-idempotent","hardware-contract-projection","control-protocol-v2","control-protocol-v3","control-protocol-v4","dr-scheduler-singleton-v1","dr-scheduler-self-owner-repair-v1","dr-scheduler-systemd-unit-v1","dr-sync-recover-v1","dr-local-reconcile-fence-v1","dr-checkpoint-producer-v1","dr-nbd-deterministic-drain-v1","dr-nbd-cleanup-recovery-v1","dr-plan-authority-snapshot-v1","dr-failover-authority-snapshot-v1","dr-completed-cycle-evidence-v2","dr-failover-abort-v1","dr-transition-preflight-v1","dr-transition-preflight-v2","dr-release-tombstone-v1","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","guest-preparation-v1","guest-preparation-v2","test-domain-lifecycle-v1","test-artifact-lifecycle-v2","cloud-managed-test-vm-v1","cutover-ready-v1","cutover-manifest-v2","cutover-preflight-v1","cloud-cutover-commit-v1","cloud-failback-lifecycle-v1","dr-failback-commit-journal-v1","dr-failback-commit-journal-v2","dr-failback-late-ack-reconcile-v1","dr-failback-rollback-fence-v1"]}\n'
     return 0
   fi
 
