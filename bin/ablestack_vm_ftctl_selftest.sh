@@ -9313,8 +9313,6 @@ selftest_case_dr_kvm_vmware_reverse_route_and_baseline_contract() {
     "targetVmdkPath":"[datastore] w22-01/w22-01.vmdk",
     "sizeBytes":1048576
   }]}
-}
-
 JSON
   ftctl_dr_kvm_vmware_canonicalize_profile "${profile}" "${map_path}"
   selftest_assert_file_contains "${map_path}" '"providerPair":"ABLESTACK_TO_VMWARE"'
@@ -9335,6 +9333,45 @@ JSON
     ftctl_dr_scheduler_run_cycle "${plan}" run-reverse "${profile}" 2 reverse-incremental
   })"
   selftest_assert_contains "${out}" "reverse-writer:${plan}:reverse-incremental" "provider pair routes to reverse writer"
+}
+
+selftest_case_dr_kvm_vmware_initial_seed_accepts_missing_baseline() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR initial KVM to VMware seed treats a missing baseline as expected"
+
+  local baseline="${SELFTEST_ROOT}/missing-reverse-baseline.json"
+  local invalid="${SELFTEST_ROOT}/invalid-reverse-baseline.json"
+  local valid="${SELFTEST_ROOT}/valid-reverse-baseline.json"
+  local out="" rc=0
+
+  out="$( (
+    source "${LIB_BASE}/ftctl/dr_kvm_vmware_mover.sh"
+    ftctl_kvm_vmware_load_previous_snapshot "${baseline}" 0 FULL_REVERSE_SEED
+  ) )" || rc=$?
+  selftest_assert_eq "${rc}" "0" "missing reverse baseline is valid for full seed"
+  selftest_assert_eq "${out}" "" "full seed has no previous snapshot"
+
+  rc=0
+  (
+    source "${LIB_BASE}/ftctl/dr_kvm_vmware_mover.sh"
+    ftctl_kvm_vmware_load_previous_snapshot "${baseline}" 0 REVERSE_INCREMENTAL
+  ) >/dev/null 2>&1 || rc=$?
+  selftest_assert_eq "${rc}" "83" "incremental reverse sync requires a baseline"
+
+  printf '%s\n' '{"schemaVersion":1,"state":"BROKEN","direction":"KVM_TO_VMWARE","disks":[]}' > "${invalid}"
+  rc=0
+  (
+    source "${LIB_BASE}/ftctl/dr_kvm_vmware_mover.sh"
+    ftctl_kvm_vmware_load_previous_snapshot "${invalid}" 0 FULL_REVERSE_SEED
+  ) >/dev/null 2>&1 || rc=$?
+  selftest_assert_eq "${rc}" "84" "invalid reverse baseline is rejected"
+
+  printf '%s\n' '{"schemaVersion":1,"state":"LOCAL_DURABLE","direction":"KVM_TO_VMWARE","disks":[{"diskIndex":0,"snapshot":"baseline-1"}]}' > "${valid}"
+  out="$( (
+    source "${LIB_BASE}/ftctl/dr_kvm_vmware_mover.sh"
+    ftctl_kvm_vmware_load_previous_snapshot "${valid}" 0 REVERSE_INCREMENTAL
+  ) )"
+  selftest_assert_eq "${out}" "baseline-1" "incremental reverse sync loads the durable snapshot"
 }
 
 selftest_case_dr_kvm_vmware_canonicalizes_cloud_rbd_volume_identity() {
@@ -9523,6 +9560,7 @@ selftest_main() {
   selftest_case_dr_vmware_automatic_reseed_mode
   selftest_case_dr_vmware_mover_uses_raw_over_nbd_image_opts
   selftest_case_dr_kvm_vmware_reverse_route_and_baseline_contract
+  selftest_case_dr_kvm_vmware_initial_seed_accepts_missing_baseline
   selftest_case_dr_kvm_vmware_canonicalizes_cloud_rbd_volume_identity
   selftest_case_events_json
   selftest_info "all checks passed"

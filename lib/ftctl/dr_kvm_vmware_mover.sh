@@ -63,6 +63,27 @@ ftctl_kvm_vmware_build_extent_file() {
     | jq '{areas:[.[] | {offset:(.offset|tonumber),length:(.length|tonumber),exists:(.exists != false)}]}' > "${output_path}"
 }
 
+ftctl_kvm_vmware_load_previous_snapshot() {
+  local baseline_path="${1-}" disk_index="${2-}" cycle_type="${3-}"
+  local snapshot=""
+
+  if [[ ! -s "${baseline_path}" ]]; then
+    [[ "${cycle_type}" == "FULL_REVERSE_SEED" ]] || return 83
+    printf '\n'
+    return 0
+  fi
+
+  jq -e '.schemaVersion == 1
+    and .state == "LOCAL_DURABLE"
+    and .direction == "KVM_TO_VMWARE"
+    and (.disks | type == "array")' "${baseline_path}" >/dev/null 2>&1 || return 84
+  snapshot="$(jq -r --argjson index "${disk_index}" \
+    '[.disks[] | select(.diskIndex == $index) | .snapshot][0] // ""' \
+    "${baseline_path}")" || return 84
+  [[ -n "${snapshot}" || "${cycle_type}" == "FULL_REVERSE_SEED" ]] || return 83
+  printf '%s\n' "${snapshot}"
+}
+
 ftctl_kvm_vmware_start_writer() {
   local endpoint="${1-}" username="${2-}" password_file="${3-}" tls_verify="${4-}" thumbprint="${5-}" libdir="${6-}"
   local vm_ref="${7-}" vmdk="${8-}" socket_path="${9-}" log_path="${10-}" transports
@@ -225,7 +246,7 @@ main() {
   local map_path="${FTCTL_DR_KVM_VMWARE_DISK_MAP:-}" baseline_path="${FTCTL_DR_KVM_VMWARE_BASELINE:-}" metrics_path="${FTCTL_DR_CYCLE_METRICS_PATH:-}"
   local credentials_file="${FTCTL_DR_CREDENTIALS_FILE:-}" cycle_type="${FTCTL_DR_CYCLE_TYPE:-FULL_REVERSE_SEED}"
   local endpoint username tls_verify thumbprint libdir govc_bin vm_ref power_state work_dir password_file rows_path disk_metrics_path
-  local index row pool image previous_snapshot new_snapshot metric_path extent_path rc=0
+  local index row pool image previous_snapshot new_snapshot metric_path extent_path rc=0 baseline_file_state
   [[ -f "${map_path}" && -n "${baseline_path}" && -n "${metrics_path}" ]] || ftctl_kvm_vmware_die 65 "DR_REVERSE_MAP_MISSING"
   for command in jq rbd qemu-nbd nbd-client nbdkit blockdev flock python3; do
     ftctl_vmware_mover_require "${command}" 65
@@ -249,11 +270,31 @@ main() {
   power_state="$(ftctl_kvm_vmware_target_power_state "${govc_bin}" "${endpoint}" "${username}" "${password_file}" "${tls_verify}" "${vm_ref}" || true)"
   [[ "${power_state}" == "poweredOff" || "${power_state}" == "POWERED_OFF" ]] || ftctl_kvm_vmware_die 76 "DR_REVERSE_TARGET_VM_NOT_STOPPED: ${vm_ref} state=${power_state:-unknown}"
 
+  if [[ -s "${baseline_path}" ]]; then
+    jq -e '.schemaVersion == 1
+      and .state == "LOCAL_DURABLE"
+      and .direction == "KVM_TO_VMWARE"
+      and (.disks | type == "array")' "${baseline_path}" >/dev/null 2>&1 \
+      || ftctl_kvm_vmware_die 84 "DR_REVERSE_BASELINE_INVALID"
+    baseline_file_state="LOCAL_DURABLE"
+  else
+    [[ "${cycle_type}" == "FULL_REVERSE_SEED" ]] \
+      || ftctl_kvm_vmware_die 83 "DR_REVERSE_BASELINE_REQUIRED"
+    baseline_file_state="MISSING_EXPECTED"
+  fi
+
   while IFS= read -r row; do
     index="$(jq -r '.diskIndex' <<< "${row}")"
     pool="$(jq -r '.sourcePool' <<< "${row}")"
     image="$(jq -r '.sourceImage' <<< "${row}")"
-    previous_snapshot="$(jq -r --argjson index "${index}" '.disks[]? | select(.diskIndex == $index) | .snapshot' "${baseline_path}" 2>/dev/null | head -n 1)"
+    rc=0
+    previous_snapshot="$(ftctl_kvm_vmware_load_previous_snapshot \
+      "${baseline_path}" "${index}" "${cycle_type}")" || rc=$?
+    if [[ "${rc}" != "0" ]]; then
+      [[ "${rc}" == "83" ]] \
+        && ftctl_kvm_vmware_die "${rc}" "DR_REVERSE_BASELINE_REQUIRED: disk=${index} state=${baseline_file_state}"
+      ftctl_kvm_vmware_die "${rc}" "DR_REVERSE_BASELINE_INVALID: disk=${index} state=${baseline_file_state}"
+    fi
     new_snapshot="ftctl-dr-${FTCTL_DR_PLAN_UUID:0:8}-${FTCTL_DR_CHECKPOINT_SEQUENCE}-${index}"
     rbd snap create "${pool}/${image}@${new_snapshot}" || ftctl_kvm_vmware_die 86 "DR_REVERSE_SNAPSHOT_CREATE_FAILED: ${pool}/${image}"
     row="$(jq -c --arg old "${previous_snapshot}" --arg new "${new_snapshot}" '. + {previousSnapshot:$old,newSnapshot:$new}' <<< "${row}")"

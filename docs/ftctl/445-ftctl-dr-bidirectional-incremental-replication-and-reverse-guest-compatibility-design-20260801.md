@@ -1,5 +1,10 @@
 # 445. FTCTL DR Bidirectional Incremental Replication And Reverse Guest Compatibility Design
 
+> 2026-08-04 corrective contract:
+> [448-ftctl-dr-initial-reverse-seed-baseline-absence-and-terminal-evidence-design-20260804.md](448-ftctl-dr-initial-reverse-seed-baseline-absence-and-terminal-evidence-design-20260804.md)
+> makes an absent reverse baseline valid for the first `FULL_REVERSE_SEED` and
+> defines typed terminal worker and storage-presence evidence.
+>
 > 2026-08-03 latest contract:
 > [446-ftctl-dr-transition-preflight-v2-and-release-tombstone-contract-design-20260803.md](446-ftctl-dr-transition-preflight-v2-and-release-tombstone-contract-design-20260803.md)
 > requires a v2 transition preflight before reverse protection and preserves a
@@ -475,3 +480,17 @@ Implemented source boundaries:
 The first reverse cycle is always `FULL_REVERSE_SEED`. Later cycles use `REVERSE_INCREMENTAL`; the previous RBD baseline snapshot is removed only after VDDK flush, read-after-write verification, and atomic local baseline commit. A failed cycle keeps the previous baseline and target authority.
 
 Live acceptance remains mandatory before production qualification. It must prove a non-zero KVM-to-VMware delta, a verified no-change cycle, VMware guest heartbeat, and a subsequent forward CBT cycle.
+
+## 18. Corrective design update (2026-08-04)
+
+Live Failback Run `7ed30e9b-da7a-4baa-bef9-be555b1464b5` proved that the cycle
+selector correctly chose `FULL_REVERSE_SEED`, but the mover unconditionally
+read the not-yet-created `baseline.json`. Under `set -euo pipefail`, `jq` exited
+with code `2` before any disk transfer. This is not a VDDK, vCenter credential,
+RBD availability, or authority-ordering failure.
+
+Document 448 is normative for this correction. In particular, baseline absence
+is `MISSING_EXPECTED` for the first full seed, the local failback session exists
+from `REQUESTED`, mover exit context is preserved, terminal workers cannot stay
+`RUNNING`, and operation-local empty checkpoint fields cannot erase durable
+Plan materialization evidence.

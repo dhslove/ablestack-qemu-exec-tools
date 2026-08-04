@@ -340,7 +340,14 @@ PY
     latest_completed_nbd_target_device_count \
     latest_completed_nbd_quarantined_device_count \
     latest_completed_nbd_teardown_error_code \
-    latest_completed_nbd_teardown_error_message
+    latest_completed_nbd_teardown_error_message \
+    target_vm_id \
+    target_external_ref \
+    target_vm_present \
+    target_storage_present \
+    target_network_present \
+    restore_point_present \
+    target_materialized
   do
     value="$(ftctl_state_read_kv "${prior_status_path}" "${key}" 2>/dev/null || true)"
     [[ -n "${value}" ]] && projection_updates+=("${key}=${value}")
@@ -2377,6 +2384,19 @@ session = {
         "target": reverse.get("target"),
         "mapping": reverse.get("mapping"),
     },
+    "failure": {
+        "phase": runtime.get("failure_phase"),
+        "component": runtime.get("failed_component"),
+        "workerExitCode": int(runtime["worker_exit_code"]) if str(runtime.get("worker_exit_code", "")).lstrip("-").isdigit() else None,
+        "driverExitCode": int(runtime["driver_exit_code"]) if str(runtime.get("driver_exit_code", "")).lstrip("-").isdigit() else None,
+        "errorCode": runtime.get("error_code"),
+        "errorMessage": runtime.get("error_message"),
+    },
+    "preflight": {
+        "baselineFileState": runtime.get("baseline_file_state"),
+        "sourceDiskProbeState": runtime.get("source_disk_probe_state"),
+        "targetWriterProbeState": runtime.get("target_writer_probe_state"),
+    },
 }
 with open(session_path, "w", encoding="utf-8") as fh:
     json.dump(session, fh, sort_keys=True, separators=(",", ":"))
@@ -2387,7 +2407,7 @@ PY
 
 ftctl_dr_runtime_failback_worker() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" run_path="${4-}" status_path="${5-}"
-  local worker_profile reverse_profile now requested_at completed_at rc=0 error_code
+  local worker_profile reverse_profile baseline_path worker_start_ticks now requested_at completed_at rc=0 error_code error_message failure_phase
   local sequence manifest_path checkpoint_path reverse_restore_points_path reverse_direction rto_actual_seconds
   local active_side current_state previous_checkpoint_sequence
 
@@ -2410,22 +2430,48 @@ ftctl_dr_runtime_failback_worker() {
   fi
 
   requested_at="$(ftctl_now_iso8601)"
+  worker_start_ticks="$(ftctl_dr_scheduler_process_start_ticks "${BASHPID:-$$}" 2>/dev/null || true)"
   reverse_profile="$(ftctl_dr_runtime_reverse_profile_path "${plan}" "${run}" "failback")"
+  failure_phase="REVERSE_PREFLIGHT"
   ftctl_dr_runtime_path_set "${run_path}" \
     "state=RUNNING" \
     "step=reverse-preflight" \
     "progress=20" \
     "failback_requested_at=${requested_at}" \
+    "failback_phase=REQUESTED" \
+    "worker_state=RUNNING" \
+    "worker_pid=${BASHPID:-$$}" \
+    "worker_start_ticks=${worker_start_ticks}" \
+    "worker_pid_alive=true" \
+    "worker_started_at=${requested_at}" \
+    "worker_updated_at=${requested_at}" \
+    "accepted=true" \
     "active_side=TARGET" \
     "checkpoint_sequence=${previous_checkpoint_sequence}" \
     "updated_at=${requested_at}" || true
   cp -f "${run_path}" "${status_path}" 2>/dev/null || true
+  ftctl_dr_runtime_write_operation_session \
+    "$(ftctl_dr_runtime_failback_session_path "${plan}" "${run}")" \
+    "$(ftctl_dr_runtime_active_failback_session_path "${plan}")" \
+    "${plan}" "${run}" "failback" "REQUESTED" "TARGET" \
+    "${worker_profile}" "" "${run_path}" "${requested_at}" "" || true
 
   if command -v ftctl_dr_scheduler_control_set >/dev/null 2>&1; then
     ftctl_dr_scheduler_control_set "${plan}" "stop" || true
   fi
   ftctl_dr_runtime_build_reverse_profile "${plan}" "${run}" "${worker_profile}" "${reverse_profile}" "failback" || rc=$?
   if [[ "${rc}" == "0" ]]; then
+    baseline_path="$(ftctl_dr_kvm_vmware_baseline_path "${plan}")"
+    if [[ -s "${baseline_path}" ]]; then
+      ftctl_dr_runtime_path_set "${run_path}" "baseline_file_state=LOCAL_DURABLE" || true
+    else
+      ftctl_dr_runtime_path_set "${run_path}" "baseline_file_state=MISSING_EXPECTED" || true
+    fi
+    ftctl_dr_runtime_path_set "${run_path}" \
+      "source_disk_probe_state=READY" \
+      "target_writer_probe_state=PENDING" \
+      "worker_updated_at=$(ftctl_now_iso8601)" || true
+    failure_phase="REVERSE_TRANSFER"
     reverse_direction="$(ftctl_dr_runtime_profile_value "${reverse_profile}" "direction" 2>/dev/null || true)"
     ftctl_dr_runtime_path_set "${run_path}" \
       "reverse_profile_path=${reverse_profile}" \
@@ -2443,21 +2489,44 @@ ftctl_dr_runtime_failback_worker() {
       73) error_code="DR_VMWARE_VDDK_CONNECT_INVALID" ;;
       74) error_code="DR_VMWARE_VDDK_EXPORT_UNAVAILABLE" ;;
       75) error_code="DR_VMWARE_VDDK_SOURCE_LOCKED" ;;
-      76) error_code="DR_VMWARE_VDDK_OPEN_DENIED" ;;
+      76) error_code="DR_REVERSE_TARGET_VM_NOT_STOPPED" ;;
       77) error_code="DR_VMWARE_VDDK_THUMBPRINT_UNRESOLVED" ;;
       81) error_code="DR_VMWARE_SNAPSHOT_REF_UNRESOLVED" ;;
+      82) error_code="DR_REVERSE_SOURCE_STORAGE_MISSING" ;;
+      83) error_code="DR_REVERSE_BASELINE_REQUIRED" ;;
+      84) error_code="DR_REVERSE_BASELINE_INVALID" ;;
+      86) error_code="DR_REVERSE_SNAPSHOT_OR_NBD_FAILED" ;;
+      87) error_code="DR_REVERSE_WRITER_FAILED" ;;
+      88) error_code="DR_REVERSE_DURABILITY_VERIFY_FAILED" ;;
       66) error_code="DR_UNSUPPORTED_DIRECTION" ;;
       47) error_code="DR_FAILBACK_REQUIRES_TARGET_ACTIVE" ;;
       *) error_code="DR_FAILBACK_REVERSE_SYNC_FAILED" ;;
     esac
+    error_message="Failback ${failure_phase} failed in kvm-vmware-mover (exit ${rc})"
     ftctl_dr_runtime_path_set "${run_path}" \
       "state=ERROR" \
       "step=failback-reverse-sync-failed" \
       "progress=100" \
-      "accepted=false" \
+      "accepted=true" \
+      "failback_phase=FAILED" \
+      "worker_state=FAILED" \
+      "worker_pid=" \
+      "worker_pid_alive=false" \
+      "worker_exit_code=${rc}" \
+      "driver_exit_code=${rc}" \
+      "worker_updated_at=$(ftctl_now_iso8601)" \
+      "failure_phase=${failure_phase}" \
+      "failed_component=kvm-vmware-mover" \
+      "target_writer_probe_state=$([[ "${failure_phase}" == "REVERSE_TRANSFER" ]] && printf FAILED || printf NOT_STARTED)" \
       "error_code=${error_code}" \
+      "error_message=${error_message}" \
       "updated_at=$(ftctl_now_iso8601)" || true
     cp -f "${run_path}" "${status_path}" 2>/dev/null || true
+    ftctl_dr_runtime_write_operation_session \
+      "$(ftctl_dr_runtime_failback_session_path "${plan}" "${run}")" \
+      "$(ftctl_dr_runtime_active_failback_session_path "${plan}")" \
+      "${plan}" "${run}" "failback" "FAILED" "TARGET" \
+      "${worker_profile}" "${reverse_profile}" "${run_path}" "${requested_at}" "$(ftctl_now_iso8601)" || true
     ftctl_log_event "dr-runtime" "dr.failback" "fail" "" "${error_code}" \
       "plan=${plan} run=${run} rc=${rc}"
     return "${rc}"
@@ -2525,7 +2594,19 @@ PY
     "reverse_direction=${reverse_direction}" \
     "reverse_profile_path=${reverse_profile}" \
     "reverse_restore_points_path=${reverse_restore_points_path}" \
+    "worker_state=SUCCEEDED" \
+    "worker_pid=" \
+    "worker_pid_alive=false" \
+    "worker_exit_code=0" \
+    "driver_exit_code=0" \
+    "worker_updated_at=${completed_at}" \
+    "baseline_file_state=LOCAL_DURABLE" \
+    "source_disk_probe_state=READY" \
+    "target_writer_probe_state=READY" \
+    "failure_phase=" \
+    "failed_component=" \
     "error_code=" \
+    "error_message=" \
     "updated_at=${completed_at}"
   cp -f "${run_path}" "${status_path}" 2>/dev/null || true
   chmod 0644 "${status_path}" 2>/dev/null || true
@@ -2535,7 +2616,7 @@ PY
 
 ftctl_dr_runtime_start_failback() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" run_path="${4-}" status_path="${5-}" wait_value="${6-}"
-  local pid log_path now
+  local pid log_path now start_ticks current_state
 
   if [[ "${wait_value}" != "false" || "${FTCTL_DR_FAILBACK_FOREGROUND:-0}" == "1" ]]; then
     ftctl_dr_runtime_failback_worker "${plan}" "${run}" "${profile_file}" "${run_path}" "${status_path}"
@@ -2550,12 +2631,23 @@ ftctl_dr_runtime_start_failback() {
   ) >> "${log_path}" 2>&1 &
   pid="$!"
   now="$(ftctl_now_iso8601)"
-  ftctl_dr_runtime_path_set "${run_path}" \
-    "state=RUNNING" \
-    "step=failback-worker-started" \
-    "progress=15" \
-    "failback_worker_pid=${pid}" \
-    "updated_at=${now}" || true
+  start_ticks="$(ftctl_dr_scheduler_process_start_ticks "${pid}" 2>/dev/null || true)"
+  current_state="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "state")"
+  if [[ "${current_state}" == "RUNNING" || -z "${current_state}" ]]; then
+    ftctl_dr_runtime_path_set "${run_path}" \
+      "state=RUNNING" \
+      "step=failback-worker-started" \
+      "progress=15" \
+      "failback_worker_pid=${pid}" \
+      "worker_pid=${pid}" \
+      "worker_start_ticks=${start_ticks}" \
+      "worker_pid_alive=true" \
+      "worker_state=RUNNING" \
+      "worker_started_at=${now}" \
+      "worker_updated_at=${now}" \
+      "accepted=true" \
+      "updated_at=${now}" || true
+  fi
 }
 
 ftctl_dr_runtime_reprotect_worker() {
@@ -2774,7 +2866,7 @@ ftctl_dr_runtime_emit_state_json() {
   local runtime_exists profile_exists run_exists
   local driver driver_state disk_map_path source_disk_map_path target_disk_map_path disk_map_role
   local target_disk_count target_disk_invalid_count manifest_path checkpoint_path cbt_status_path source_open_status_path source_snapshot_status_path
-  local scheduler_state worker_pid worker_state worker_started_at worker_updated_at worker_exit_code
+  local scheduler_state worker_pid worker_start_ticks worker_pid_alive worker_state worker_started_at worker_updated_at worker_exit_code
   local runtime_generation scheduler_pid_alive baseline_state reseed_reason consecutive_automatic_reseed_count
   local control_protocol_version control_generation control_ack_generation control_state cycle_state
   local scheduler_session_uuid scheduler_lease_epoch authority_sequence plan_cycle_sequence scheduler_health
@@ -2818,6 +2910,7 @@ ftctl_dr_runtime_emit_state_json() {
   local guestprep_checkpoint_sequence source_fence_state scheduler_recovery_state
   local test_domain_name test_domain_state test_boot_validation_mode
   local failback_session_id failback_mode failback_phase cloud_lifecycle_state
+  local failure_phase baseline_file_state source_disk_probe_state target_writer_probe_state
   local failback_commit_outcome failback_commit_phase rollback_state rollback_generation
   local failback_restore_point_ref failback_restore_point_sequence
   local failback_manifest_path failback_checkpoint_path failback_requested_at reverse_sync_started_at
@@ -2927,10 +3020,32 @@ ftctl_dr_runtime_emit_state_json() {
   checkpoint_lease_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "checkpoint_lease_state")"
   checkpoint_lease_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "checkpoint_lease_path")"
   worker_pid="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "worker_pid")"
+  worker_start_ticks="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "worker_start_ticks")"
+  worker_pid_alive="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "worker_pid_alive")"
   worker_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "worker_state")"
   worker_started_at="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "worker_started_at")"
   worker_updated_at="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "worker_updated_at")"
   worker_exit_code="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "worker_exit_code")"
+  if [[ "${worker_state}" == "RUNNING" && "${worker_pid}" =~ ^[0-9]+$ ]]; then
+    if kill -0 "${worker_pid}" >/dev/null 2>&1 \
+        && { [[ -z "${worker_start_ticks}" ]] \
+          || [[ "$(ftctl_dr_scheduler_process_start_ticks "${worker_pid}" 2>/dev/null || true)" == "${worker_start_ticks}" ]]; }; then
+      worker_pid_alive="true"
+    else
+      worker_pid_alive="false"
+      if [[ "${action}" == "dr-failback" || -n "${failback_phase}" ]]; then
+        state="ERROR"
+        step="failback-worker-exited"
+        progress="100"
+        worker_state="FAILED"
+        [[ -n "${worker_exit_code}" ]] || worker_exit_code="70"
+        [[ -n "${driver_exit_code}" ]] || driver_exit_code="70"
+        [[ -n "${error_code}" ]] || error_code="DR_FAILBACK_WORKER_EXITED"
+        [[ -n "${error_message}" ]] || error_message="Failback worker exited before publishing a terminal result"
+        [[ -n "${failed_component}" ]] || failed_component="ftctl-failback-worker"
+      fi
+    fi
+  fi
   scheduler_pid_alive="false"
   if ftctl_dr_scheduler_active_worker_valid "${plan}" ""; then
     scheduler_pid_alive="true"
@@ -3173,6 +3288,10 @@ PY
   failback_session_id="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "failback_session_id")"
   failback_mode="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "failback_mode")"
   failback_phase="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "failback_phase")"
+  failure_phase="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "failure_phase")"
+  baseline_file_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "baseline_file_state")"
+  source_disk_probe_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "source_disk_probe_state")"
+  target_writer_probe_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "target_writer_probe_state")"
   cloud_lifecycle_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "cloud_lifecycle_state")"
   failback_commit_outcome="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "failback_commit_outcome")"
   failback_commit_phase="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "failback_commit_phase")"
@@ -3219,7 +3338,9 @@ PY
   }
   target_storage_present="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "target_storage_present")"
   [[ -n "${target_storage_present}" ]] || {
-    if [[ -n "${last_target}" || -n "${checkpoint_path}" || -n "${manifest_path}" ]]; then
+    if [[ -n "${last_target}" || -n "${checkpoint_path}" || -n "${manifest_path}" \
+        || -n "${latest_completed_target_durable_at}" || -n "${latest_completed_checkpoint_path}" \
+        || -n "${latest_completed_manifest_path}" ]]; then
       target_storage_present="true"
     else
       target_storage_present="false"
@@ -3347,6 +3468,8 @@ PY
   ftctl_dr_runtime_json_string_field "checkpoint_lease_state" "${checkpoint_lease_state}"
   ftctl_dr_runtime_json_string_field "checkpoint_lease_path" "${checkpoint_lease_path}"
   ftctl_dr_runtime_json_number_field "worker_pid" "${worker_pid}"
+  ftctl_dr_runtime_json_number_field "worker_start_ticks" "${worker_start_ticks}"
+  ftctl_dr_runtime_json_boolean_field "worker_pid_alive" "${worker_pid_alive}" || return $?
   ftctl_dr_runtime_json_string_field "worker_state" "${worker_state}"
   ftctl_dr_runtime_json_string_field "worker_started_at" "${worker_started_at}"
   ftctl_dr_runtime_json_string_field "worker_updated_at" "${worker_updated_at}"
@@ -3455,6 +3578,10 @@ PY
   ftctl_dr_runtime_json_string_field "failback_session_id" "${failback_session_id}"
   ftctl_dr_runtime_json_string_field "failback_mode" "${failback_mode}"
   ftctl_dr_runtime_json_string_field "failback_phase" "${failback_phase}"
+  ftctl_dr_runtime_json_string_field "failure_phase" "${failure_phase}"
+  ftctl_dr_runtime_json_string_field "baseline_file_state" "${baseline_file_state}"
+  ftctl_dr_runtime_json_string_field "source_disk_probe_state" "${source_disk_probe_state}"
+  ftctl_dr_runtime_json_string_field "target_writer_probe_state" "${target_writer_probe_state}"
   ftctl_dr_runtime_json_string_field "cloud_lifecycle_state" "${cloud_lifecycle_state}"
   ftctl_dr_runtime_json_string_field "failback_commit_outcome" "${failback_commit_outcome}"
   ftctl_dr_runtime_json_string_field "failback_commit_phase" "${failback_commit_phase}"
