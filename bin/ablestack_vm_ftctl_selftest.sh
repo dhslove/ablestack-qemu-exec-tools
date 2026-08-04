@@ -9332,11 +9332,15 @@ JSON
 
   baseline_path="$(ftctl_dr_kvm_vmware_baseline_path "${plan}")"
   selftest_assert_eq "$(ftctl_dr_kvm_vmware_cycle_type "${plan}" incremental)" "FULL_REVERSE_SEED" "missing reverse baseline forces seed"
+  selftest_assert_eq "$(ftctl_dr_kvm_vmware_cycle_type "${plan}" failback-final)" "FULL_REVERSE_SEED" "initial failback final uses a full reverse seed"
+  selftest_assert_contains "$(ftctl_dr_kvm_vmware_mode_decision "${plan}" FAILBACK_FINAL AUTO)" $'MISSING_EXPECTED\tFULL_REVERSE_SEED\tINITIAL_REVERSE_BASELINE_MISSING\ttrue' "initial failback decision is explicit"
   mkdir -p "$(dirname "${baseline_path}")"
   cat > "${baseline_path}" <<JSON
 {"state":"LOCAL_DURABLE","generation":1,"disks":[{"diskIndex":0,"snapshot":"baseline-1"}]}
 JSON
   selftest_assert_eq "$(ftctl_dr_kvm_vmware_cycle_type "${plan}" incremental)" "REVERSE_INCREMENTAL" "durable reverse baseline enables incremental"
+  selftest_assert_eq "$(ftctl_dr_kvm_vmware_cycle_type "${plan}" failback-final)" "REVERSE_FINAL" "durable reverse baseline enables final delta"
+  selftest_assert_contains "$(ftctl_dr_kvm_vmware_mode_decision "${plan}" FAILBACK_FINAL AUTO)" $'LOCAL_DURABLE\tREVERSE_FINAL\tDURABLE_BASELINE_FINAL_DELTA\tfalse' "durable failback decision is explicit"
   out="$({
     ftctl_dr_kvm_vmware_replication_cycle() { printf 'reverse-writer:%s:%s\n' "$1" "$5"; }
     ftctl_dr_vmware_replication_cycle() { printf 'wrong-forward-reader\n'; }
@@ -9355,6 +9359,7 @@ selftest_case_dr_kvm_vmware_initial_seed_accepts_missing_baseline() {
   local out="" rc=0
 
   out="$( (
+    # shellcheck source=/dev/null
     source "${LIB_BASE}/ftctl/dr_kvm_vmware_mover.sh"
     ftctl_kvm_vmware_load_previous_snapshot "${baseline}" 0 FULL_REVERSE_SEED
   ) )" || rc=$?
@@ -9363,6 +9368,7 @@ selftest_case_dr_kvm_vmware_initial_seed_accepts_missing_baseline() {
 
   rc=0
   (
+    # shellcheck source=/dev/null
     source "${LIB_BASE}/ftctl/dr_kvm_vmware_mover.sh"
     ftctl_kvm_vmware_load_previous_snapshot "${baseline}" 0 REVERSE_INCREMENTAL
   ) >/dev/null 2>&1 || rc=$?
@@ -9371,6 +9377,7 @@ selftest_case_dr_kvm_vmware_initial_seed_accepts_missing_baseline() {
   printf '%s\n' '{"schemaVersion":1,"state":"BROKEN","direction":"KVM_TO_VMWARE","disks":[]}' > "${invalid}"
   rc=0
   (
+    # shellcheck source=/dev/null
     source "${LIB_BASE}/ftctl/dr_kvm_vmware_mover.sh"
     ftctl_kvm_vmware_load_previous_snapshot "${invalid}" 0 FULL_REVERSE_SEED
   ) >/dev/null 2>&1 || rc=$?
@@ -9378,6 +9385,7 @@ selftest_case_dr_kvm_vmware_initial_seed_accepts_missing_baseline() {
 
   printf '%s\n' '{"schemaVersion":1,"state":"LOCAL_DURABLE","direction":"KVM_TO_VMWARE","disks":[{"diskIndex":0,"snapshot":"baseline-1"}]}' > "${valid}"
   out="$( (
+    # shellcheck source=/dev/null
     source "${LIB_BASE}/ftctl/dr_kvm_vmware_mover.sh"
     ftctl_kvm_vmware_load_previous_snapshot "${valid}" 0 REVERSE_INCREMENTAL
   ) )"
@@ -9405,6 +9413,7 @@ JSON
 {"credentials":{"source":{"type":"VCENTER","endpoint":"10.10.21.10","principal":"administrator@example.local","auth":{"password":"vcenter-password"}},"target":{"type":"MOLD_API","endpoint":"http://10.10.32.10:8080/client/api","auth":{"password":"wrong-password"}}}}
 JSON
   (
+    # shellcheck source=/dev/null
     source "${LIB_BASE}/ftctl/dr_kvm_vmware_mover.sh"
     FTCTL_DR_CREDENTIALS_FILE="${credentials}"
     ftctl_kvm_vmware_write_password_file "${password_file}"

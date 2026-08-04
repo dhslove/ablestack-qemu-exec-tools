@@ -3,7 +3,9 @@
 > 2026-08-04 corrective contract:
 > [448-ftctl-dr-initial-reverse-seed-baseline-absence-and-terminal-evidence-design-20260804.md](448-ftctl-dr-initial-reverse-seed-baseline-absence-and-terminal-evidence-design-20260804.md)
 > makes an absent reverse baseline valid for the first `FULL_REVERSE_SEED` and
-> defines typed terminal worker and storage-presence evidence.
+> defines typed terminal worker and storage-presence evidence. Revision 2
+> supersedes the fixed `failback-final -> REVERSE_FINAL` mapping with a
+> baseline-aware `AUTO` decision and a read-only reverse preflight contract.
 >
 > 2026-08-03 latest contract:
 > [446-ftctl-dr-transition-preflight-v2-and-release-tombstone-contract-design-20260803.md](446-ftctl-dr-transition-preflight-v2-and-release-tombstone-contract-design-20260803.md)

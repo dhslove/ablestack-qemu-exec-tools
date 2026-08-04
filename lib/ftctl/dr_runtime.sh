@@ -1094,10 +1094,19 @@ ftctl_dr_runtime_reverse_checkpoint() {
   local restore_points_path sequence output rc=0 manifest_path checkpoint_path
   local source_at target_at rpo source_provider target_provider driver now
   local baseline_generation baseline_state tracker_state writer_state target_written write_verified guest_compatibility_state
+  local operation_intent="REPROTECT" requested_mode="AUTO" effective_mode="" mode_decision_code="" initial_seed_required=false decision
 
   command -v ftctl_dr_scheduler_run_cycle >/dev/null 2>&1 || return 0
   restore_points_path="$(ftctl_dr_runtime_reverse_restore_points_path "${plan}")"
   sequence="$(ftctl_dr_runtime_failover_next_sequence "${status_path}" "${restore_points_path}")"
+  source_provider="$(ftctl_dr_scheduler_profile_provider "${profile_file}" source)"
+  target_provider="$(ftctl_dr_scheduler_profile_provider "${profile_file}" target)"
+  if [[ "${source_provider}" == "ABLESTACK" && "${target_provider}" == "VMWARE" ]]; then
+    [[ "${phase}" == "failback" ]] && operation_intent="FAILBACK_FINAL"
+    decision="$(ftctl_dr_kvm_vmware_mode_decision "${plan}" "${operation_intent}" "${requested_mode}")" || return $?
+    IFS=$'\t' read -r baseline_state effective_mode mode_decision_code initial_seed_required <<< "${decision}"
+    cycle_type="${effective_mode}"
+  fi
   now="$(ftctl_now_iso8601)"
   ftctl_dr_runtime_path_set "${run_path}" \
     "state=RUNNING" \
@@ -1105,6 +1114,12 @@ ftctl_dr_runtime_reverse_checkpoint() {
     "progress=55" \
     "checkpoint_sequence=${sequence}" \
     "reverse_restore_points_path=${restore_points_path}" \
+    "operation_intent=${operation_intent}" \
+    "requested_mode=${requested_mode}" \
+    "effective_mode=${effective_mode}" \
+    "mode_decision_code=${mode_decision_code}" \
+    "initial_seed_required=${initial_seed_required}" \
+    "baseline_file_state=${baseline_state}" \
     "updated_at=${now}" || true
   cp -f "${run_path}" "${status_path}" 2>/dev/null || true
 
@@ -1115,8 +1130,6 @@ ftctl_dr_runtime_reverse_checkpoint() {
   source_at="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "sourceCheckpointAt" || true)"
   target_at="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "targetDurableAt" || true)"
   rpo="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "targetReadyRpoSeconds" || true)"
-  source_provider="$(ftctl_dr_scheduler_profile_provider "${profile_file}" source)"
-  target_provider="$(ftctl_dr_scheduler_profile_provider "${profile_file}" target)"
   driver="$(ftctl_dr_scheduler_driver_name "${source_provider}" "${target_provider}")"
   baseline_generation="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "baselineGeneration" "integer" || true)"
   baseline_state="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "baselineState" || true)"
@@ -2407,7 +2420,8 @@ PY
 
 ftctl_dr_runtime_failback_worker() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" run_path="${4-}" status_path="${5-}"
-  local worker_profile reverse_profile baseline_path worker_start_ticks now requested_at completed_at rc=0 error_code error_message failure_phase
+  local worker_profile reverse_profile worker_start_ticks now requested_at completed_at rc=0 error_code error_message failure_phase
+  local reverse_preflight_json
   local sequence manifest_path checkpoint_path reverse_restore_points_path reverse_direction rto_actual_seconds
   local active_side current_state previous_checkpoint_sequence
 
@@ -2461,21 +2475,31 @@ ftctl_dr_runtime_failback_worker() {
   fi
   ftctl_dr_runtime_build_reverse_profile "${plan}" "${run}" "${worker_profile}" "${reverse_profile}" "failback" || rc=$?
   if [[ "${rc}" == "0" ]]; then
-    baseline_path="$(ftctl_dr_kvm_vmware_baseline_path "${plan}")"
-    if [[ -s "${baseline_path}" ]]; then
-      ftctl_dr_runtime_path_set "${run_path}" "baseline_file_state=LOCAL_DURABLE" || true
-    else
-      ftctl_dr_runtime_path_set "${run_path}" "baseline_file_state=MISSING_EXPECTED" || true
-    fi
+    reverse_preflight_json="$(ftctl_dr_kvm_vmware_reverse_preflight "${plan}" "${reverse_profile}" "FAILBACK_FINAL" "AUTO" 1)" || rc=$?
+  fi
+  if [[ -n "${reverse_preflight_json}" ]]; then
     ftctl_dr_runtime_path_set "${run_path}" \
-      "source_disk_probe_state=READY" \
-      "target_writer_probe_state=PENDING" \
+      "operation_intent=$(jq -r '.operation_intent // "FAILBACK_FINAL"' <<< "${reverse_preflight_json}")" \
+      "requested_mode=$(jq -r '.requested_mode // "AUTO"' <<< "${reverse_preflight_json}")" \
+      "effective_mode=$(jq -r '.effective_mode // ""' <<< "${reverse_preflight_json}")" \
+      "mode_decision_code=$(jq -r '.mode_decision_code // ""' <<< "${reverse_preflight_json}")" \
+      "initial_seed_required=$(jq -r '.initial_seed_required // false' <<< "${reverse_preflight_json}")" \
+      "baseline_file_state=$(jq -r '.baseline_file_state // ""' <<< "${reverse_preflight_json}")" \
+      "source_disk_probe_state=$(jq -r '.source_disk_probe_state // ""' <<< "${reverse_preflight_json}")" \
+      "source_disk_count=$(jq -r '.source_disk_count // 0' <<< "${reverse_preflight_json}")" \
+      "target_writer_probe_state=$(jq -r '.target_writer_probe_state // ""' <<< "${reverse_preflight_json}")" \
+      "estimated_virtual_bytes=$(jq -r '.estimated_virtual_bytes // 0' <<< "${reverse_preflight_json}")" \
       "worker_updated_at=$(ftctl_now_iso8601)" || true
+  fi
+  if [[ "${rc}" == "0" ]]; then
     failure_phase="REVERSE_TRANSFER"
     reverse_direction="$(ftctl_dr_runtime_profile_value "${reverse_profile}" "direction" 2>/dev/null || true)"
     ftctl_dr_runtime_path_set "${run_path}" \
       "reverse_profile_path=${reverse_profile}" \
       "reverse_direction=${reverse_direction}" || true
+    ftctl_dr_runtime_path_set "${run_path}" \
+      "operation_intent=FAILBACK_FINAL" \
+      "requested_mode=AUTO" || true
     ftctl_dr_runtime_reverse_checkpoint "${plan}" "${run}" "${reverse_profile}" "${run_path}" "${status_path}" "failback-final" "failback" || rc=$?
   fi
   if [[ "${rc}" != "0" ]]; then
@@ -2910,7 +2934,8 @@ ftctl_dr_runtime_emit_state_json() {
   local guestprep_checkpoint_sequence source_fence_state scheduler_recovery_state
   local test_domain_name test_domain_state test_boot_validation_mode
   local failback_session_id failback_mode failback_phase cloud_lifecycle_state
-  local failure_phase baseline_file_state source_disk_probe_state target_writer_probe_state
+  local failure_phase baseline_file_state source_disk_probe_state source_disk_count target_writer_probe_state
+  local operation_intent requested_mode effective_mode mode_decision_code initial_seed_required estimated_virtual_bytes
   local failback_commit_outcome failback_commit_phase rollback_state rollback_generation
   local failback_restore_point_ref failback_restore_point_sequence
   local failback_manifest_path failback_checkpoint_path failback_requested_at reverse_sync_started_at
@@ -3291,7 +3316,14 @@ PY
   failure_phase="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "failure_phase")"
   baseline_file_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "baseline_file_state")"
   source_disk_probe_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "source_disk_probe_state")"
+  source_disk_count="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "source_disk_count")"
   target_writer_probe_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "target_writer_probe_state")"
+  operation_intent="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "operation_intent")"
+  requested_mode="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "requested_mode")"
+  effective_mode="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "effective_mode")"
+  mode_decision_code="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "mode_decision_code")"
+  initial_seed_required="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "initial_seed_required")"
+  estimated_virtual_bytes="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "estimated_virtual_bytes")"
   cloud_lifecycle_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "cloud_lifecycle_state")"
   failback_commit_outcome="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "failback_commit_outcome")"
   failback_commit_phase="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "failback_commit_phase")"
@@ -3581,7 +3613,14 @@ PY
   ftctl_dr_runtime_json_string_field "failure_phase" "${failure_phase}"
   ftctl_dr_runtime_json_string_field "baseline_file_state" "${baseline_file_state}"
   ftctl_dr_runtime_json_string_field "source_disk_probe_state" "${source_disk_probe_state}"
+  ftctl_dr_runtime_json_number_field "source_disk_count" "${source_disk_count}"
   ftctl_dr_runtime_json_string_field "target_writer_probe_state" "${target_writer_probe_state}"
+  ftctl_dr_runtime_json_string_field "operation_intent" "${operation_intent}"
+  ftctl_dr_runtime_json_string_field "requested_mode" "${requested_mode}"
+  ftctl_dr_runtime_json_string_field "effective_mode" "${effective_mode}"
+  ftctl_dr_runtime_json_string_field "mode_decision_code" "${mode_decision_code}"
+  ftctl_dr_runtime_json_boolean_field "initial_seed_required" "${initial_seed_required:-false}" || return $?
+  ftctl_dr_runtime_json_number_field "estimated_virtual_bytes" "${estimated_virtual_bytes}"
   ftctl_dr_runtime_json_string_field "cloud_lifecycle_state" "${cloud_lifecycle_state}"
   ftctl_dr_runtime_json_string_field "failback_commit_outcome" "${failback_commit_outcome}"
   ftctl_dr_runtime_json_string_field "failback_commit_phase" "${failback_commit_phase}"

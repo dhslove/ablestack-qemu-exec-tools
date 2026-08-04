@@ -142,20 +142,136 @@ os.replace(tmp, output_path)
 PY
 }
 
-ftctl_dr_kvm_vmware_cycle_type() {
-  local plan="${1-}" requested="${2-}" baseline
+ftctl_dr_kvm_vmware_baseline_state() {
+  local plan="${1-}" baseline
   baseline="$(ftctl_dr_kvm_vmware_baseline_path "${plan}")"
-  case "${requested}" in
-    failback-final|reverse-final) printf 'REVERSE_FINAL\n' ;;
-    reprotect-seed|full-reverse-seed) printf 'FULL_REVERSE_SEED\n' ;;
-    *)
-      if [[ -f "${baseline}" ]] && jq -e '.state == "LOCAL_DURABLE" and (.disks | length > 0)' "${baseline}" >/dev/null 2>&1; then
-        printf 'REVERSE_INCREMENTAL\n'
+  if [[ ! -e "${baseline}" ]]; then
+    printf 'MISSING_EXPECTED\n'
+  elif [[ -s "${baseline}" ]] && jq -e '.state == "LOCAL_DURABLE" and ((.disks | type) == "array") and ((.disks | length) > 0)' \
+      "${baseline}" >/dev/null 2>&1; then
+    printf 'LOCAL_DURABLE\n'
+  else
+    printf 'INVALID\n'
+  fi
+}
+
+ftctl_dr_kvm_vmware_mode_decision() {
+  local plan="${1-}" operation_intent="${2-}" requested_mode="${3-AUTO}" baseline_state effective_mode decision_code initial_seed=false
+  operation_intent="${operation_intent^^}"
+  operation_intent="${operation_intent//-/_}"
+  requested_mode="${requested_mode^^}"
+  requested_mode="${requested_mode//-/_}"
+  baseline_state="$(ftctl_dr_kvm_vmware_baseline_state "${plan}")"
+
+  [[ -n "${operation_intent}" ]] || operation_intent="FAILBACK_FINAL"
+  [[ -n "${requested_mode}" ]] || requested_mode="AUTO"
+  if [[ "${baseline_state}" == "INVALID" ]]; then
+    printf '%s\t%s\t%s\t%s\n' "${baseline_state}" "" "DR_REVERSE_BASELINE_INVALID" "false"
+    return 84
+  fi
+
+  case "${requested_mode}" in
+    AUTO)
+      if [[ "${baseline_state}" == "MISSING_EXPECTED" ]]; then
+        effective_mode="FULL_REVERSE_SEED"
+        decision_code="INITIAL_REVERSE_BASELINE_MISSING"
+        initial_seed=true
+      elif [[ "${operation_intent}" == "FAILBACK_FINAL" ]]; then
+        effective_mode="REVERSE_FINAL"
+        decision_code="DURABLE_BASELINE_FINAL_DELTA"
       else
-        printf 'FULL_REVERSE_SEED\n'
+        effective_mode="REVERSE_INCREMENTAL"
+        decision_code="DURABLE_BASELINE_INCREMENTAL"
       fi
       ;;
+    FULL_REVERSE_SEED)
+      effective_mode="FULL_REVERSE_SEED"
+      decision_code="EXPLICIT_FULL_REVERSE_SEED"
+      initial_seed=true
+      ;;
+    REVERSE_FINAL|REVERSE_INCREMENTAL)
+      if [[ "${baseline_state}" != "LOCAL_DURABLE" ]]; then
+        printf '%s\t%s\t%s\t%s\n' "${baseline_state}" "" "DR_REVERSE_BASELINE_REQUIRED" "false"
+        return 83
+      fi
+      effective_mode="${requested_mode}"
+      decision_code="EXPLICIT_${requested_mode}"
+      ;;
+    *)
+      printf '%s\t%s\t%s\t%s\n' "${baseline_state}" "" "DR_REVERSE_MODE_INVALID" "false"
+      return 2
+      ;;
   esac
+  printf '%s\t%s\t%s\t%s\n' "${baseline_state}" "${effective_mode}" "${decision_code}" "${initial_seed}"
+}
+
+ftctl_dr_kvm_vmware_cycle_type() {
+  local plan="${1-}" legacy_requested="${2-}" operation_intent requested_mode decision rc=0
+  case "${legacy_requested}" in
+    failback-final) operation_intent="FAILBACK_FINAL"; requested_mode="AUTO" ;;
+    reprotect-seed) operation_intent="REPROTECT"; requested_mode="AUTO" ;;
+    full-reverse-seed|FULL_REVERSE_SEED) operation_intent="REPROTECT"; requested_mode="FULL_REVERSE_SEED" ;;
+    reverse-final|REVERSE_FINAL) operation_intent="FAILBACK_FINAL"; requested_mode="REVERSE_FINAL" ;;
+    reverse-incremental|REVERSE_INCREMENTAL) operation_intent="REPROTECT"; requested_mode="REVERSE_INCREMENTAL" ;;
+    *) operation_intent="REPROTECT"; requested_mode="AUTO" ;;
+  esac
+  decision="$(ftctl_dr_kvm_vmware_mode_decision "${plan}" "${operation_intent}" "${requested_mode}")" || rc=$?
+  [[ "${rc}" == "0" ]] || return "${rc}"
+  awk -F '\t' '{print $2}' <<< "${decision}"
+}
+
+ftctl_dr_kvm_vmware_reverse_preflight() {
+  local plan="${1-}" profile_file="${2-}" operation_intent="${3-FAILBACK_FINAL}" requested_mode="${4-AUTO}" json="${5-0}"
+  local map_path decision rc=0 baseline_state effective_mode decision_code initial_seed source_disk_count estimated_virtual_bytes
+  local source_disk_probe_state="READY" target_writer_probe_state="READY" error_code="" ready=true
+  [[ -n "${plan}" && -f "${profile_file}" ]] || return 2
+  map_path="$(mktemp "${TMPDIR:-/tmp}/ftctl-reverse-map.XXXXXX.json")"
+  trap 'rm -f "${map_path}"' RETURN
+  ftctl_dr_kvm_vmware_canonicalize_profile "${profile_file}" "${map_path}" || {
+    rc=67; error_code="DR_REVERSE_DISK_MAP_INVALID"; ready=false
+  }
+  if [[ "${rc}" == "0" ]]; then
+    decision="$(ftctl_dr_kvm_vmware_mode_decision "${plan}" "${operation_intent}" "${requested_mode}")" || rc=$?
+    IFS=$'\t' read -r baseline_state effective_mode decision_code initial_seed <<< "${decision}"
+    [[ "${rc}" == "0" ]] || { ready=false; error_code="${decision_code}"; }
+  else
+    baseline_state="$(ftctl_dr_kvm_vmware_baseline_state "${plan}")"
+  fi
+  source_disk_count="$(jq -r '.disks | length' "${map_path}" 2>/dev/null || printf 0)"
+  estimated_virtual_bytes="$(jq -r '[.disks[].virtualBytes // 0] | add // 0' "${map_path}" 2>/dev/null || printf 0)"
+  if [[ "${rc}" == "0" ]]; then
+    while IFS=$'\t' read -r pool image; do
+      if [[ -z "${pool}" || -z "${image}" ]] || ! rbd info "${pool}/${image}" >/dev/null 2>&1; then
+        source_disk_probe_state="NOT_READY"
+        ready=false
+        rc=82
+        error_code="DR_REVERSE_SOURCE_STORAGE_MISSING"
+        break
+      fi
+    done < <(jq -r '.disks[] | [.sourcePool,.sourceImage] | @tsv' "${map_path}")
+  else
+    source_disk_probe_state="NOT_CHECKED"
+  fi
+  for cmd in jq rbd qemu-nbd nbd-client nbdkit blockdev flock python3; do
+    if ! command -v "${cmd}" >/dev/null 2>&1; then
+      target_writer_probe_state="NOT_READY"
+      ready=false
+      [[ "${rc}" != "0" ]] || rc=65
+      [[ -n "${error_code}" ]] || error_code="DR_VMWARE_MOVER_UNAVAILABLE"
+    fi
+  done
+  if [[ "${json}" == "1" ]]; then
+    printf '{"command":"dr-reverse-preflight","schema_version":1,"contract_version":"dr-reverse-preflight-v1","result":"%s","ready":%s,"plan_uuid":"%s","operation_intent":"%s","requested_mode":"%s","effective_mode":"%s","mode_decision_code":"%s","initial_seed_required":%s,"baseline_file_state":"%s","source_disk_probe_state":"%s","source_disk_count":%s,"target_writer_probe_state":"%s","estimated_virtual_bytes":%s,"error_code":"%s","exit_code":%s}\n' \
+      "$( [[ "${ready}" == "true" ]] && printf ok || printf error )" "${ready}" "$(ftctl__json_escape "${plan}")" \
+      "$(ftctl__json_escape "${operation_intent}")" "$(ftctl__json_escape "${requested_mode}")" "$(ftctl__json_escape "${effective_mode}")" \
+      "$(ftctl__json_escape "${decision_code}")" "${initial_seed:-false}" "$(ftctl__json_escape "${baseline_state}")" \
+      "$(ftctl__json_escape "${source_disk_probe_state}")" "${source_disk_count:-0}" "$(ftctl__json_escape "${target_writer_probe_state}")" \
+      "${estimated_virtual_bytes:-0}" "$(ftctl__json_escape "${error_code}")" "${rc}"
+  else
+    printf 'ready=%s baseline=%s requested=%s effective=%s decision=%s source_disks=%s writer=%s\n' \
+      "${ready}" "${baseline_state}" "${requested_mode}" "${effective_mode}" "${decision_code}" "${source_disk_count}" "${target_writer_probe_state}"
+  fi
+  return "${rc}"
 }
 
 ftctl_dr_kvm_vmware_write_checkpoint() {
@@ -216,7 +332,7 @@ ftctl_dr_kvm_vmware_replication_cycle() {
   ftctl_ensure_dir "${root}" "0755"
   ftctl_ensure_dir "${cycle_dir}" "0755"
   ftctl_dr_kvm_vmware_canonicalize_profile "${profile_file}" "${map_path}" || return 67
-  effective="$(ftctl_dr_kvm_vmware_cycle_type "${plan}" "${requested}")"
+  effective="$(ftctl_dr_kvm_vmware_cycle_type "${plan}" "${requested}")" || return $?
   mover="$(ftctl_dr_kvm_vmware_effective_mover 2>/dev/null || true)"
   [[ -n "${mover}" ]] || return 65
   credentials_file="$(ftctl_dr_runtime_credential_path "${plan}" 2>/dev/null || true)"

@@ -1,7 +1,7 @@
 # 448. FTCTL DR Initial Reverse Seed Baseline Absence And Terminal Evidence Design
 
 - Date: 2026-08-04
-- Status: code-level corrective design; implementation pending
+- Status: revision 2 code-level corrective design; cycle selector and preflight implementation pending
 - Scope: KVM-to-VMware initial reverse seed, failback worker terminal evidence, target-storage projection
 - Parent design: [445-ftctl-dr-bidirectional-incremental-replication-and-reverse-guest-compatibility-design-20260801.md](445-ftctl-dr-bidirectional-incremental-replication-and-reverse-guest-compatibility-design-20260801.md)
 - Cloud companion: `ablestack-cloud/docs/ftctl/591-cross-hypervisor-dr-failback-initial-reverse-seed-and-early-failure-convergence-design-20260804.md`
@@ -17,7 +17,13 @@ An early mover failure must also converge as a terminal, typed operation while
 preserving TARGET authority and the last known durable forward-protection
 evidence.
 
-## 2. Verified failure
+## 2. First verified failure
+
+This section records the baseline-loader failure corrected by commit
+`29ac3511e8b32cdb681cf5a8411d617513562a74`. Section 12 records the later
+deployed failure that proved the operation-intent-to-cycle-mode selector was
+still incomplete and supersedes any statement that the selector itself was
+already correct.
 
 The live Plan `7889e625-371a-48f9-b553-54e311481170` produced Failback Run
 `7ed30e9b-da7a-4baa-bef9-be555b1464b5` with the following evidence:
@@ -46,7 +52,8 @@ previous_snapshot="$(jq -r --argjson index "${index}" \
 
 Because the script uses `set -euo pipefail`, `jq` returns `2` for the missing
 file and terminates the mover before the existing full-seed extent branch can
-run. The cycle selector is correct; the baseline loader violates its contract.
+run. That incident was a baseline-loader violation. It did not prove that the
+`failback-final` selector selected `FULL_REVERSE_SEED` in the deployed path.
 
 ## 3. Safety invariants
 
@@ -362,10 +369,215 @@ selftest_case_dr_kvm_vmware_initial_seed_accepts_missing_baseline: PASS
 selftest_case_dr_kvm_vmware_reverse_route_and_baseline_contract: PASS
 ```
 
-Package verification is performed by the branch GitHub Actions release workflow
-and the deployed-host checks described in section 7.3.
+## 12. Revision 2: failback intent and reverse cycle mode separation
 
-### 11.1 Transition preflight strict-output correction
+### 12.1 Follow-up live evidence
+
+The subsequent deployed Failback for Plan
+`7889e625-371a-48f9-b553-54e311481170` and Run
+`3a6357e1-9092-47c9-9d5b-e72f4a543fc0` failed in four seconds with the
+following evidence:
+
+| Evidence | Observed value |
+|---|---|
+| Runtime request | `failback-final` |
+| Current effective mode | `REVERSE_FINAL` |
+| Reverse baseline | `MISSING_EXPECTED` |
+| Reverse disk map | `READY`, two disks |
+| Source RBD images | `READY`, 100 GiB and 50 GiB |
+| VMware destination power | `poweredOff` |
+| Required commands | all present |
+| nbdkit VDDK plugin | available, version `1.38.5` |
+| Mover result | exit `83`, `DR_REVERSE_BASELINE_REQUIRED` |
+| Authority after failure | TARGET retained; KVM on, VMware off |
+
+The non-mutating deployed-host probe reproduced the selector defect directly:
+
+```text
+current_effective_mode=REVERSE_FINAL
+baseline=MISSING_EXPECTED
+proposed_effective_mode=FULL_REVERSE_SEED
+disk_map_validation=READY
+```
+
+The environment and mapping are ready. The selected transfer mode is not.
+
+### 12.2 Root cause
+
+`ftctl_dr_runtime_start_failback()` passes `failback-final` to
+`ftctl_dr_runtime_reverse_checkpoint()`. The scheduler routes the reversed
+ABLESTACK-to-VMware profile to `ftctl_dr_kvm_vmware_replication_cycle()`, where
+`ftctl_dr_kvm_vmware_cycle_type()` currently contains:
+
+```bash
+case "${requested}" in
+  failback-final|reverse-final) printf 'REVERSE_FINAL\n' ;;
+  reprotect-seed|full-reverse-seed) printf 'FULL_REVERSE_SEED\n' ;;
+  # ...
+esac
+```
+
+This conflates two independent concepts:
+
+- operation intent: final data synchronization before Failback;
+- data mode: full reverse seed, reverse incremental, or reverse final delta.
+
+`failback-final` describes the operation intent. It cannot imply an
+incremental mode unless a valid durable reverse baseline already exists.
+
+### 12.3 Normative selector contract
+
+Replace the string-only selector with a probe plus decision result. The
+functions remain shell-callable but return one compact JSON object:
+
+```bash
+ftctl_dr_kvm_vmware_probe_baseline() {
+  # MISSING_EXPECTED, LOCAL_DURABLE, or INVALID
+}
+
+ftctl_dr_kvm_vmware_select_cycle_mode() {
+  local plan="$1" operation_intent="$2" requested_mode="${3-AUTO}"
+  # Emits requestedMode, effectiveMode, baselineFileState,
+  # modeDecisionCode, and initialSeedRequired.
+}
+```
+
+Required decision table:
+
+| Operation intent | Requested mode | Baseline | Effective mode | Result |
+|---|---|---|---|---|
+| `FAILBACK_FINAL` | `AUTO` | missing | `FULL_REVERSE_SEED` | ready |
+| `FAILBACK_FINAL` | `AUTO` | durable | `REVERSE_FINAL` | ready |
+| `REPROTECT` | `AUTO` | missing | `FULL_REVERSE_SEED` | ready |
+| `REPROTECT` | `AUTO` | durable | `REVERSE_INCREMENTAL` | ready |
+| any | explicit incremental/final | missing | none | exit `83` |
+| any | any non-forced mode | invalid | none | exit `84` |
+
+The mode decision JSON is persisted before the mover starts:
+
+```json
+{
+  "operationIntent": "FAILBACK_FINAL",
+  "requestedMode": "AUTO",
+  "effectiveMode": "FULL_REVERSE_SEED",
+  "baselineFileState": "MISSING_EXPECTED",
+  "modeDecisionCode": "INITIAL_REVERSE_BASELINE_ABSENT",
+  "initialSeedRequired": true
+}
+```
+
+`dr_kvm_vmware_mover.sh` receives only `effectiveMode`; it does not reinterpret
+operation intent. Its existing exit `83` check remains a final defensive
+guard, not the normal first-seed path.
+
+### 12.4 Non-mutating reverse preflight
+
+Add the FTCTL command:
+
+```text
+ablestack-vm-ftctl dr-reverse-preflight \
+  --plan <uuid> --operation-intent failback-final \
+  --requested-mode auto --json
+```
+
+It performs no snapshot creation and no target writes. It validates:
+
+1. direction and provider pair are `KVM_TO_VMWARE` and
+   `ABLESTACK_TO_VMWARE`;
+2. disk indexes are unique and every RBD/QCOW2 source maps to one VMDK;
+3. every source image/file exists and matches the active KVM domain;
+4. the VMware destination VM is powered off;
+5. vCenter credentials, VM reference, VDDK library, nbdkit plugin, and required
+   helper commands are usable;
+6. the baseline state and effective mode obey the decision table.
+
+Success output includes:
+
+```json
+{
+  "ready": true,
+  "operationIntent": "FAILBACK_FINAL",
+  "requestedMode": "AUTO",
+  "effectiveMode": "FULL_REVERSE_SEED",
+  "baselineFileState": "MISSING_EXPECTED",
+  "modeDecisionCode": "INITIAL_REVERSE_BASELINE_ABSENT",
+  "sourceDiskProbeState": "READY",
+  "sourceDiskCount": 2,
+  "targetWriterProbeState": "READY",
+  "targetVmPowerState": "POWERED_OFF"
+}
+```
+
+The writer probe may load libraries, authenticate, inspect the powered-off VM,
+and open/close the target through a no-write capability probe. It must not
+create snapshots, write sectors, or advance a baseline.
+
+### 12.5 Runtime, checkpoint, and failure precedence
+
+`ftctl_dr_runtime_reverse_checkpoint()` accepts separate
+`operation_intent` and `requested_mode` parameters. It writes these fields to
+the Run and failback session before dispatch:
+
+```text
+operation_intent=FAILBACK_FINAL
+requested_mode=AUTO
+effective_mode=FULL_REVERSE_SEED
+mode_decision_code=INITIAL_REVERSE_BASELINE_ABSENT
+baseline_file_state=MISSING_EXPECTED
+replication_direction=KVM_TO_VMWARE
+provider_pair=ABLESTACK_TO_VMWARE
+```
+
+After all VMDKs are flushed and verified, the full seed atomically commits
+`baseline.json` generation 1 and a reverse checkpoint. Only then may FTCTL
+publish `FAILBACK_DATA_READY`. A retry before that commit remains a full seed;
+a retry after commit selects `REVERSE_FINAL`.
+
+The first typed terminal error wins. A later Cloud data-gate projection must
+not replace `DR_REVERSE_BASELINE_REQUIRED`, writer failure, or durability
+failure with a secondary direction mismatch.
+
+### 12.6 Self-test additions
+
+Add deterministic tests for:
+
+1. `failback-final + missing + AUTO -> FULL_REVERSE_SEED`;
+2. `failback-final + durable + AUTO -> REVERSE_FINAL`;
+3. explicit `REVERSE_FINAL + missing -> 83`;
+4. invalid baseline never silently reseeds;
+5. preflight is read-only and emits exactly one JSON object;
+6. Run status records requested/effective mode before mover execution;
+7. successful first seed commits generation 1 for every disk;
+8. first terminal error remains unchanged during later reconciliation.
+
+### 12.7 Revision 2 implementation priority
+
+1. P0: replace the `failback-final` fixed mapping with the decision table.
+2. P0: add read-only reverse preflight and exact JSON self-tests.
+3. P0: persist requested/effective mode and provider pair before transfer.
+4. P0: prove full reverse seed generation 1 on both mapped disks.
+5. P1: normalize Agent status and Cloud error precedence.
+6. P1: retain Cloud-owned target VM/volume materialization evidence.
+7. P2: package, paired deploy, clean retry, then second-cycle incremental
+   acceptance.
+
+### 12.8 Revision 2 AS-IS / TO-BE
+
+| Area | Error cause | AS-IS | TO-BE |
+|---|---|---|---|
+| Intent/mode | one string carries two meanings | `failback-final` forces `REVERSE_FINAL` | intent and mode are separate fields |
+| First reverse seed | no baseline exists | deterministic exit `83` | `AUTO` selects `FULL_REVERSE_SEED` |
+| Preflight | checks transition but not data mode | reports ready before selector failure | returns effective mode and probe states |
+| Runtime evidence | mode fields remain empty | root cause appears only after exit | decision persisted before mover start |
+| Baseline | generation 1 cannot be reached | no reverse lineage | atomic full seed creates generation 1 |
+| Retry | same fixed selector repeats failure | retry is not useful | pre-commit retry remains full seed |
+| Error identity | later gate can replace root cause | direction mismatch obscures exit `83` | first typed terminal error wins |
+
+## 13. Transition preflight strict-output correction
+
+Package verification for the preceding implementation is performed by the
+branch GitHub Actions release workflow and the deployed-host checks described
+in section 7.3.
 
 The deployed retry preflight exposed a second early-failure boundary. After a
 clean runtime removal, `dr-transition-preflight --json` correctly returned

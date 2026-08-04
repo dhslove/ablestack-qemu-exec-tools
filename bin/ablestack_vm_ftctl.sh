@@ -109,6 +109,8 @@ CLI_CHECKPOINT_SEQUENCE=""
 CLI_AUTHORITY_GENERATION=""
 CLI_OPERATION=""
 CLI_EXPECTED_AUTHORITY=""
+CLI_OPERATION_INTENT=""
+CLI_REQUESTED_MODE="AUTO"
 CLI_RESUME_BASELINE_CHECKPOINT_SEQUENCE=""
 CLI_MINIMUM_COMPLETED_CHECKPOINT_SEQUENCE=""
 CLI_FORCE_IMMEDIATE_CYCLE="false"
@@ -276,7 +278,9 @@ Commands:
   dr-release         Release DR runtime state
   dr-status          Show DR runtime status for a plan/run
   dr-transition-preflight
-                     Validate failback/reprotect authority without changing runtime state
+                      Validate failback/reprotect authority without changing runtime state
+  dr-reverse-preflight
+                      Resolve reverse seed mode and validate source disks without changing runtime state
   dr-capabilities    Show FTCTL_DR runtime command capabilities
   dr-cancel          Cancel a DR runtime run
   config             Manage cluster/host inventory
@@ -326,7 +330,11 @@ Global options:
       --checkpoint-sequence N
                      Durable checkpoint used for target promotion
       --authority-generation N
-                     Monotonic Cloud promotion generation
+                      Monotonic Cloud promotion generation
+      --operation-intent INTENT
+                      Reverse operation intent such as FAILBACK_FINAL or REPROTECT
+      --requested-mode MODE
+                      Reverse transfer mode; AUTO is the default
       --resume-baseline-checkpoint-sequence N
                      Last durable sequence before source protection resumes
       --minimum-completed-checkpoint-sequence N
@@ -382,7 +390,7 @@ parse_args() {
         print_version
         exit "${EXIT_OK}"
         ;;
-      protect|protect-start|status|reconcile|failover|failover-prepare|failback|failback-sync|failback-finalize|failback-reprotect|unprotect|fence-confirm|fence-clear|pause-protection|resume-protection|preflight-remote|dr-key-ensure|dr-key-install|dr-key-remove|check|health|events|snapshot|dr-plan-apply|dr-sync-start|dr-sync-recover|dr-sync-pause|dr-sync-resume|dr-scheduler-run|dr-reconcile|dr-test-failover|dr-test-cleanup|dr-test-prepare|dr-test-artifact-cleanup|dr-failover|dr-failover-abort|dr-failback|dr-reprotect|dr-target-materialized|dr-cutover-commit|dr-failback-commit|dr-failback-commit-status|dr-failback-abort|dr-release|dr-status|dr-transition-preflight|dr-capabilities|dr-cancel|config)
+      protect|protect-start|status|reconcile|failover|failover-prepare|failback|failback-sync|failback-finalize|failback-reprotect|unprotect|fence-confirm|fence-clear|pause-protection|resume-protection|preflight-remote|dr-key-ensure|dr-key-install|dr-key-remove|check|health|events|snapshot|dr-plan-apply|dr-sync-start|dr-sync-recover|dr-sync-pause|dr-sync-resume|dr-scheduler-run|dr-reconcile|dr-test-failover|dr-test-cleanup|dr-test-prepare|dr-test-artifact-cleanup|dr-failover|dr-failover-abort|dr-failback|dr-reprotect|dr-target-materialized|dr-cutover-commit|dr-failback-commit|dr-failback-commit-status|dr-failback-abort|dr-release|dr-status|dr-transition-preflight|dr-reverse-preflight|dr-capabilities|dr-cancel|config)
         [[ -z "${CLI_COMMAND}" ]] || {
           echo "ERROR: multiple commands specified" >&2
           exit "${EXIT_USAGE}"
@@ -663,6 +671,14 @@ parse_args() {
         CLI_OPERATION="${2-}"
         shift 2
         ;;
+      --operation-intent)
+        CLI_OPERATION_INTENT="${2-}"
+        shift 2
+        ;;
+      --requested-mode)
+        CLI_REQUESTED_MODE="${2-}"
+        shift 2
+        ;;
       --expected-authority)
         CLI_EXPECTED_AUTHORITY="${2-}"
         shift 2
@@ -836,6 +852,10 @@ dispatch() {
     dr-transition-preflight)
       ftctl_dr_runtime_transition_preflight "${CLI_PLAN}" "${CLI_OPERATION}" "${CLI_EXPECTED_AUTHORITY}" \
         "${CLI_AUTHORITY_GENERATION}" "${CLI_JSON}"
+      ;;
+    dr-reverse-preflight)
+      ftctl_dr_kvm_vmware_reverse_preflight "${CLI_PLAN}" "${CLI_PROFILE_JSON}" \
+        "${CLI_OPERATION_INTENT:-FAILBACK_FINAL}" "${CLI_REQUESTED_MODE:-AUTO}" "${CLI_JSON}"
       ;;
     dr-capabilities)
       ftctl_dr_runtime_capabilities "${CLI_JSON}"
