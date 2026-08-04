@@ -337,3 +337,49 @@ The correction is complete only when the original failing shape passes a clean
 initial reverse full seed, the next cycle passes as a real incremental transfer,
 all terminal state is consistent across FTCTL and Cloud, and no failure before
 Cloud commit can stop the TARGET authority VM or power on VMware.
+
+## 11. Implementation result (2026-08-04)
+
+Implemented in commit `29ac3511e8b32cdb681cf5a8411d617513562a74`:
+
+- `dr_kvm_vmware_mover.sh` accepts an absent baseline only for
+  `FULL_REVERSE_SEED`, validates an existing lineage before transfer, and emits
+  typed exits `83` and `84` for required/invalid lineage;
+- `dr_runtime.sh` writes a REQUESTED failback session before reverse transfer,
+  records worker PID/start ticks and typed phase/component/driver evidence, and
+  writes a terminal FAILED session before the worker exits;
+- status projection retains Plan materialization evidence and converts a stale
+  RUNNING record with a dead PID identity into `DR_FAILBACK_WORKER_EXITED`;
+- the runtime records baseline, source-disk probe, and target-writer probe states
+  without exposing credentials or unbounded logs;
+- shell self-tests cover missing, required, invalid, and durable baseline cases.
+
+Local verification completed:
+
+```text
+bash -n: PASS
+selftest_case_dr_kvm_vmware_initial_seed_accepts_missing_baseline: PASS
+selftest_case_dr_kvm_vmware_reverse_route_and_baseline_contract: PASS
+```
+
+Package verification is performed by the branch GitHub Actions release workflow
+and the deployed-host checks described in section 7.3.
+
+### 11.1 Transition preflight strict-output correction
+
+The deployed retry preflight exposed a second early-failure boundary. After a
+clean runtime removal, `dr-transition-preflight --json` correctly returned
+`DR_TRANSITION_PREFLIGHT_STATE_MISSING`, but unset local variables also emitted
+shell diagnostics to stderr. The Agent all-lines parser therefore received more
+than one payload and rejected the response as invalid JSON.
+
+The runtime now initializes every optional transition field before checking the
+status file. Missing state emits exactly one typed JSON object, exit `79`, and no
+stderr noise. `selftest_case_dr_transition_preflight_is_read_only` covers both
+the ready and missing-state forms. The corrected focused self-test set passes:
+
+```text
+selftest_case_dr_transition_preflight_is_read_only: PASS
+selftest_case_dr_kvm_vmware_initial_seed_accepts_missing_baseline: PASS
+selftest_case_dr_kvm_vmware_reverse_route_and_baseline_contract: PASS
+```

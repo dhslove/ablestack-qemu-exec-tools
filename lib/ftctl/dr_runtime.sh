@@ -5212,7 +5212,8 @@ ftctl_dr_runtime_failover_abort() {
 ftctl_dr_runtime_transition_preflight() {
   local plan="${1-}" operation="${2-}" expected_authority="${3-TARGET}"
   local expected_generation="${4-}" json="${5-0}"
-  local status_path active_side authority_generation target_power_state source_fence_state source_power_state
+  local status_path active_side="" authority_generation="" target_power_state=""
+  local source_fence_state="" source_power_state=""
   local ready="true" error_code="" message="" retryable="false" checked_at_epoch_ms
 
   ftctl_dr_runtime_require_plan "${plan}" || return 2

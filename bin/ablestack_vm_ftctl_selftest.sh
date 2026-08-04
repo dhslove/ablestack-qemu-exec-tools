@@ -9267,6 +9267,8 @@ selftest_case_dr_transition_preflight_is_read_only() {
 
   local plan="plan-transition-preflight"
   local status_path before_sha after_sha out rc=0
+  local missing_plan="plan-transition-preflight-missing"
+  local stderr_path="${SELFTEST_ROOT}/transition-preflight-missing.stderr"
   if ftctl_command_requires_lock "dr-transition-preflight" ""; then
     selftest_fail "DR transition preflight must not use the legacy global lock"
   fi
@@ -9289,6 +9291,13 @@ selftest_case_dr_transition_preflight_is_read_only() {
   out="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-transition-preflight --config "${SELFTEST_CONFIG}" --plan "${plan}" --operation reprotect --expected-authority TARGET --authority-generation 8 --json 2>/dev/null)" || rc=$?
   selftest_assert_eq "${rc}" "79" "generation mismatch exit"
   selftest_assert_contains "${out}" '"error_code":"DR_TRANSITION_PREFLIGHT_GENERATION_MISMATCH"' "generation mismatch is typed"
+
+  rc=0
+  out="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-transition-preflight --config "${SELFTEST_CONFIG}" --plan "${missing_plan}" --operation failback --expected-authority TARGET --authority-generation 7 --json 2>"${stderr_path}")" || rc=$?
+  selftest_assert_eq "${rc}" "79" "missing state exit"
+  selftest_assert_eq "$(wc -l <<< "${out}" | tr -d ' ')" "1" "missing state emits one JSON object"
+  selftest_assert_eq "$(cat "${stderr_path}")" "" "missing state emits no stderr noise"
+  selftest_assert_contains "${out}" '"error_code":"DR_TRANSITION_PREFLIGHT_STATE_MISSING"' "missing state is typed"
 }
 
 selftest_case_dr_kvm_vmware_reverse_route_and_baseline_contract() {
@@ -9313,6 +9322,7 @@ selftest_case_dr_kvm_vmware_reverse_route_and_baseline_contract() {
     "targetVmdkPath":"[datastore] w22-01/w22-01.vmdk",
     "sizeBytes":1048576
   }]}
+}
 JSON
   ftctl_dr_kvm_vmware_canonicalize_profile "${profile}" "${map_path}"
   selftest_assert_file_contains "${map_path}" '"providerPair":"ABLESTACK_TO_VMWARE"'
