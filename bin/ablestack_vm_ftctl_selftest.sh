@@ -9392,6 +9392,35 @@ selftest_case_dr_kvm_vmware_initial_seed_accepts_missing_baseline() {
   selftest_assert_eq "${out}" "baseline-1" "incremental reverse sync loads the durable snapshot"
 }
 
+selftest_case_dr_kvm_vmware_reverse_preflight_clears_return_trap() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR reverse preflight clears its RETURN trap after temporary map cleanup"
+
+  local profile="${SELFTEST_ROOT}/reverse-preflight-profile.json"
+  local stderr_file="${SELFTEST_ROOT}/reverse-preflight.stderr"
+  local out="" rc=0
+  printf '%s\n' '{}' > "${profile}"
+
+  out="$( (
+    ftctl_dr_kvm_vmware_canonicalize_profile() {
+      printf '%s\n' '{"disks":[{"sourcePool":"rbd","sourceImage":"image","virtualBytes":1024}]}' > "${2}"
+    }
+    ftctl_dr_kvm_vmware_mode_decision() {
+      printf 'MISSING_EXPECTED\tFULL_REVERSE_SEED\tINITIAL_REVERSE_BASELINE_MISSING\ttrue\n'
+    }
+    rbd() { return 0; }
+    command() { return 0; }
+
+    ftctl_dr_kvm_vmware_reverse_preflight plan-trap "${profile}" FAILBACK_FINAL AUTO 1
+    printf 'caller-returned\n'
+  ) 2>"${stderr_file}" )" || rc=$?
+
+  selftest_assert_eq "${rc}" "0" "reverse preflight caller returns successfully under set -u"
+  selftest_assert_contains "${out}" '"effective_mode":"FULL_REVERSE_SEED"' "reverse preflight emits the selected mode"
+  selftest_assert_contains "${out}" "caller-returned" "RETURN trap does not escape into its caller"
+  selftest_assert_eq "$(cat "${stderr_file}")" "" "reverse preflight emits no cleanup error"
+}
+
 selftest_case_dr_kvm_vmware_canonicalizes_cloud_rbd_volume_identity() {
   local tmp profile output credentials password_file
   tmp="$(mktemp -d)"
@@ -9580,6 +9609,7 @@ selftest_main() {
   selftest_case_dr_vmware_mover_uses_raw_over_nbd_image_opts
   selftest_case_dr_kvm_vmware_reverse_route_and_baseline_contract
   selftest_case_dr_kvm_vmware_initial_seed_accepts_missing_baseline
+  selftest_case_dr_kvm_vmware_reverse_preflight_clears_return_trap
   selftest_case_dr_kvm_vmware_canonicalizes_cloud_rbd_volume_identity
   selftest_case_events_json
   selftest_info "all checks passed"

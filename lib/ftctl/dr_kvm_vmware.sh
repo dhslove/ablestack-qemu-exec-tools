@@ -226,7 +226,8 @@ ftctl_dr_kvm_vmware_reverse_preflight() {
   local source_disk_probe_state="READY" target_writer_probe_state="READY" error_code="" ready=true
   [[ -n "${plan}" && -f "${profile_file}" ]] || return 2
   map_path="$(mktemp "${TMPDIR:-/tmp}/ftctl-reverse-map.XXXXXX.json")"
-  trap 'rm -f "${map_path}"' RETURN
+  # RETURN traps survive into the caller unless they clear themselves.
+  trap 'rm -f -- "${map_path:-}"; trap - RETURN' RETURN
   ftctl_dr_kvm_vmware_canonicalize_profile "${profile_file}" "${map_path}" || {
     rc=67; error_code="DR_REVERSE_DISK_MAP_INVALID"; ready=false
   }
