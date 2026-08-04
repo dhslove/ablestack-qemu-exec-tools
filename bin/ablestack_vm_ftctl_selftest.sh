@@ -9314,7 +9314,7 @@ selftest_case_dr_kvm_vmware_reverse_route_and_baseline_contract() {
   "planUuid":"${plan}",
   "runUuid":"run-reverse",
   "direction":"KVM_TO_VMWARE",
-  "source":{"provider":"ABLESTACK","externalRef":"target-vm"},
+  "source":{"provider":"ABLESTACK","externalRef":"target-vm","instanceName":"i-2-266-VM"},
   "target":{"provider":"VMWARE","externalRef":"vm-101"},
   "mapping":{"disks":[{
     "device":"sda",
@@ -9347,6 +9347,37 @@ JSON
     ftctl_dr_scheduler_run_cycle "${plan}" run-reverse "${profile}" 2 reverse-incremental
   })"
   selftest_assert_contains "${out}" "reverse-writer:${plan}:reverse-incremental" "provider pair routes to reverse writer"
+}
+
+selftest_case_dr_kvm_vmware_reverses_forward_profile_roles() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR derives the KVM to VMware route from a forward VMware to KVM profile"
+
+  local profile="${SELFTEST_ROOT}/forward-vmware-kvm-profile.json"
+  local map_path="${SELFTEST_ROOT}/forward-vmware-kvm-map.json"
+  cat > "${profile}" <<'JSON'
+{
+  "planUuid":"plan-forward-profile",
+  "direction":"VMWARE_TO_KVM",
+  "source":{"provider":"VMWARE","externalRef":"vm-6429"},
+  "target":{"provider":"ABLESTACK","externalRef":"target-vm","instanceName":"i-2-266-VM"},
+  "mapping":{"disks":[{
+    "sizeBytes":1048576,
+    "sourcePath":"[datastore] w22-01/w22-01.vmdk",
+    "targetPath":"rbd/rbd/w22-01-dr-disk-0",
+    "source":{"vmdkPath":"[datastore] w22-01/w22-01.vmdk"},
+    "target":{"storagePath":"rbd","name":"w22-01-dr-disk-0"}
+  }]}
+}
+JSON
+
+  ftctl_dr_kvm_vmware_canonicalize_profile "${profile}" "${map_path}"
+  selftest_assert_file_contains "${map_path}" '"direction":"KVM_TO_VMWARE"'
+  selftest_assert_file_contains "${map_path}" '"sourceDomain":"i-2-266-VM"'
+  selftest_assert_file_contains "${map_path}" '"sourcePool":"rbd"'
+  selftest_assert_file_contains "${map_path}" '"sourceImage":"w22-01-dr-disk-0"'
+  selftest_assert_file_contains "${map_path}" 'w22-01/w22-01.vmdk'
+  selftest_assert_file_contains "${map_path}" '"targetVmRef":"vm-6429"'
 }
 
 selftest_case_dr_kvm_vmware_initial_seed_accepts_missing_baseline() {
@@ -9403,12 +9434,19 @@ selftest_case_dr_kvm_vmware_reverse_preflight_clears_return_trap() {
 
   out="$( (
     ftctl_dr_kvm_vmware_canonicalize_profile() {
-      printf '%s\n' '{"disks":[{"sourcePool":"rbd","sourceImage":"image","virtualBytes":1024}]}' > "${2}"
+      printf '%s\n' '{"sourceDomain":"i-2-266-VM","disks":[{"sourcePool":"rbd","sourceImage":"image","virtualBytes":1024}]}' > "${2}"
     }
     ftctl_dr_kvm_vmware_mode_decision() {
       printf 'MISSING_EXPECTED\tFULL_REVERSE_SEED\tINITIAL_REVERSE_BASELINE_MISSING\ttrue\n'
     }
     rbd() { return 0; }
+    virsh() {
+      case "${1-}" in
+        dominfo) return 0 ;;
+        domstate) printf 'running\n'; return 0 ;;
+      esac
+      return 1
+    }
     command() { return 0; }
 
     ftctl_dr_kvm_vmware_reverse_preflight plan-trap "${profile}" FAILBACK_FINAL AUTO 1
@@ -9417,8 +9455,57 @@ selftest_case_dr_kvm_vmware_reverse_preflight_clears_return_trap() {
 
   selftest_assert_eq "${rc}" "0" "reverse preflight caller returns successfully under set -u"
   selftest_assert_contains "${out}" '"effective_mode":"FULL_REVERSE_SEED"' "reverse preflight emits the selected mode"
+  selftest_assert_contains "${out}" '"source_domain_probe_state":"READY"' "reverse preflight proves the live KVM domain"
   selftest_assert_contains "${out}" "caller-returned" "RETURN trap does not escape into its caller"
   selftest_assert_eq "$(cat "${stderr_file}")" "" "reverse preflight emits no cleanup error"
+}
+
+selftest_case_dr_kvm_vmware_reverse_preflight_requires_live_domain() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR reverse preflight rejects a missing or stopped KVM source domain"
+
+  local profile="${SELFTEST_ROOT}/reverse-live-domain-profile.json"
+  local out="" rc=0
+  printf '%s\n' '{}' > "${profile}"
+
+  out="$( (
+    ftctl_dr_kvm_vmware_canonicalize_profile() {
+      printf '%s\n' '{"sourceDomain":"i-2-266-VM","disks":[{"sourcePool":"rbd","sourceImage":"image","targetVmdkPath":"[ds] vm/disk.vmdk","targetVmRef":"vm-1","virtualBytes":1024}]}' > "${2}"
+    }
+    ftctl_dr_kvm_vmware_mode_decision() {
+      printf 'MISSING_EXPECTED\tFULL_REVERSE_SEED\tINITIAL_REVERSE_BASELINE_MISSING\ttrue\n'
+    }
+    virsh() { return 1; }
+    rbd() { return 0; }
+    command() { return 0; }
+    ftctl_dr_kvm_vmware_reverse_preflight plan-domain-missing "${profile}" FAILBACK_FINAL AUTO 1
+  ) 2>/dev/null)" || rc=$?
+  selftest_assert_eq "${rc}" "86" "missing KVM source domain is a typed preflight failure"
+  selftest_assert_contains "${out}" '"source_domain_probe_state":"NOT_FOUND"' "missing domain is observable"
+  selftest_assert_contains "${out}" '"error_code":"DR_REVERSE_SOURCE_DOMAIN_NOT_FOUND"' "missing domain error is stable"
+
+  rc=0
+  out="$( (
+    ftctl_dr_kvm_vmware_canonicalize_profile() {
+      printf '%s\n' '{"sourceDomain":"i-2-266-VM","disks":[{"sourcePool":"rbd","sourceImage":"image","targetVmdkPath":"[ds] vm/disk.vmdk","targetVmRef":"vm-1","virtualBytes":1024}]}' > "${2}"
+    }
+    ftctl_dr_kvm_vmware_mode_decision() {
+      printf 'MISSING_EXPECTED\tFULL_REVERSE_SEED\tINITIAL_REVERSE_BASELINE_MISSING\ttrue\n'
+    }
+    virsh() {
+      case "${1-}" in
+        dominfo) return 0 ;;
+        domstate) printf 'shut off\n'; return 0 ;;
+      esac
+      return 1
+    }
+    rbd() { return 0; }
+    command() { return 0; }
+    ftctl_dr_kvm_vmware_reverse_preflight plan-domain-stopped "${profile}" FAILBACK_FINAL AUTO 1
+  ) 2>/dev/null)" || rc=$?
+  selftest_assert_eq "${rc}" "87" "stopped KVM source domain is a typed preflight failure"
+  selftest_assert_contains "${out}" '"source_domain_probe_state":"NOT_RUNNING"' "stopped domain is observable"
+  selftest_assert_contains "${out}" '"error_code":"DR_REVERSE_SOURCE_DOMAIN_NOT_RUNNING"' "stopped domain error is stable"
 }
 
 selftest_case_dr_kvm_vmware_canonicalizes_cloud_rbd_volume_identity() {
@@ -9429,7 +9516,7 @@ selftest_case_dr_kvm_vmware_canonicalizes_cloud_rbd_volume_identity() {
   credentials="${tmp}/credentials.json"
   password_file="${tmp}/vcenter.password"
   cat > "${profile}" <<'JSON'
-{"planUuid":"plan-rbd","runUuid":"run-rbd","direction":"KVM_TO_VMWARE","source":{"provider":"ABLESTACK"},"target":{"provider":"VMWARE","externalRef":"vm-6429"},"mapping":{"disks":[{"sizeBytes":"107374182400","sourcePath":"w22-01-dr-disk-0","targetVmdkPath":"[datastore] w22-01/w22-01.vmdk","source":{"storagePath":"rbd","volumeUuid":"7e74a011-47dc-4de5-acd3-a7af6aeaf9f6","name":"w22-01-dr-disk-0"}}]}}
+{"planUuid":"plan-rbd","runUuid":"run-rbd","direction":"KVM_TO_VMWARE","source":{"provider":"ABLESTACK","instanceName":"i-2-266-VM"},"target":{"provider":"VMWARE","externalRef":"vm-6429"},"mapping":{"disks":[{"sizeBytes":"107374182400","sourcePath":"w22-01-dr-disk-0","targetVmdkPath":"[datastore] w22-01/w22-01.vmdk","source":{"storagePath":"rbd","volumeUuid":"7e74a011-47dc-4de5-acd3-a7af6aeaf9f6","name":"w22-01-dr-disk-0"}}]}}
 JSON
   ftctl_dr_kvm_vmware_canonicalize_profile "${profile}" "${output}"
   jq -e '.direction == "KVM_TO_VMWARE"
@@ -9608,8 +9695,10 @@ selftest_main() {
   selftest_case_dr_vmware_automatic_reseed_mode
   selftest_case_dr_vmware_mover_uses_raw_over_nbd_image_opts
   selftest_case_dr_kvm_vmware_reverse_route_and_baseline_contract
+  selftest_case_dr_kvm_vmware_reverses_forward_profile_roles
   selftest_case_dr_kvm_vmware_initial_seed_accepts_missing_baseline
   selftest_case_dr_kvm_vmware_reverse_preflight_clears_return_trap
+  selftest_case_dr_kvm_vmware_reverse_preflight_requires_live_domain
   selftest_case_dr_kvm_vmware_canonicalizes_cloud_rbd_volume_identity
   selftest_case_events_json
   selftest_info "all checks passed"

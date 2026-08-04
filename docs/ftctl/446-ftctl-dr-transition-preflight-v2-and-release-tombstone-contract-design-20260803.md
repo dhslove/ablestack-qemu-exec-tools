@@ -1,5 +1,11 @@
 # 446. FTCTL DR Transition Preflight V2 And Release Tombstone Contract Design
 
+> 2026-08-04 normative live-runtime correction:
+> [449-ftctl-dr-live-runtime-observation-and-projection-boundary-design-20260804.md](449-ftctl-dr-live-runtime-observation-and-projection-boundary-design-20260804.md)
+> clarifies that transition preflight validates FTCTL-owned projection and
+> authority state only. Mold Agent and vCenter remain authoritative for live VM
+> power, and reverse preflight requires the live KVM source domain.
+
 - 작성일: 2026-08-03
 - 상태: 상세 코드 설계 완료, 구현 대기
 - Cloud 상위 설계:

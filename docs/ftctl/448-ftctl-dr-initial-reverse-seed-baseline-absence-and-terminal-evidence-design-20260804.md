@@ -1,10 +1,15 @@
 # 448. FTCTL DR Initial Reverse Seed Baseline Absence And Terminal Evidence Design
 
 - Date: 2026-08-04
-- Status: revision 2 code-level corrective design; cycle selector and preflight implementation pending
+- Status: revision 3 code-level corrective design; live-runtime boundary implementation pending
 - Scope: KVM-to-VMware initial reverse seed, failback worker terminal evidence, target-storage projection
 - Parent design: [445-ftctl-dr-bidirectional-incremental-replication-and-reverse-guest-compatibility-design-20260801.md](445-ftctl-dr-bidirectional-incremental-replication-and-reverse-guest-compatibility-design-20260801.md)
 - Cloud companion: `ablestack-cloud/docs/ftctl/591-cross-hypervisor-dr-failback-initial-reverse-seed-and-early-failure-convergence-design-20260804.md`
+
+> Revision 3 live-runtime boundary:
+> [449-ftctl-dr-live-runtime-observation-and-projection-boundary-design-20260804.md](449-ftctl-dr-live-runtime-observation-and-projection-boundary-design-20260804.md)
+> defines FTCTL power fields as projection-only and requires a live KVM source
+> domain before reverse data preflight can pass.
 
 ## 1. Objective
 

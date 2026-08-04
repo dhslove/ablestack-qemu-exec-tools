@@ -74,18 +74,25 @@ def first(*values):
             return value
     return ""
 
-source = obj(profile.get("source"))
-target = obj(profile.get("target"))
+forward_source = obj(profile.get("source"))
+forward_target = obj(profile.get("target"))
 mapping = obj(profile.get("mapping"))
+direction = first(profile.get("direction")).upper()
+reverse_from_target = direction == "VMWARE_TO_KVM"
+source = forward_target if reverse_from_target else forward_source
+target = forward_source if reverse_from_target else forward_target
 disks = items(mapping.get("disks") or mapping.get("diskMappings") or profile.get("disks"))
 rows = []
 for index, disk in enumerate(disks):
     disk = obj(disk)
-    source_obj = obj(disk.get("source"))
-    target_obj = obj(disk.get("target"))
+    forward_disk_source = obj(disk.get("source"))
+    forward_disk_target = obj(disk.get("target"))
+    source_obj = forward_disk_target if reverse_from_target else forward_disk_source
+    target_obj = forward_disk_source if reverse_from_target else forward_disk_target
     source_path = first(
-        disk.get("sourcePath"), disk.get("sourceDiskRef"),
         source_obj.get("path"), source_obj.get("diskRef"),
+        disk.get("targetPath") if reverse_from_target else disk.get("sourcePath"),
+        disk.get("targetDiskRef") if reverse_from_target else disk.get("sourceDiskRef"),
     )
     pool = first(
         disk.get("sourcePool"), source_obj.get("pool"), source_obj.get("storagePath"),
@@ -101,8 +108,9 @@ for index, disk in enumerate(disks):
         image = image or match.group(2)
     image = image.split("@", 1)[0]
     target_vmdk = first(
-        disk.get("targetVmdkPath"), disk.get("targetPath"), disk.get("targetDiskRef"),
         target_obj.get("vmdkPath"), target_obj.get("path"), target_obj.get("diskRef"),
+        disk.get("sourcePath") if reverse_from_target else disk.get("targetVmdkPath"),
+        disk.get("sourceDiskRef") if reverse_from_target else disk.get("targetPath"),
     )
     size = disk.get("sizeBytes") or source_obj.get("sizeBytes") or target_obj.get("sizeBytes") or 0
     identity = "|".join((pool, image, target_vmdk, str(size)))
@@ -114,7 +122,7 @@ for index, disk in enumerate(disks):
         "sourceVolumeUuid": first(source_obj.get("volumeUuid"), source_obj.get("uuid")),
         "sourceUri": f"rbd:{pool}/{image}" if pool and image else source_path,
         "targetVmdkPath": target_vmdk,
-        "targetVmRef": first(disk.get("targetVmRef"), target.get("externalRef"), target.get("vmId"), target.get("id")),
+        "targetVmRef": first(target.get("externalRef"), target.get("vmId"), target.get("id"), disk.get("targetVmRef")),
         "virtualBytes": int(size or 0),
         "diskIdentityHash": "sha256:" + hashlib.sha256(identity.encode("utf-8")).hexdigest(),
     })
@@ -127,9 +135,10 @@ payload = {
     "runUuid": profile.get("runUuid", ""),
     "source": source,
     "target": target,
+    "sourceDomain": first(source.get("instanceName"), source.get("domainName"), source.get("vmName")),
     "disks": rows,
 }
-if not rows or any(not row["sourcePool"] or not row["sourceImage"] or not row["targetVmdkPath"] or not row["targetVmRef"] for row in rows):
+if not payload["sourceDomain"] or not rows or any(not row["sourcePool"] or not row["sourceImage"] or not row["targetVmdkPath"] or not row["targetVmRef"] for row in rows):
     raise SystemExit("KVM_TO_VMWARE disk map is incomplete")
 os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 tmp = output_path + ".tmp"
@@ -223,7 +232,7 @@ ftctl_dr_kvm_vmware_cycle_type() {
 ftctl_dr_kvm_vmware_reverse_preflight() {
   local plan="${1-}" profile_file="${2-}" operation_intent="${3-FAILBACK_FINAL}" requested_mode="${4-AUTO}" json="${5-0}"
   local map_path decision rc=0 baseline_state effective_mode decision_code initial_seed source_disk_count estimated_virtual_bytes
-  local source_disk_probe_state="READY" target_writer_probe_state="READY" error_code="" ready=true
+  local source_domain source_domain_probe_state="READY" source_disk_probe_state="READY" target_writer_probe_state="READY" error_code="" ready=true
   [[ -n "${plan}" && -f "${profile_file}" ]] || return 2
   map_path="$(mktemp "${TMPDIR:-/tmp}/ftctl-reverse-map.XXXXXX.json")"
   # RETURN traps survive into the caller unless they clear themselves.
@@ -240,6 +249,24 @@ ftctl_dr_kvm_vmware_reverse_preflight() {
   fi
   source_disk_count="$(jq -r '.disks | length' "${map_path}" 2>/dev/null || printf 0)"
   estimated_virtual_bytes="$(jq -r '[.disks[].virtualBytes // 0] | add // 0' "${map_path}" 2>/dev/null || printf 0)"
+  source_domain="$(jq -r '.sourceDomain // empty' "${map_path}" 2>/dev/null || true)"
+  if [[ "${rc}" == "0" ]]; then
+    if [[ -z "${source_domain}" ]] || ! virsh dominfo "${source_domain}" >/dev/null 2>&1; then
+      source_domain_probe_state="NOT_FOUND"
+      source_disk_probe_state="NOT_CHECKED"
+      ready=false
+      rc=86
+      error_code="DR_REVERSE_SOURCE_DOMAIN_NOT_FOUND"
+    elif [[ "$(virsh domstate "${source_domain}" 2>/dev/null | tr '[:lower:]' '[:upper:]' | tr -d '[:space:]')" != "RUNNING" ]]; then
+      source_domain_probe_state="NOT_RUNNING"
+      source_disk_probe_state="NOT_CHECKED"
+      ready=false
+      rc=87
+      error_code="DR_REVERSE_SOURCE_DOMAIN_NOT_RUNNING"
+    fi
+  else
+    source_domain_probe_state="NOT_CHECKED"
+  fi
   if [[ "${rc}" == "0" ]]; then
     while IFS=$'\t' read -r pool image; do
       if [[ -z "${pool}" || -z "${image}" ]] || ! rbd info "${pool}/${image}" >/dev/null 2>&1; then
@@ -262,11 +289,11 @@ ftctl_dr_kvm_vmware_reverse_preflight() {
     fi
   done
   if [[ "${json}" == "1" ]]; then
-    printf '{"command":"dr-reverse-preflight","schema_version":1,"contract_version":"dr-reverse-preflight-v1","result":"%s","ready":%s,"plan_uuid":"%s","operation_intent":"%s","requested_mode":"%s","effective_mode":"%s","mode_decision_code":"%s","initial_seed_required":%s,"baseline_file_state":"%s","source_disk_probe_state":"%s","source_disk_count":%s,"target_writer_probe_state":"%s","estimated_virtual_bytes":%s,"error_code":"%s","exit_code":%s}\n' \
+    printf '{"command":"dr-reverse-preflight","schema_version":2,"contract_version":"dr-reverse-preflight-v2","result":"%s","ready":%s,"plan_uuid":"%s","operation_intent":"%s","requested_mode":"%s","effective_mode":"%s","mode_decision_code":"%s","initial_seed_required":%s,"baseline_file_state":"%s","source_domain_probe_state":"%s","source_disk_probe_state":"%s","source_disk_count":%s,"target_writer_probe_state":"%s","estimated_virtual_bytes":%s,"error_code":"%s","exit_code":%s}\n' \
       "$( [[ "${ready}" == "true" ]] && printf ok || printf error )" "${ready}" "$(ftctl__json_escape "${plan}")" \
       "$(ftctl__json_escape "${operation_intent}")" "$(ftctl__json_escape "${requested_mode}")" "$(ftctl__json_escape "${effective_mode}")" \
       "$(ftctl__json_escape "${decision_code}")" "${initial_seed:-false}" "$(ftctl__json_escape "${baseline_state}")" \
-      "$(ftctl__json_escape "${source_disk_probe_state}")" "${source_disk_count:-0}" "$(ftctl__json_escape "${target_writer_probe_state}")" \
+      "$(ftctl__json_escape "${source_domain_probe_state}")" "$(ftctl__json_escape "${source_disk_probe_state}")" "${source_disk_count:-0}" "$(ftctl__json_escape "${target_writer_probe_state}")" \
       "${estimated_virtual_bytes:-0}" "$(ftctl__json_escape "${error_code}")" "${rc}"
   else
     printf 'ready=%s baseline=%s requested=%s effective=%s decision=%s source_disks=%s writer=%s\n' \

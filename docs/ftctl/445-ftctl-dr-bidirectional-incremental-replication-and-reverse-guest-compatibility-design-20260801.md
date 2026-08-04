@@ -1,5 +1,10 @@
 # 445. FTCTL DR Bidirectional Incremental Replication And Reverse Guest Compatibility Design
 
+> 2026-08-04 live-runtime boundary correction:
+> [449-ftctl-dr-live-runtime-observation-and-projection-boundary-design-20260804.md](449-ftctl-dr-live-runtime-observation-and-projection-boundary-design-20260804.md)
+> separates durable FTCTL power projection from Agent/vCenter observations and
+> requires the active KVM domain, not only its disks, for reverse readiness.
+>
 > 2026-08-04 corrective contract:
 > [448-ftctl-dr-initial-reverse-seed-baseline-absence-and-terminal-evidence-design-20260804.md](448-ftctl-dr-initial-reverse-seed-baseline-absence-and-terminal-evidence-design-20260804.md)
 > makes an absent reverse baseline valid for the first `FULL_REVERSE_SEED` and
