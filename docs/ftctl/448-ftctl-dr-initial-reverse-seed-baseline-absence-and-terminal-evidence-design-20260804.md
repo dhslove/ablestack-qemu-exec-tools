@@ -10,6 +10,11 @@
 > [449-ftctl-dr-live-runtime-observation-and-projection-boundary-design-20260804.md](449-ftctl-dr-live-runtime-observation-and-projection-boundary-design-20260804.md)
 > defines FTCTL power fields as projection-only and requires a live KVM source
 > domain before reverse data preflight can pass.
+>
+> Revision 4 RBD snapshot and terminal-causality correction:
+> [450-ftctl-dr-reverse-rbd-snapshot-readonly-nbd-and-terminal-causality-design-20260805.md](450-ftctl-dr-reverse-rbd-snapshot-readonly-nbd-and-terminal-causality-design-20260805.md)
+> is normative for read-only RBD snapshot attachment and engine-terminal error
+> precedence.
 
 ## 1. Objective
 
@@ -600,3 +605,16 @@ selftest_case_dr_transition_preflight_is_read_only: PASS
 selftest_case_dr_kvm_vmware_initial_seed_accepts_missing_baseline: PASS
 selftest_case_dr_kvm_vmware_reverse_route_and_baseline_contract: PASS
 ```
+
+## 14. Revision 4: read-only snapshot attachment and terminal causality
+
+The next live retry correctly selected `FULL_REVERSE_SEED` and created both
+RBD snapshots, but `qemu-nbd` opened the immutable snapshot without
+`--read-only` and failed with exit `86`. A concurrent dead-worker projection
+published synthetic exit `70` before the mover's typed terminal result became
+visible.
+
+Document 450 supersedes the source NBD attachment and failure precedence parts
+of this document. The source snapshot attachment is read-only, the worker gets
+a bounded terminal-publication grace period, and an engine terminal envelope
+has higher precedence than watchdog or Cloud data-gate derivations.

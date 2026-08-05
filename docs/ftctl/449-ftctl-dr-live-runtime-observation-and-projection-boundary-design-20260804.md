@@ -5,6 +5,7 @@
 - Scope: transition preflight, reverse preflight, runtime projection, Agent contract
 - Parent design: [448-ftctl-dr-initial-reverse-seed-baseline-absence-and-terminal-evidence-design-20260804.md](448-ftctl-dr-initial-reverse-seed-baseline-absence-and-terminal-evidence-design-20260804.md)
 - Cloud companion: `ablestack-cloud/docs/ftctl/592-cross-hypervisor-dr-failback-live-runtime-preflight-and-ux-convergence-design-20260804.md`
+- Terminal-causality addendum: [450-ftctl-dr-reverse-rbd-snapshot-readonly-nbd-and-terminal-causality-design-20260805.md](450-ftctl-dr-reverse-rbd-snapshot-readonly-nbd-and-terminal-causality-design-20260805.md)
 
 ## 1. Objective
 

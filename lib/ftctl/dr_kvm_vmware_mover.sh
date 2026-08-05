@@ -103,6 +103,12 @@ ftctl_kvm_vmware_start_writer() {
   printf '%s\n' "$!"
 }
 
+ftctl_kvm_vmware_attach_source_snapshot() {
+  local source_dev="${1-}" source_uri="${2-}"
+  [[ -n "${source_dev}" && -n "${source_uri}" ]] || return 86
+  qemu-nbd --read-only --cache=none --connect="${source_dev}" --format=raw "${source_uri}" >/dev/null
+}
+
 ftctl_kvm_vmware_patch_disk() {
   local row="${1-}" cycle_type="${2-}" previous_snapshot="${3-}" new_snapshot="${4-}"
   local endpoint="${5-}" username="${6-}" password_file="${7-}" tls_verify="${8-}" thumbprint="${9-}" libdir="${10-}"
@@ -127,7 +133,7 @@ ftctl_kvm_vmware_patch_disk() {
   flock -x 9
   source_dev="$(ftctl_vmware_mover_free_nbd || true)"
   [[ -n "${source_dev}" ]] || { flock -u 9; rm -rf "${work_dir}"; return 86; }
-  qemu-nbd --connect="${source_dev}" --format=raw "${source_uri}" >/dev/null || {
+  ftctl_kvm_vmware_attach_source_snapshot "${source_dev}" "${source_uri}" || {
     flock -u 9; rm -rf "${work_dir}"; return 86;
   }
   FTCTL_DR_NBD_SOURCE_DEVICE_COUNT=1

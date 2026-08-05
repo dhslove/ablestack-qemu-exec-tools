@@ -2519,7 +2519,7 @@ ftctl_dr_runtime_failback_worker() {
       82) error_code="DR_REVERSE_SOURCE_STORAGE_MISSING" ;;
       83) error_code="DR_REVERSE_BASELINE_REQUIRED" ;;
       84) error_code="DR_REVERSE_BASELINE_INVALID" ;;
-      86) error_code="DR_REVERSE_SNAPSHOT_OR_NBD_FAILED" ;;
+      86) error_code="DR_REVERSE_SNAPSHOT_OPEN_FAILED" ;;
       87) error_code="DR_REVERSE_WRITER_FAILED" ;;
       88) error_code="DR_REVERSE_DURABILITY_VERIFY_FAILED" ;;
       66) error_code="DR_UNSUPPORTED_DIRECTION" ;;
@@ -2534,6 +2534,10 @@ ftctl_dr_runtime_failback_worker() {
       "accepted=true" \
       "failback_phase=FAILED" \
       "worker_state=FAILED" \
+      "terminal_source=ENGINE_TERMINAL" \
+      "terminal_version=1" \
+      "terminal_publication_pending=false" \
+      "terminal_publication_pending_since=" \
       "worker_pid=" \
       "worker_pid_alive=false" \
       "worker_exit_code=${rc}" \
@@ -2619,6 +2623,10 @@ PY
     "reverse_profile_path=${reverse_profile}" \
     "reverse_restore_points_path=${reverse_restore_points_path}" \
     "worker_state=SUCCEEDED" \
+    "terminal_source=ENGINE_TERMINAL" \
+    "terminal_version=1" \
+    "terminal_publication_pending=false" \
+    "terminal_publication_pending_since=" \
     "worker_pid=" \
     "worker_pid_alive=false" \
     "worker_exit_code=0" \
@@ -2891,6 +2899,7 @@ ftctl_dr_runtime_emit_state_json() {
   local driver driver_state disk_map_path source_disk_map_path target_disk_map_path disk_map_role
   local target_disk_count target_disk_invalid_count manifest_path checkpoint_path cbt_status_path source_open_status_path source_snapshot_status_path
   local scheduler_state worker_pid worker_start_ticks worker_pid_alive worker_state worker_started_at worker_updated_at worker_exit_code
+  local terminal_source terminal_version terminal_publication_pending terminal_publication_pending_since terminal_pending_age
   local runtime_generation scheduler_pid_alive baseline_state reseed_reason consecutive_automatic_reseed_count
   local control_protocol_version control_generation control_ack_generation control_state cycle_state
   local scheduler_session_uuid scheduler_lease_epoch authority_sequence plan_cycle_sequence scheduler_health
@@ -3051,6 +3060,10 @@ ftctl_dr_runtime_emit_state_json() {
   worker_started_at="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "worker_started_at")"
   worker_updated_at="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "worker_updated_at")"
   worker_exit_code="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "worker_exit_code")"
+  terminal_source="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "terminal_source")"
+  terminal_version="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "terminal_version")"
+  terminal_publication_pending="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "terminal_publication_pending")"
+  terminal_publication_pending_since="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "terminal_publication_pending_since")"
   if [[ "${worker_state}" == "RUNNING" && "${worker_pid}" =~ ^[0-9]+$ ]]; then
     if kill -0 "${worker_pid}" >/dev/null 2>&1 \
         && { [[ -z "${worker_start_ticks}" ]] \
@@ -3059,15 +3072,40 @@ ftctl_dr_runtime_emit_state_json() {
     else
       worker_pid_alive="false"
       if [[ "${action}" == "dr-failback" || -n "${failback_phase}" ]]; then
-        state="ERROR"
-        step="failback-worker-exited"
-        progress="100"
-        worker_state="FAILED"
-        [[ -n "${worker_exit_code}" ]] || worker_exit_code="70"
-        [[ -n "${driver_exit_code}" ]] || driver_exit_code="70"
-        [[ -n "${error_code}" ]] || error_code="DR_FAILBACK_WORKER_EXITED"
-        [[ -n "${error_message}" ]] || error_message="Failback worker exited before publishing a terminal result"
-        [[ -n "${failed_component}" ]] || failed_component="ftctl-failback-worker"
+        if [[ -z "${terminal_publication_pending_since}" ]]; then
+          terminal_publication_pending_since="$(ftctl_now_iso8601)"
+          terminal_publication_pending="true"
+          ftctl_dr_runtime_path_set "${state_path}" \
+            "terminal_publication_pending=true" \
+            "terminal_publication_pending_since=${terminal_publication_pending_since}" \
+            "worker_pid_alive=false" || true
+          terminal_pending_age=0
+        else
+          terminal_pending_age="$(ftctl_dr_runtime_rpo_from_target_at "${terminal_publication_pending_since}" 2>/dev/null || printf '0')"
+        fi
+        if [[ "${terminal_pending_age}" =~ ^[0-9]+$ \
+              && "${terminal_pending_age}" -lt "${FTCTL_DR_TERMINAL_PUBLICATION_GRACE_SECONDS:-10}" ]]; then
+          state="RUNNING"
+          step="failback-terminal-publication-pending"
+          progress="99"
+          worker_state="TERMINAL_PENDING"
+          retryable="true"
+          retry_after_sec="2"
+          terminal_publication_pending="true"
+        else
+          state="ERROR"
+          step="failback-worker-exited"
+          progress="100"
+          worker_state="FAILED"
+          [[ -n "${worker_exit_code}" ]] || worker_exit_code="70"
+          [[ -n "${driver_exit_code}" ]] || driver_exit_code="70"
+          [[ -n "${error_code}" ]] || error_code="DR_TERMINAL_PUBLICATION_TIMEOUT"
+          [[ -n "${error_message}" ]] || error_message="Failback worker exited without publishing a terminal result within the grace period"
+          [[ -n "${failed_component}" ]] || failed_component="ftctl-failback-worker"
+          terminal_source="WATCHDOG_DERIVED"
+          terminal_version="${terminal_version:-1}"
+          terminal_publication_pending="false"
+        fi
       fi
     fi
   fi
@@ -3506,6 +3544,10 @@ PY
   ftctl_dr_runtime_json_string_field "worker_started_at" "${worker_started_at}"
   ftctl_dr_runtime_json_string_field "worker_updated_at" "${worker_updated_at}"
   ftctl_dr_runtime_json_number_field "worker_exit_code" "${worker_exit_code}"
+  ftctl_dr_runtime_json_string_field "terminal_source" "${terminal_source}"
+  ftctl_dr_runtime_json_number_field "terminal_version" "${terminal_version}"
+  ftctl_dr_runtime_json_boolean_field "terminal_publication_pending" "${terminal_publication_pending}" || return $?
+  ftctl_dr_runtime_json_string_field "terminal_publication_pending_since" "${terminal_publication_pending_since}"
   ftctl_dr_runtime_json_boolean_field "retryable" "${retryable}" || return $?
   ftctl_dr_runtime_json_number_field "retry_after_sec" "${retry_after_sec}"
   ftctl_dr_runtime_json_string_field "lock_file" "${lock_file}"
@@ -5342,7 +5384,7 @@ ftctl_dr_runtime_capabilities() {
       first="0"
       printf '"%s"' "$(ftctl__json_escape "${command}")"
     done
-    printf '],"supported_features":["async-run","status-projection","status-scope-v2","target-materialized-notify","target-materialized-idempotent","target-materialization-manifest-v2","target-resource-ownership-generation-v1","hardware-contract-projection","control-protocol-v2","control-protocol-v3","control-protocol-v4","dr-scheduler-singleton-v1","dr-scheduler-self-owner-repair-v1","dr-scheduler-systemd-unit-v1","dr-sync-recover-v1","dr-local-reconcile-fence-v1","dr-checkpoint-producer-v1","dr-nbd-deterministic-drain-v1","dr-nbd-cleanup-recovery-v1","dr-plan-authority-snapshot-v1","dr-failover-authority-snapshot-v1","dr-completed-cycle-evidence-v2","dr-failover-abort-v1","dr-transition-preflight-v1","dr-transition-preflight-v2","dr-reverse-preflight-v2","dr-release-tombstone-v1","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","guest-preparation-v1","guest-preparation-v2","test-domain-lifecycle-v1","test-artifact-lifecycle-v2","cloud-managed-test-vm-v1","cutover-ready-v1","cutover-manifest-v2","cutover-preflight-v1","cloud-cutover-commit-v1","cloud-failback-lifecycle-v1","dr-failback-commit-journal-v1","dr-failback-commit-journal-v2","dr-failback-late-ack-reconcile-v1","dr-failback-rollback-fence-v1"]}\n'
+    printf '],"supported_features":["async-run","status-projection","status-scope-v2","target-materialized-notify","target-materialized-idempotent","target-materialization-manifest-v2","target-resource-ownership-generation-v1","hardware-contract-projection","control-protocol-v2","control-protocol-v3","control-protocol-v4","dr-scheduler-singleton-v1","dr-scheduler-self-owner-repair-v1","dr-scheduler-systemd-unit-v1","dr-sync-recover-v1","dr-local-reconcile-fence-v1","dr-checkpoint-producer-v1","dr-nbd-deterministic-drain-v1","dr-nbd-cleanup-recovery-v1","dr-plan-authority-snapshot-v1","dr-failover-authority-snapshot-v1","dr-completed-cycle-evidence-v2","dr-failover-abort-v1","dr-transition-preflight-v1","dr-transition-preflight-v2","dr-reverse-preflight-v2","dr-reverse-rbd-snapshot-readonly-v1","dr-terminal-causality-v1","dr-release-tombstone-v1","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","guest-preparation-v1","guest-preparation-v2","test-domain-lifecycle-v1","test-artifact-lifecycle-v2","cloud-managed-test-vm-v1","cutover-ready-v1","cutover-manifest-v2","cutover-preflight-v1","cloud-cutover-commit-v1","cloud-failback-lifecycle-v1","dr-failback-commit-journal-v1","dr-failback-commit-journal-v2","dr-failback-late-ack-reconcile-v1","dr-failback-rollback-fence-v1"]}\n'
     return 0
   fi
 

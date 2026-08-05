@@ -9460,6 +9460,66 @@ selftest_case_dr_kvm_vmware_reverse_preflight_clears_return_trap() {
   selftest_assert_eq "$(cat "${stderr_file}")" "" "reverse preflight emits no cleanup error"
 }
 
+selftest_case_dr_kvm_vmware_snapshot_attach_is_read_only() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR reverse source snapshot is attached read-only"
+
+  local call_log="${SELFTEST_ROOT}/reverse-source-attach.log"
+  (
+    # shellcheck source=/dev/null
+    source "${LIB_BASE}/ftctl/dr_kvm_vmware_mover.sh"
+    qemu-nbd() {
+      printf '%s\n' "$*" > "${call_log}"
+    }
+    ftctl_kvm_vmware_attach_source_snapshot "/dev/nbd15" \
+      "rbd:rbd/w22-01-dr-disk-0@snapshot-1"
+  )
+
+  selftest_assert_file_contains "${call_log}" "--read-only"
+  selftest_assert_file_contains "${call_log}" "--cache=none"
+  selftest_assert_file_contains "${call_log}" "--connect=/dev/nbd15"
+  selftest_assert_file_contains "${call_log}" "rbd:rbd/w22-01-dr-disk-0@snapshot-1"
+  selftest_assert_contains "$(ftctl_dr_runtime_capabilities 1)" \
+    '"dr-reverse-rbd-snapshot-readonly-v1"' "read-only reverse capability is advertised"
+  selftest_assert_contains "$(ftctl_dr_runtime_capabilities 1)" \
+    '"dr-terminal-causality-v1"' "terminal causality capability is advertised"
+}
+
+selftest_case_dr_failback_terminal_publication_grace() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR failback waits for authoritative terminal publication"
+
+  local state_path="${SELFTEST_ROOT}/failback-terminal-grace.state"
+  local output=""
+  ftctl_state_write_kv_all "${state_path}" \
+    "action=dr-failback" \
+    "state=RUNNING" \
+    "step=reverse-transfer" \
+    "progress=80" \
+    "failback_phase=REVERSE_SYNCING" \
+    "worker_state=RUNNING" \
+    "worker_pid=999999" \
+    "worker_pid_alive=true"
+
+  output="$(FTCTL_DR_TERMINAL_PUBLICATION_GRACE_SECONDS=10 \
+    ftctl_dr_runtime_emit_state_json "dr-failback" "ok" \
+      "plan-terminal-grace" "run-terminal-grace" "${state_path}" "0")"
+  selftest_assert_contains "${output}" '"state":"RUNNING"' "dead worker remains non-terminal during grace"
+  selftest_assert_contains "${output}" '"worker_state":"TERMINAL_PENDING"' "terminal publication is explicit"
+  selftest_assert_contains "${output}" '"terminal_publication_pending":true' "pending provenance is emitted"
+  selftest_assert_not_contains "${output}" '"DR_FAILBACK_WORKER_EXITED"' "legacy synthetic failure is suppressed"
+
+  ftctl_dr_runtime_path_set "${state_path}" \
+    "terminal_publication_pending=true" \
+    "terminal_publication_pending_since=1970-01-01T00:00:00+0000"
+  output="$(FTCTL_DR_TERMINAL_PUBLICATION_GRACE_SECONDS=1 \
+    ftctl_dr_runtime_emit_state_json "dr-failback" "ok" \
+      "plan-terminal-grace" "run-terminal-grace" "${state_path}" "0")"
+  selftest_assert_contains "${output}" '"state":"ERROR"' "watchdog terminalizes after grace"
+  selftest_assert_contains "${output}" '"error_code":"DR_TERMINAL_PUBLICATION_TIMEOUT"' "watchdog error is specific"
+  selftest_assert_contains "${output}" '"terminal_source":"WATCHDOG_DERIVED"' "watchdog provenance is explicit"
+}
+
 selftest_case_dr_kvm_vmware_reverse_preflight_requires_live_domain() {
   selftest_reset_env
   selftest_info "FTCTL_DR reverse preflight rejects a missing or stopped KVM source domain"
@@ -9698,6 +9758,8 @@ selftest_main() {
   selftest_case_dr_kvm_vmware_reverses_forward_profile_roles
   selftest_case_dr_kvm_vmware_initial_seed_accepts_missing_baseline
   selftest_case_dr_kvm_vmware_reverse_preflight_clears_return_trap
+  selftest_case_dr_kvm_vmware_snapshot_attach_is_read_only
+  selftest_case_dr_failback_terminal_publication_grace
   selftest_case_dr_kvm_vmware_reverse_preflight_requires_live_domain
   selftest_case_dr_kvm_vmware_canonicalizes_cloud_rbd_volume_identity
   selftest_case_events_json
