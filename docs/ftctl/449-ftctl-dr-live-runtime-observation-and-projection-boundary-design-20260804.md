@@ -7,6 +7,7 @@
 - Cloud companion: `ablestack-cloud/docs/ftctl/592-cross-hypervisor-dr-failback-live-runtime-preflight-and-ux-convergence-design-20260804.md`
 - Terminal-causality addendum: [450-ftctl-dr-reverse-rbd-snapshot-readonly-nbd-and-terminal-causality-design-20260805.md](450-ftctl-dr-reverse-rbd-snapshot-readonly-nbd-and-terminal-causality-design-20260805.md)
 - Worker reconciliation addendum: [451-ftctl-dr-worker-identity-live-transfer-and-terminal-reconciliation-design-20260805.md](451-ftctl-dr-worker-identity-live-transfer-and-terminal-reconciliation-design-20260805.md)
+- Route envelope addendum: [452-ftctl-dr-failback-route-envelope-and-cloud-lifecycle-boundary-design-20260805.md](452-ftctl-dr-failback-route-envelope-and-cloud-lifecycle-boundary-design-20260805.md)
 
 ## 1. Objective
 

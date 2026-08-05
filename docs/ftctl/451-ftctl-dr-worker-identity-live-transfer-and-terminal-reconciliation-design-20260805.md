@@ -5,6 +5,7 @@
 - Scope: asynchronous Failback worker identity, transfer heartbeat, status reconciliation, cleanup ownership
 - Parent: [450](450-ftctl-dr-reverse-rbd-snapshot-readonly-nbd-and-terminal-causality-design-20260805.md)
 - Cloud companion: `ablestack-cloud/docs/ftctl/594-cross-hypervisor-dr-live-worker-and-terminal-reconciliation-design-20260805.md`
+- Post-transfer route correction: [452](452-ftctl-dr-failback-route-envelope-and-cloud-lifecycle-boundary-design-20260805.md)
 
 ## 1. Objective
 
@@ -342,3 +343,13 @@ VDDK residue, and all FTCTL, Agent, API, DB, KVM, and VMware states agree.
 - Retest cleanup: the failed Failback Run was aborted through the FTCTL command,
   all Run-owned NBD/VDDK processes and NBD endpoints were drained, and the Plan
   returned to `FAILED_OVER` with TARGET authority.
+
+## 18. Route Envelope Addendum
+
+The subsequent live Run reached authoritative `FAILBACK_DATA_READY`, proving
+the worker and transfer correction. Its route status still exposed
+provider-style `reverse_direction=ABLESTACK_TO_VMWARE` without a complete
+canonical tuple, while the reverse profile topology was `KVM_TO_VMWARE`.
+Document 452 is normative for route-contract v2, compatibility aliases, and
+Cloud-invoked idempotent abort/drain. It does not change the proven mover;
+it makes the successful evidence unambiguous to Cloud.

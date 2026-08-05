@@ -1,5 +1,10 @@
 # 445. FTCTL DR Bidirectional Incremental Replication And Reverse Guest Compatibility Design
 
+> 2026-08-05 route-contract v2 correction:
+> [452-ftctl-dr-failback-route-envelope-and-cloud-lifecycle-boundary-design-20260805.md](452-ftctl-dr-failback-route-envelope-and-cloud-lifecycle-boundary-design-20260805.md)
+> separates `KVM_TO_VMWARE` topology from `ABLESTACK_TO_VMWARE` provider pair
+> and preserves both through Run, status, terminal, and abort evidence.
+>
 > 2026-08-04 live-runtime boundary correction:
 > [449-ftctl-dr-live-runtime-observation-and-projection-boundary-design-20260804.md](449-ftctl-dr-live-runtime-observation-and-projection-boundary-design-20260804.md)
 > separates durable FTCTL power projection from Agent/vCenter observations and

@@ -5,6 +5,7 @@
 - Scope: KVM-to-VMware initial reverse seed, failback worker terminal evidence, target-storage projection
 - Parent design: [445-ftctl-dr-bidirectional-incremental-replication-and-reverse-guest-compatibility-design-20260801.md](445-ftctl-dr-bidirectional-incremental-replication-and-reverse-guest-compatibility-design-20260801.md)
 - Cloud companion: `ablestack-cloud/docs/ftctl/591-cross-hypervisor-dr-failback-initial-reverse-seed-and-early-failure-convergence-design-20260804.md`
+- Route envelope correction: [452](452-ftctl-dr-failback-route-envelope-and-cloud-lifecycle-boundary-design-20260805.md)
 
 > Revision 3 live-runtime boundary:
 > [449-ftctl-dr-live-runtime-observation-and-projection-boundary-design-20260804.md](449-ftctl-dr-live-runtime-observation-and-projection-boundary-design-20260804.md)

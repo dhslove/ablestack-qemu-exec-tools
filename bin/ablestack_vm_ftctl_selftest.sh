@@ -8238,7 +8238,10 @@ EOF
   selftest_assert_contains "${out}" '"source_promotion_state":"STANDBY"' "source remains standby before Cloud commit"
   selftest_assert_contains "${out}" '"engine_ack_state":"PENDING"' "engine commit is pending"
   selftest_assert_contains "${out}" '"failback_restore_point_sequence":4' "failback reverse checkpoint sequence"
-  selftest_assert_contains "${out}" '"reverse_direction":"KVM_TO_KVM"' "failback reverse direction"
+  selftest_assert_contains "${out}" '"reverse_direction":"ABLESTACK_TO_ABLESTACK"' "failback legacy provider direction"
+  selftest_assert_contains "${out}" '"route_contract_version":2' "failback route contract version"
+  selftest_assert_contains "${out}" '"replication_direction":"KVM_TO_KVM"' "failback topology direction"
+  selftest_assert_contains "${out}" '"provider_pair":"ABLESTACK_TO_ABLESTACK"' "failback provider pair"
   selftest_assert_contains "${out}" '"failback_rto_actual_seconds":' "failback RTO field"
 
   reverse_profile="${SELFTEST_ROOT}/run/dr-runtime/plans/${plan}/reverse-profiles/run-failback-failback.json"
@@ -9354,6 +9357,7 @@ selftest_case_dr_kvm_vmware_reverses_forward_profile_roles() {
   selftest_info "FTCTL_DR derives the KVM to VMware route from a forward VMware to KVM profile"
 
   local profile="${SELFTEST_ROOT}/forward-vmware-kvm-profile.json"
+  local reverse_profile="${SELFTEST_ROOT}/reverse-kvm-vmware-profile.json"
   local map_path="${SELFTEST_ROOT}/forward-vmware-kvm-map.json"
   cat > "${profile}" <<'JSON'
 {
@@ -9371,7 +9375,14 @@ selftest_case_dr_kvm_vmware_reverses_forward_profile_roles() {
 }
 JSON
 
-  ftctl_dr_kvm_vmware_canonicalize_profile "${profile}" "${map_path}"
+  ftctl_dr_runtime_build_reverse_profile "plan-forward-profile" "run-reverse" \
+    "${profile}" "${reverse_profile}" "failback"
+  selftest_assert_file_contains "${reverse_profile}" '"direction":"KVM_TO_VMWARE"'
+  selftest_assert_file_contains "${reverse_profile}" '"replicationDirection":"KVM_TO_VMWARE"'
+  selftest_assert_file_contains "${reverse_profile}" '"providerPair":"ABLESTACK_TO_VMWARE"'
+  selftest_assert_file_contains "${reverse_profile}" '"routeContractVersion":2'
+
+  ftctl_dr_kvm_vmware_canonicalize_profile "${reverse_profile}" "${map_path}"
   selftest_assert_file_contains "${map_path}" '"direction":"KVM_TO_VMWARE"'
   selftest_assert_file_contains "${map_path}" '"sourceDomain":"i-2-266-VM"'
   selftest_assert_file_contains "${map_path}" '"sourcePool":"rbd"'

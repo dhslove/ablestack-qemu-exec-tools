@@ -1156,6 +1156,11 @@ reverse["source"] = copy.deepcopy(target)
 reverse["target"] = copy.deepcopy(source)
 reverse["originalDirection"] = profile.get("direction", "")
 reverse["reverseDirection"] = reverse["direction"]
+reverse_source_provider = first_str(reverse.get("source", {}).get("provider")).upper()
+reverse_target_provider = first_str(reverse.get("target", {}).get("provider")).upper()
+reverse["replicationDirection"] = reverse["direction"]
+reverse["providerPair"] = f"{reverse_source_provider}_TO_{reverse_target_provider}"
+reverse["routeContractVersion"] = 2
 reverse["reverseOf"] = {
     "planUuid": profile.get("planUuid", ""),
     "runUuid": profile.get("runUuid", ""),
@@ -1189,8 +1194,8 @@ PY
 ftctl_dr_runtime_reverse_checkpoint() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" run_path="${4-}" status_path="${5-}" cycle_type="${6-reverse-sync}" phase="${7-reverse}"
   local restore_points_path sequence output rc=0 manifest_path checkpoint_path transfer_progress_path
-  local source_at target_at rpo source_provider target_provider driver now
-  local baseline_generation baseline_state tracker_state writer_state target_written write_verified guest_compatibility_state
+  local source_at target_at rpo source_provider target_provider replication_direction provider_pair driver now
+  local baseline_generation baseline_state="" tracker_state writer_state target_written write_verified guest_compatibility_state
   local operation_intent="REPROTECT" requested_mode="AUTO" effective_mode="" mode_decision_code="" initial_seed_required=false decision
 
   command -v ftctl_dr_scheduler_run_cycle >/dev/null 2>&1 || return 0
@@ -1198,6 +1203,8 @@ ftctl_dr_runtime_reverse_checkpoint() {
   sequence="$(ftctl_dr_runtime_failover_next_sequence "${status_path}" "${restore_points_path}")"
   source_provider="$(ftctl_dr_scheduler_profile_provider "${profile_file}" source)"
   target_provider="$(ftctl_dr_scheduler_profile_provider "${profile_file}" target)"
+  replication_direction="$(ftctl_dr_runtime_profile_value "${profile_file}" "direction" 2>/dev/null || true)"
+  provider_pair="${source_provider}_TO_${target_provider}"
   if [[ "${source_provider}" == "ABLESTACK" && "${target_provider}" == "VMWARE" ]]; then
     [[ "${phase}" == "failback" ]] && operation_intent="FAILBACK_FINAL"
     decision="$(ftctl_dr_kvm_vmware_mode_decision "${plan}" "${operation_intent}" "${requested_mode}")" || return $?
@@ -1254,8 +1261,10 @@ ftctl_dr_runtime_reverse_checkpoint() {
     "last_source_checkpoint_at=${source_at}" \
     "last_target_durable_at=${target_at}" \
     "target_ready_rpo_seconds=${rpo}" \
-    "reverse_direction=${source_provider}_TO_${target_provider}" \
-    "provider_pair=${source_provider}_TO_${target_provider}" \
+    "route_contract_version=2" \
+    "replication_direction=${replication_direction}" \
+    "reverse_direction=${provider_pair}" \
+    "provider_pair=${provider_pair}" \
     "baseline_generation=${baseline_generation}" \
     "baseline_state=${baseline_state}" \
     "tracker_state=${tracker_state}" \
@@ -2522,8 +2531,8 @@ ftctl_dr_runtime_failback_worker() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" run_path="${4-}" status_path="${5-}"
   local launch_nonce="${6-}" worker_generation="${7-}" worker_profile reverse_profile worker_start_ticks now requested_at completed_at rc=0 error_code error_message failure_phase
   local worker_pid heartbeat_pid=""
-  local reverse_preflight_json
-  local sequence manifest_path checkpoint_path reverse_restore_points_path reverse_direction rto_actual_seconds
+  local reverse_preflight_json="" reverse_source_provider="" reverse_target_provider=""
+  local sequence manifest_path checkpoint_path reverse_restore_points_path reverse_direction replication_direction provider_pair rto_actual_seconds
   local active_side current_state previous_checkpoint_sequence
 
   worker_profile="${profile_file}"
@@ -2584,7 +2593,11 @@ ftctl_dr_runtime_failback_worker() {
   fi
   ftctl_dr_runtime_build_reverse_profile "${plan}" "${run}" "${worker_profile}" "${reverse_profile}" "failback" || rc=$?
   if [[ "${rc}" == "0" ]]; then
-    reverse_preflight_json="$(ftctl_dr_kvm_vmware_reverse_preflight "${plan}" "${reverse_profile}" "FAILBACK_FINAL" "AUTO" 1)" || rc=$?
+    reverse_source_provider="$(ftctl_dr_scheduler_profile_provider "${reverse_profile}" source)"
+    reverse_target_provider="$(ftctl_dr_scheduler_profile_provider "${reverse_profile}" target)"
+    if [[ "${reverse_source_provider}" == "ABLESTACK" && "${reverse_target_provider}" == "VMWARE" ]]; then
+      reverse_preflight_json="$(ftctl_dr_kvm_vmware_reverse_preflight "${plan}" "${reverse_profile}" "FAILBACK_FINAL" "AUTO" 1)" || rc=$?
+    fi
   fi
   if [[ -n "${reverse_preflight_json}" ]]; then
     ftctl_dr_runtime_path_set "${run_path}" \
@@ -2602,10 +2615,16 @@ ftctl_dr_runtime_failback_worker() {
   fi
   if [[ "${rc}" == "0" ]]; then
     failure_phase="REVERSE_TRANSFER"
-    reverse_direction="$(ftctl_dr_runtime_profile_value "${reverse_profile}" "direction" 2>/dev/null || true)"
+    replication_direction="$(ftctl_dr_runtime_profile_value "${reverse_profile}" "direction" 2>/dev/null || true)"
+    provider_pair="$(ftctl_dr_runtime_profile_value "${reverse_profile}" "providerPair" 2>/dev/null || true)"
+    [[ -n "${provider_pair}" ]] || provider_pair="${replication_direction}"
+    reverse_direction="${provider_pair}"
     ftctl_dr_runtime_path_set "${run_path}" \
       "reverse_profile_path=${reverse_profile}" \
-      "reverse_direction=${reverse_direction}" || true
+      "route_contract_version=2" \
+      "replication_direction=${replication_direction}" \
+      "reverse_direction=${reverse_direction}" \
+      "provider_pair=${provider_pair}" || true
     ftctl_dr_runtime_path_set "${run_path}" \
       "operation_intent=FAILBACK_FINAL" \
       "requested_mode=AUTO" || true
@@ -2697,6 +2716,8 @@ ftctl_dr_runtime_failback_worker() {
   checkpoint_path="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "checkpoint_path")"
   reverse_restore_points_path="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "reverse_restore_points_path")"
   reverse_direction="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "reverse_direction")"
+  replication_direction="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "replication_direction")"
+  provider_pair="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "provider_pair")"
   rto_actual_seconds="$(python3 - "${requested_at}" "${completed_at}" <<'PY'
 import sys
 from datetime import datetime, timezone
@@ -2745,7 +2766,10 @@ PY
     "source_promotion_state=STANDBY" \
     "target_power_state=POWERED_ON" \
     "engine_ack_state=PENDING" \
+    "route_contract_version=2" \
+    "replication_direction=${replication_direction}" \
     "reverse_direction=${reverse_direction}" \
+    "provider_pair=${provider_pair}" \
     "reverse_profile_path=${reverse_profile}" \
     "reverse_restore_points_path=${reverse_restore_points_path}" \
     "worker_state=SUCCEEDED" \
@@ -2836,7 +2860,7 @@ ftctl_dr_runtime_start_failback() {
 ftctl_dr_runtime_reprotect_worker() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" run_path="${4-}" status_path="${5-}"
   local worker_profile reverse_profile now requested_at completed_at rc=0 error_code
-  local sequence manifest_path checkpoint_path reverse_restore_points_path reverse_direction rto_actual_seconds
+  local sequence manifest_path checkpoint_path reverse_restore_points_path reverse_direction replication_direction provider_pair rto_actual_seconds
   local active_side current_state previous_checkpoint_sequence
 
   worker_profile="${profile_file}"
@@ -2871,10 +2895,16 @@ ftctl_dr_runtime_reprotect_worker() {
 
   ftctl_dr_runtime_build_reverse_profile "${plan}" "${run}" "${worker_profile}" "${reverse_profile}" "reprotect" || rc=$?
   if [[ "${rc}" == "0" ]]; then
-    reverse_direction="$(ftctl_dr_runtime_profile_value "${reverse_profile}" "direction" 2>/dev/null || true)"
+    replication_direction="$(ftctl_dr_runtime_profile_value "${reverse_profile}" "direction" 2>/dev/null || true)"
+    provider_pair="$(ftctl_dr_runtime_profile_value "${reverse_profile}" "providerPair" 2>/dev/null || true)"
+    [[ -n "${provider_pair}" ]] || provider_pair="${replication_direction}"
+    reverse_direction="${provider_pair}"
     ftctl_dr_runtime_path_set "${run_path}" \
       "reverse_profile_path=${reverse_profile}" \
-      "reverse_direction=${reverse_direction}" || true
+      "route_contract_version=2" \
+      "replication_direction=${replication_direction}" \
+      "reverse_direction=${reverse_direction}" \
+      "provider_pair=${provider_pair}" || true
     ftctl_dr_runtime_reverse_checkpoint "${plan}" "${run}" "${reverse_profile}" "${run_path}" "${status_path}" "reprotect-seed" "reprotect" || rc=$?
   fi
   if [[ "${rc}" != "0" ]]; then
@@ -2920,6 +2950,8 @@ ftctl_dr_runtime_reprotect_worker() {
   checkpoint_path="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "checkpoint_path")"
   reverse_restore_points_path="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "reverse_restore_points_path")"
   reverse_direction="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "reverse_direction")"
+  replication_direction="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "replication_direction")"
+  provider_pair="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "provider_pair")"
   rto_actual_seconds="$(python3 - "${requested_at}" "${completed_at}" <<'PY'
 import sys
 from datetime import datetime, timezone
@@ -2960,7 +2992,10 @@ PY
     "active_side=TARGET" \
     "target_power_state=POWER_ON_DELEGATED" \
     "target_promotion_state=PROMOTED" \
+    "route_contract_version=2" \
+    "replication_direction=${replication_direction}" \
     "reverse_direction=${reverse_direction}" \
+    "provider_pair=${provider_pair}" \
     "reverse_profile_path=${reverse_profile}" \
     "reverse_restore_points_path=${reverse_restore_points_path}" \
     "error_code=" \
@@ -3106,7 +3141,7 @@ ftctl_dr_runtime_emit_state_json() {
   local failback_rto_actual_seconds source_power_state source_promotion_state failback_worker_pid
   local reprotect_session_id reprotect_mode reprotect_restore_point_ref reprotect_restore_point_sequence
   local reprotect_manifest_path reprotect_checkpoint_path reprotect_requested_at reprotect_completed_at
-  local reprotect_rto_actual_seconds reverse_direction reverse_profile_path reverse_restore_points_path reprotect_worker_pid
+  local reprotect_rto_actual_seconds route_contract_version replication_direction reverse_direction provider_pair reverse_profile_path reverse_restore_points_path reprotect_worker_pid
   local target_vm_id target_external_ref target_materialized target_vm_present target_storage_present target_network_present restore_point_present
   local status_scope profile_path authority_state_path source_firmware="" source_secure_boot="" source_hardware_fingerprint=""
   local target_boot_type="" target_boot_mode="" target_io_policy="" target_iothreads=""
@@ -3594,7 +3629,10 @@ PY
   reprotect_requested_at="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "reprotect_requested_at")"
   reprotect_completed_at="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "reprotect_completed_at")"
   reprotect_rto_actual_seconds="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "reprotect_rto_actual_seconds")"
+  route_contract_version="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "route_contract_version")"
+  replication_direction="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "replication_direction")"
   reverse_direction="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "reverse_direction")"
+  provider_pair="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "provider_pair")"
   reverse_profile_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "reverse_profile_path")"
   reverse_restore_points_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "reverse_restore_points_path")"
   reprotect_worker_pid="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "reprotect_worker_pid")"
@@ -3905,7 +3943,10 @@ PY
   ftctl_dr_runtime_json_string_field "reprotect_requested_at" "${reprotect_requested_at}"
   ftctl_dr_runtime_json_string_field "reprotect_completed_at" "${reprotect_completed_at}"
   ftctl_dr_runtime_json_number_field "reprotect_rto_actual_seconds" "${reprotect_rto_actual_seconds}"
+  ftctl_dr_runtime_json_number_field "route_contract_version" "${route_contract_version}"
+  ftctl_dr_runtime_json_string_field "replication_direction" "${replication_direction}"
   ftctl_dr_runtime_json_string_field "reverse_direction" "${reverse_direction}"
+  ftctl_dr_runtime_json_string_field "provider_pair" "${provider_pair}"
   ftctl_dr_runtime_json_string_field "reverse_profile_path" "${reverse_profile_path}"
   ftctl_dr_runtime_json_string_field "reverse_restore_points_path" "${reverse_restore_points_path}"
   ftctl_dr_runtime_json_number_field "reprotect_worker_pid" "${reprotect_worker_pid}"

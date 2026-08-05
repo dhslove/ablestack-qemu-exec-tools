@@ -7,6 +7,7 @@
 - Runtime boundary: [449-ftctl-dr-live-runtime-observation-and-projection-boundary-design-20260804.md](449-ftctl-dr-live-runtime-observation-and-projection-boundary-design-20260804.md)
 - Cloud companion: `ablestack-cloud/docs/ftctl/593-cross-hypervisor-dr-failback-reverse-rbd-readonly-and-terminal-causality-design-20260805.md`
 - Worker identity correction: [451](451-ftctl-dr-worker-identity-live-transfer-and-terminal-reconciliation-design-20260805.md)
+- Route envelope correction: [452](452-ftctl-dr-failback-route-envelope-and-cloud-lifecycle-boundary-design-20260805.md)
 
 ## 1. Objective
 
