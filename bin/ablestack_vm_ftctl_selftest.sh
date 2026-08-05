@@ -9515,10 +9515,46 @@ selftest_case_dr_failback_terminal_publication_grace() {
   output="$(FTCTL_DR_TERMINAL_PUBLICATION_GRACE_SECONDS=1 \
     ftctl_dr_runtime_emit_state_json "dr-failback" "ok" \
       "plan-terminal-grace" "run-terminal-grace" "${state_path}" "0")"
-  selftest_assert_contains "${output}" '"state":"ERROR"' "watchdog terminalizes after grace"
-  selftest_assert_contains "${output}" '"error_code":"DR_TERMINAL_PUBLICATION_TIMEOUT"' "watchdog error is specific"
-  selftest_assert_contains "${output}" '"terminal_source":"WATCHDOG_DERIVED"' "watchdog provenance is explicit"
+  selftest_assert_contains "${output}" '"state":"RUNNING"' "status observation never terminalizes the Run"
+  selftest_assert_contains "${output}" '"worker_liveness_state":"DEAD_CONFIRMED"' "dead worker is typed for backend reconciliation"
+  selftest_assert_contains "${output}" '"reconciliation_required":true' "dead worker requires reconciliation"
+  selftest_assert_not_contains "${output}" '"terminal_source":"WATCHDOG_DERIVED"' "status does not synthesize terminal provenance"
 }
+
+selftest_case_dr_failback_live_worker_journal_is_read_only() (
+  selftest_reset_env
+  selftest_info "FTCTL_DR live Failback journal survives conflicting legacy identity and status reads"
+
+  local plan="plan-live-worker" run="run-live-worker" run_path worker_path progress_path before after output pid ticks
+  ftctl_dr_runtime_ensure_plan_dirs "${plan}"
+  run_path="$(ftctl_dr_runtime_run_path "${plan}" "${run}")"
+  worker_path="$(ftctl_dr_runtime_run_journal_path "${plan}" "${run}" worker)"
+  progress_path="$(ftctl_dr_runtime_run_journal_path "${plan}" "${run}" progress)"
+  sleep 30 &
+  pid="$!"
+  ticks="$(ftctl_dr_scheduler_process_start_ticks "${pid}")"
+  ftctl_state_write_kv_all "${run_path}" \
+    "action=dr-failback" "state=RUNNING" "step=failback-transfer" "progress=55" \
+    "failback_phase=REVERSE_SYNCING" "worker_state=RUNNING" \
+    "worker_pid=${pid}" "worker_start_ticks=$((ticks + 1))" "worker_pid_alive=true" \
+    "transfer_progress_path=${progress_path}"
+  ftctl_dr_runtime_worker_journal_write "${plan}" "${run}" "nonce-live" "7" \
+    "${pid}" "${ticks}" "RUNNING" "$(ftctl_now_iso8601)"
+  printf '{"state":"COPYING","transferPayloadBytes":1048576,"updatedAtEpochMs":%s}\n' \
+    "$(( $(date +%s) * 1000 ))" > "${progress_path}"
+  before="$(sha256sum "${run_path}" "${worker_path}")"
+  output="$(ftctl_dr_runtime_emit_state_json "dr-failback" "ok" "${plan}" "${run}" "${run_path}" "0")"
+  after="$(sha256sum "${run_path}" "${worker_path}")"
+  kill "${pid}" 2>/dev/null || true
+  wait "${pid}" 2>/dev/null || true
+
+  selftest_assert_eq "${after}" "${before}" "status read does not mutate Run or worker journals"
+  selftest_assert_contains "${output}" '"worker_identity_state":"MATCHED"' "worker-owned identity overrides conflicting legacy state"
+  selftest_assert_contains "${output}" '"worker_liveness_state":"ALIVE"' "live worker remains non-terminal"
+  selftest_assert_contains "${output}" '"transfer_activity_state":"COPYING"' "live transfer activity is projected"
+  selftest_assert_contains "${output}" '"transfer_payload_bytes":1048576' "live payload bytes are projected"
+  selftest_assert_contains "${output}" '"terminal_authoritative":false' "live transfer has no terminal"
+)
 
 selftest_case_dr_kvm_vmware_reverse_preflight_requires_live_domain() {
   selftest_reset_env
@@ -9760,6 +9796,7 @@ selftest_main() {
   selftest_case_dr_kvm_vmware_reverse_preflight_clears_return_trap
   selftest_case_dr_kvm_vmware_snapshot_attach_is_read_only
   selftest_case_dr_failback_terminal_publication_grace
+  selftest_case_dr_failback_live_worker_journal_is_read_only
   selftest_case_dr_kvm_vmware_reverse_preflight_requires_live_domain
   selftest_case_dr_kvm_vmware_canonicalizes_cloud_rbd_volume_identity
   selftest_case_events_json

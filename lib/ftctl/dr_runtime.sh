@@ -69,6 +69,103 @@ ftctl_dr_runtime_run_path() {
   printf '%s/%s.state\n' "$(ftctl_dr_runtime_run_dir "${plan}")" "$(ftctl_dr_runtime_key "${run}")"
 }
 
+ftctl_dr_runtime_run_journal_dir() {
+  local plan="${1-}" run="${2-}"
+  printf '%s/%s.journals\n' "$(ftctl_dr_runtime_run_dir "${plan}")" "$(ftctl_dr_runtime_key "${run}")"
+}
+
+ftctl_dr_runtime_run_journal_path() {
+  local plan="${1-}" run="${2-}" role="${3-}"
+  printf '%s/%s.state\n' "$(ftctl_dr_runtime_run_journal_dir "${plan}" "${run}")" "$(ftctl_dr_runtime_key "${role}")"
+}
+
+ftctl_dr_runtime_journal_write() {
+  local path="${1-}" dir tmp item
+  shift
+  [[ -n "${path}" ]] || return 1
+  dir="$(dirname "${path}")"
+  ftctl_ensure_dir "${dir}" "0755"
+  tmp="$(mktemp "${dir}/.$(basename "${path}").tmp.XXXXXX")" || return 1
+  for item in "$@"; do
+    printf '%s\n' "${item}" >> "${tmp}"
+  done
+  chmod 0644 "${tmp}" 2>/dev/null || true
+  sync -f "${tmp}" 2>/dev/null || true
+  mv -f -- "${tmp}" "${path}" || { rm -f -- "${tmp}"; return 1; }
+  sync -f "${dir}" 2>/dev/null || true
+}
+
+ftctl_dr_runtime_journal_value() {
+  local path="${1-}" key="${2-}"
+  [[ -f "${path}" ]] || return 0
+  ftctl_dr_runtime_state_get_from_path "${path}" "${key}"
+}
+
+ftctl_dr_runtime_launch_nonce() {
+  if [[ -r /proc/sys/kernel/random/uuid ]]; then
+    tr -d '[:space:]' < /proc/sys/kernel/random/uuid
+  else
+    printf '%s-%s-%s\n' "$(date +%s%N)" "$$" "${RANDOM}"
+  fi
+}
+
+ftctl_dr_runtime_worker_journal_write() {
+  local plan="${1-}" run="${2-}" nonce="${3-}" generation="${4-}" pid="${5-}" start_ticks="${6-}" state="${7-}" now="${8-}"
+  local path
+  path="$(ftctl_dr_runtime_run_journal_path "${plan}" "${run}" worker)"
+  ftctl_dr_runtime_journal_write "${path}" \
+    "version=1" "writer_role=worker" "plan=${plan}" "run=${run}" \
+    "launch_nonce=${nonce}" "generation=${generation}" "worker_pid=${pid}" \
+    "worker_start_ticks=${start_ticks}" "worker_state=${state}" \
+    "worker_heartbeat_at=${now}" "written_at=${now}"
+}
+
+ftctl_dr_runtime_terminal_journal_write() {
+  local plan="${1-}" run="${2-}" nonce="${3-}" generation="${4-}" state="${5-}" exit_code="${6-}" error_code="${7-}" now="${8-}"
+  local path
+  path="$(ftctl_dr_runtime_run_journal_path "${plan}" "${run}" terminal)"
+  ftctl_dr_runtime_journal_write "${path}" \
+    "version=1" "writer_role=engine-terminal" "plan=${plan}" "run=${run}" \
+    "launch_nonce=${nonce}" "generation=${generation}" "terminal_state=${state}" \
+    "terminal_exit_code=${exit_code}" "terminal_error_code=${error_code}" \
+    "terminal_source=ENGINE_TERMINAL" "terminal_version=1" \
+    "terminal_authoritative=true" "runtime_endpoints_drained=true" "written_at=${now}"
+}
+
+ftctl_dr_runtime_failback_worker_live() {
+  local plan="${1-}" run="${2-}" worker_path pid ticks actual
+  worker_path="$(ftctl_dr_runtime_run_journal_path "${plan}" "${run}" worker)"
+  [[ -f "${worker_path}" ]] || return 1
+  pid="$(ftctl_dr_runtime_journal_value "${worker_path}" worker_pid)"
+  ticks="$(ftctl_dr_runtime_journal_value "${worker_path}" worker_start_ticks)"
+  [[ "${pid}" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "${pid}" >/dev/null 2>&1 || return 1
+  actual="$(ftctl_dr_scheduler_process_start_ticks "${pid}" 2>/dev/null || true)"
+  [[ -z "${ticks}" || "${actual}" == "${ticks}" ]]
+}
+
+ftctl_dr_runtime_other_failback_worker_live() {
+  local plan="${1-}" run="${2-}" worker_path worker_run pid ticks actual terminal_path
+  shopt -s nullglob
+  for worker_path in "$(ftctl_dr_runtime_run_dir "${plan}")"/*.journals/worker.state; do
+    worker_run="$(ftctl_dr_runtime_journal_value "${worker_path}" run)"
+    [[ -n "${worker_run}" && "${worker_run}" != "${run}" ]] || continue
+    terminal_path="$(dirname "${worker_path}")/terminal.state"
+    [[ ! -f "${terminal_path}" ]] || continue
+    pid="$(ftctl_dr_runtime_journal_value "${worker_path}" worker_pid)"
+    ticks="$(ftctl_dr_runtime_journal_value "${worker_path}" worker_start_ticks)"
+    [[ "${pid}" =~ ^[0-9]+$ ]] || continue
+    kill -0 "${pid}" >/dev/null 2>&1 || continue
+    actual="$(ftctl_dr_scheduler_process_start_ticks "${pid}" 2>/dev/null || true)"
+    if [[ -z "${ticks}" || "${actual}" == "${ticks}" ]]; then
+      shopt -u nullglob
+      return 0
+    fi
+  done
+  shopt -u nullglob
+  return 1
+}
+
 ftctl_dr_runtime_test_dir() {
   local plan="${1-}"
   printf '%s/test-sessions\n' "$(ftctl_dr_runtime_plan_dir "${plan}")"
@@ -1091,7 +1188,7 @@ PY
 
 ftctl_dr_runtime_reverse_checkpoint() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" run_path="${4-}" status_path="${5-}" cycle_type="${6-reverse-sync}" phase="${7-reverse}"
-  local restore_points_path sequence output rc=0 manifest_path checkpoint_path
+  local restore_points_path sequence output rc=0 manifest_path checkpoint_path transfer_progress_path
   local source_at target_at rpo source_provider target_provider driver now
   local baseline_generation baseline_state tracker_state writer_state target_written write_verified guest_compatibility_state
   local operation_intent="REPROTECT" requested_mode="AUTO" effective_mode="" mode_decision_code="" initial_seed_required=false decision
@@ -1108,6 +1205,7 @@ ftctl_dr_runtime_reverse_checkpoint() {
     cycle_type="${effective_mode}"
   fi
   now="$(ftctl_now_iso8601)"
+  transfer_progress_path="$(ftctl_dr_runtime_run_journal_path "${plan}" "${run}" progress)"
   ftctl_dr_runtime_path_set "${run_path}" \
     "state=RUNNING" \
     "step=${phase}-transfer" \
@@ -1120,10 +1218,12 @@ ftctl_dr_runtime_reverse_checkpoint() {
     "mode_decision_code=${mode_decision_code}" \
     "initial_seed_required=${initial_seed_required}" \
     "baseline_file_state=${baseline_state}" \
+    "transfer_progress_path=${transfer_progress_path}" \
     "updated_at=${now}" || true
   cp -f "${run_path}" "${status_path}" 2>/dev/null || true
 
-  output="$(ftctl_dr_scheduler_run_cycle "${plan}" "${run}-${phase}" "${profile_file}" "${sequence}" "${cycle_type}")" || rc=$?
+  output="$(FTCTL_DR_TRANSFER_PROGRESS_PATH="${transfer_progress_path}" \
+    ftctl_dr_scheduler_run_cycle "${plan}" "${run}-${phase}" "${profile_file}" "${sequence}" "${cycle_type}")" || rc=$?
   [[ "${rc}" == "0" ]] || return "${rc}"
   manifest_path="$(awk -F '\t' 'NF >= 2 {print $1; exit}' <<< "${output}")"
   checkpoint_path="$(awk -F '\t' 'NF >= 2 {print $2; exit}' <<< "${output}")"
@@ -2420,17 +2520,27 @@ PY
 
 ftctl_dr_runtime_failback_worker() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" run_path="${4-}" status_path="${5-}"
-  local worker_profile reverse_profile worker_start_ticks now requested_at completed_at rc=0 error_code error_message failure_phase
+  local launch_nonce="${6-}" worker_generation="${7-}" worker_profile reverse_profile worker_start_ticks now requested_at completed_at rc=0 error_code error_message failure_phase
+  local worker_pid heartbeat_pid=""
   local reverse_preflight_json
   local sequence manifest_path checkpoint_path reverse_restore_points_path reverse_direction rto_actual_seconds
   local active_side current_state previous_checkpoint_sequence
 
   worker_profile="${profile_file}"
   [[ -n "${worker_profile}" && -f "${worker_profile}" ]] || worker_profile="$(ftctl_dr_runtime_profile_path "${plan}")"
+  [[ -n "${launch_nonce}" ]] || launch_nonce="$(ftctl_dr_runtime_launch_nonce)"
+  [[ "${worker_generation}" =~ ^[0-9]+$ ]] || worker_generation="$(date +%s%N)"
+  worker_pid="${BASHPID:-$$}"
+  worker_start_ticks="$(ftctl_dr_scheduler_process_start_ticks "${worker_pid}" 2>/dev/null || true)"
+  requested_at="$(ftctl_now_iso8601)"
+  ftctl_dr_runtime_worker_journal_write "${plan}" "${run}" "${launch_nonce}" "${worker_generation}" \
+    "${worker_pid}" "${worker_start_ticks}" "STARTING" "${requested_at}" || return 70
   active_side="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "active_side")"
   current_state="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "authority_state")"
   previous_checkpoint_sequence="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "checkpoint_sequence")"
   if [[ "${active_side}" != "TARGET" && "${current_state}" != "FAILED_OVER" ]]; then
+    ftctl_dr_runtime_terminal_journal_write "${plan}" "${run}" "${launch_nonce}" "${worker_generation}" \
+      "FAILED" "47" "DR_FAILBACK_REQUIRES_TARGET_ACTIVE" "$(ftctl_now_iso8601)" || true
     ftctl_dr_runtime_path_set "${run_path}" \
       "state=ERROR" \
       "step=failback-not-eligible" \
@@ -2443,8 +2553,6 @@ ftctl_dr_runtime_failback_worker() {
     return 47
   fi
 
-  requested_at="$(ftctl_now_iso8601)"
-  worker_start_ticks="$(ftctl_dr_scheduler_process_start_ticks "${BASHPID:-$$}" 2>/dev/null || true)"
   reverse_profile="$(ftctl_dr_runtime_reverse_profile_path "${plan}" "${run}" "failback")"
   failure_phase="REVERSE_PREFLIGHT"
   ftctl_dr_runtime_path_set "${run_path}" \
@@ -2454,15 +2562,16 @@ ftctl_dr_runtime_failback_worker() {
     "failback_requested_at=${requested_at}" \
     "failback_phase=REQUESTED" \
     "worker_state=RUNNING" \
-    "worker_pid=${BASHPID:-$$}" \
-    "worker_start_ticks=${worker_start_ticks}" \
-    "worker_pid_alive=true" \
+    "worker_launch_nonce=${launch_nonce}" \
+    "worker_generation=${worker_generation}" \
     "worker_started_at=${requested_at}" \
     "worker_updated_at=${requested_at}" \
     "accepted=true" \
     "active_side=TARGET" \
     "checkpoint_sequence=${previous_checkpoint_sequence}" \
     "updated_at=${requested_at}" || true
+  ftctl_dr_runtime_worker_journal_write "${plan}" "${run}" "${launch_nonce}" "${worker_generation}" \
+    "${worker_pid}" "${worker_start_ticks}" "RUNNING" "${requested_at}" || true
   cp -f "${run_path}" "${status_path}" 2>/dev/null || true
   ftctl_dr_runtime_write_operation_session \
     "$(ftctl_dr_runtime_failback_session_path "${plan}" "${run}")" \
@@ -2500,7 +2609,18 @@ ftctl_dr_runtime_failback_worker() {
     ftctl_dr_runtime_path_set "${run_path}" \
       "operation_intent=FAILBACK_FINAL" \
       "requested_mode=AUTO" || true
+    (
+      while kill -0 "${worker_pid}" >/dev/null 2>&1; do
+        ftctl_dr_runtime_worker_journal_write "${plan}" "${run}" "${launch_nonce}" "${worker_generation}" \
+          "${worker_pid}" "${worker_start_ticks}" "RUNNING" "$(ftctl_now_iso8601)" || true
+        sleep 2
+      done
+    ) &
+    heartbeat_pid="$!"
     ftctl_dr_runtime_reverse_checkpoint "${plan}" "${run}" "${reverse_profile}" "${run_path}" "${status_path}" "failback-final" "failback" || rc=$?
+    kill "${heartbeat_pid}" >/dev/null 2>&1 || true
+    wait "${heartbeat_pid}" 2>/dev/null || true
+    heartbeat_pid=""
   fi
   if [[ "${rc}" != "0" ]]; then
     case "${rc}" in
@@ -2527,6 +2647,8 @@ ftctl_dr_runtime_failback_worker() {
       *) error_code="DR_FAILBACK_REVERSE_SYNC_FAILED" ;;
     esac
     error_message="Failback ${failure_phase} failed in kvm-vmware-mover (exit ${rc})"
+    ftctl_dr_runtime_terminal_journal_write "${plan}" "${run}" "${launch_nonce}" "${worker_generation}" \
+      "FAILED" "${rc}" "${error_code}" "$(ftctl_now_iso8601)" || true
     ftctl_dr_runtime_path_set "${run_path}" \
       "state=ERROR" \
       "step=failback-reverse-sync-failed" \
@@ -2557,10 +2679,14 @@ ftctl_dr_runtime_failback_worker() {
       "${worker_profile}" "${reverse_profile}" "${run_path}" "${requested_at}" "$(ftctl_now_iso8601)" || true
     ftctl_log_event "dr-runtime" "dr.failback" "fail" "" "${error_code}" \
       "plan=${plan} run=${run} rc=${rc}"
+    ftctl_dr_runtime_worker_journal_write "${plan}" "${run}" "${launch_nonce}" "${worker_generation}" \
+      "${worker_pid}" "${worker_start_ticks}" "TERMINAL_PUBLISHED" "$(ftctl_now_iso8601)" || true
     return "${rc}"
   fi
 
   completed_at="$(ftctl_now_iso8601)"
+  ftctl_dr_runtime_terminal_journal_write "${plan}" "${run}" "${launch_nonce}" "${worker_generation}" \
+    "FAILBACK_DATA_READY" "0" "" "${completed_at}" || true
   ftctl_dr_runtime_write_operation_session \
     "$(ftctl_dr_runtime_failback_session_path "${plan}" "${run}")" \
     "$(ftctl_dr_runtime_active_failback_session_path "${plan}")" \
@@ -2644,14 +2770,38 @@ PY
   chmod 0644 "${status_path}" 2>/dev/null || true
   ftctl_log_event "dr-runtime" "dr.failback" "ok" "" "" \
     "plan=${plan} run=${run} restore_point=ftctl:${plan}:${sequence} phase=DATA_READY active_side=TARGET"
+  ftctl_dr_runtime_worker_journal_write "${plan}" "${run}" "${launch_nonce}" "${worker_generation}" \
+    "${worker_pid}" "${worker_start_ticks}" "TERMINAL_PUBLISHED" "${completed_at}" || true
 }
 
 ftctl_dr_runtime_start_failback() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" run_path="${4-}" status_path="${5-}" wait_value="${6-}"
-  local pid log_path now start_ticks current_state
+  local pid log_path now launch_nonce worker_generation launch_path worker_path ack_nonce ack_generation ack_pid attempt
+
+  if ftctl_dr_runtime_other_failback_worker_live "${plan}" "${run}"; then
+    ftctl_dr_runtime_path_set "${run_path}" \
+      "state=RUNNING" "step=failback-existing-worker-reconciliation" "progress=15" \
+      "accepted=false" "retryable=true" "retry_after_sec=2" \
+      "reconciliation_required=true" "worker_liveness_state=ALIVE" \
+      "error_code=DR_ENGINE_BUSY_RETRYABLE" \
+      "error_message=Another Failback worker is still active for this Plan" \
+      "updated_at=$(ftctl_now_iso8601)" || true
+    return 20
+  fi
+
+  launch_nonce="$(ftctl_dr_runtime_launch_nonce)"
+  worker_generation="$(date +%s%N)"
+  launch_path="$(ftctl_dr_runtime_run_journal_path "${plan}" "${run}" launch)"
+  worker_path="$(ftctl_dr_runtime_run_journal_path "${plan}" "${run}" worker)"
+  now="$(ftctl_now_iso8601)"
+  ftctl_dr_runtime_journal_write "${launch_path}" \
+    "version=1" "writer_role=launcher" "plan=${plan}" "run=${run}" \
+    "launch_nonce=${launch_nonce}" "generation=${worker_generation}" \
+    "launch_state=ACCEPTED" "written_at=${now}" || return 70
 
   if [[ "${wait_value}" != "false" || "${FTCTL_DR_FAILBACK_FOREGROUND:-0}" == "1" ]]; then
-    ftctl_dr_runtime_failback_worker "${plan}" "${run}" "${profile_file}" "${run_path}" "${status_path}"
+    ftctl_dr_runtime_failback_worker "${plan}" "${run}" "${profile_file}" "${run_path}" "${status_path}" \
+      "${launch_nonce}" "${worker_generation}"
     return $?
   fi
 
@@ -2659,27 +2809,28 @@ ftctl_dr_runtime_start_failback() {
   (
     trap - EXIT
     unset FTCTL_HELD_LOCK_FILE
-    ftctl_dr_runtime_failback_worker "${plan}" "${run}" "${profile_file}" "${run_path}" "${status_path}"
+    ftctl_dr_runtime_failback_worker "${plan}" "${run}" "${profile_file}" "${run_path}" "${status_path}" \
+      "${launch_nonce}" "${worker_generation}"
   ) >> "${log_path}" 2>&1 &
   pid="$!"
   now="$(ftctl_now_iso8601)"
-  start_ticks="$(ftctl_dr_scheduler_process_start_ticks "${pid}" 2>/dev/null || true)"
-  current_state="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "state")"
-  if [[ "${current_state}" == "RUNNING" || -z "${current_state}" ]]; then
-    ftctl_dr_runtime_path_set "${run_path}" \
-      "state=RUNNING" \
-      "step=failback-worker-started" \
-      "progress=15" \
-      "failback_worker_pid=${pid}" \
-      "worker_pid=${pid}" \
-      "worker_start_ticks=${start_ticks}" \
-      "worker_pid_alive=true" \
-      "worker_state=RUNNING" \
-      "worker_started_at=${now}" \
-      "worker_updated_at=${now}" \
-      "accepted=true" \
-      "updated_at=${now}" || true
-  fi
+  ack_pid=""
+  for attempt in $(seq 1 100); do
+    ack_nonce="$(ftctl_dr_runtime_journal_value "${worker_path}" launch_nonce)"
+    ack_generation="$(ftctl_dr_runtime_journal_value "${worker_path}" generation)"
+    ack_pid="$(ftctl_dr_runtime_journal_value "${worker_path}" worker_pid)"
+    if [[ "${ack_nonce}" == "${launch_nonce}" && "${ack_generation}" == "${worker_generation}" && "${ack_pid}" =~ ^[0-9]+$ ]]; then
+      break
+    fi
+    kill -0 "${pid}" >/dev/null 2>&1 || break
+    sleep 0.05
+  done
+  ftctl_dr_runtime_journal_write "${launch_path}" \
+    "version=1" "writer_role=launcher" "plan=${plan}" "run=${run}" \
+    "launch_nonce=${launch_nonce}" "generation=${worker_generation}" \
+    "expected_pid=${pid}" \
+    "launch_state=$([[ "${ack_pid}" =~ ^[0-9]+$ ]] && printf ACKNOWLEDGED || printf ACK_PENDING)" \
+    "written_at=${now}" || true
 }
 
 ftctl_dr_runtime_reprotect_worker() {
@@ -2900,6 +3051,9 @@ ftctl_dr_runtime_emit_state_json() {
   local target_disk_count target_disk_invalid_count manifest_path checkpoint_path cbt_status_path source_open_status_path source_snapshot_status_path
   local scheduler_state worker_pid worker_start_ticks worker_pid_alive worker_state worker_started_at worker_updated_at worker_exit_code
   local terminal_source terminal_version terminal_publication_pending terminal_publication_pending_since terminal_pending_age
+  local worker_identity_state worker_liveness_state worker_launch_nonce worker_generation worker_heartbeat_current
+  local transfer_activity_state transfer_payload_bytes owned_process_count reconciliation_required terminal_authoritative runtime_endpoints_drained
+  local worker_journal_path terminal_journal_path progress_journal_path actual_worker_start_ticks heartbeat_age progress_updated_epoch progress_age
   local runtime_generation scheduler_pid_alive baseline_state reseed_reason consecutive_automatic_reseed_count
   local control_protocol_version control_generation control_ack_generation control_state cycle_state
   local scheduler_session_uuid scheduler_lease_epoch authority_sequence plan_cycle_sequence scheduler_health
@@ -3064,50 +3218,100 @@ ftctl_dr_runtime_emit_state_json() {
   terminal_version="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "terminal_version")"
   terminal_publication_pending="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "terminal_publication_pending")"
   terminal_publication_pending_since="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "terminal_publication_pending_since")"
-  if [[ "${worker_state}" == "RUNNING" && "${worker_pid}" =~ ^[0-9]+$ ]]; then
-    if kill -0 "${worker_pid}" >/dev/null 2>&1 \
-        && { [[ -z "${worker_start_ticks}" ]] \
-          || [[ "$(ftctl_dr_scheduler_process_start_ticks "${worker_pid}" 2>/dev/null || true)" == "${worker_start_ticks}" ]]; }; then
+  worker_identity_state="UNPUBLISHED"
+  worker_liveness_state="UNKNOWN"
+  worker_launch_nonce=""
+  worker_generation="0"
+  transfer_activity_state="UNKNOWN"
+  transfer_payload_bytes="0"
+  owned_process_count="0"
+  reconciliation_required="false"
+  terminal_authoritative="false"
+  runtime_endpoints_drained="false"
+  if [[ "${terminal_source}" == "ENGINE_TERMINAL" ]]; then
+    terminal_authoritative="true"
+    runtime_endpoints_drained="true"
+    worker_liveness_state="TERMINAL"
+  fi
+  if [[ -n "${run}" ]]; then
+    worker_journal_path="$(ftctl_dr_runtime_run_journal_path "${plan}" "${run}" worker)"
+    terminal_journal_path="$(ftctl_dr_runtime_run_journal_path "${plan}" "${run}" terminal)"
+    progress_journal_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "transfer_progress_path")"
+    [[ -n "${progress_journal_path}" ]] || progress_journal_path="$(ftctl_dr_runtime_run_journal_path "${plan}" "${run}" progress)"
+    if [[ -f "${worker_journal_path}" ]]; then
+      worker_pid="$(ftctl_dr_runtime_journal_value "${worker_journal_path}" worker_pid)"
+      worker_start_ticks="$(ftctl_dr_runtime_journal_value "${worker_journal_path}" worker_start_ticks)"
+      worker_state="$(ftctl_dr_runtime_journal_value "${worker_journal_path}" worker_state)"
+      worker_launch_nonce="$(ftctl_dr_runtime_journal_value "${worker_journal_path}" launch_nonce)"
+      worker_generation="$(ftctl_dr_runtime_journal_value "${worker_journal_path}" generation)"
+      worker_heartbeat_current="$(ftctl_dr_runtime_journal_value "${worker_journal_path}" worker_heartbeat_at)"
+      if [[ -n "${worker_heartbeat_current}" ]]; then
+        worker_updated_at="${worker_heartbeat_current}"
+        worker_heartbeat_at="${worker_heartbeat_current}"
+      fi
+    fi
+    if [[ -f "${progress_journal_path}" ]]; then
+      transfer_activity_state="$(jq -r '.state // "UNKNOWN"' "${progress_journal_path}" 2>/dev/null || printf UNKNOWN)"
+      transfer_payload_bytes="$(jq -r '.transferPayloadBytes // 0' "${progress_journal_path}" 2>/dev/null || printf 0)"
+      progress_updated_epoch="$(jq -r '.updatedAtEpochMs // 0' "${progress_journal_path}" 2>/dev/null || printf 0)"
+      if [[ "${progress_updated_epoch}" =~ ^[0-9]+$ && "${progress_updated_epoch}" -gt 0 ]]; then
+        progress_age=$(( $(date +%s) - (progress_updated_epoch / 1000) ))
+      else
+        progress_age=999999
+      fi
+    else
+      progress_age=999999
+    fi
+    if [[ -f "${terminal_journal_path}" ]]; then
+      terminal_source="$(ftctl_dr_runtime_journal_value "${terminal_journal_path}" terminal_source)"
+      terminal_version="$(ftctl_dr_runtime_journal_value "${terminal_journal_path}" terminal_version)"
+      terminal_authoritative="$(ftctl_dr_runtime_journal_value "${terminal_journal_path}" terminal_authoritative)"
+      runtime_endpoints_drained="$(ftctl_dr_runtime_journal_value "${terminal_journal_path}" runtime_endpoints_drained)"
+      worker_liveness_state="TERMINAL"
+      terminal_publication_pending="false"
+    fi
+  fi
+  if [[ "${terminal_authoritative}" != "true" && "${worker_state}" == "RUNNING" && "${worker_pid}" =~ ^[0-9]+$ ]]; then
+    actual_worker_start_ticks="$(ftctl_dr_scheduler_process_start_ticks "${worker_pid}" 2>/dev/null || true)"
+    if kill -0 "${worker_pid}" >/dev/null 2>&1; then
       worker_pid_alive="true"
+      owned_process_count="1"
+      if [[ -z "${worker_start_ticks}" || "${actual_worker_start_ticks}" == "${worker_start_ticks}" ]]; then
+        worker_identity_state="MATCHED"
+        worker_liveness_state="ALIVE"
+      else
+        worker_identity_state="CONFLICT"
+        worker_liveness_state="SUSPECT"
+        reconciliation_required="true"
+      fi
     else
       worker_pid_alive="false"
+      worker_identity_state="$([[ -n "${worker_start_ticks}" ]] && printf MATCHED || printf UNPUBLISHED)"
       if [[ "${action}" == "dr-failback" || -n "${failback_phase}" ]]; then
-        if [[ -z "${terminal_publication_pending_since}" ]]; then
-          terminal_publication_pending_since="$(ftctl_now_iso8601)"
-          terminal_publication_pending="true"
-          ftctl_dr_runtime_path_set "${state_path}" \
-            "terminal_publication_pending=true" \
-            "terminal_publication_pending_since=${terminal_publication_pending_since}" \
-            "worker_pid_alive=false" || true
-          terminal_pending_age=0
+        heartbeat_age="$(ftctl_dr_runtime_rpo_from_target_at "${worker_updated_at}" 2>/dev/null || printf '999999')"
+        [[ "${heartbeat_age}" =~ ^[0-9]+$ ]] || heartbeat_age=999999
+        state="RUNNING"
+        step="failback-runtime-reconciliation"
+        worker_state="TERMINAL_PENDING"
+        retryable="true"
+        retry_after_sec="2"
+        reconciliation_required="true"
+        terminal_publication_pending="true"
+        if [[ "${progress_age}" -lt "${FTCTL_DR_TERMINAL_PUBLICATION_GRACE_SECONDS:-10}" \
+              || "${heartbeat_age}" -lt "${FTCTL_DR_TERMINAL_PUBLICATION_GRACE_SECONDS:-10}" ]]; then
+          worker_liveness_state="SUSPECT"
         else
-          terminal_pending_age="$(ftctl_dr_runtime_rpo_from_target_at "${terminal_publication_pending_since}" 2>/dev/null || printf '0')"
-        fi
-        if [[ "${terminal_pending_age}" =~ ^[0-9]+$ \
-              && "${terminal_pending_age}" -lt "${FTCTL_DR_TERMINAL_PUBLICATION_GRACE_SECONDS:-10}" ]]; then
-          state="RUNNING"
-          step="failback-terminal-publication-pending"
-          progress="99"
-          worker_state="TERMINAL_PENDING"
-          retryable="true"
-          retry_after_sec="2"
-          terminal_publication_pending="true"
-        else
-          state="ERROR"
-          step="failback-worker-exited"
-          progress="100"
-          worker_state="FAILED"
-          [[ -n "${worker_exit_code}" ]] || worker_exit_code="70"
-          [[ -n "${driver_exit_code}" ]] || driver_exit_code="70"
-          [[ -n "${error_code}" ]] || error_code="DR_TERMINAL_PUBLICATION_TIMEOUT"
-          [[ -n "${error_message}" ]] || error_message="Failback worker exited without publishing a terminal result within the grace period"
-          [[ -n "${failed_component}" ]] || failed_component="ftctl-failback-worker"
-          terminal_source="WATCHDOG_DERIVED"
-          terminal_version="${terminal_version:-1}"
-          terminal_publication_pending="false"
+          worker_liveness_state="DEAD_CONFIRMED"
+          runtime_endpoints_drained="false"
         fi
       fi
     fi
+  fi
+  if [[ "${terminal_authoritative}" != "true" \
+        && "${progress_age:-999999}" -lt "${FTCTL_DR_TERMINAL_PUBLICATION_GRACE_SECONDS:-10}" \
+        && ( "${transfer_activity_state}" == "COPYING" || "${transfer_activity_state}" == "VERIFYING" ) ]]; then
+    worker_liveness_state="ALIVE"
+    reconciliation_required="$([[ "${worker_identity_state}" == CONFLICT ]] && printf true || printf false)"
   fi
   scheduler_pid_alive="false"
   if ftctl_dr_scheduler_active_worker_valid "${plan}" ""; then
@@ -3544,8 +3748,18 @@ PY
   ftctl_dr_runtime_json_string_field "worker_started_at" "${worker_started_at}"
   ftctl_dr_runtime_json_string_field "worker_updated_at" "${worker_updated_at}"
   ftctl_dr_runtime_json_number_field "worker_exit_code" "${worker_exit_code}"
+  ftctl_dr_runtime_json_string_field "worker_identity_state" "${worker_identity_state}"
+  ftctl_dr_runtime_json_string_field "worker_liveness_state" "${worker_liveness_state}"
+  ftctl_dr_runtime_json_string_field "worker_launch_nonce" "${worker_launch_nonce}"
+  ftctl_dr_runtime_json_number_field "worker_generation" "${worker_generation}"
+  ftctl_dr_runtime_json_string_field "transfer_activity_state" "${transfer_activity_state}"
+  ftctl_dr_runtime_json_number_field "transfer_payload_bytes" "${transfer_payload_bytes}"
+  ftctl_dr_runtime_json_number_field "owned_process_count" "${owned_process_count}"
+  ftctl_dr_runtime_json_boolean_field "reconciliation_required" "${reconciliation_required}" || return $?
+  ftctl_dr_runtime_json_boolean_field "runtime_endpoints_drained" "${runtime_endpoints_drained}" || return $?
   ftctl_dr_runtime_json_string_field "terminal_source" "${terminal_source}"
   ftctl_dr_runtime_json_number_field "terminal_version" "${terminal_version}"
+  ftctl_dr_runtime_json_boolean_field "terminal_authoritative" "${terminal_authoritative}" || return $?
   ftctl_dr_runtime_json_boolean_field "terminal_publication_pending" "${terminal_publication_pending}" || return $?
   ftctl_dr_runtime_json_string_field "terminal_publication_pending_since" "${terminal_publication_pending_since}"
   ftctl_dr_runtime_json_boolean_field "retryable" "${retryable}" || return $?
@@ -5384,7 +5598,7 @@ ftctl_dr_runtime_capabilities() {
       first="0"
       printf '"%s"' "$(ftctl__json_escape "${command}")"
     done
-    printf '],"supported_features":["async-run","status-projection","status-scope-v2","target-materialized-notify","target-materialized-idempotent","target-materialization-manifest-v2","target-resource-ownership-generation-v1","hardware-contract-projection","control-protocol-v2","control-protocol-v3","control-protocol-v4","dr-scheduler-singleton-v1","dr-scheduler-self-owner-repair-v1","dr-scheduler-systemd-unit-v1","dr-sync-recover-v1","dr-local-reconcile-fence-v1","dr-checkpoint-producer-v1","dr-nbd-deterministic-drain-v1","dr-nbd-cleanup-recovery-v1","dr-plan-authority-snapshot-v1","dr-failover-authority-snapshot-v1","dr-completed-cycle-evidence-v2","dr-failover-abort-v1","dr-transition-preflight-v1","dr-transition-preflight-v2","dr-reverse-preflight-v2","dr-reverse-rbd-snapshot-readonly-v1","dr-terminal-causality-v1","dr-release-tombstone-v1","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","guest-preparation-v1","guest-preparation-v2","test-domain-lifecycle-v1","test-artifact-lifecycle-v2","cloud-managed-test-vm-v1","cutover-ready-v1","cutover-manifest-v2","cutover-preflight-v1","cloud-cutover-commit-v1","cloud-failback-lifecycle-v1","dr-failback-commit-journal-v1","dr-failback-commit-journal-v2","dr-failback-late-ack-reconcile-v1","dr-failback-rollback-fence-v1"]}\n'
+    printf '],"supported_features":["async-run","status-projection","status-scope-v2","target-materialized-notify","target-materialized-idempotent","target-materialization-manifest-v2","target-resource-ownership-generation-v1","hardware-contract-projection","control-protocol-v2","control-protocol-v3","control-protocol-v4","dr-scheduler-singleton-v1","dr-scheduler-self-owner-repair-v1","dr-scheduler-systemd-unit-v1","dr-sync-recover-v1","dr-local-reconcile-fence-v1","dr-checkpoint-producer-v1","dr-nbd-deterministic-drain-v1","dr-nbd-cleanup-recovery-v1","dr-plan-authority-snapshot-v1","dr-failover-authority-snapshot-v1","dr-completed-cycle-evidence-v2","dr-failover-abort-v1","dr-transition-preflight-v1","dr-transition-preflight-v2","dr-reverse-preflight-v2","dr-reverse-rbd-snapshot-readonly-v1","dr-terminal-causality-v1","dr-worker-journal-v1","dr-live-transfer-progress-v1","dr-runtime-reconciliation-v1","dr-release-tombstone-v1","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","guest-preparation-v1","guest-preparation-v2","test-domain-lifecycle-v1","test-artifact-lifecycle-v2","cloud-managed-test-vm-v1","cutover-ready-v1","cutover-manifest-v2","cutover-preflight-v1","cloud-cutover-commit-v1","cloud-failback-lifecycle-v1","dr-failback-commit-journal-v1","dr-failback-commit-journal-v2","dr-failback-late-ack-reconcile-v1","dr-failback-rollback-fence-v1"]}\n'
     return 0
   fi
 

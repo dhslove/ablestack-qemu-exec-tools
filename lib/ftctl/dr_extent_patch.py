@@ -21,11 +21,30 @@ import json
 import os
 import struct
 import sys
+import tempfile
 import time
 from typing import Dict, Iterable, List
 
 
 BLKGETSIZE64 = 0x80081272
+
+
+def write_progress(path: str, payload: Dict[str, object]) -> None:
+    if not path:
+        return
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=f".{os.path.basename(path)}.", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, sort_keys=True, separators=(",", ":"))
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def parse_rbd_target(target: str):
@@ -75,6 +94,9 @@ def copy_extents(
     expected_source_size: int = 0,
     expected_target_size: int = 0,
     verify: bool = False,
+    progress_json: str = "",
+    progress_base_bytes: int = 0,
+    progress_disk_index: int = 0,
 ) -> Dict[str, int]:
     source_fd = os.open(source, os.O_RDONLY)
     target_fd = None
@@ -85,6 +107,24 @@ def copy_extents(
     bytes_read = 0
     bytes_written = 0
     verified_bytes = 0
+    last_progress = 0.0
+
+    def publish_progress(state: str, force: bool = False) -> None:
+        nonlocal last_progress
+        now = time.monotonic()
+        if not force and now - last_progress < 2.0:
+            return
+        last_progress = now
+        write_progress(progress_json, {
+            "schemaVersion": 1,
+            "state": state,
+            "diskIndex": progress_disk_index,
+            "sourceReadBytes": progress_base_bytes + bytes_read,
+            "targetWrittenBytes": progress_base_bytes + bytes_written,
+            "transferPayloadBytes": progress_base_bytes + bytes_read,
+            "verifiedBytes": verified_bytes,
+            "updatedAtEpochMs": int(time.time() * 1000),
+        })
     try:
         source_size = device_size(source_fd)
         rbd_target = parse_rbd_target(target)
@@ -119,6 +159,7 @@ def copy_extents(
             )
         upper_bound = min(source_size, target_size)
         normalized = normalize(areas, upper_bound)
+        publish_progress("COPYING", True)
         for extent in normalized:
             offset = extent["offset"]
             remaining = extent["length"]
@@ -141,6 +182,7 @@ def copy_extents(
                         bytes_written += count
                 offset += amount
                 remaining -= amount
+                publish_progress("COPYING")
         if image is not None:
             image.flush()
         else:
@@ -161,7 +203,9 @@ def copy_extents(
                     verified_bytes += amount
                     offset += amount
                     remaining -= amount
+                    publish_progress("VERIFYING")
         duration_ms = max(1, (time.monotonic_ns() - started) // 1_000_000)
+        publish_progress("COMPLETE", True)
         return {
             "changedExtentCount": len(normalized),
             "changedBytes": sum(item["length"] for item in normalized),
@@ -194,6 +238,9 @@ def main() -> int:
     parser.add_argument("--expected-source-size", type=int, default=0)
     parser.add_argument("--expected-target-size", type=int, default=0)
     parser.add_argument("--verify", action="store_true")
+    parser.add_argument("--progress-json", default="")
+    parser.add_argument("--progress-base-bytes", type=int, default=0)
+    parser.add_argument("--progress-disk-index", type=int, default=0)
     args = parser.parse_args()
     with open(args.areas_json, "r", encoding="utf-8") as handle:
         payload = json.load(handle)
@@ -205,6 +252,9 @@ def main() -> int:
         max(0, args.expected_source_size),
         max(0, args.expected_target_size),
         args.verify,
+        args.progress_json,
+        max(0, args.progress_base_bytes),
+        max(0, args.progress_disk_index),
     )
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     return 0

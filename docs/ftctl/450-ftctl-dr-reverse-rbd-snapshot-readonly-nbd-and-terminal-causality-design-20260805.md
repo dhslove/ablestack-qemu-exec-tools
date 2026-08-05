@@ -1,11 +1,12 @@
 # 450. FTCTL DR Reverse RBD Snapshot Read-Only NBD And Terminal Causality Design
 
 - Date: 2026-08-05
-- Status: code-level corrective design; implementation pending
+- Status: read-only and terminal-grace baseline; worker identity reconciliation is superseded by document 451
 - Scope: KVM-to-VMware reverse transfer, RBD snapshot NBD attachment, worker terminal evidence
 - Parent: [448-ftctl-dr-initial-reverse-seed-baseline-absence-and-terminal-evidence-design-20260804.md](448-ftctl-dr-initial-reverse-seed-baseline-absence-and-terminal-evidence-design-20260804.md)
 - Runtime boundary: [449-ftctl-dr-live-runtime-observation-and-projection-boundary-design-20260804.md](449-ftctl-dr-live-runtime-observation-and-projection-boundary-design-20260804.md)
 - Cloud companion: `ablestack-cloud/docs/ftctl/593-cross-hypervisor-dr-failback-reverse-rbd-readonly-and-terminal-causality-design-20260805.md`
+- Worker identity correction: [451](451-ftctl-dr-worker-identity-live-transfer-and-terminal-reconciliation-design-20260805.md)
 
 ## 1. Objective
 
@@ -322,3 +323,17 @@ The affected Windows Plan passes only when:
 This correction is complete only after the package self-tests, controlled host
 preflight, and one real two-disk Failback all pass with matching FTCTL, Agent,
 Cloud Run, FailbackSession, KVM, and VMware evidence.
+
+## 12. 2026-08-05 Live Transfer Reconciliation Addendum
+
+Live preflight after this document found a later Run whose transfer processes
+and byte counters were advancing while Cloud had already classified the worker
+as exited. A standalone `BASHPID` probe passed, so command substitution alone
+is not the established cause. The corrective contract is the owner-specific
+journal, immutable worker handshake, progress heartbeat, pure status merge, and
+multi-signal terminal predicate in document 451.
+
+Where this document permits terminalization after only a dead-PID observation
+and bounded publication grace, document 451 takes precedence. Grace remains an
+observation aid; it is not terminal proof when transfer activity, heartbeat, or
+a Run-owned process is live.
