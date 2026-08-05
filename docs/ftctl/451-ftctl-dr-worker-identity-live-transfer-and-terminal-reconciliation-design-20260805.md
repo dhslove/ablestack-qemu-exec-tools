@@ -1,7 +1,7 @@
 # 451. FTCTL DR Worker Identity, Live Transfer, And Terminal Reconciliation Design
 
 - Date: 2026-08-05
-- Status: code-level corrective design; implementation pending
+- Status: implemented, packaged, deployed, and preflight verified
 - Scope: asynchronous Failback worker identity, transfer heartbeat, status reconciliation, cleanup ownership
 - Parent: [450](450-ftctl-dr-reverse-rbd-snapshot-readonly-nbd-and-terminal-causality-design-20260805.md)
 - Cloud companion: `ablestack-cloud/docs/ftctl/594-cross-hypervisor-dr-live-worker-and-terminal-reconciliation-design-20260805.md`
@@ -324,3 +324,21 @@ The correction is complete only when a real two-disk full reverse seed stays
 RUNNING for the entire transfer, reports advancing bytes, publishes
 `FAILBACK_DATA_READY`, completes Cloud authority transition, leaves no NBD or
 VDDK residue, and all FTCTL, Agent, API, DB, KVM, and VMware states agree.
+
+## 17. Implementation and deployment verification
+
+- Source commit: `4eeae9408b3bad15349d4979b3201c871c1f83e1`
+- GitHub Actions run: `30975645481` (`success`)
+- RPM: `ablestack_vm_ftctl-0.9.1-1.noarch`
+- RPM SHA256: `404541ae9fe3ddd3fd39b423bf5677f5ed0f20c8d2c21f3b2266733a4b0310d1`
+- Deployment targets: `10.10.32.1`, `10.10.32.2`, `10.10.32.3`
+- Host verification: package installed, `ablestack-vm-ftctl.timer` active, and
+  `mold-agent` active on all three hosts.
+- Engine verification: worker identity reconciliation, transfer progress JSON,
+  terminal authority, and endpoint-drain markers are present in the installed
+  scripts.
+- Self-tests: authoritative terminal publication grace and live worker journal
+  conflict recovery both passed.
+- Retest cleanup: the failed Failback Run was aborted through the FTCTL command,
+  all Run-owned NBD/VDDK processes and NBD endpoints were drained, and the Plan
+  returned to `FAILED_OVER` with TARGET authority.
