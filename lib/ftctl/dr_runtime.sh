@@ -5066,7 +5066,7 @@ ftctl_dr_runtime_cutover_commit() {
       return 78
       ;;
     esac
-    case "${source_power_state}" in POWERED_OFF|UNREACHABLE) ;; *)
+    case "${source_power_state}" in POWERED_OFF|UNREACHABLE|UNKNOWN) ;; *)
       [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_error_json "dr-cutover-commit" "${plan}" "${run}" \
         "DR_CUTOVER_POWER_STATE_INVALID" "source power state is not safe for cutover" 78
       return 78

@@ -8039,7 +8039,7 @@ manifest_sha256=${manifest}
 target_vm_id=${target_vm_id}
 target_external_ref=${target_external_ref}
 source_fence_state=ACKNOWLEDGED
-source_power_state=POWERED_OFF
+source_power_state=UNKNOWN
 active_side=SOURCE
 target_power_state=POWERED_OFF
 target_promotion_state=CUTOVER_READY
@@ -8069,7 +8069,7 @@ payload = {
     "planUuid": plan,
     "runUuid": run,
     "sourceFenceState": "ACKNOWLEDGED",
-    "sourcePowerState": "POWERED_OFF",
+    "sourcePowerState": "UNKNOWN",
     "targetExternalRef": target_external_ref,
     "targetPowerState": "POWERED_ON",
     "targetVmId": int(target_vm_id),
@@ -8086,7 +8086,7 @@ PY
     --commit-attempt-id "${attempt}" --commit-envelope-sha256 "${envelope_sha}" \
     --target-vm-id "${target_vm_id}" --target-external-ref "${target_external_ref}" \
     --target-power-state POWERED_ON --boot-validation-state POWER_STATE_VALIDATED \
-    --source-fence-state ACKNOWLEDGED --source-power-state POWERED_OFF --json)"
+    --source-fence-state ACKNOWLEDGED --source-power-state UNKNOWN --json)"
   selftest_assert_contains "${out}" '"state":"FAILED_OVER"' "V2 cutover commit state"
   selftest_assert_file_contains "${journal_path}" 'phase=ACKNOWLEDGED'
   selftest_assert_file_contains "${journal_path}" "commit_envelope_sha256=${envelope_sha}"
@@ -8105,7 +8105,7 @@ PY
     --commit-attempt-id "${attempt}" --commit-envelope-sha256 "${envelope_sha}" \
     --target-vm-id "${target_vm_id}" --target-external-ref "${target_external_ref}" \
     --target-power-state POWERED_ON --boot-validation-state POWER_STATE_VALIDATED \
-    --source-fence-state ACKNOWLEDGED --source-power-state POWERED_OFF --json)"
+    --source-fence-state ACKNOWLEDGED --source-power-state UNKNOWN --json)"
   selftest_assert_contains "${out}" '"state":"FAILED_OVER"' "V2 cutover replay is idempotent"
 
   set +e

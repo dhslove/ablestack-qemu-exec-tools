@@ -170,8 +170,12 @@ hash를 검증한다.
 7. target VM identity가 materialization identity와 일치
 8. target power가 `POWERED_ON`
 9. boot validation이 허용 상태
-10. source fence와 power가 안전 상태
+10. source fence가 `ACKNOWLEDGED|VERIFIED`이고 power가 `POWERED_OFF|UNREACHABLE|UNKNOWN`
 11. Cloud hash와 FTCTL 재계산 hash가 일치
+
+재해 모드에서는 원본 사이트 전원 관측 자체가 불가능할 수 있으므로 `UNKNOWN`을
+독립적인 안전 증거로 취급하지 않는다. 반드시 운영자가 승인한 fence 증거와 함께
+제출된 경우에만 허용하며, fence가 확인되지 않은 `UNKNOWN`은 계속 차단한다.
 
 typed error:
 
