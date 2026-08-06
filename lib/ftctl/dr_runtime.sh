@@ -3135,6 +3135,7 @@ ftctl_dr_runtime_emit_state_json() {
   local failure_phase baseline_file_state source_disk_probe_state source_disk_count target_writer_probe_state
   local operation_intent requested_mode effective_mode mode_decision_code initial_seed_required estimated_virtual_bytes
   local failback_commit_outcome failback_commit_phase rollback_state rollback_generation
+  local failback_commit_contract_version failback_commit_attempt_id failback_commit_envelope_sha256 failback_commit_dispatch_state
   local failback_restore_point_ref failback_restore_point_sequence
   local failback_manifest_path failback_checkpoint_path failback_requested_at reverse_sync_started_at
   local reverse_target_ready_at source_promote_started_at source_power_on_at failback_completed_at
@@ -3610,6 +3611,10 @@ PY
   cloud_lifecycle_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "cloud_lifecycle_state")"
   failback_commit_outcome="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "failback_commit_outcome")"
   failback_commit_phase="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "failback_commit_phase")"
+  failback_commit_contract_version="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "failback_commit_contract_version")"
+  failback_commit_attempt_id="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "failback_commit_attempt_id")"
+  failback_commit_envelope_sha256="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "failback_commit_envelope_sha256")"
+  failback_commit_dispatch_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "failback_commit_dispatch_state")"
   rollback_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "rollback_state")"
   rollback_generation="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "rollback_generation")"
   failback_restore_point_ref="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "failback_restore_point_ref")"
@@ -3992,6 +3997,10 @@ PY
   ftctl_dr_runtime_json_string_field "cloud_lifecycle_state" "${cloud_lifecycle_state}"
   ftctl_dr_runtime_json_string_field "failback_commit_outcome" "${failback_commit_outcome}"
   ftctl_dr_runtime_json_string_field "failback_commit_phase" "${failback_commit_phase}"
+  ftctl_dr_runtime_json_string_field "failback_commit_contract_version" "${failback_commit_contract_version}"
+  ftctl_dr_runtime_json_string_field "failback_commit_attempt_id" "${failback_commit_attempt_id}"
+  ftctl_dr_runtime_json_string_field "failback_commit_envelope_sha256" "${failback_commit_envelope_sha256}"
+  ftctl_dr_runtime_json_string_field "failback_commit_dispatch_state" "${failback_commit_dispatch_state}"
   ftctl_dr_runtime_json_string_field "rollback_state" "${rollback_state}"
   ftctl_dr_runtime_json_number_field "rollback_generation" "${rollback_generation}"
   ftctl_dr_runtime_json_string_field "failback_restore_point_ref" "${failback_restore_point_ref}"
@@ -5147,6 +5156,7 @@ ftctl_dr_runtime_reconcile_failback_commit() {
   local run_path status_path commit_path session_path active_path control_path ack_path now
   local commit_plan commit_run commit_session commit_phase commit_outcome
   local source_power_state target_power_state authority_generation checkpoint_sequence
+  local baseline_generation evidence_run contract_version commit_attempt_id commit_envelope_sha256
   local control_generation control_command control_owner
   local ack_generation ack_state ack_owner ack_request_run ack_session ack_epoch ack_pid ack_start_ticks ack_owner_matched
   local active_session active_epoch active_pid active_start_ticks
@@ -5172,6 +5182,11 @@ ftctl_dr_runtime_reconcile_failback_commit() {
   checkpoint_sequence="$(ftctl_state_read_kv "${commit_path}" "checkpoint_sequence" 2>/dev/null || true)"
   source_power_state="$(ftctl_state_read_kv "${commit_path}" "source_power_state" 2>/dev/null || true)"
   target_power_state="$(ftctl_state_read_kv "${commit_path}" "target_power_state" 2>/dev/null || true)"
+  baseline_generation="$(ftctl_state_read_kv "${commit_path}" "baseline_generation" 2>/dev/null || true)"
+  evidence_run="$(ftctl_state_read_kv "${commit_path}" "evidence_run" 2>/dev/null || true)"
+  contract_version="$(ftctl_state_read_kv "${commit_path}" "contract_version" 2>/dev/null || true)"
+  commit_attempt_id="$(ftctl_state_read_kv "${commit_path}" "commit_attempt_id" 2>/dev/null || true)"
+  commit_envelope_sha256="$(ftctl_state_read_kv "${commit_path}" "commit_envelope_sha256" 2>/dev/null || true)"
 
   if [[ "${commit_phase}" == "ACKNOWLEDGED" && "${commit_outcome}" == "ACKNOWLEDGED" ]]; then
     ftctl_dr_scheduler_lock_release "${plan}" "failback-commit" 206
@@ -5221,8 +5236,11 @@ ftctl_dr_runtime_reconcile_failback_commit() {
 
   now="$(ftctl_now_iso8601)"
   ftctl_state_write_kv_all "${commit_path}" \
-    "version=2" "plan=${plan}" "run=${run}" "session_id=${session_id}" \
+    "version=3" "plan=${plan}" "run=${run}" "session_id=${session_id}" \
     "checkpoint_sequence=${checkpoint_sequence}" "authority_generation=${authority_generation}" \
+    "baseline_generation=${baseline_generation}" "evidence_run=${evidence_run}" \
+    "contract_version=${contract_version}" "commit_attempt_id=${commit_attempt_id}" \
+    "commit_envelope_sha256=${commit_envelope_sha256}" \
     "phase=ACKNOWLEDGED" "outcome=ACKNOWLEDGED" \
     "control_generation=${control_generation}" "control_ack_generation=${ack_generation}" \
     "ack_owner_run=${ack_owner}" "ack_scheduler_session_uuid=${ack_session}" \
@@ -5239,6 +5257,7 @@ ftctl_dr_runtime_reconcile_failback_commit() {
     "active_side=SOURCE" "source_power_state=POWERED_ON" "target_power_state=POWERED_OFF" \
     "engine_ack_state=ACKNOWLEDGED" "engine_ack_at=${now}" \
     "failback_commit_outcome=ACKNOWLEDGED" "failback_commit_phase=ACKNOWLEDGED" \
+    "failback_commit_dispatch_state=ACKNOWLEDGED" \
     "control_generation=${control_generation}" "control_ack_generation=${ack_generation}" \
     "scheduler_state=RUNNING" "retryable=false" "error_code=" "error_message=" \
     "updated_at=${now}" || {
@@ -5251,6 +5270,7 @@ ftctl_dr_runtime_reconcile_failback_commit() {
     "active_side=SOURCE" "source_power_state=POWERED_ON" "target_power_state=POWERED_OFF" \
     "engine_ack_state=ACKNOWLEDGED" "engine_ack_at=${now}" \
     "failback_commit_outcome=ACKNOWLEDGED" "failback_commit_phase=ACKNOWLEDGED" \
+    "failback_commit_dispatch_state=ACKNOWLEDGED" \
     "control_generation=${control_generation}" "control_ack_generation=${ack_generation}" \
     "scheduler_state=RUNNING" "retryable=false" "error_code=" "error_message=" \
     "updated_at=${now}" || {
@@ -5269,6 +5289,33 @@ ftctl_dr_runtime_reconcile_failback_commit() {
   return 0
 }
 
+ftctl_dr_runtime_failback_commit_envelope_sha256() {
+  python3 - "$@" <<'PY'
+import hashlib
+import json
+import sys
+
+(contract, plan, run, session, checkpoint, authority, baseline, evidence_run,
+ attempt, target_power, source_power, boot_state) = sys.argv[1:]
+payload = {
+    "authorityGeneration": int(authority),
+    "baselineGeneration": int(baseline),
+    "bootValidationState": boot_state,
+    "checkpointSequence": int(checkpoint),
+    "commitAttemptId": attempt,
+    "contractVersion": contract,
+    "evidenceRunUuid": evidence_run,
+    "failbackSessionId": session,
+    "planUuid": plan,
+    "runUuid": run,
+    "sourcePowerState": source_power,
+    "targetPowerState": target_power,
+}
+canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+print(hashlib.sha256(canonical.encode("utf-8")).hexdigest())
+PY
+}
+
 ftctl_dr_runtime_failback_commit() {
   local plan="${1-}" run="${2-}" session_id="${3-}" checkpoint_sequence="${4-}"
   local authority_generation="${5-}" target_power_state="${6-}" source_power_state="${7-}"
@@ -5276,15 +5323,29 @@ ftctl_dr_runtime_failback_commit() {
   local resume_baseline_checkpoint_sequence="${10-${checkpoint_sequence}}"
   local minimum_completed_checkpoint_sequence="${11-}"
   local force_immediate_cycle="${12-true}"
+  local contract_version="${13-}" baseline_generation="${14-}" evidence_run="${15-}"
+  local commit_attempt_id="${16-}" commit_envelope_sha256="${17-}"
   local run_path status_path session_path active_path commit_path state current_session current_checkpoint now rc=0
-  local commit_phase control_generation control_ack_generation
+  local commit_phase control_generation control_ack_generation calculated_envelope_sha256
 
   ftctl_dr_runtime_require_plan "${plan}" || return 2
   ftctl_dr_runtime_require_run "${run}" || return 2
-  if [[ -z "${session_id}" || ! "${checkpoint_sequence}" =~ ^[0-9]+$ || ! "${authority_generation}" =~ ^[0-9]+$ ]]; then
+  if [[ "${contract_version}" != "DR_FAILBACK_COMMIT_V1" || -z "${session_id}" || ! "${checkpoint_sequence}" =~ ^[0-9]+$ \
+        || ! "${authority_generation}" =~ ^[0-9]+$ || ! "${baseline_generation}" =~ ^[0-9]+$ \
+        || "${evidence_run}" != "${run}" || -z "${commit_attempt_id}" \
+        || ! "${commit_envelope_sha256}" =~ ^[0-9a-f]{64}$ ]]; then
     [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_error_json "dr-failback-commit" "${plan}" "${run}" \
-      "DR_FAILBACK_COMMIT_INVALID" "session id, checkpoint sequence, and authority generation are required" 2
+      "DR_FAILBACK_COMMIT_INVALID" "complete failback commit envelope v1 is required" 2
     return 2
+  fi
+  calculated_envelope_sha256="$(ftctl_dr_runtime_failback_commit_envelope_sha256 \
+    "${contract_version}" "${plan}" "${run}" "${session_id}" "${checkpoint_sequence}" \
+    "${authority_generation}" "${baseline_generation}" "${evidence_run}" "${commit_attempt_id}" \
+    "${target_power_state}" "${source_power_state}" "${boot_validation_state}")" || return 2
+  if [[ "${calculated_envelope_sha256}" != "${commit_envelope_sha256}" ]]; then
+    [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_error_json "dr-failback-commit" "${plan}" "${run}" \
+      "DR_FAILBACK_COMMIT_ENVELOPE_MISMATCH" "Failback commit envelope SHA-256 does not match" 79
+    return 79
   fi
   [[ "${resume_baseline_checkpoint_sequence}" =~ ^[0-9]+$ ]] || resume_baseline_checkpoint_sequence="${checkpoint_sequence}"
   [[ "${minimum_completed_checkpoint_sequence}" =~ ^[0-9]+$ ]] \
@@ -5330,6 +5391,8 @@ ftctl_dr_runtime_failback_commit() {
         && "$(ftctl_state_read_kv "${commit_path}" "session_id" 2>/dev/null || true)" == "${session_id}" \
         && "$(ftctl_state_read_kv "${commit_path}" "checkpoint_sequence" 2>/dev/null || true)" == "${checkpoint_sequence}" \
         && "$(ftctl_state_read_kv "${commit_path}" "authority_generation" 2>/dev/null || true)" == "${authority_generation}" ]]; then
+    [[ "$(ftctl_state_read_kv "${commit_path}" "commit_attempt_id" 2>/dev/null || true)" == "${commit_attempt_id}" \
+          && "$(ftctl_state_read_kv "${commit_path}" "commit_envelope_sha256" 2>/dev/null || true)" == "${commit_envelope_sha256}" ]] || return 79
     [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_state_json \
       "dr-failback-commit" "ok" "${plan}" "${run}" "${run_path}" "0"
     return 0
@@ -5338,12 +5401,17 @@ ftctl_dr_runtime_failback_commit() {
   now="$(ftctl_now_iso8601)"
   ftctl_ensure_dir "$(dirname "${commit_path}")" "0755"
   ftctl_state_write_kv_all "${commit_path}" \
-    "version=1" \
+    "version=3" \
     "plan=${plan}" \
     "run=${run}" \
     "session_id=${session_id}" \
     "checkpoint_sequence=${checkpoint_sequence}" \
     "authority_generation=${authority_generation}" \
+    "baseline_generation=${baseline_generation}" \
+    "evidence_run=${evidence_run}" \
+    "contract_version=${contract_version}" \
+    "commit_attempt_id=${commit_attempt_id}" \
+    "commit_envelope_sha256=${commit_envelope_sha256}" \
     "phase=PREPARED" \
     "outcome=PENDING" \
     "source_power_state=${source_power_state}" \
@@ -5363,6 +5431,10 @@ ftctl_dr_runtime_failback_commit() {
     "source_promotion_state=PROMOTED" \
     "boot_validation_state=${boot_validation_state}" \
     "cloud_authority_generation=${authority_generation}" \
+    "failback_commit_contract_version=${contract_version}" \
+    "failback_commit_attempt_id=${commit_attempt_id}" \
+    "failback_commit_envelope_sha256=${commit_envelope_sha256}" \
+    "failback_commit_dispatch_state=JOURNALED" \
     "engine_ack_state=PENDING" \
     "engine_ack_at=" \
     "failback_commit_outcome=PENDING" \
@@ -5387,6 +5459,10 @@ ftctl_dr_runtime_failback_commit() {
     "target_promotion_state=STANDBY" "source_power_state=POWERED_ON" \
     "source_promotion_state=PROMOTED" "boot_validation_state=${boot_validation_state}" \
     "cloud_authority_generation=${authority_generation}" "engine_ack_state=PENDING" \
+    "failback_commit_contract_version=${contract_version}" \
+    "failback_commit_attempt_id=${commit_attempt_id}" \
+    "failback_commit_envelope_sha256=${commit_envelope_sha256}" \
+    "failback_commit_dispatch_state=JOURNALED" \
     "engine_ack_at=" "failback_commit_outcome=PENDING" \
     "failback_commit_phase=AUTHORITY_COMMITTED" \
     "resume_baseline_checkpoint_sequence=${resume_baseline_checkpoint_sequence}" \
@@ -5395,8 +5471,11 @@ ftctl_dr_runtime_failback_commit() {
     "immediate_cycle_owner_run=${run}" "scheduler_state=STARTING" \
     "retryable=false" "error_code=" "error_message=" "updated_at=${now}" || return 2
   ftctl_state_write_kv_all "${commit_path}" \
-    "version=1" "plan=${plan}" "run=${run}" "session_id=${session_id}" \
+    "version=3" "plan=${plan}" "run=${run}" "session_id=${session_id}" \
     "checkpoint_sequence=${checkpoint_sequence}" "authority_generation=${authority_generation}" \
+    "baseline_generation=${baseline_generation}" "evidence_run=${evidence_run}" \
+    "contract_version=${contract_version}" "commit_attempt_id=${commit_attempt_id}" \
+    "commit_envelope_sha256=${commit_envelope_sha256}" \
     "phase=AUTHORITY_COMMITTED" "outcome=PENDING" \
     "resume_baseline_checkpoint_sequence=${resume_baseline_checkpoint_sequence}" \
     "minimum_completed_checkpoint_sequence=${minimum_completed_checkpoint_sequence}" \
@@ -5416,8 +5495,11 @@ ftctl_dr_runtime_failback_commit() {
   [[ "${control_generation}" =~ ^[0-9]+$ ]] || control_generation=0
   [[ "${control_ack_generation}" =~ ^[0-9]+$ ]] || control_ack_generation=0
   ftctl_state_write_kv_all "${commit_path}" \
-    "version=2" "plan=${plan}" "run=${run}" "session_id=${session_id}" \
+    "version=3" "plan=${plan}" "run=${run}" "session_id=${session_id}" \
     "checkpoint_sequence=${checkpoint_sequence}" "authority_generation=${authority_generation}" \
+    "baseline_generation=${baseline_generation}" "evidence_run=${evidence_run}" \
+    "contract_version=${contract_version}" "commit_attempt_id=${commit_attempt_id}" \
+    "commit_envelope_sha256=${commit_envelope_sha256}" \
     "resume_baseline_checkpoint_sequence=${resume_baseline_checkpoint_sequence}" \
     "minimum_completed_checkpoint_sequence=${minimum_completed_checkpoint_sequence}" \
     "immediate_cycle_pending=${force_immediate_cycle}" \
@@ -5457,19 +5539,29 @@ ftctl_dr_runtime_failback_commit() {
 }
 
 ftctl_dr_runtime_failback_commit_status() {
-  local plan="${1-}" run="${2-}" session_id="${3-}" json="${4-0}"
-  local run_path commit_path current_session
+  local plan="${1-}" run="${2-}" session_id="${3-}" contract_version="${4-}"
+  local commit_attempt_id="${5-}" commit_envelope_sha256="${6-}" json="${7-0}"
+  local run_path commit_path current_session journal_attempt journal_sha
   ftctl_dr_runtime_require_plan "${plan}" || return 2
   ftctl_dr_runtime_require_run "${run}" || return 2
   run_path="$(ftctl_dr_runtime_run_path "${plan}" "${run}")"
   commit_path="$(ftctl_dr_runtime_failback_commit_state_path "${plan}" "${run}")"
   current_session="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "failback_session_id")"
-  [[ -n "${session_id}" && "${current_session}" == "${session_id}" ]] || return 79
+  [[ "${contract_version}" == "DR_FAILBACK_COMMIT_V1" && -n "${session_id}" && "${current_session}" == "${session_id}" \
+        && -n "${commit_attempt_id}" && "${commit_envelope_sha256}" =~ ^[0-9a-f]{64}$ ]] || return 79
   [[ -f "${commit_path}" ]] || {
     [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_error_json \
       "dr-failback-commit-status" "${plan}" "${run}" \
-      "DR_FAILBACK_COMMIT_NOT_FOUND" "Failback commit journal was not found" 44
+      "DR_FAILBACK_COMMIT_NOT_SUBMITTED" "Failback commit was not submitted to FTCTL" 44
     return 44
+  }
+  journal_attempt="$(ftctl_state_read_kv "${commit_path}" "commit_attempt_id" 2>/dev/null || true)"
+  journal_sha="$(ftctl_state_read_kv "${commit_path}" "commit_envelope_sha256" 2>/dev/null || true)"
+  [[ "${journal_attempt}" == "${commit_attempt_id}" && "${journal_sha}" == "${commit_envelope_sha256}" ]] || {
+    [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_error_json \
+      "dr-failback-commit-status" "${plan}" "${run}" \
+      "DR_FAILBACK_COMMIT_IDENTITY_MISMATCH" "Failback commit identity does not match the durable journal" 79
+    return 79
   }
   ftctl_dr_runtime_reconcile_failback_commit "${plan}" "${run}" "${session_id}" || true
   [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_state_json \
@@ -5713,7 +5805,7 @@ ftctl_dr_runtime_capabilities() {
       first="0"
       printf '"%s"' "$(ftctl__json_escape "${command}")"
     done
-    printf '],"supported_features":["async-run","status-projection","status-scope-v2","target-materialized-notify","target-materialized-idempotent","target-materialization-manifest-v2","target-resource-ownership-generation-v1","hardware-contract-projection","control-protocol-v2","control-protocol-v3","control-protocol-v4","dr-scheduler-singleton-v1","dr-scheduler-self-owner-repair-v1","dr-scheduler-systemd-unit-v1","dr-sync-recover-v1","dr-local-reconcile-fence-v1","dr-checkpoint-producer-v1","dr-nbd-deterministic-drain-v1","dr-nbd-cleanup-recovery-v1","dr-plan-authority-snapshot-v1","dr-failover-authority-snapshot-v1","dr-completed-cycle-evidence-v2","dr-failover-abort-v1","dr-transition-preflight-v1","dr-transition-preflight-v2","dr-reverse-preflight-v2","dr-reverse-evidence-publication-v1","dr-reverse-rbd-snapshot-readonly-v1","dr-terminal-causality-v1","dr-worker-journal-v1","dr-live-transfer-progress-v1","dr-runtime-reconciliation-v1","dr-release-tombstone-v1","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","guest-preparation-v1","guest-preparation-v2","test-domain-lifecycle-v1","test-artifact-lifecycle-v2","cloud-managed-test-vm-v1","cutover-ready-v1","cutover-manifest-v2","cutover-preflight-v1","cloud-cutover-commit-v1","cloud-failback-lifecycle-v1","dr-failback-commit-journal-v1","dr-failback-commit-journal-v2","dr-failback-late-ack-reconcile-v1","dr-failback-rollback-fence-v1"]}\n'
+    printf '],"supported_features":["async-run","status-projection","status-scope-v2","target-materialized-notify","target-materialized-idempotent","target-materialization-manifest-v2","target-resource-ownership-generation-v1","hardware-contract-projection","control-protocol-v2","control-protocol-v3","control-protocol-v4","dr-scheduler-singleton-v1","dr-scheduler-self-owner-repair-v1","dr-scheduler-systemd-unit-v1","dr-sync-recover-v1","dr-local-reconcile-fence-v1","dr-checkpoint-producer-v1","dr-nbd-deterministic-drain-v1","dr-nbd-cleanup-recovery-v1","dr-plan-authority-snapshot-v1","dr-failover-authority-snapshot-v1","dr-completed-cycle-evidence-v2","dr-failover-abort-v1","dr-transition-preflight-v1","dr-transition-preflight-v2","dr-reverse-preflight-v2","dr-reverse-evidence-publication-v1","dr-reverse-rbd-snapshot-readonly-v1","dr-terminal-causality-v1","dr-worker-journal-v1","dr-live-transfer-progress-v1","dr-runtime-reconciliation-v1","dr-release-tombstone-v1","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","guest-preparation-v1","guest-preparation-v2","test-domain-lifecycle-v1","test-artifact-lifecycle-v2","cloud-managed-test-vm-v1","cutover-ready-v1","cutover-manifest-v2","cutover-preflight-v1","cloud-cutover-commit-v1","cloud-failback-lifecycle-v1","dr-failback-commit-journal-v1","dr-failback-commit-journal-v2","dr-failback-commit-envelope-v1","dr-failback-commit-journal-v3","dr-failback-late-ack-reconcile-v1","dr-failback-rollback-fence-v1"]}\n'
     return 0
   fi
 

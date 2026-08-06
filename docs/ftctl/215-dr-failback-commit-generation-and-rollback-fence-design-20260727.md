@@ -467,6 +467,17 @@ is restored, the source is powered off, and the scheduler is stopped.
 | Cloud refresh | Reprojects the stale engine error onto the plan | Projects `FAILED_OVER_UNPROTECTED` without a current error |
 | Audit | Failed run and current state can be confused | Failed run is retained; current authority is healthy and explicit |
 
+## 20. Commit Envelope Generation Source Amendment - 2026-08-06
+
+Failback authority generation is supplied by Cloud from the active committed
+cutover session. It is not derived from reverse checkpoint sequence, baseline
+generation, FTCTL operation Run, or Cloud DB Run ID. FTCTL validates and
+persists the supplied generation but does not synthesize it.
+
+The complete envelope and write-ahead journal ordering are defined in document
+453. Fixtures in which checkpoint and authority generation happen to be equal
+must not be treated as a contract requirement.
+
 ## 2026-07-27 Late ACK and Authority Snapshot Convergence Addendum
 
 이 문서의 generation 및 rollback fence 계약은 유지한다. 다만 commit 호출이

@@ -118,6 +118,11 @@ CLI_TARGET_POWER_STATE=""
 CLI_SOURCE_POWER_STATE=""
 CLI_BOOT_VALIDATION_STATE=""
 CLI_PHASE=""
+CLI_COMMIT_CONTRACT_VERSION=""
+CLI_BASELINE_GENERATION=""
+CLI_EVIDENCE_RUN=""
+CLI_COMMIT_ATTEMPT_ID=""
+CLI_COMMIT_ENVELOPE_SHA256=""
 
 FTCTL_LIB_BASE=""
 
@@ -345,6 +350,11 @@ Global options:
       --source-power-state STATE
       --boot-validation-state STATE
       --phase PHASE     Failback rollback phase: prepare or commit
+      --commit-contract-version VERSION
+      --baseline-generation N
+      --evidence-run UUID
+      --commit-attempt-id UUID
+      --commit-envelope-sha256 SHA256
       --provisioning-backend BACKEND
 
 Config actions:
@@ -711,6 +721,26 @@ parse_args() {
         CLI_PHASE="${2-}"
         shift 2
         ;;
+      --commit-contract-version)
+        CLI_COMMIT_CONTRACT_VERSION="${2-}"
+        shift 2
+        ;;
+      --baseline-generation)
+        CLI_BASELINE_GENERATION="${2-}"
+        shift 2
+        ;;
+      --evidence-run)
+        CLI_EVIDENCE_RUN="${2-}"
+        shift 2
+        ;;
+      --commit-attempt-id)
+        CLI_COMMIT_ATTEMPT_ID="${2-}"
+        shift 2
+        ;;
+      --commit-envelope-sha256)
+        CLI_COMMIT_ENVELOPE_SHA256="${2-}"
+        shift 2
+        ;;
       --profile-json)
         CLI_PROFILE_JSON="${2-}"
         shift 2
@@ -836,10 +866,13 @@ dispatch() {
         "${CLI_CHECKPOINT_SEQUENCE}" "${CLI_AUTHORITY_GENERATION}" "${CLI_TARGET_POWER_STATE}" \
         "${CLI_SOURCE_POWER_STATE}" "${CLI_BOOT_VALIDATION_STATE}" "${CLI_JSON}" \
         "${CLI_RESUME_BASELINE_CHECKPOINT_SEQUENCE}" "${CLI_MINIMUM_COMPLETED_CHECKPOINT_SEQUENCE}" \
-        "${CLI_FORCE_IMMEDIATE_CYCLE}"
+        "${CLI_FORCE_IMMEDIATE_CYCLE}" "${CLI_COMMIT_CONTRACT_VERSION}" \
+        "${CLI_BASELINE_GENERATION}" "${CLI_EVIDENCE_RUN}" "${CLI_COMMIT_ATTEMPT_ID}" \
+        "${CLI_COMMIT_ENVELOPE_SHA256}"
       ;;
     dr-failback-commit-status)
-      ftctl_dr_runtime_failback_commit_status "${CLI_PLAN}" "${CLI_RUN}" "${CLI_CUTOVER_SESSION_ID}" "${CLI_JSON}"
+      ftctl_dr_runtime_failback_commit_status "${CLI_PLAN}" "${CLI_RUN}" "${CLI_CUTOVER_SESSION_ID}" \
+        "${CLI_COMMIT_CONTRACT_VERSION}" "${CLI_COMMIT_ATTEMPT_ID}" "${CLI_COMMIT_ENVELOPE_SHA256}" "${CLI_JSON}"
       ;;
     dr-failback-abort)
       ftctl_dr_runtime_failback_abort "${CLI_PLAN}" "${CLI_RUN}" "${CLI_CUTOVER_SESSION_ID}" \

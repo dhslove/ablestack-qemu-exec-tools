@@ -8287,13 +8287,23 @@ EOF
   selftest_assert_contains "${out}" '"reverse_evidence_missing_fields":[]' "complete evidence has no missing field"
 
   set +e
+  local failback_contract="DR_FAILBACK_COMMIT_V1" failback_attempt="commit-attempt-1" failback_hash
+  failback_hash="$(ftctl_dr_runtime_failback_commit_envelope_sha256 \
+    "${failback_contract}" "${plan}" "run-failback" "${plan}:run-failback" \
+    "4" "4" "4" "run-failback" "${failback_attempt}" \
+    "POWERED_ON" "POWERED_ON" "POWER_STATE_VALIDATED")"
   out="$(ftctl_dr_runtime_failback_commit "${plan}" "run-failback" "${plan}:run-failback" \
-    "4" "4" "POWERED_ON" "POWERED_ON" "POWER_STATE_VALIDATED" "1" 2>&1)"
+    "4" "4" "POWERED_ON" "POWERED_ON" "POWER_STATE_VALIDATED" "1" "4" "5" "true" \
+    "${failback_contract}" "4" "run-failback" "${failback_attempt}" "${failback_hash}" 2>&1)"
   rc=$?
   set -e
   selftest_assert_eq "${rc}" "78" "running target blocks source authority commit"
   selftest_assert_contains "${out}" "DR_FAILBACK_TARGET_STILL_RUNNING" "target power preflight error"
 
+  failback_hash="$(ftctl_dr_runtime_failback_commit_envelope_sha256 \
+    "${failback_contract}" "${plan}" "run-failback" "${plan}:run-failback" \
+    "4" "4" "4" "run-failback" "${failback_attempt}" \
+    "POWERED_OFF" "POWERED_ON" "POWER_STATE_VALIDATED")"
   out="$(
     ftctl_dr_scheduler_resume_after_transition() {
       ftctl_dr_scheduler_active_worker_valid() {
@@ -8309,7 +8319,8 @@ EOF
       return 0
     }
     ftctl_dr_runtime_failback_commit "${plan}" "run-failback" "${plan}:run-failback" \
-      "4" "4" "POWERED_OFF" "POWERED_ON" "POWER_STATE_VALIDATED" "1"
+      "4" "4" "POWERED_OFF" "POWERED_ON" "POWER_STATE_VALIDATED" "1" "4" "5" "true" \
+      "${failback_contract}" "4" "run-failback" "${failback_attempt}" "${failback_hash}"
   )"
   selftest_assert_contains "${out}" '"state":"SYNCING"' "Cloud commit resumes protection"
   selftest_assert_contains "${out}" '"active_side":"SOURCE"' "Cloud commit restores source authority"
@@ -8326,7 +8337,8 @@ EOF
 
   out="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-failback-commit-status \
     --config "${SELFTEST_CONFIG}" --plan "${plan}" --run run-failback \
-    --session-id "${plan}:run-failback" --json)"
+    --session-id "${plan}:run-failback" --commit-contract-version "${failback_contract}" \
+    --commit-attempt-id "${failback_attempt}" --commit-envelope-sha256 "${failback_hash}" --json)"
   selftest_assert_contains "${out}" '"failback_commit_outcome":"ACKNOWLEDGED"' "commit status projects durable acknowledgement"
 
   out="$(
@@ -8334,8 +8346,11 @@ EOF
       return 0
     }
     ftctl_state_write_kv_all "${plan_dir}/failbacks/run-failback.commit.state" \
-      "version=2" "plan=${plan}" "run=run-failback" "session_id=${plan}:run-failback" \
+      "version=3" "plan=${plan}" "run=run-failback" "session_id=${plan}:run-failback" \
       "checkpoint_sequence=4" "authority_generation=4" \
+      "baseline_generation=4" "evidence_run=run-failback" \
+      "contract_version=${failback_contract}" "commit_attempt_id=${failback_attempt}" \
+      "commit_envelope_sha256=${failback_hash}" \
       "phase=SCHEDULER_RESUMING" "outcome=UNKNOWN" \
       "control_generation=12" "control_ack_generation=11" \
       "source_power_state=POWERED_ON" "target_power_state=POWERED_OFF"
@@ -8349,7 +8364,7 @@ EOF
       "engine_ack_state=UNKNOWN" "failback_commit_outcome=UNKNOWN" \
       "failback_commit_phase=SCHEDULER_RESUMING"
     ftctl_dr_runtime_failback_commit_status "${plan}" "run-failback" \
-      "${plan}:run-failback" "1"
+      "${plan}:run-failback" "${failback_contract}" "${failback_attempt}" "${failback_hash}" "1"
   )"
   selftest_assert_contains "${out}" '"failback_commit_outcome":"ACKNOWLEDGED"' "late ACK converges commit status"
   selftest_assert_file_contains "${plan_dir}/failbacks/run-failback.commit.state" "recovered_from_late_ack=true"

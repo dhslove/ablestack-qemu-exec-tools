@@ -266,3 +266,16 @@ The package was installed on `10.10.32.1`, `.2`, and `.3`. Installed-script
 marker checks, timers, and `mold-agent` service checks passed on all hosts.
 Live `dr-status` published a complete generation-15 tuple and live reverse
 preflight returned Ready with the evidence publication contract enabled.
+
+## 2026-08-06 Commit Envelope Validation Addendum
+
+Complete reverse route and durability evidence does not authorize FTCTL to
+invent Cloud commit identifiers. A later Run reached reverse-data completion
+but Cloud omitted session, checkpoint, and authority fields, so FTCTL correctly
+rejected the commit before creating a journal.
+
+Document
+`453-ftctl-dr-failback-commit-envelope-validation-and-idempotent-recovery-design-20260806.md`
+defines the versioned typed CLI contract, journal v3, status v2, and
+idempotent forward recovery. Checkpoint or baseline generation and Cloud
+authority generation are explicitly independent values.

@@ -421,6 +421,15 @@ FTCTL은 Cloud session history나 UI action eligibility를 관리하지 않는�
 조회 경계를 수정한다. 세부 경계는
 `217-dr-cloud-current-authority-projection-boundary-design-20260728.md`와
 Cloud 문서 578을 따른다.
+## 20. Commit Submission Precondition Amendment - 2026-08-06
+
+Late ACK recovery requires a durable journal identified by session, attempt
+ID, and envelope hash. Journal absence before a recorded dispatch is
+`NOT_SUBMITTED`, not an ambiguous late ACK. Deterministic validation errors
+return directly to Cloud without status probing.
+
+Document 453 defines the status-v2 outcome model and crash recovery points.
+
 ## 19. 2026-07-30 Post-Commit Sequence Handoff Amendment
 
 late ACK 수렴만으로는 첫 원본 방향 checkpoint의 단조 증가를 보장하지 않는다.
