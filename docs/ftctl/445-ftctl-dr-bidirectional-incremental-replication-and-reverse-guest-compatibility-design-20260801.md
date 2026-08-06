@@ -506,3 +506,12 @@ is `MISSING_EXPECTED` for the first full seed, the local failback session exists
 from `REQUESTED`, mover exit context is preserved, terminal workers cannot stay
 `RUNNING`, and operation-local empty checkpoint fields cannot erase durable
 Plan materialization evidence.
+
+## 19. Forward Target Locator Reuse Addendum (2026-08-06)
+
+The round trip is not complete at Failback authority commit. The first resumed
+`VMWARE_TO_KVM` cycle must rebuild or validate the same canonical target map
+used by initial protection and must open every RBD target as
+`rbd:<pool>/<image>`. Source-side bare target references are not a valid
+fallback. Document 454 defines the shared locator implementation, map role and
+generation contract, typed errors, and live acceptance criteria.

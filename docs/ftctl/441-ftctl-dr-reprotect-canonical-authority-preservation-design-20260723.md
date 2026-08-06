@@ -353,3 +353,13 @@ the following durable evidence:
 The current forward VMware mover and its global `vmware-disks.json` must never
 be reused as reverse-transfer proof. The normative data-plane design is
 [445-ftctl-dr-bidirectional-incremental-replication-and-reverse-guest-compatibility-design-20260801.md](445-ftctl-dr-bidirectional-incremental-replication-and-reverse-guest-compatibility-design-20260801.md).
+
+## 12. 2026-08-06 Forward Target Locator Reuse Addendum
+
+After Failback returns authority to VMware, the resumed `VMWARE_TO_KVM` path
+must reuse the same canonical ABLESTACK target locator used by initial
+protection. A missing forward target map may not fall back to a bare
+`targetDiskRef`, and an allocated scheduler sequence is not proof that
+protection resumed. Document 454 is normative for direction-scoped map roles,
+RBD sync/runtime locator separation, atomic map regeneration, and the first
+durable post-Failback forward-checkpoint gate.

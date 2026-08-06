@@ -204,8 +204,21 @@ ftctl_vmware_mover_json_value() {
 }
 
 ftctl_vmware_mover_target_uri() {
-  local raw_path="${1-}" target_storage_path="${2-}" target_name="${3-}"
+  local raw_path="${1-}" target_storage_path="${2-}" target_name="${3-}" target_storage_type="${4-}"
   local pool image
+  if [[ "${target_storage_type^^}" == *RBD* ]] &&
+      [[ "${raw_path}" != rbd:* && "${raw_path}" != /dev/rbd/*/* && "${raw_path}" != rbd/*/* ]]; then
+    pool="${target_storage_path#rbd:}"
+    pool="${pool#/dev/rbd/}"
+    pool="${pool#rbd/}"
+    pool="${pool#/}"
+    pool="${pool%/}"
+    image="${target_name:-${raw_path}}"
+    image="${image#/}"
+    [[ -n "${pool}" && -n "${image}" && "${pool}" != */* && "${image}" != */* ]] || return 1
+    printf 'rbd:%s/%s\n' "${pool}" "${image}"
+    return 0
+  fi
   if [[ -z "${raw_path}" && -n "${target_storage_path}" && -n "${target_name}" ]]; then
     raw_path="${target_storage_path%/}/${target_name}"
   fi
@@ -1150,7 +1163,11 @@ vmware = load(vmware_path)
 target = load(target_path)
 source_disks = vmware.get("disks") if isinstance(vmware.get("disks"), list) else []
 target_disks = target.get("disks") if isinstance(target.get("disks"), list) else []
-count = max(len(source_disks), len(target_disks))
+if not source_disks:
+    raise SystemExit("DR_VMWARE_SOURCE_DISK_MAP_EMPTY")
+if len(source_disks) != len(target_disks):
+    raise SystemExit("DR_FORWARD_TARGET_MAP_CARDINALITY_MISMATCH")
+count = len(source_disks)
 rows = []
 for index in range(count):
     source = item_at(source_disks, index)
@@ -1160,7 +1177,7 @@ for index in range(count):
         source_disk_key,
         first(source.get("sourceVmdkPath"), source.get("sourceDiskRef"), source.get("sourcePath")),
         first(source.get("sizeBytes"), dest.get("sizeBytes")),
-        first(dest.get("targetPath"), source.get("targetPath"), source.get("targetDiskRef")),
+        first(dest.get("targetPath")),
     ]
     import hashlib
     identity_hash = "sha256:" + hashlib.sha256("|".join(identity_parts).encode("utf-8")).hexdigest()
@@ -1179,9 +1196,10 @@ for index in range(count):
         "lastSyncSequence": integer(source.get("lastSyncSequence")),
         "diskIdentityHash": identity_hash,
         "virtualBytes": first(source.get("sizeBytes"), dest.get("sizeBytes")),
-        "targetPath": first(dest.get("targetPath"), source.get("targetPath"), source.get("targetDiskRef"), source.get("targetVmdkPath")),
-        "targetName": first(dest.get("targetName"), source.get("targetName"), source.get("targetDiskRef")),
+        "targetPath": first(dest.get("targetPath")),
+        "targetName": first(dest.get("targetName")),
         "targetStoragePath": first(dest.get("targetStoragePath"), target.get("target", {}).get("storagePath") if isinstance(target.get("target"), dict) else ""),
+        "targetStorageType": first(dest.get("targetStorageType"), target.get("target", {}).get("storagePoolType") if isinstance(target.get("target"), dict) else ""),
         "targetFormat": first(dest.get("targetFormat"), source.get("targetFormat"), "raw").lower(),
     })
 print(json.dumps(rows, sort_keys=True, separators=(",", ":")))
@@ -1703,6 +1721,8 @@ main() {
   local metrics_path results_path result_tmp query_path patch_metrics_path journal_path commit_rc mode_state_path guard_rc
 
   [[ -n "${disk_map}" && -f "${disk_map}" ]] || ftctl_vmware_mover_die 65 "FTCTL_DR_DISK_MAP is required"
+  [[ -n "${target_disk_map}" && -f "${target_disk_map}" ]] ||
+    ftctl_vmware_mover_die 65 "DR_FORWARD_TARGET_MAP_MISSING: FTCTL_DR_TARGET_DISK_MAP is required"
   [[ -n "${credentials_file}" && -f "${credentials_file}" ]] || ftctl_vmware_mover_die 65 "FTCTL_DR_CREDENTIALS_FILE is required"
   if [[ -n "${FTCTL_DR_PLAN_UUID:-}" && -d "${FTCTL_DR_NBD_QUARANTINE_ROOT}/${FTCTL_DR_PLAN_UUID}" ]] &&
       find "${FTCTL_DR_NBD_QUARANTINE_ROOT}/${FTCTL_DR_PLAN_UUID}" -maxdepth 1 -type f -name '*.json' -print -quit 2>/dev/null | grep -q .; then
@@ -1791,7 +1811,7 @@ main() {
   i=0
   while [[ "${i}" -lt "${count}" ]]; do
     row="$(jq -c ".[$i]" <<< "${rows}")"
-    local label source_vmdk source_vm_ref source_snapshot_ref target_path target_name target_storage_path target_uri target_format
+    local label source_vmdk source_vm_ref source_snapshot_ref target_path target_name target_storage_path target_storage_type target_uri target_format
     local cbt_disk_id previous_change_id new_change_id virtual_bytes areas_count changed_bytes effective_mode incremental_verified
     label="$(jq -r '.label // ""' <<< "${row}")"
     source_vmdk="$(jq -r '.sourceVmdk // ""' <<< "${row}")"
@@ -1804,7 +1824,13 @@ main() {
     target_path="$(jq -r '.targetPath // ""' <<< "${row}")"
     target_name="$(jq -r '.targetName // ""' <<< "${row}")"
     target_storage_path="$(jq -r '.targetStoragePath // ""' <<< "${row}")"
-    target_uri="$(ftctl_vmware_mover_target_uri "${target_path}" "${target_storage_path}" "${target_name}")"
+    target_storage_type="$(jq -r '.targetStorageType // ""' <<< "${row}")"
+    target_uri="$(ftctl_vmware_mover_target_uri "${target_path}" "${target_storage_path}" "${target_name}" "${target_storage_type}")" ||
+      ftctl_vmware_mover_die 65 "DR_FORWARD_TARGET_LOCATOR_INVALID: ${label:-disk${i}} target locator cannot be canonicalized"
+    case "${target_uri}" in
+      rbd:*/*|/*) ;;
+      *) ftctl_vmware_mover_die 65 "DR_FORWARD_TARGET_LOCATOR_INVALID: ${label:-disk${i}} resolved to ${target_uri:-empty}" ;;
+    esac
     target_format="$(jq -r '.targetFormat // "raw"' <<< "${row}")"
     [[ -n "${snapshot_name}" ]] || ftctl_vmware_mover_die 82 "DR_CBT_QUERY_FAILED: VMware snapshot name is unavailable"
     query_path="$(mktemp -p "${FTCTL_DR_VMWARE_MOVER_LOG_DIR}" vmware-cbt-query-${i}.XXXXXX.json)"

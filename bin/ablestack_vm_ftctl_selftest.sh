@@ -9199,6 +9199,59 @@ JSON
   selftest_assert_eq "${rc}" "90" "repeated automatic reseed guard"
 }
 
+selftest_case_dr_vmware_forward_target_map_reuses_ablestack_locator() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR VMware forward cycles reuse canonical ABLESTACK RBD locators"
+
+  local profile="${SELFTEST_ROOT}/vmware-forward-target-profile.json"
+  local source_map="${SELFTEST_ROOT}/vmware-forward-source.json"
+  local target_map="${SELFTEST_ROOT}/vmware-forward-target.json"
+  local rows target_uri rc=0
+  cat > "${profile}" <<'JSON'
+{
+  "version":1,
+  "engine":"FTCTL_DR",
+  "planUuid":"plan-forward-rbd",
+  "direction":"VMWARE_TO_KVM",
+  "source":{"provider":"VMWARE","driver":"VMWARE_DIRECT"},
+  "target":{"provider":"ABLESTACK","driver":"ABLESTACK","storagePath":"rbd","storagePoolType":"RBD"},
+  "mapping":{"disks":[{
+    "device":"scsi0:0",
+    "sourceDiskRef":"[datastore1] w22-01/w22-01.vmdk",
+    "targetName":"w22-01-dr-disk-0",
+    "targetDiskRef":"w22-01-dr-disk-0",
+    "targetFormat":"raw",
+    "sizeBytes":2147483648,
+    "targetStorageType":"RBD",
+    "targetStoragePath":"rbd",
+    "targetStorageKrbdPath":"/dev/rbd"
+  }]}
+}
+JSON
+  cat > "${source_map}" <<'JSON'
+{"disks":[{"device":"scsi0:0","sourceDiskKey":"2000","sourceVmdkPath":"[datastore1] w22-01/w22-01.vmdk","targetDiskRef":"w22-01-dr-disk-0","sizeBytes":2147483648}]}
+JSON
+
+  ftctl_dr_ablestack_canonicalize_profile "${profile}" "${target_map}"
+  selftest_assert_eq "$(jq -r '.disks[0].targetPath' "${target_map}")" \
+    "/dev/rbd/rbd/w22-01-dr-disk-0" "canonical forward krbd locator"
+
+  # shellcheck source=/dev/null
+  source "${ROOT_DIR}/lib/ftctl/dr_vmware_mover.sh"
+  rows="$(ftctl_vmware_mover_disk_plan "${source_map}" "${target_map}")"
+  selftest_assert_eq "$(jq -r '.[0].targetPath' <<< "${rows}")" \
+    "/dev/rbd/rbd/w22-01-dr-disk-0" "mover destination-only locator"
+  target_uri="$(ftctl_vmware_mover_target_uri \
+    "$(jq -r '.[0].targetPath' <<< "${rows}")" \
+    "$(jq -r '.[0].targetStoragePath' <<< "${rows}")" \
+    "$(jq -r '.[0].targetName' <<< "${rows}")" \
+    "$(jq -r '.[0].targetStorageType' <<< "${rows}")")"
+  selftest_assert_eq "${target_uri}" "rbd:rbd/w22-01-dr-disk-0" "librbd mover URI"
+
+  ftctl_vmware_mover_disk_plan "${source_map}" "${target_map}.missing" >/dev/null 2>&1 || rc=$?
+  [[ "${rc}" != "0" ]] || selftest_fail "missing forward target map must not use source targetDiskRef"
+}
+
 selftest_case_dr_scheduler_systemd_launch_contract() {
   local plan="plan-systemd-owned" run="run-systemd-owned" plan_dir profile state status launch unit rc
   selftest_reset_env
@@ -9841,6 +9894,7 @@ selftest_main() {
   selftest_case_dr_vmware_nbd_holder_safety_barrier
   selftest_case_dr_vmware_nbd_quarantine_on_timeout
   selftest_case_dr_vmware_automatic_reseed_mode
+  selftest_case_dr_vmware_forward_target_map_reuses_ablestack_locator
   selftest_case_dr_vmware_mover_uses_raw_over_nbd_image_opts
   selftest_case_dr_kvm_vmware_reverse_route_and_baseline_contract
   selftest_case_dr_kvm_vmware_reverses_forward_profile_roles

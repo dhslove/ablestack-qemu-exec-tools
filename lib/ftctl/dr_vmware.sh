@@ -1191,6 +1191,19 @@ ftctl_dr_vmware_replication_cycle() {
   source_snapshot_status_path="$(ftctl_dr_vmware_source_snapshot_status_path "${plan}")"
   [[ -f "${disk_map}" ]] || ftctl_dr_vmware_canonicalize_profile "${profile_file}" "${disk_map}" || return $?
   target_disk_map="$(ftctl_dr_ablestack_disk_map_path "${plan}" 2>/dev/null || true)"
+  if [[ -z "${target_disk_map}" ]] || ! command -v ftctl_dr_ablestack_canonicalize_profile >/dev/null 2>&1; then
+    ftctl_log_event "dr-runtime" "dr.vmware.target_map" "fail" "" "65" \
+      "plan=${plan} run=${run} error_code=DR_FORWARD_TARGET_MAP_GENERATOR_UNAVAILABLE"
+    return 65
+  fi
+  # The ABLESTACK canonicalizer is the single source of truth for forward
+  # target locators. Rebuild the role-scoped map before every VMware cycle so
+  # post-failback resume cannot fall back to a bare Cloud volume name.
+  ftctl_dr_ablestack_canonicalize_profile "${profile_file}" "${target_disk_map}" || {
+    ftctl_log_event "dr-runtime" "dr.vmware.target_map" "fail" "" "65" \
+      "plan=${plan} run=${run} error_code=DR_FORWARD_TARGET_MAP_INVALID"
+    return 65
+  }
   [[ -f "${capability_path}" ]] || ftctl_dr_vmware_write_capability "${capability_path}" || return $?
   source_at="$(ftctl_now_iso8601)"
 
@@ -1204,7 +1217,7 @@ ftctl_dr_vmware_replication_cycle() {
     FTCTL_DR_CHECKPOINT_SEQUENCE="${sequence:-0}" \
     FTCTL_DR_CYCLE_TYPE="${cycle_type:-incremental}" \
     FTCTL_DR_DISK_MAP="${disk_map}" \
-    FTCTL_DR_TARGET_DISK_MAP="$([[ -f "${target_disk_map}" ]] && printf '%s' "${target_disk_map}")" \
+    FTCTL_DR_TARGET_DISK_MAP="${target_disk_map}" \
     FTCTL_DR_CAPABILITY="${capability_path}" \
     FTCTL_DR_MANIFEST="${manifest_path}" \
     FTCTL_DR_CHECKPOINT="${checkpoint_path}" \

@@ -1,5 +1,11 @@
 # 453. FTCTL DR Failback Commit Envelope Validation And Idempotent Recovery Design
 
+> 2026-08-06 normative follow-up: commit ACK proves authority transition but
+> does not prove that forward protection resumed. Document 454 defines the
+> shared initial-protection/reprotect target locator and the first durable
+> `VMWARE_TO_KVM` checkpoint gate. Allocated or `PREPARING` scheduler sequence
+> values cannot satisfy that gate.
+
 ## Implementation Result
 
 - `dr-failback-commit` accepts only the complete `DR_FAILBACK_COMMIT_V1` typed envelope.
