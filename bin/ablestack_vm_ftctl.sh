@@ -105,8 +105,12 @@ CLI_TARGET_READY_RPO_SECONDS=""
 CLI_MATERIALIZATION_SPEC_JSON=""
 CLI_MATERIALIZATION_SPEC_SHA256=""
 CLI_CUTOVER_SESSION_ID=""
+CLI_ENGINE_SESSION_ID=""
+CLI_CLOUD_SESSION_ID=""
 CLI_CHECKPOINT_SEQUENCE=""
 CLI_AUTHORITY_GENERATION=""
+CLI_MANIFEST_SHA256=""
+CLI_SOURCE_FENCE_STATE=""
 CLI_OPERATION=""
 CLI_EXPECTED_AUTHORITY=""
 CLI_OPERATION_INTENT=""
@@ -275,6 +279,8 @@ Commands:
   dr-target-materialized
                      Mark Cloud target VM/volume materialization complete
   dr-cutover-commit  Commit Cloud-owned target promotion to FTCTL authority state
+  dr-cutover-commit-status
+                     Read the durable Cloud-owned cutover commit outcome
   dr-failover-abort  Abort failover preparation before target promotion
   dr-failback-commit Commit Cloud-owned source restoration to FTCTL authority state
   dr-failback-commit-status
@@ -332,10 +338,18 @@ Global options:
       --secondary-vm-name NAME
       --active-side SIDE
       --session-id ID  Cloud cutover session identifier
+      --engine-session-id ID
+                     FTCTL failover engine session identifier
+      --cloud-session-id ID
+                     Cloud cutover session UUID
       --checkpoint-sequence N
                      Durable checkpoint used for target promotion
       --authority-generation N
                       Monotonic Cloud promotion generation
+      --manifest-sha256 SHA256
+                     Durable cutover manifest SHA-256
+      --source-fence-state STATE
+                     Source isolation state observed by Cloud
       --operation-intent INTENT
                       Reverse operation intent such as FAILBACK_FINAL or REPROTECT
       --requested-mode MODE
@@ -400,7 +414,7 @@ parse_args() {
         print_version
         exit "${EXIT_OK}"
         ;;
-      protect|protect-start|status|reconcile|failover|failover-prepare|failback|failback-sync|failback-finalize|failback-reprotect|unprotect|fence-confirm|fence-clear|pause-protection|resume-protection|preflight-remote|dr-key-ensure|dr-key-install|dr-key-remove|check|health|events|snapshot|dr-plan-apply|dr-sync-start|dr-sync-recover|dr-sync-pause|dr-sync-resume|dr-scheduler-run|dr-reconcile|dr-test-failover|dr-test-cleanup|dr-test-prepare|dr-test-artifact-cleanup|dr-failover|dr-failover-abort|dr-failback|dr-reprotect|dr-target-materialized|dr-cutover-commit|dr-failback-commit|dr-failback-commit-status|dr-failback-abort|dr-release|dr-status|dr-transition-preflight|dr-reverse-preflight|dr-capabilities|dr-cancel|config)
+      protect|protect-start|status|reconcile|failover|failover-prepare|failback|failback-sync|failback-finalize|failback-reprotect|unprotect|fence-confirm|fence-clear|pause-protection|resume-protection|preflight-remote|dr-key-ensure|dr-key-install|dr-key-remove|check|health|events|snapshot|dr-plan-apply|dr-sync-start|dr-sync-recover|dr-sync-pause|dr-sync-resume|dr-scheduler-run|dr-reconcile|dr-test-failover|dr-test-cleanup|dr-test-prepare|dr-test-artifact-cleanup|dr-failover|dr-failover-abort|dr-failback|dr-reprotect|dr-target-materialized|dr-cutover-commit|dr-cutover-commit-status|dr-failback-commit|dr-failback-commit-status|dr-failback-abort|dr-release|dr-status|dr-transition-preflight|dr-reverse-preflight|dr-capabilities|dr-cancel|config)
         [[ -z "${CLI_COMMAND}" ]] || {
           echo "ERROR: multiple commands specified" >&2
           exit "${EXIT_USAGE}"
@@ -669,12 +683,28 @@ parse_args() {
         CLI_CUTOVER_SESSION_ID="${2-}"
         shift 2
         ;;
+      --engine-session-id)
+        CLI_ENGINE_SESSION_ID="${2-}"
+        shift 2
+        ;;
+      --cloud-session-id)
+        CLI_CLOUD_SESSION_ID="${2-}"
+        shift 2
+        ;;
       --checkpoint-sequence)
         CLI_CHECKPOINT_SEQUENCE="${2-}"
         shift 2
         ;;
       --authority-generation)
         CLI_AUTHORITY_GENERATION="${2-}"
+        shift 2
+        ;;
+      --manifest-sha256)
+        CLI_MANIFEST_SHA256="${2-}"
+        shift 2
+        ;;
+      --source-fence-state)
+        CLI_SOURCE_FENCE_STATE="${2-}"
         shift 2
         ;;
       --operation)
@@ -854,9 +884,17 @@ dispatch() {
         "${CLI_MATERIALIZATION_SPEC_JSON}" "${CLI_MATERIALIZATION_SPEC_SHA256}" "${CLI_JSON}"
       ;;
     dr-cutover-commit)
-      ftctl_dr_runtime_cutover_commit "${CLI_PLAN}" "${CLI_RUN}" "${CLI_CUTOVER_SESSION_ID}" \
+      ftctl_dr_runtime_cutover_commit "${CLI_PLAN}" "${CLI_RUN}" "${CLI_ENGINE_SESSION_ID:-${CLI_CUTOVER_SESSION_ID}}" \
         "${CLI_CHECKPOINT_SEQUENCE}" "${CLI_AUTHORITY_GENERATION}" "${CLI_TARGET_POWER_STATE}" \
-        "${CLI_BOOT_VALIDATION_STATE}" "${CLI_JSON}"
+        "${CLI_BOOT_VALIDATION_STATE}" "${CLI_JSON}" "${CLI_COMMIT_CONTRACT_VERSION}" \
+        "${CLI_CLOUD_SESSION_ID}" "${CLI_MANIFEST_SHA256}" "${CLI_COMMIT_ATTEMPT_ID}" \
+        "${CLI_COMMIT_ENVELOPE_SHA256}" "${CLI_TARGET_VM_ID}" "${CLI_TARGET_EXTERNAL_REF}" \
+        "${CLI_SOURCE_FENCE_STATE}" "${CLI_SOURCE_POWER_STATE}"
+      ;;
+    dr-cutover-commit-status)
+      ftctl_dr_runtime_cutover_commit_status "${CLI_PLAN}" "${CLI_RUN}" \
+        "${CLI_ENGINE_SESSION_ID:-${CLI_CUTOVER_SESSION_ID}}" "${CLI_COMMIT_CONTRACT_VERSION}" \
+        "${CLI_COMMIT_ATTEMPT_ID}" "${CLI_COMMIT_ENVELOPE_SHA256}" "${CLI_JSON}"
       ;;
     dr-failover-abort)
       ftctl_dr_runtime_failover_abort "${CLI_PLAN}" "${CLI_RUN}" "${CLI_CUTOVER_SESSION_ID}" "${CLI_JSON}"

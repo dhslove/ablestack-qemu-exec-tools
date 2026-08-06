@@ -1,5 +1,10 @@
 # FTCTL DR Real Failover Cutover Manifest Contract Design
 
+> 2026-08-06 normative commit-contract follow-up:
+> [455-ftctl-dr-forward-cutover-commit-envelope-and-idempotent-ack-design-20260806.md](455-ftctl-dr-forward-cutover-commit-envelope-and-idempotent-ack-design-20260806.md)
+> replaces the ambiguous session identifier and non-journaled V1 acknowledgement
+> with the typed V2 envelope, write-ahead journal, and status recovery contract.
+
 > 2026-07-27 후속 계약: Failover operation이 Plan의 완료 cycle 및 NBD drain
 > 증거를 잃지 않도록 하는 authority snapshot, status hydration, 준비 취소 계약은
 > `442-ftctl-dr-failover-authority-cycle-evidence-and-abort-contract-design-20260727.md`

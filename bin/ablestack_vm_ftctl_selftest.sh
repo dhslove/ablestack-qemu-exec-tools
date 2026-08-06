@@ -8012,6 +8012,113 @@ JSON
   selftest_assert_contains "${out}" 'DR_CUTOVER_GENERATION_STALE' "stale generation error code"
 }
 
+selftest_case_dr_runtime_cloud_cutover_commit_v2_is_durable() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR validates and durably acknowledges the Cloud cutover commit envelope"
+
+  local plan="plan-cloud-cutover-v2" run="run-cloud-cutover-v2"
+  local engine_session="${plan}:${run}" cloud_session="cloud-cutover-session-v2"
+  local attempt="cutover-attempt-v2" manifest="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  local target_vm_id="266" target_external_ref="ce028129-98a7-4dba-b05c-7c74ca5df398"
+  local plan_dir="${SELFTEST_ROOT}/run/dr-runtime/plans/${plan}"
+  local run_path="${plan_dir}/runs/${run}.state" status_path="${plan_dir}/status.state"
+  local session_path="${plan_dir}/failovers/${run}.json" journal_path="${plan_dir}/cutover-commits/${run}.commit.state"
+  local envelope_sha out rc=0
+
+  mkdir -p "${plan_dir}/runs" "${plan_dir}/failovers"
+  cat > "${run_path}" <<EOF
+plan=${plan}
+run=${run}
+action=dr-failover
+state=CUTOVER_READY
+step=cutover-ready
+progress=100
+failover_session_id=${engine_session}
+failover_restore_point_sequence=43
+manifest_sha256=${manifest}
+target_vm_id=${target_vm_id}
+target_external_ref=${target_external_ref}
+source_fence_state=ACKNOWLEDGED
+source_power_state=POWERED_OFF
+active_side=SOURCE
+target_power_state=POWERED_OFF
+target_promotion_state=CUTOVER_READY
+updated_at=2026-08-06T00:00:00Z
+EOF
+  cp -f "${run_path}" "${status_path}"
+  cat > "${session_path}" <<JSON
+{"planUuid":"${plan}","runUuid":"${run}","sessionId":"${engine_session}","state":"CUTOVER_READY","activeSide":"SOURCE"}
+JSON
+  cp -f "${session_path}" "${plan_dir}/failovers/active.json"
+
+  envelope_sha="$(python3 - "${plan}" "${run}" "${engine_session}" "${cloud_session}" "${attempt}" \
+      "${manifest}" "${target_vm_id}" "${target_external_ref}" <<'PY'
+import hashlib
+import json
+import sys
+plan, run, engine_session, cloud_session, attempt, manifest, target_vm_id, target_external_ref = sys.argv[1:]
+payload = {
+    "authorityGeneration": 43,
+    "bootValidationState": "POWER_STATE_VALIDATED",
+    "checkpointSequence": 43,
+    "cloudCutoverSessionUuid": cloud_session,
+    "commitAttemptId": attempt,
+    "contractVersion": "DR_CUTOVER_COMMIT_V2",
+    "engineSessionId": engine_session,
+    "manifestSha256": manifest,
+    "planUuid": plan,
+    "runUuid": run,
+    "sourceFenceState": "ACKNOWLEDGED",
+    "sourcePowerState": "POWERED_OFF",
+    "targetExternalRef": target_external_ref,
+    "targetPowerState": "POWERED_ON",
+    "targetVmId": int(target_vm_id),
+}
+print(hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest())
+PY
+  )"
+
+  out="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-cutover-commit \
+    --config "${SELFTEST_CONFIG}" --plan "${plan}" --run "${run}" \
+    --commit-contract-version DR_CUTOVER_COMMIT_V2 \
+    --engine-session-id "${engine_session}" --cloud-session-id "${cloud_session}" \
+    --checkpoint-sequence 43 --manifest-sha256 "${manifest}" --authority-generation 43 \
+    --commit-attempt-id "${attempt}" --commit-envelope-sha256 "${envelope_sha}" \
+    --target-vm-id "${target_vm_id}" --target-external-ref "${target_external_ref}" \
+    --target-power-state POWERED_ON --boot-validation-state POWER_STATE_VALIDATED \
+    --source-fence-state ACKNOWLEDGED --source-power-state POWERED_OFF --json)"
+  selftest_assert_contains "${out}" '"state":"FAILED_OVER"' "V2 cutover commit state"
+  selftest_assert_file_contains "${journal_path}" 'phase=ACKNOWLEDGED'
+  selftest_assert_file_contains "${journal_path}" "commit_envelope_sha256=${envelope_sha}"
+
+  out="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-cutover-commit-status \
+    --config "${SELFTEST_CONFIG}" --plan "${plan}" --run "${run}" \
+    --commit-contract-version DR_CUTOVER_COMMIT_V2 --engine-session-id "${engine_session}" \
+    --commit-attempt-id "${attempt}" --commit-envelope-sha256 "${envelope_sha}" --json)"
+  selftest_assert_contains "${out}" '"commit_outcome":"ACKNOWLEDGED"' "V2 durable cutover ACK"
+
+  out="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-cutover-commit \
+    --config "${SELFTEST_CONFIG}" --plan "${plan}" --run "${run}" \
+    --commit-contract-version DR_CUTOVER_COMMIT_V2 \
+    --engine-session-id "${engine_session}" --cloud-session-id "${cloud_session}" \
+    --checkpoint-sequence 43 --manifest-sha256 "${manifest}" --authority-generation 43 \
+    --commit-attempt-id "${attempt}" --commit-envelope-sha256 "${envelope_sha}" \
+    --target-vm-id "${target_vm_id}" --target-external-ref "${target_external_ref}" \
+    --target-power-state POWERED_ON --boot-validation-state POWER_STATE_VALIDATED \
+    --source-fence-state ACKNOWLEDGED --source-power-state POWERED_OFF --json)"
+  selftest_assert_contains "${out}" '"state":"FAILED_OVER"' "V2 cutover replay is idempotent"
+
+  set +e
+  out="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-cutover-commit-status \
+    --config "${SELFTEST_CONFIG}" --plan "${plan}" --run "${run}" \
+    --commit-contract-version DR_CUTOVER_COMMIT_V2 --engine-session-id "${engine_session}" \
+    --commit-attempt-id different-attempt --commit-envelope-sha256 "${envelope_sha}" --json 2>&1)"
+  rc=$?
+  set -e
+  selftest_assert_eq "${rc}" "79" "conflicting cutover status identity must fail"
+  selftest_assert_contains "${out}" 'DR_CUTOVER_COMMIT_IDENTITY_MISMATCH' "cutover status identity error"
+}
+
 selftest_case_dr_runtime_status_hydrates_complete_cycle_evidence() {
   selftest_reset_env
   selftest_info "FTCTL_DR status hydrates exact completed-cycle NBD evidence from restore points"
@@ -9877,6 +9984,7 @@ selftest_main() {
   selftest_case_dr_full_resync_request_is_one_shot
   selftest_case_dr_runtime_planned_failover_promotes_latest_checkpoint
   selftest_case_dr_runtime_cloud_cutover_commit_is_idempotent
+  selftest_case_dr_runtime_cloud_cutover_commit_v2_is_durable
   selftest_case_dr_runtime_status_hydrates_complete_cycle_evidence
   selftest_case_dr_runtime_failover_abort_resumes_source_protection
   selftest_case_dr_scheduler_resume_accepts_live_worker_pending_ack
