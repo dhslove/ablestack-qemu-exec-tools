@@ -258,3 +258,11 @@ preflight contract emission, and read-only reverse RBD snapshot attachment.
 The repository-wide self-test still stops earlier in an existing
 `shared-blockcopy` fixture that requires a Cloud-managed disk map; that
 unrelated fixture failure is not counted as validation of this change.
+
+GitHub Actions run `31062183699` built commit `33d1651` and produced
+`ablestack_vm_ftctl-0.9.1-1.noarch` with SHA256
+`ba4077ed953cacfb72e0c46a97beba1d358e397dc8ed171ff8929e050fe2bd7b`.
+The package was installed on `10.10.32.1`, `.2`, and `.3`. Installed-script
+marker checks, timers, and `mold-agent` service checks passed on all hosts.
+Live `dr-status` published a complete generation-15 tuple and live reverse
+preflight returned Ready with the evidence publication contract enabled.
