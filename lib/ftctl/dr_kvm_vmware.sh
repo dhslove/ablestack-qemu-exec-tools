@@ -289,7 +289,7 @@ ftctl_dr_kvm_vmware_reverse_preflight() {
     fi
   done
   if [[ "${json}" == "1" ]]; then
-    printf '{"command":"dr-reverse-preflight","schema_version":2,"contract_version":"dr-reverse-preflight-v2","result":"%s","ready":%s,"plan_uuid":"%s","operation_intent":"%s","requested_mode":"%s","effective_mode":"%s","mode_decision_code":"%s","initial_seed_required":%s,"baseline_file_state":"%s","source_domain_probe_state":"%s","source_disk_probe_state":"%s","source_disk_count":%s,"target_writer_probe_state":"%s","estimated_virtual_bytes":%s,"error_code":"%s","exit_code":%s}\n' \
+    printf '{"command":"dr-reverse-preflight","schema_version":2,"contract_version":"dr-reverse-preflight-v2","result":"%s","ready":%s,"status_evidence_contract_version":1,"status_evidence_publication_ready":true,"status_evidence_error_code":"","plan_uuid":"%s","operation_intent":"%s","requested_mode":"%s","effective_mode":"%s","mode_decision_code":"%s","initial_seed_required":%s,"baseline_file_state":"%s","source_domain_probe_state":"%s","source_disk_probe_state":"%s","source_disk_count":%s,"target_writer_probe_state":"%s","estimated_virtual_bytes":%s,"error_code":"%s","exit_code":%s}\n' \
       "$( [[ "${ready}" == "true" ]] && printf ok || printf error )" "${ready}" "$(ftctl__json_escape "${plan}")" \
       "$(ftctl__json_escape "${operation_intent}")" "$(ftctl__json_escape "${requested_mode}")" "$(ftctl__json_escape "${effective_mode}")" \
       "$(ftctl__json_escape "${decision_code}")" "${initial_seed:-false}" "$(ftctl__json_escape "${baseline_state}")" \

@@ -192,3 +192,69 @@ FTCTL completion requires a v2 status tuple, preserved transfer evidence,
 idempotent abort/drain, and no secret leakage. No operator action is required
 during design or implementation. After Cloud and FTCTL are deployed together
 and cleanup preflight passes, the operator executes one normal Failback.
+
+## 11. Implementation And Live Verification - 2026-08-05
+
+The FTCTL route envelope was implemented and packaged from commit
+`517f81779595bf7721bcfdda2f4c5d85b4d4b9c4` by GitHub Actions run
+`31017698792`. Package `ablestack_vm_ftctl-0.9.1-1.noarch` was deployed to
+hosts `10.10.32.1`, `10.10.32.2`, and `10.10.32.3` together with the matching
+Agent relay classes.
+
+Verification completed as follows:
+
+- reverse-profile self-tests passed for VMware-to-KVM and KVM-to-VMware role
+  reversal;
+- installed scripts emit `route_contract_version=2`,
+  `replication_direction`, and `provider_pair`;
+- all three `mold-agent` services are active;
+- the stale Failback was aborted through FTCTL prepare/commit, leaving
+  `FAILED_OVER`, `active_side=TARGET`, target `POWERED_ON`, source
+  `POWERED_OFF`, and `rollback_state=COMPLETED`;
+- no Run-owned `qemu-img`, `nbdkit`, or Failback mover process remained;
+- `dr-transition-preflight-v2` returned `ready=true` for TARGET authority
+  generation 10.
+
+The durable reverse checkpoint and baseline were retained. The abort removed
+only active operation ownership, so the next normal Failback can select the
+validated reverse-final path without a forced cleanup or full reseed caused by
+this failed attempt.
+
+## 2026-08-06 Durable Evidence Publication Addendum
+
+The next live Run completed reverse-final checkpoint sequence 15 and persisted
+the complete durability tuple in the Run state and checkpoint. Plan-authority
+`dr-status` nevertheless omitted `baseline_generation`, `tracker_state`,
+`writer_state`, `target_written`, `write_verified`, and
+`reverse_guest_compatibility_state`. Cloud therefore rejected the lifecycle
+gate even though the reverse writer succeeded.
+
+`ftctl_dr_runtime_emit_state_json()` must resolve one coherent reverse evidence
+tuple from the operation Run and its referenced checkpoint and publish typed
+values for both operation and Plan-authority scopes. It must also advertise a
+reverse evidence contract version and completeness state. The preflight command
+must verify that the installed engine supports this publication contract.
+
+Cloud document
+`596-cross-hypervisor-dr-failback-durable-evidence-publication-contract-design-20260806.md`
+is normative for the cross-layer contract, asynchronous publication grace, and
+retest acceptance criteria. Retained checkpoint 15 remains reusable and must
+not be removed by this correction.
+
+## 2026-08-06 Durable Evidence Publication Implementation
+
+The engine now resolves the reverse durability tuple from the operation Run
+state first and its referenced checkpoint second. `dr-status` publishes typed
+`reverse_evidence_contract_version`, `reverse_evidence_state`,
+`reverse_evidence_run_uuid`, baseline/tracker/writer states, target-write
+booleans, guest compatibility, and the missing-field list. Conflicting Plan,
+Run, or generation identity is reported as `INCONSISTENT`; incomplete and
+explicitly non-durable tuples remain distinct.
+
+`dr-reverse-preflight` advertises evidence contract version 1 and publication
+readiness, and capabilities include `dr-reverse-evidence-publication-v1`.
+Targeted WSL ext4 self-tests passed for reverse evidence projection, reverse
+preflight contract emission, and read-only reverse RBD snapshot attachment.
+The repository-wide self-test still stops earlier in an existing
+`shared-blockcopy` fixture that requires a Cloud-managed disk map; that
+unrelated fixture failure is not counted as validation of this change.

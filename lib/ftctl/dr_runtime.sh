@@ -3145,6 +3145,12 @@ ftctl_dr_runtime_emit_state_json() {
   local target_vm_id target_external_ref target_materialized target_vm_present target_storage_present target_network_present restore_point_present
   local status_scope profile_path authority_state_path source_firmware="" source_secure_boot="" source_hardware_fingerprint=""
   local target_boot_type="" target_boot_mode="" target_io_policy="" target_iothreads=""
+  local reverse_evidence_contract_version="1" reverse_evidence_state="PENDING" reverse_evidence_run_uuid=""
+  local reverse_evidence_state_path="" reverse_evidence_checkpoint_path="" reverse_evidence_checkpoint_plan=""
+  local reverse_evidence_checkpoint_run="" reverse_evidence_checkpoint_sequence=""
+  local baseline_generation="" tracker_state="" writer_state="" target_written="" write_verified=""
+  local reverse_guest_compatibility_state="" reverse_evidence_field="" reverse_evidence_first="true"
+  local -a reverse_evidence_missing_fields=()
 
   ftctl_dr_runtime_state_snapshot_begin "${state_path}"
   action="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "action")"
@@ -3636,6 +3642,57 @@ PY
   reverse_profile_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "reverse_profile_path")"
   reverse_restore_points_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "reverse_restore_points_path")"
   reprotect_worker_pid="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "reprotect_worker_pid")"
+  reverse_evidence_run_uuid="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "run")"
+  [[ -n "${reverse_evidence_run_uuid}" ]] || reverse_evidence_run_uuid="${run}"
+  [[ -n "${reverse_evidence_run_uuid}" ]] || reverse_evidence_run_uuid="${external_job_ref}"
+  [[ -n "${reverse_evidence_run_uuid}" ]] || reverse_evidence_run_uuid="${control_request_run_uuid}"
+  reverse_evidence_state_path="${state_path}"
+  if [[ -n "${reverse_evidence_run_uuid}" && -f "$(ftctl_dr_runtime_run_path "${plan}" "${reverse_evidence_run_uuid}")" ]]; then
+    reverse_evidence_state_path="$(ftctl_dr_runtime_run_path "${plan}" "${reverse_evidence_run_uuid}")"
+  fi
+  baseline_generation="$(ftctl_dr_runtime_state_get_from_path "${reverse_evidence_state_path}" "baseline_generation")"
+  baseline_state="$(ftctl_dr_runtime_state_get_from_path "${reverse_evidence_state_path}" "baseline_state")"
+  tracker_state="$(ftctl_dr_runtime_state_get_from_path "${reverse_evidence_state_path}" "tracker_state")"
+  writer_state="$(ftctl_dr_runtime_state_get_from_path "${reverse_evidence_state_path}" "writer_state")"
+  target_written="$(ftctl_dr_runtime_state_get_from_path "${reverse_evidence_state_path}" "target_written")"
+  write_verified="$(ftctl_dr_runtime_state_get_from_path "${reverse_evidence_state_path}" "write_verified")"
+  reverse_guest_compatibility_state="$(ftctl_dr_runtime_state_get_from_path "${reverse_evidence_state_path}" "reverse_guest_compatibility_state")"
+  reverse_evidence_checkpoint_path="$(ftctl_dr_runtime_state_get_from_path "${reverse_evidence_state_path}" "checkpoint_path")"
+  [[ -n "${reverse_evidence_checkpoint_path}" ]] || reverse_evidence_checkpoint_path="${checkpoint_path}"
+  if [[ -s "${reverse_evidence_checkpoint_path}" ]]; then
+    [[ -n "${baseline_generation}" ]] || baseline_generation="$(jq -r '.baselineGeneration // empty' "${reverse_evidence_checkpoint_path}" 2>/dev/null || true)"
+    [[ -n "${baseline_state}" ]] || baseline_state="$(jq -r '.baselineState // empty' "${reverse_evidence_checkpoint_path}" 2>/dev/null || true)"
+    [[ -n "${tracker_state}" ]] || tracker_state="$(jq -r '.trackerState // empty' "${reverse_evidence_checkpoint_path}" 2>/dev/null || true)"
+    [[ -n "${writer_state}" ]] || writer_state="$(jq -r '.writerState // empty' "${reverse_evidence_checkpoint_path}" 2>/dev/null || true)"
+    [[ -n "${target_written}" ]] || target_written="$(jq -r 'if has("targetWritten") then .targetWritten else empty end' "${reverse_evidence_checkpoint_path}" 2>/dev/null || true)"
+    [[ -n "${write_verified}" ]] || write_verified="$(jq -r 'if has("writeVerified") then .writeVerified else empty end' "${reverse_evidence_checkpoint_path}" 2>/dev/null || true)"
+    reverse_evidence_checkpoint_plan="$(jq -r '.planUuid // empty' "${reverse_evidence_checkpoint_path}" 2>/dev/null || true)"
+    reverse_evidence_checkpoint_run="$(jq -r '.runUuid // empty' "${reverse_evidence_checkpoint_path}" 2>/dev/null || true)"
+    reverse_evidence_checkpoint_sequence="$(jq -r '.checkpointSequence // .baselineGeneration // empty' "${reverse_evidence_checkpoint_path}" 2>/dev/null || true)"
+  fi
+  for reverse_evidence_field in baseline_generation baseline_state tracker_state writer_state target_written write_verified reverse_guest_compatibility_state; do
+    [[ -n "${!reverse_evidence_field}" ]] || reverse_evidence_missing_fields+=("${reverse_evidence_field}")
+  done
+  if [[ -n "${reverse_evidence_checkpoint_plan}" && "${reverse_evidence_checkpoint_plan}" != "${plan}" ]]; then
+    reverse_evidence_state="INCONSISTENT"
+  elif [[ -n "${reverse_evidence_checkpoint_run}" && "${reverse_evidence_checkpoint_run}" != "${reverse_evidence_run_uuid}" \
+      && "${reverse_evidence_checkpoint_run}" != "${reverse_evidence_run_uuid}-failback" ]]; then
+    reverse_evidence_state="INCONSISTENT"
+  elif [[ -n "${reverse_evidence_checkpoint_sequence}" && -n "${baseline_generation}" \
+      && "${reverse_evidence_checkpoint_sequence}" != "${baseline_generation}" ]]; then
+    reverse_evidence_state="INCONSISTENT"
+  elif (( ${#reverse_evidence_missing_fields[@]} > 0 )); then
+    if [[ -s "${reverse_evidence_state_path}" || -s "${reverse_evidence_checkpoint_path}" ]]; then
+      reverse_evidence_state="INCOMPLETE"
+    else
+      reverse_evidence_state="PENDING"
+    fi
+  elif [[ "${baseline_state}" != "LOCAL_DURABLE" || "${tracker_state}" != "LOCAL_DURABLE" \
+      || "${writer_state}" != "DURABLE" || "${target_written}" != "true" || "${write_verified}" != "true" ]]; then
+    reverse_evidence_state="NOT_DURABLE"
+  else
+    reverse_evidence_state="COMPLETE"
+  fi
   target_vm_id="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "target_vm_id")"
   target_external_ref="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "target_external_ref")"
   dynamic_rpo="$(ftctl_dr_runtime_rpo_from_target_at "${last_target}" 2>/dev/null || true)"
@@ -3767,6 +3824,23 @@ PY
   ftctl_dr_runtime_json_string_field "control_request_run_uuid" "${control_request_run_uuid}"
   ftctl_dr_runtime_json_boolean_field "owner_matched" "${owner_matched}" || return $?
   ftctl_dr_runtime_json_string_field "baseline_state" "${baseline_state}"
+  ftctl_dr_runtime_json_number_field "reverse_evidence_contract_version" "${reverse_evidence_contract_version}"
+  ftctl_dr_runtime_json_string_field "reverse_evidence_state" "${reverse_evidence_state}"
+  ftctl_dr_runtime_json_string_field "reverse_evidence_run_uuid" "${reverse_evidence_run_uuid}"
+  ftctl_dr_runtime_json_number_field "baseline_generation" "${baseline_generation}"
+  ftctl_dr_runtime_json_string_field "tracker_state" "${tracker_state}"
+  ftctl_dr_runtime_json_string_field "writer_state" "${writer_state}"
+  ftctl_dr_runtime_json_boolean_field "target_written" "${target_written}" || return $?
+  ftctl_dr_runtime_json_boolean_field "write_verified" "${write_verified}" || return $?
+  ftctl_dr_runtime_json_string_field "reverse_guest_compatibility_state" "${reverse_guest_compatibility_state}"
+  printf ',"reverse_evidence_missing_fields":['
+  reverse_evidence_first="true"
+  for reverse_evidence_field in "${reverse_evidence_missing_fields[@]}"; do
+    [[ "${reverse_evidence_first}" == "true" ]] || printf ','
+    printf '"%s"' "$(ftctl__json_escape "${reverse_evidence_field}")"
+    reverse_evidence_first="false"
+  done
+  printf ']'
   ftctl_dr_runtime_json_string_field "reseed_reason" "${reseed_reason}"
   ftctl_dr_runtime_json_number_field "consecutive_automatic_reseed_count" "${consecutive_automatic_reseed_count}"
   ftctl_dr_runtime_json_number_field "control_protocol_version" "${control_protocol_version}"
@@ -5639,7 +5713,7 @@ ftctl_dr_runtime_capabilities() {
       first="0"
       printf '"%s"' "$(ftctl__json_escape "${command}")"
     done
-    printf '],"supported_features":["async-run","status-projection","status-scope-v2","target-materialized-notify","target-materialized-idempotent","target-materialization-manifest-v2","target-resource-ownership-generation-v1","hardware-contract-projection","control-protocol-v2","control-protocol-v3","control-protocol-v4","dr-scheduler-singleton-v1","dr-scheduler-self-owner-repair-v1","dr-scheduler-systemd-unit-v1","dr-sync-recover-v1","dr-local-reconcile-fence-v1","dr-checkpoint-producer-v1","dr-nbd-deterministic-drain-v1","dr-nbd-cleanup-recovery-v1","dr-plan-authority-snapshot-v1","dr-failover-authority-snapshot-v1","dr-completed-cycle-evidence-v2","dr-failover-abort-v1","dr-transition-preflight-v1","dr-transition-preflight-v2","dr-reverse-preflight-v2","dr-reverse-rbd-snapshot-readonly-v1","dr-terminal-causality-v1","dr-worker-journal-v1","dr-live-transfer-progress-v1","dr-runtime-reconciliation-v1","dr-release-tombstone-v1","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","guest-preparation-v1","guest-preparation-v2","test-domain-lifecycle-v1","test-artifact-lifecycle-v2","cloud-managed-test-vm-v1","cutover-ready-v1","cutover-manifest-v2","cutover-preflight-v1","cloud-cutover-commit-v1","cloud-failback-lifecycle-v1","dr-failback-commit-journal-v1","dr-failback-commit-journal-v2","dr-failback-late-ack-reconcile-v1","dr-failback-rollback-fence-v1"]}\n'
+    printf '],"supported_features":["async-run","status-projection","status-scope-v2","target-materialized-notify","target-materialized-idempotent","target-materialization-manifest-v2","target-resource-ownership-generation-v1","hardware-contract-projection","control-protocol-v2","control-protocol-v3","control-protocol-v4","dr-scheduler-singleton-v1","dr-scheduler-self-owner-repair-v1","dr-scheduler-systemd-unit-v1","dr-sync-recover-v1","dr-local-reconcile-fence-v1","dr-checkpoint-producer-v1","dr-nbd-deterministic-drain-v1","dr-nbd-cleanup-recovery-v1","dr-plan-authority-snapshot-v1","dr-failover-authority-snapshot-v1","dr-completed-cycle-evidence-v2","dr-failover-abort-v1","dr-transition-preflight-v1","dr-transition-preflight-v2","dr-reverse-preflight-v2","dr-reverse-evidence-publication-v1","dr-reverse-rbd-snapshot-readonly-v1","dr-terminal-causality-v1","dr-worker-journal-v1","dr-live-transfer-progress-v1","dr-runtime-reconciliation-v1","dr-release-tombstone-v1","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","guest-preparation-v1","guest-preparation-v2","test-domain-lifecycle-v1","test-artifact-lifecycle-v2","cloud-managed-test-vm-v1","cutover-ready-v1","cutover-manifest-v2","cutover-preflight-v1","cloud-cutover-commit-v1","cloud-failback-lifecycle-v1","dr-failback-commit-journal-v1","dr-failback-commit-journal-v2","dr-failback-late-ack-reconcile-v1","dr-failback-rollback-fence-v1"]}\n'
     return 0
   fi
 

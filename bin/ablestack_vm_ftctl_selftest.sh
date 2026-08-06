@@ -8155,7 +8155,7 @@ selftest_case_dr_runtime_failback_restores_source_after_reverse_checkpoint() {
   local status_path="${plan_dir}/status.state"
   local fakebin="${SELFTEST_ROOT}/fakebin"
   local call_log="${SELFTEST_ROOT}/qemu-img-failback.log"
-  local out="" session_path="" active_path="" reverse_profile="" reverse_points="" rc=0
+  local out="" session_path="" active_path="" reverse_profile="" reverse_points="" run_path="" rc=0
 
   mkdir -p "${plan_dir}" "${fakebin}" "${SELFTEST_ROOT}/source" "${SELFTEST_ROOT}/target"
   cat > "${fakebin}/qemu-img" <<EOF
@@ -8197,7 +8197,8 @@ EOF
     "disks": [
       {"device": "vda", "sourcePath": "${SELFTEST_ROOT}/source/root.qcow2", "targetPath": "${SELFTEST_ROOT}/target/root.qcow2", "sourceFormat": "qcow2", "targetFormat": "qcow2", "sizeBytes": 1048576, "targetDiskOfferingId": "disk-offering-1"}
     ]
-  }
+  },
+  "guestCompatibility": {"state": "READY"}
 }
 JSON
   cat > "${status_path}" <<EOF
@@ -8255,6 +8256,16 @@ EOF
   selftest_assert_file_contains "${active_path}" '"activeSide":"TARGET"'
   selftest_assert_file_contains "${call_log}" "convert --force-share -p -n -S"
 
+  run_path="$(ftctl_dr_runtime_run_path "${plan}" "run-failback")"
+  ftctl_dr_runtime_path_set "${run_path}" \
+    "baseline_generation=4" \
+    "baseline_state=LOCAL_DURABLE" \
+    "tracker_state=LOCAL_DURABLE" \
+    "writer_state=DURABLE" \
+    "target_written=true" \
+    "write_verified=true" \
+    "reverse_guest_compatibility_state=READY"
+
   out="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-status \
     --config "${SELFTEST_CONFIG}" \
     --plan "${plan}" \
@@ -8263,6 +8274,17 @@ EOF
   selftest_assert_contains "${out}" '"active_side":"TARGET"' "failback status target active"
   selftest_assert_contains "${out}" '"failback_phase":"DATA_READY"' "failback status phase"
   selftest_assert_contains "${out}" '"cloud_lifecycle_state":"PENDING"' "Cloud lifecycle is pending"
+  selftest_assert_contains "${out}" '"reverse_evidence_contract_version":1' "reverse evidence contract version"
+  selftest_assert_contains "${out}" '"reverse_evidence_state":"COMPLETE"' "reverse evidence is complete"
+  selftest_assert_contains "${out}" '"reverse_evidence_run_uuid":"run-failback"' "reverse evidence is bound to the Run"
+  selftest_assert_contains "${out}" '"baseline_generation":4' "reverse baseline generation is typed"
+  selftest_assert_contains "${out}" '"baseline_state":"LOCAL_DURABLE"' "reverse baseline is durable"
+  selftest_assert_contains "${out}" '"tracker_state":"LOCAL_DURABLE"' "reverse tracker is durable"
+  selftest_assert_contains "${out}" '"writer_state":"DURABLE"' "reverse writer is durable"
+  selftest_assert_contains "${out}" '"target_written":true' "reverse target write is projected"
+  selftest_assert_contains "${out}" '"write_verified":true' "reverse target write verification is projected"
+  selftest_assert_contains "${out}" '"reverse_guest_compatibility_state":"READY"' "reverse guest compatibility is projected"
+  selftest_assert_contains "${out}" '"reverse_evidence_missing_fields":[]' "complete evidence has no missing field"
 
   set +e
   out="$(ftctl_dr_runtime_failback_commit "${plan}" "run-failback" "${plan}:run-failback" \
@@ -9467,6 +9489,8 @@ selftest_case_dr_kvm_vmware_reverse_preflight_clears_return_trap() {
   selftest_assert_eq "${rc}" "0" "reverse preflight caller returns successfully under set -u"
   selftest_assert_contains "${out}" '"effective_mode":"FULL_REVERSE_SEED"' "reverse preflight emits the selected mode"
   selftest_assert_contains "${out}" '"source_domain_probe_state":"READY"' "reverse preflight proves the live KVM domain"
+  selftest_assert_contains "${out}" '"status_evidence_contract_version":1' "reverse preflight advertises evidence contract"
+  selftest_assert_contains "${out}" '"status_evidence_publication_ready":true' "reverse preflight proves evidence publication support"
   selftest_assert_contains "${out}" "caller-returned" "RETURN trap does not escape into its caller"
   selftest_assert_eq "$(cat "${stderr_file}")" "" "reverse preflight emits no cleanup error"
 }
@@ -9492,6 +9516,8 @@ selftest_case_dr_kvm_vmware_snapshot_attach_is_read_only() {
   selftest_assert_file_contains "${call_log}" "rbd:rbd/w22-01-dr-disk-0@snapshot-1"
   selftest_assert_contains "$(ftctl_dr_runtime_capabilities 1)" \
     '"dr-reverse-rbd-snapshot-readonly-v1"' "read-only reverse capability is advertised"
+  selftest_assert_contains "$(ftctl_dr_runtime_capabilities 1)" \
+    '"dr-reverse-evidence-publication-v1"' "reverse evidence publication capability is advertised"
   selftest_assert_contains "$(ftctl_dr_runtime_capabilities 1)" \
     '"dr-terminal-causality-v1"' "terminal causality capability is advertised"
 }
