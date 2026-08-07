@@ -412,8 +412,8 @@ Options:
   --winpe-timeout <SEC>                     Default: 600
   --linux-bootstrap                         Default: auto for Linux guests
   --no-linux-bootstrap
-  --bootstrap-fallback sata|off             Default: sata
-  --no-bootstrap-fallback                   Same as --bootstrap-fallback off
+  --bootstrap-fallback sata|off             Default: sata; Cloud targets always use SATA fallback
+  --no-bootstrap-fallback                   Disables fallback only for direct libvirt targets
   --safe-mode                               Default: off
   --force-cleanup                           Default: off
 

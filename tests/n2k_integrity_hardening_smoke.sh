@@ -418,17 +418,35 @@ n2k_cloud_target_import_volume() {
   : >"${import_marker}"
   printf '%s' '{"id":"duplicate-root","job_id":"duplicate-job"}'
 }
+ # shellcheck disable=SC2317
+n2k_cloud_target_deploy_vm_for_volume() {
+  [[ "$5" == "root-1" ]]
+  printf '%s' '{"id":"vm-resumed","job_id":"deploy-resumed"}'
+}
+# shellcheck disable=SC2317
+n2k_cloud_target_wait_for_vm_nic_match() {
+  printf '%s' '{"matched":true,"checks":[]}'
+}
+# shellcheck disable=SC2317
+n2k_cloud_target_ensure_root_volume() {
+  printf '%s' '{"volume":{"id":"root-1","type":"ROOT","virtualmachineid":"vm-resumed"},"converted":false}'
+}
 checkpoint_rc=0
 n2k_cloud_target_cutover \
   "${reentry_manifest}" 0 1 0 \
   "endpoint" "api-key" "secret-key" "" >/dev/null 2>&1 || checkpoint_rc=$?
-[[ "${checkpoint_rc}" -eq 79 ]] || {
-  echo "[ERR] Incomplete Cloud checkpoint returned rc=${checkpoint_rc}, expected 79" >&2
+[[ "${checkpoint_rc}" -eq 0 ]] || {
+  echo "[ERR] Incomplete Cloud checkpoint was not resumed: rc=${checkpoint_rc}" >&2
   exit 1
 }
 [[ ! -e "${import_marker}" ]] || {
   echo "[ERR] Incomplete Cloud checkpoint allowed a duplicate import" >&2
   exit 1
 }
+jq -e '
+  .runtime.cloud.vm_id == "vm-resumed"
+  and .runtime.cloud.root_volume_id == "root-1"
+  and .runtime.cloud.checkpoint.complete == true
+' "${reentry_manifest}" >/dev/null
 
 echo "[OK] n2k changed-region, cutover, RBD staging, and Cloud checkpoint integrity passed"

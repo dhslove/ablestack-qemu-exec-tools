@@ -3699,27 +3699,32 @@ v2k_bootstrap_fallback_enabled() {
 
 v2k_select_bootstrap_fallback() {
   local manifest="$1" phase="$2" code="$3" reason="$4" policy="${5:-sata}"
-  local bus="sata"
+  local bus="sata" provider
+  provider="$(jq -r '.target.provider // "libvirt"' "${manifest}" 2>/dev/null || echo libvirt)"
 
-  if ! v2k_bootstrap_fallback_enabled "${policy}"; then
+  # Cloud migrations always hand a degraded VM to an engineer for inspection.
+  # The opt-out remains available only for direct libvirt targets.
+  if [[ "${provider}" != "ablestack-cloud" ]] && ! v2k_bootstrap_fallback_enabled "${policy}"; then
     return 1
   fi
 
-  v2k_manifest_runtime_set "${manifest}" ".runtime.bootstrap_fallback" \
-    "$(jq -nc \
-      --arg bus "${bus}" \
-      --arg phase "${phase}" \
-      --arg reason "${reason}" \
-      --argjson code "${code}" \
-      '{enabled:true,bus:$bus,phase:$phase,code:$code,reason:$reason}')" || true
-  if [[ "$(jq -r '.target.provider // "libvirt"' "${manifest}" 2>/dev/null || echo libvirt)" == "ablestack-cloud" ]]; then
+  if [[ "${provider}" == "ablestack-cloud" ]]; then
     if ! v2k_cloud_target_apply_disk_controller_override \
-        "${manifest}" "${bus}" "bootstrap_sata_fallback"; then
+        "${manifest}" "${bus}" "bootstrap_sata_fallback" \
+        "${phase}" "${code}" "${reason}"; then
       v2k_event ERROR "cutover" "" "bootstrap_fallback_controller_plan_failed" \
         "$(jq -nc --arg bus "${bus}" --arg phase "${phase}" \
           '{bus:$bus,phase:$phase,action:"stop_before_cloud_deploy"}')" || true
       return 1
     fi
+  else
+    v2k_manifest_runtime_set "${manifest}" ".runtime.bootstrap_fallback" \
+      "$(jq -nc \
+        --arg bus "${bus}" \
+        --arg phase "${phase}" \
+        --arg reason "${reason}" \
+        --argjson code "${code}" \
+        '{enabled:true,bus:$bus,scope:"all-disks",phase:$phase,code:$code,reason:$reason}')" || return 1
   fi
   v2k_event WARN "cutover" "" "bootstrap_fallback_selected" \
     "$(jq -nc \
@@ -3732,6 +3737,20 @@ v2k_select_bootstrap_fallback() {
     echo "[v2k] ${reason}. Falling back to SATA disk controller."
   fi
   return 0
+}
+
+v2k_cloud_record_boot_readiness_ready() {
+  local manifest="$1" guest_class="$2" method="$3"
+  v2k_manifest_runtime_set "${manifest}" ".runtime.cloud.readiness" \
+    "$(jq -nc --arg guest_class "${guest_class}" --arg method "${method}" '
+      {
+        status:"ready",
+        inspection_required:false,
+        components:{
+          boot:{status:"ready",guest_class:$guest_class,method:$method},
+          controller:{status:"ready"}
+        }
+      }')"
 }
 
 v2k_libvirt_redefine_with_bootstrap_fallback() {
@@ -3873,19 +3892,17 @@ v2k_cmd_cutover() {
   # - If WinPE is skipped and caller did not explicitly set --start,
   #   auto-start the VM (unless --define-only).
   # -------------------------------------------------------------------
-  local is_windows=0
-  local guest_family guest_id guest_full
+  local is_windows=0 guest_class="unknown"
+  local guest_family guest_id
   guest_family="$(jq -r '.source.vm.guestFamily // empty' "${V2K_MANIFEST}" 2>/dev/null || true)"
   guest_id="$(jq -r '.source.vm.guestId // .source.vm.guest_id // empty' "${V2K_MANIFEST}" 2>/dev/null || true)"
-  guest_full="$(jq -r '.source.vm.guestFullName // .source.vm.guest_full_name // empty' "${V2K_MANIFEST}" 2>/dev/null || true)"
 
   # Windows heuristics based on govc inventory fields.
-  if [[ "${guest_family}" == "windowsGuest" ]]; then
+  if v2k_manifest_is_windows "${V2K_MANIFEST}"; then
     is_windows=1
-  elif [[ "${guest_id}" =~ [Ww]in ]]; then
-    is_windows=1
-  elif [[ "${guest_full}" =~ [Ww]indows ]]; then
-    is_windows=1
+    guest_class="windows"
+  elif v2k_is_linux_guest; then
+    guest_class="linux"
   fi
 
   if [[ "${winpe_cli_set}" -eq 0 && "${is_windows}" -eq 0 ]]; then
@@ -3914,45 +3931,60 @@ v2k_cmd_cutover() {
   if [[ "${winpe_bootstrap}" -eq 1 ]]; then
     local winpe_preflight_path="" winpe_preflight_sha=""
     local virtio_preflight_path="" virtio_preflight_sha=""
+    local winpe_preflight_code=0 winpe_preflight_reason=""
 
     if ! winpe_preflight_path="$(v2k_resolve_winpe_iso "${winpe_iso}")"; then
       v2k_event ERROR "cutover" "" "winpe_assets_preflight_failed" \
         "$(jq -nc --arg requested "${winpe_iso:-auto}" \
           '{asset:"winpe",requested:$requested,code:71,shutdown_started:false}')"
       echo "WinPE ISO preflight failed before VMware shutdown. requested=${winpe_iso:-auto}" >&2
-      exit 71
-    fi
-    if ! virtio_preflight_path="$(v2k_resolve_virtio_iso "${virtio_iso}")"; then
+      winpe_preflight_code=71
+      winpe_preflight_reason="winpe_iso_unavailable"
+    elif ! virtio_preflight_path="$(v2k_resolve_virtio_iso "${virtio_iso}")"; then
       v2k_event ERROR "cutover" "" "winpe_assets_preflight_failed" \
         "$(jq -nc --arg requested "${virtio_iso:-auto}" \
           '{asset:"virtio",requested:$requested,code:72,shutdown_started:false}')"
       echo "VirtIO ISO preflight failed before VMware shutdown. requested=${virtio_iso:-auto}" >&2
-      exit 72
+      winpe_preflight_code=72
+      winpe_preflight_reason="virtio_iso_unavailable"
+    else
+      winpe_preflight_sha="$(sha256sum -- "${winpe_preflight_path}" | awk '{print $1}')"
+      virtio_preflight_sha="$(sha256sum -- "${virtio_preflight_path}" | awk '{print $1}')"
+      if [[ ! "${winpe_preflight_sha}" =~ ^[0-9a-fA-F]{64}$ \
+          || ! "${virtio_preflight_sha}" =~ ^[0-9a-fA-F]{64}$ ]]; then
+        v2k_event ERROR "cutover" "" "winpe_assets_preflight_failed" \
+          '{"asset":"checksum","code":73,"shutdown_started":false}'
+        echo "WinPE/VirtIO ISO checksum preflight failed before VMware shutdown." >&2
+        winpe_preflight_code=73
+        winpe_preflight_reason="winpe_asset_checksum_failed"
+      fi
     fi
 
-    winpe_preflight_sha="$(sha256sum -- "${winpe_preflight_path}" | awk '{print $1}')"
-    virtio_preflight_sha="$(sha256sum -- "${virtio_preflight_path}" | awk '{print $1}')"
-    if [[ ! "${winpe_preflight_sha}" =~ ^[0-9a-fA-F]{64}$ \
-        || ! "${virtio_preflight_sha}" =~ ^[0-9a-fA-F]{64}$ ]]; then
-      v2k_event ERROR "cutover" "" "winpe_assets_preflight_failed" \
-        '{"asset":"checksum","code":73,"shutdown_started":false}'
-      echo "WinPE/VirtIO ISO checksum preflight failed before VMware shutdown." >&2
-      exit 73
+    if [[ "${winpe_preflight_code}" -ne 0 ]]; then
+      if [[ "${target_provider}" == "ablestack-cloud" ]]; then
+        v2k_select_bootstrap_fallback \
+          "${V2K_MANIFEST}" "winpe_preflight" "${winpe_preflight_code}" \
+          "${winpe_preflight_reason}" "${bootstrap_fallback}" || exit 74
+        winpe_bootstrap=0
+        start_vm=0
+      else
+        exit "${winpe_preflight_code}"
+      fi
+    else
+      winpe_iso="${winpe_preflight_path}"
+      virtio_iso="${virtio_preflight_path}"
+      export V2K_WINPE_PREFLIGHT_PATH="${winpe_preflight_path}"
+      export V2K_WINPE_PREFLIGHT_SHA256="${winpe_preflight_sha}"
+      export V2K_VIRTIO_PREFLIGHT_PATH="${virtio_preflight_path}"
+      export V2K_VIRTIO_PREFLIGHT_SHA256="${virtio_preflight_sha}"
+      v2k_event INFO "cutover" "" "winpe_assets_preflight_done" \
+        "$(jq -nc \
+          --arg winpe_path "${winpe_preflight_path}" \
+          --arg winpe_sha256 "${winpe_preflight_sha}" \
+          --arg virtio_path "${virtio_preflight_path}" \
+          --arg virtio_sha256 "${virtio_preflight_sha}" \
+          '{winpe:{path:$winpe_path,sha256:$winpe_sha256},virtio:{path:$virtio_path,sha256:$virtio_sha256},shutdown_started:false}')"
     fi
-
-    winpe_iso="${winpe_preflight_path}"
-    virtio_iso="${virtio_preflight_path}"
-    export V2K_WINPE_PREFLIGHT_PATH="${winpe_preflight_path}"
-    export V2K_WINPE_PREFLIGHT_SHA256="${winpe_preflight_sha}"
-    export V2K_VIRTIO_PREFLIGHT_PATH="${virtio_preflight_path}"
-    export V2K_VIRTIO_PREFLIGHT_SHA256="${virtio_preflight_sha}"
-    v2k_event INFO "cutover" "" "winpe_assets_preflight_done" \
-      "$(jq -nc \
-        --arg winpe_path "${winpe_preflight_path}" \
-        --arg winpe_sha256 "${winpe_preflight_sha}" \
-        --arg virtio_path "${virtio_preflight_path}" \
-        --arg virtio_sha256 "${virtio_preflight_sha}" \
-        '{winpe:{path:$winpe_path,sha256:$winpe_sha256},virtio:{path:$virtio_path,sha256:$virtio_sha256},shutdown_started:false}')"
   fi
 
   export V2K_FORCE_CLEANUP="${force_cleanup}"
@@ -4070,6 +4102,8 @@ v2k_cmd_cutover() {
       fi
       if v2k_linux_bootstrap_initramfs "${V2K_MANIFEST}"; then
         v2k_event INFO "cutover" "" "cloud_linux_bootstrap_done" "{}"
+        v2k_cloud_record_boot_readiness_ready \
+          "${V2K_MANIFEST}" "linux" "linux-initramfs" || exit 74
         if [[ "${V2K_JSON_OUT:-0}" -ne 1 ]]; then
           echo "[v2k] Cloud Linux bootstrap(initramfs) done (guestFamily=linuxGuest)"
         fi
@@ -4083,9 +4117,16 @@ v2k_cmd_cutover() {
           echo "Cloud Linux bootstrap (initramfs rebuild) failed. code=${rc}" >&2
           exit 74
         fi
+        start_vm=0
       fi
     else
       v2k_event INFO "cutover" "" "cloud_linux_bootstrap_skipped" "{\"reason\":\"cli_or_policy\"}"
+      if ! jq -e '.runtime.bootstrap_fallback.enabled == true' "${V2K_MANIFEST}" >/dev/null 2>&1; then
+        v2k_select_bootstrap_fallback \
+          "${V2K_MANIFEST}" "linux_bootstrap" 0 \
+          "Cloud Linux bootstrap was skipped" "${bootstrap_fallback}" || exit 74
+      fi
+      start_vm=0
     fi
   fi
 
@@ -4095,6 +4136,8 @@ v2k_cmd_cutover() {
     fi
     if v2k_cloud_windows_winpe_bootstrap "${winpe_iso}" "${virtio_iso}" "${winpe_timeout}"; then
       v2k_event INFO "cutover" "" "cloud_winpe_bootstrap_done" "{}"
+      v2k_cloud_record_boot_readiness_ready \
+        "${V2K_MANIFEST}" "windows" "winpe" || exit 74
       if [[ "${V2K_JSON_OUT:-0}" -ne 1 ]]; then
         echo "[v2k] Cloud Windows WinPE bootstrap done (guestFamily=windowsGuest)"
       fi
@@ -4105,7 +4148,24 @@ v2k_cmd_cutover() {
         echo "Cloud Windows WinPE bootstrap failed. code=${rc}" >&2
         exit "${rc}"
       fi
+      start_vm=0
     fi
+  fi
+
+  if [[ "${target_provider}" == "ablestack-cloud" && "${guest_class}" == "windows" && "${winpe_bootstrap}" -eq 0 ]]; then
+    if ! jq -e '.runtime.bootstrap_fallback.enabled == true' "${V2K_MANIFEST}" >/dev/null 2>&1; then
+      v2k_select_bootstrap_fallback \
+        "${V2K_MANIFEST}" "winpe_bootstrap" 0 \
+        "Cloud Windows WinPE bootstrap was skipped" "${bootstrap_fallback}" || exit 74
+    fi
+    start_vm=0
+  fi
+
+  if [[ "${target_provider}" == "ablestack-cloud" && "${guest_class}" == "unknown" ]]; then
+    v2k_select_bootstrap_fallback \
+      "${V2K_MANIFEST}" "guest_classification" 0 \
+      "Guest OS could not be classified for boot preparation" "${bootstrap_fallback}" || exit 74
+    start_vm=0
   fi
 
   if [[ "${target_provider}" == "ablestack-cloud" ]]; then
@@ -4279,6 +4339,13 @@ v2k_cmd_cleanup() {
       *) echo "Unknown option: $1" >&2; exit 2;;
     esac
   done
+  if jq -e '.runtime.cloud.inspection_required == true or .runtime.cloud.checkpoint.inspection_required == true' \
+      "${V2K_MANIFEST}" >/dev/null 2>&1; then
+    keep_snapshots=1
+    keep_workdir=1
+    v2k_event WARN "cleanup" "" "cleanup_blocked_for_cloud_inspection" \
+      '{"keep_snapshots":true,"keep_workdir":true,"reason":"cloud target requires engineer inspection"}' || true
+  fi
   v2k_event INFO "cleanup" "" "phase_start" "{\"keep_snapshots\":${keep_snapshots},\"keep_workdir\":${keep_workdir}}"
 
   # Engine-level idempotent cleanup first (processes/devices/tmp). Never fail.
