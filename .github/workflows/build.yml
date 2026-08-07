@@ -318,7 +318,7 @@ jobs:
           path: release/ftctl-rpm/**
 
           
-  # 1-C) V2K RPM BUILD (isolated from other RPM build paths)
+  # 1-C) V2K RPM BUILD (Rocky 9.6 / 9.7 / 9.8)
   # 1-C) V2K RPM BUILD (isolated path to avoid overlap with other RPM jobs)
   # ======================================================================
   build-v2k-rpm:
@@ -327,7 +327,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        host_os_minor: ["9.6", "9.7"]
+        host_os_minor: ["9.6", "9.7", "9.8"]
     container:
       image: rockylinux/rockylinux:9
       options: --user 0
@@ -343,17 +343,17 @@ jobs:
 
           ROCKY_MINOR="${{ matrix.host_os_minor }}"
           REPO_PREFIX="rocky-build-${ROCKY_MINOR}"
-          if [[ "${ROCKY_MINOR}" == "9.6" ]]; then
-            REPO_ROOT="https://dl.rockylinux.org/vault/rocky/${ROCKY_MINOR}"
-          elif [[ "${ROCKY_MINOR}" == "9.7" ]]; then
-            REPO_ROOT="https://dl.rockylinux.org/vault/rocky/${ROCKY_MINOR}"
-          else
-            echo "[ERR] Unsupported Rocky minor for V2K build: ${ROCKY_MINOR}" >&2
-            exit 2
-          fi
+          case "${ROCKY_MINOR}" in
+            9.6|9.7) REPO_ROOT="https://dl.rockylinux.org/vault/rocky/${ROCKY_MINOR}" ;;
+            9.8) REPO_ROOT="https://dl.rockylinux.org/pub/rocky/${ROCKY_MINOR}" ;;
+            *)
+              echo "[ERR] Unsupported Rocky minor for V2K build: ${ROCKY_MINOR}" >&2
+              exit 2
+              ;;
+          esac
 
           # Keep V2K build inputs pinned to the intended Rocky minor.
-          # 9.6 and 9.7 use vault because fixed minor trees may be removed from pub.
+          # 9.6/9.7 are archived in vault; 9.8 is the current published minor.
           cat > "/etc/yum.repos.d/${REPO_PREFIX}.repo" <<EOF
           [${REPO_PREFIX}-baseos]
           name=Rocky Linux ${ROCKY_MINOR} - BaseOS
@@ -389,14 +389,14 @@ jobs:
 
           ROCKY_MINOR="${{ matrix.host_os_minor }}"
           REPO_PREFIX="rocky-build-${ROCKY_MINOR}"
-          if [[ "${ROCKY_MINOR}" == "9.6" ]]; then
-            REPO_ROOT="https://dl.rockylinux.org/vault/rocky/${ROCKY_MINOR}"
-          elif [[ "${ROCKY_MINOR}" == "9.7" ]]; then
-            REPO_ROOT="https://dl.rockylinux.org/vault/rocky/${ROCKY_MINOR}"
-          else
-            echo "[ERR] Unsupported Rocky minor for V2K build: ${ROCKY_MINOR}" >&2
-            exit 2
-          fi
+          case "${ROCKY_MINOR}" in
+            9.6|9.7) REPO_ROOT="https://dl.rockylinux.org/vault/rocky/${ROCKY_MINOR}" ;;
+            9.8) REPO_ROOT="https://dl.rockylinux.org/pub/rocky/${ROCKY_MINOR}" ;;
+            *)
+              echo "[ERR] Unsupported Rocky minor for V2K build: ${ROCKY_MINOR}" >&2
+              exit 2
+              ;;
+          esac
 
           cat > "/etc/yum.repos.d/${REPO_PREFIX}.repo" <<EOF
           [${REPO_PREFIX}-baseos]
@@ -536,6 +536,7 @@ jobs:
           )
 
           BASELINE_FILE="rpm/v2k_baseline_pkgs_ablestack_${ROCKY_MINOR}.txt"
+          COMPAT_BASELINE_FILE="rpm/v2k_baseline_pkgs_ablestack_9.7.txt"
           SHARED_BASELINE_FILE="rpm/v2k_baseline_pkgs_ablestack_9.6.txt"
 
           echo "[INFO] Sanity check: required pkgs availability (repo view)"
@@ -553,6 +554,9 @@ jobs:
           EFFECTIVE_BASELINE_FILE="${BASELINE_FILE}"
           if [[ -f "${BASELINE_FILE}" ]]; then
             echo "[INFO] Using ABLESTACK baseline file: ${BASELINE_FILE}"
+          elif [[ "${ROCKY_MINOR}" == "9.8" && -f "${COMPAT_BASELINE_FILE}" ]]; then
+            EFFECTIVE_BASELINE_FILE="${COMPAT_BASELINE_FILE}"
+            echo "[INFO] Using Rocky 9.7 ABLESTACK baseline for Rocky 9.8 compatibility: ${COMPAT_BASELINE_FILE}"
           elif [[ -f "${SHARED_BASELINE_FILE}" ]]; then
             EFFECTIVE_BASELINE_FILE="${SHARED_BASELINE_FILE}"
             echo "[WARN] Missing minor-specific baseline: ${BASELINE_FILE}"
@@ -618,13 +622,13 @@ jobs:
           path: release/v2k/**
 
   # ======================================================================
-  # 1-D) N2K RPM BUILD (Rocky 9.6 / 9.7)
+  # 1-D) N2K RPM BUILD (Rocky 9.6 / 9.7 / 9.8)
   # ======================================================================
   build-n2k-rpm:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        host_os_minor: ["9.6", "9.7"]
+        host_os_minor: ["9.6", "9.7", "9.8"]
     container:
       image: rockylinux/rockylinux:9
       options: --user 0
@@ -641,14 +645,14 @@ jobs:
 
           ROCKY_MINOR="${{ matrix.host_os_minor }}"
           REPO_PREFIX="rocky-n2k-${ROCKY_MINOR}"
-          if [[ "${ROCKY_MINOR}" == "9.6" ]]; then
-            REPO_ROOT="https://dl.rockylinux.org/vault/rocky/${ROCKY_MINOR}"
-          elif [[ "${ROCKY_MINOR}" == "9.7" ]]; then
-            REPO_ROOT="https://dl.rockylinux.org/vault/rocky/${ROCKY_MINOR}"
-          else
-            echo "[ERR] Unsupported Rocky minor for N2K build: ${ROCKY_MINOR}" >&2
-            exit 2
-          fi
+          case "${ROCKY_MINOR}" in
+            9.6|9.7) REPO_ROOT="https://dl.rockylinux.org/vault/rocky/${ROCKY_MINOR}" ;;
+            9.8) REPO_ROOT="https://dl.rockylinux.org/pub/rocky/${ROCKY_MINOR}" ;;
+            *)
+              echo "[ERR] Unsupported Rocky minor for N2K build: ${ROCKY_MINOR}" >&2
+              exit 2
+              ;;
+          esac
 
           cat > "/etc/yum.repos.d/${REPO_PREFIX}.repo" <<EOF
           [${REPO_PREFIX}-baseos]
@@ -976,7 +980,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for ver in 9.6 9.7; do
+          for ver in 9.6 9.7 9.8; do
             SRC_DIR=$(find dist -type d -path "*/v2k-rpm-rocky${ver}" | head -n 1 || true)
             if [[ -z "${SRC_DIR}" || ! -d "${SRC_DIR}" ]]; then
               echo "[ERR] No V2K RPM repo found for Rocky ${ver} in workflow artifacts." >&2
@@ -995,7 +999,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          for ver in 9.6 9.7; do
+          for ver in 9.6 9.7 9.8; do
             SRC_DIR="$(find dist -type d \( \
                         -path "*/n2k-rpm-package-rocky${ver}/release/n2k/n2k-rpm-rocky${ver}" -o \
                         -path "*/n2k-rpm-package-rocky${ver}/n2k-rpm-rocky${ver}" \
@@ -1335,11 +1339,13 @@ jobs:
             - V2K (ABLESTACK Host add-on):
                 v2k/v2k-rpm-rocky9.6 (offline RPM repo for ablestack_v2k)
                 v2k/v2k-rpm-rocky9.7 (offline RPM repo for ablestack_v2k)
+                v2k/v2k-rpm-rocky9.8 (offline RPM repo for ablestack_v2k)
                 Runtime assets are bundled inside the ablestack_v2k RPM:
                   govc, VDDK, pyVmomi wheels, compatibility profiles, WinPE ISO
             - N2K (ABLESTACK Host add-on):
                 n2k/n2k-rpm-rocky9.6 (offline RPM repo for ablestack_n2k)
                 n2k/n2k-rpm-rocky9.7 (offline RPM repo for ablestack_n2k)
+                n2k/n2k-rpm-rocky9.8 (offline RPM repo for ablestack_n2k)
 
 
           Windows (recommended)
@@ -1914,8 +1920,10 @@ jobs:
             - rpm/hangctl-rpm-rocky9.6
             - v2k/v2k-rpm-rocky9.6
             - v2k/v2k-rpm-rocky9.7
+            - v2k/v2k-rpm-rocky9.8
             - n2k/n2k-rpm-rocky9.6
             - n2k/n2k-rpm-rocky9.7
+            - n2k/n2k-rpm-rocky9.8
             - completions/
             - install-linux.sh
             - uninstall-linux.sh
@@ -1952,7 +1960,7 @@ jobs:
           if [[ -d release/rpm/ftctl-rpm-rocky9.6 ]]; then
             cp -a release/rpm/ftctl-rpm-rocky9.6 build/iso-staging/rocky/rpm/
           fi
-          for ver in 9.6 9.7; do
+          for ver in 9.6 9.7 9.8; do
             if [[ -d "release/v2k/v2k-rpm-rocky${ver}" ]]; then
               cp -a "release/v2k/v2k-rpm-rocky${ver}" build/iso-staging/rocky/v2k/
             fi
@@ -2013,8 +2021,10 @@ jobs:
             release/rpm/ftctl-rpm-rocky9.6/ablestack_vm_ftctl-*.rpm
             release/v2k/v2k-rpm-rocky9.6/ablestack_v2k-*.noarch.rpm
             release/v2k/v2k-rpm-rocky9.7/ablestack_v2k-*.noarch.rpm
+            release/v2k/v2k-rpm-rocky9.8/ablestack_v2k-*.noarch.rpm
             release/n2k/n2k-rpm-rocky9.6/ablestack_n2k-*.noarch.rpm
             release/n2k/n2k-rpm-rocky9.7/ablestack_n2k-*.noarch.rpm
+            release/n2k/n2k-rpm-rocky9.8/ablestack_n2k-*.noarch.rpm
             release/winpe/*.iso
             release/winpe/SHA256SUMS
             release_notes.md
@@ -2072,7 +2082,7 @@ jobs:
             copy_plain "${rpm}"
           done
 
-          for ver in 9.6 9.7; do
+          for ver in 9.6 9.7 9.8; do
             for rpm in "release/v2k/v2k-rpm-rocky${ver}"/ablestack_v2k-*.noarch.rpm; do
               copy_rpm_with_suffix "${rpm}" "rocky${ver}"
             done
@@ -2094,8 +2104,8 @@ jobs:
           fi
 
           asset_count="$(find "${OUT_DIR}" -maxdepth 1 -type f | wc -l)"
-          if [[ "${asset_count}" -ne 12 ]]; then
-            echo "[ERR] Expected exactly 12 GitHub Release assets, found ${asset_count}." >&2
+          if [[ "${asset_count}" -ne 14 ]]; then
+            echo "[ERR] Expected exactly 14 GitHub Release assets, found ${asset_count}." >&2
             find "${OUT_DIR}" -maxdepth 1 -type f -printf '%f\n' | sort >&2
             exit 2
           fi
