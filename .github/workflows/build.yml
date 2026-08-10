@@ -711,12 +711,12 @@ jobs:
           path: release/n2k/**
 
   # ======================================================================
-  # 2) DEB BUILD (Ubuntu 22.04 / 24.04)
+  # 2) DEB BUILD (Ubuntu 22.04 / 24.04 / 26.04)
   # ======================================================================
   build-deb:
     strategy:
       matrix:
-        os_version: [22.04, 24.04]
+        os_version: [22.04, 24.04, 26.04]
     runs-on: ubuntu-${{ matrix.os_version }}
     steps:
       - uses: actions/checkout@v4
@@ -948,7 +948,7 @@ jobs:
           fi
 
           echo "[INFO] Collecting DEB repos..."
-          for ver in 22.04 24.04; do
+          for ver in 22.04 24.04 26.04; do
             SRC_DIR=$(find dist -type d \( \
                         -path "*/deb-package-${ver}/release/deb/deb-ubuntu${ver}" -o \
                         -path "*/deb-package-${ver}/deb-ubuntu${ver}" \
@@ -958,7 +958,9 @@ jobs:
               mkdir -p release/deb/deb-ubuntu${ver}
               cp -r "$SRC_DIR"/* release/deb/deb-ubuntu${ver}/
             else
-              echo "[WARN] No DEB repo found for version ${ver}"
+              echo "[ERR] No DEB repo found for Ubuntu ${ver} in workflow artifacts." >&2
+              find dist -maxdepth 6 -path "*deb-package*" -print >&2 || true
+              exit 2
             fi
           done
 
@@ -1322,6 +1324,7 @@ jobs:
             - DEB repos:
                 deb/deb-ubuntu22.04
                 deb/deb-ubuntu24.04
+                deb/deb-ubuntu26.04
             - Windows:
                 msi/ (ablestack-qemu-exec-tools .msi)
                 virtio/ (VirtIO Windows drivers + Guest Tools from stable-virtio)
@@ -1936,6 +1939,7 @@ jobs:
           Contents
             - deb/deb-ubuntu22.04
             - deb/deb-ubuntu24.04
+            - deb/deb-ubuntu26.04
             - completions/
             - install-linux.sh
             - uninstall-linux.sh

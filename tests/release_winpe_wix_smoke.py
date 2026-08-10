@@ -85,6 +85,14 @@ for required_path in (
 ):
     if required_path not in workflow:
         fail(f"build.yml is missing Rocky 9.8 release path: {required_path}")
+if "os_version: [22.04, 24.04, 26.04]" not in workflow:
+    fail("build.yml does not build DEB packages on the Ubuntu 26.04 runner")
+if "for ver in 22.04 24.04 26.04; do" not in workflow:
+    fail("build.yml does not collect the Ubuntu 26.04 DEB repository")
+if workflow.count("deb/deb-ubuntu26.04") != 2:
+    fail("build.yml does not document Ubuntu 26.04 in both release and ISO manifests")
+if "No DEB repo found for Ubuntu ${ver} in workflow artifacts." not in workflow:
+    fail("build.yml does not fail closed when an Ubuntu DEB repository is missing")
 if "workflow_run:" in workflow:
     fail("build.yml still uses the obsolete cross-run release trigger")
 if "github.event.workflow_run" in workflow:
