@@ -7119,7 +7119,7 @@ case "${1-}" in
   "VirtualMachines": [
     {
       "Config": {
-        "ChangeTrackingEnabled": true,
+        "ChangeTrackingEnabled": false,
         "Hardware": {
           "Device": [
             {
@@ -7231,10 +7231,66 @@ JSON
   selftest_assert_file_contains "${call_log}" "GOVC:about"
   selftest_assert_file_contains "${call_log}" "GOVC:vm.info -json vm-4486"
   cbt_status="${plan_dir}/vmware-cbt.json"
-  selftest_assert_file_contains "${cbt_status}" '"enabled":true'
+  selftest_assert_file_contains "${cbt_status}" '"enabled":false'
+  selftest_assert_file_contains "${cbt_status}" '"lifecycleState":"CONFIGURED_PENDING_ACTIVATION"'
+  selftest_assert_file_contains "${cbt_status}" '"vmConfigSignal":"FALSE"'
   selftest_assert_file_contains "${cbt_status}" '"cbtDiskId":"scsi0:0"'
   selftest_assert_file_contains "${cbt_status}" '"resolution":"vm-device-graph"'
   selftest_assert_file_not_contains "${cbt_status}" "secret"
+}
+
+selftest_case_dr_vmware_cbt_activation_evidence_promotes_active() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR VMware CBT snapshot evidence promotes ACTIVE"
+
+  local status_path="${SELFTEST_ROOT}/vmware-cbt-status.json"
+  local evidence_path="${SELFTEST_ROOT}/vmware-cbt-evidence.json"
+  cat > "${status_path}" <<'JSON'
+{"schemaVersion":2,"driver":"VMWARE","phase":"cbt-preflight","lifecycleState":"CONFIGURED_PENDING_ACTIVATION","enabled":false,"vmConfigSignal":"FALSE"}
+JSON
+  cat > "${evidence_path}" <<'JSON'
+[{"diskId":"scsi0:0","changeId":"52 88 fe","querySucceeded":true}]
+JSON
+
+  # shellcheck source=/dev/null
+  source "${ROOT_DIR}/lib/ftctl/dr_vmware_mover.sh"
+  ftctl_vmware_mover_publish_cbt_active "${status_path}" "${evidence_path}" "ftctl-run-snapshot" "snapshot-101"
+
+  selftest_assert_file_contains "${status_path}" '"lifecycleState":"ACTIVE"'
+  selftest_assert_file_contains "${status_path}" '"enabled":true'
+  selftest_assert_file_contains "${status_path}" '"querySucceeded":true'
+  selftest_assert_file_contains "${status_path}" '"snapshotRef":"snapshot-101"'
+}
+
+selftest_case_dr_vmware_cbt_full_seed_verifies_current_change_id() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR VMware full seed verifies current snapshot changeId"
+
+  local fake_python="${SELFTEST_ROOT}/fake-cbt-python"
+  local helper="${SELFTEST_ROOT}/fake-cbt-helper.py"
+  local password_file="${SELFTEST_ROOT}/vcenter-password"
+  local output_path="${SELFTEST_ROOT}/cbt-query.json"
+  local call_log="${SELFTEST_ROOT}/cbt-query.args"
+  cat > "${fake_python}" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" > "${FTCTL_FAKE_CBT_ARGS}"
+printf '{"new_change_id":"52 current","vmdk_path":"[ds] vm/disk-000001.vmdk","areas":[],"activation_verified":true}\n'
+EOF
+  chmod +x "${fake_python}"
+  printf '# mock helper\n' > "${helper}"
+  printf 'secret' > "${password_file}"
+
+  # shellcheck source=/dev/null
+  source "${ROOT_DIR}/lib/ftctl/dr_vmware_mover.sh"
+  FTCTL_DR_VMWARE_CBT_PYTHON="${fake_python}" \
+  FTCTL_DR_VMWARE_CBT_QUERY_HELPER="${helper}" \
+  FTCTL_FAKE_CBT_ARGS="${call_log}" \
+    ftctl_vmware_mover_query_cbt "https://vcenter/sdk" "user" "${password_file}" false "" \
+      "vm-101" "run-snapshot" "scsi0:0" "" "${output_path}" true
+
+  selftest_assert_file_contains "${call_log}" "--verify-current"
+  selftest_assert_file_contains "${output_path}" '"activation_verified":true'
 }
 
 selftest_case_dr_vmware_missing_disk_map_config_incomplete() {
@@ -9971,6 +10027,8 @@ selftest_main() {
   selftest_case_dr_vmware_preflight_missing_vddk
   selftest_case_dr_vmware_contract_ready
   selftest_case_dr_vmware_cbt_preflight_uses_runtime_credentials_file
+  selftest_case_dr_vmware_cbt_activation_evidence_promotes_active
+  selftest_case_dr_vmware_cbt_full_seed_verifies_current_change_id
   selftest_case_dr_vmware_missing_disk_map_config_incomplete
   selftest_case_dr_vmware_missing_vddk_blocks_sync
   selftest_case_dr_scheduler_ablestack_checkpoint_loop

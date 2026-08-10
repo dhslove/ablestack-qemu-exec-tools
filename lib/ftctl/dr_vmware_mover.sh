@@ -277,25 +277,118 @@ ftctl_vmware_mover_resolve_cbt_python() {
   return 1
 }
 
+ftctl_vmware_mover_publish_cbt_failure() {
+  local error_code="${1-}" message="${2-}" disk_id="${3-}" status_path="${FTCTL_DR_CBT_STATUS_PATH:-}"
+  [[ -n "${status_path}" ]] || return 0
+  python3 - "${status_path}" "${error_code}" "${message}" "${disk_id}" <<'PY'
+import json
+import os
+import sys
+import time
+
+path, error_code, message, disk_id = sys.argv[1:5]
+status = {}
+if os.path.isfile(path):
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            value = json.load(handle)
+            if isinstance(value, dict):
+                status = value
+    except (OSError, ValueError, TypeError):
+        status = {}
+status.update({
+    "schemaVersion": 2,
+    "phase": "cbt-activation",
+    "lifecycleState": "ERROR",
+    "enabled": False,
+    "error_code": error_code,
+    "message": message,
+    "failedDiskId": disk_id,
+    "checkedAtEpochMs": int(time.time() * 1000),
+})
+tmp = path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as handle:
+    json.dump(status, handle, sort_keys=True, separators=(",", ":"))
+    handle.write("\n")
+    handle.flush()
+    os.fsync(handle.fileno())
+os.replace(tmp, path)
+PY
+}
+
 ftctl_vmware_mover_query_cbt() {
   local endpoint="${1-}" username="${2-}" password_file="${3-}" tls_verify="${4-}" libdir="${5-}"
   local vm_ref="${6-}" snapshot_name="${7-}" disk_id="${8-}" previous_change_id="${9-}" output_path="${10-}"
-  local python_bin helper
+  local verify_current="${11-false}" python_bin helper
   python_bin="$(ftctl_vmware_mover_resolve_cbt_python "${libdir}" || true)"
   helper="${FTCTL_DR_VMWARE_CBT_QUERY_HELPER:-${FTCTL_DR_VMWARE_MOVER_LIB_DIR}/dr_vmware_changed_areas.py}"
   [[ -n "${python_bin}" ]] || ftctl_vmware_mover_die 82 "DR_CBT_QUERY_FAILED: pyVmomi runtime was not found"
   [[ -f "${helper}" ]] || ftctl_vmware_mover_die 82 "DR_CBT_QUERY_FAILED: CBT query helper was not found"
   [[ -n "${vm_ref}" && -n "${snapshot_name}" && -n "${disk_id}" ]] || \
     ftctl_vmware_mover_die 80 "DR_VMWARE_CBT_DISK_ID_UNRESOLVED: VM, snapshot, or disk identifier is empty"
-  VCENTER_HOST="$(ftctl_vmware_mover_govc_url "${endpoint}")" \
+  local -a helper_args=(--vm "${vm_ref}" --snapshot "${snapshot_name}" --disk-id "${disk_id}" --change-id "${previous_change_id}")
+  [[ "${verify_current}" == "true" ]] && helper_args+=(--verify-current)
+  if ! VCENTER_HOST="$(ftctl_vmware_mover_govc_url "${endpoint}")" \
   VCENTER_USER="${username}" \
   VCENTER_PASS="$(cat "${password_file}")" \
   VCENTER_INSECURE="$([[ "${tls_verify}" == "true" ]] && printf 0 || printf 1)" \
-    "${python_bin}" "${helper}" --vm "${vm_ref}" --snapshot "${snapshot_name}" \
-      --disk-id "${disk_id}" --change-id "${previous_change_id}" > "${output_path}" || \
+    "${python_bin}" "${helper}" "${helper_args[@]}" > "${output_path}"; then
+    ftctl_vmware_mover_publish_cbt_failure "DR_VMWARE_CBT_QUERY_FAILED" \
+      "QueryChangedDiskAreas failed for ${disk_id}" "${disk_id}" || true
     ftctl_vmware_mover_die 82 "DR_CBT_QUERY_FAILED: QueryChangedDiskAreas failed for ${disk_id}"
-  jq -e '.new_change_id != null and .new_change_id != ""' "${output_path}" >/dev/null || \
+  fi
+  if ! jq -e '.new_change_id != null and .new_change_id != ""' "${output_path}" >/dev/null; then
+    ftctl_vmware_mover_publish_cbt_failure "DR_VMWARE_CBT_CHANGE_ID_MISSING" \
+      "VMware did not return a current changeId for ${disk_id}" "${disk_id}" || true
     ftctl_vmware_mover_die 83 "DR_CBT_BASELINE_INVALID: VMware did not return a new changeId for ${disk_id}"
+  fi
+}
+
+ftctl_vmware_mover_publish_cbt_active() {
+  local status_path="${1-}" evidence_path="${2-}" snapshot_name="${3-}" snapshot_ref="${4-}"
+  [[ -n "${status_path}" && -f "${evidence_path}" ]] || return 0
+  python3 - "${status_path}" "${evidence_path}" "${snapshot_name}" "${snapshot_ref}" <<'PY'
+import json
+import os
+import sys
+import time
+
+status_path, evidence_path, snapshot_name, snapshot_ref = sys.argv[1:5]
+status = {}
+if os.path.isfile(status_path):
+    with open(status_path, "r", encoding="utf-8") as handle:
+        value = json.load(handle)
+        if isinstance(value, dict):
+            status = value
+with open(evidence_path, "r", encoding="utf-8") as handle:
+    evidence = json.load(handle)
+if not isinstance(evidence, list) or not evidence:
+    raise SystemExit("CBT activation evidence is empty")
+if not all(item.get("querySucceeded") and item.get("changeId") for item in evidence):
+    raise SystemExit("CBT activation evidence is incomplete")
+status.update({
+    "schemaVersion": 2,
+    "phase": "cbt-activation",
+    "lifecycleState": "ACTIVE",
+    "enabled": True,
+    "error_code": "",
+    "message": "CBT activation was verified from the run snapshot",
+    "checkedAtEpochMs": int(time.time() * 1000),
+    "activationEvidence": {
+        "snapshotName": snapshot_name,
+        "snapshotRef": snapshot_ref,
+        "verifiedAtEpochMs": int(time.time() * 1000),
+        "disks": evidence,
+    },
+})
+tmp = status_path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as handle:
+    json.dump(status, handle, sort_keys=True, separators=(",", ":"))
+    handle.write("\n")
+    handle.flush()
+    os.fsync(handle.fileno())
+os.replace(tmp, status_path)
+PY
 }
 
 ftctl_vmware_mover_free_nbd() {
@@ -1718,7 +1811,7 @@ main() {
   local endpoint username password tls_verify thumbprint libdir password_file rows row count i
   local govc_bin source_vm_ref_for_snapshot snapshot_name snapshot_ref snapshot_created="false" mover_rc=0
   local cycle_type requested_mode effective_mode_request mode_decision reseed_reason
-  local metrics_path results_path result_tmp query_path patch_metrics_path journal_path commit_rc mode_state_path guard_rc
+  local metrics_path results_path result_tmp query_path patch_metrics_path journal_path commit_rc mode_state_path guard_rc cbt_evidence_path
 
   [[ -n "${disk_map}" && -f "${disk_map}" ]] || ftctl_vmware_mover_die 65 "FTCTL_DR_DISK_MAP is required"
   [[ -n "${target_disk_map}" && -f "${target_disk_map}" ]] ||
@@ -1788,6 +1881,8 @@ main() {
   journal_path="${FTCTL_DR_CYCLE_JOURNAL_PATH:-${metrics_path}.journal.json}"
   results_path="$(mktemp -p "${FTCTL_DR_VMWARE_MOVER_LOG_DIR}" vmware-cycle-results.XXXXXX.json)"
   printf '[]\n' > "${results_path}"
+  cbt_evidence_path="$(mktemp -p "${FTCTL_DR_VMWARE_MOVER_LOG_DIR}" vmware-cbt-evidence.XXXXXX.json)"
+  printf '[]\n' > "${cbt_evidence_path}"
   ftctl_vmware_mover_write_cycle_journal "${journal_path}" "PREPARING" "FULL_RETRY" "" "" "${results_path}" "${mode_decision}"
   snapshot_ref="$(jq -r '[.[].sourceSnapshotRef // ""] | map(select(. != "")) | .[0] // ""' <<< "${rows}")"
   snapshot_name="$(jq -r '[.[].sourceSnapshotName // ""] | map(select(. != "")) | .[0] // ""' <<< "${rows}")"
@@ -1836,8 +1931,12 @@ main() {
     query_path="$(mktemp -p "${FTCTL_DR_VMWARE_MOVER_LOG_DIR}" vmware-cbt-query-${i}.XXXXXX.json)"
     ftctl_vmware_mover_query_cbt "${endpoint}" "${username}" "${password_file}" "${tls_verify}" "${libdir}" \
       "${source_vm_ref}" "${snapshot_name}" "${cbt_disk_id}" \
-      "$([[ "${effective_mode_request}" == "CBT_INCREMENTAL" ]] && printf '%s' "${previous_change_id}")" "${query_path}"
+      "$([[ "${effective_mode_request}" == "CBT_INCREMENTAL" ]] && printf '%s' "${previous_change_id}")" "${query_path}" \
+      "$([[ "${effective_mode_request}" == "FULL_SEED" || "${effective_mode_request}" == "FULL_RESEED" ]] && printf true || printf false)"
     new_change_id="$(jq -r '.new_change_id // ""' "${query_path}")"
+    jq --arg diskId "${cbt_disk_id}" --arg changeId "${new_change_id}" \
+      '. + [{diskId:$diskId,changeId:$changeId,querySucceeded:true}]' "${cbt_evidence_path}" > "${cbt_evidence_path}.tmp"
+    mv -f "${cbt_evidence_path}.tmp" "${cbt_evidence_path}"
     source_vmdk="$(jq -r '.vmdk_path // ""' "${query_path}")"
     areas_count="$(jq -r '(.areas // []) | length' "${query_path}")"
     changed_bytes="$(jq -r '[.areas[]?.length] | add // 0' "${query_path}")"
@@ -1879,6 +1978,8 @@ main() {
     rm -f "${query_path}" "${patch_metrics_path}" "${result_tmp}"
     i=$((i + 1))
   done
+  ftctl_vmware_mover_publish_cbt_active "${FTCTL_DR_CBT_STATUS_PATH:-}" "${cbt_evidence_path}" "${snapshot_name}" "${snapshot_ref}" || \
+    ftctl_vmware_mover_die 82 "DR_CBT_QUERY_FAILED: CBT activation evidence could not be published"
   ftctl_vmware_mover_write_cycle_journal "${journal_path}" "METADATA_PREPARED" "METADATA_ONLY" "" "" "${results_path}" "${mode_decision}"
   commit_rc=0
   ftctl_vmware_mover_commit_cycle_metrics "${disk_map}" "${results_path}" "${metrics_path}" \
@@ -1892,7 +1993,7 @@ main() {
     "$(jq -r '.effectiveMode // ""' "${metrics_path}")" ||
       ftctl_vmware_mover_die 88 "DR_CBT_LOCAL_COMMIT_FAILED: mode decision state commit failed"
   ftctl_vmware_mover_write_cycle_journal "${journal_path}" "LOCAL_DURABLE" "NONE" "" "" "${results_path}" "${mode_decision}"
-  rm -f "${results_path}"
+  rm -f "${results_path}" "${cbt_evidence_path}"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

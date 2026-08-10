@@ -1034,8 +1034,10 @@ for index, disk in enumerate(disks):
         unresolved.append(item)
 
 status = {
+    "schemaVersion": 2,
     "driver": "VMWARE",
     "phase": "cbt-preflight",
+    "lifecycleState": "CONFIG_REQUIRED",
     "checkedAt": now,
     "vmRef": vm_ref,
     "endpoint": endpoint,
@@ -1043,6 +1045,7 @@ status = {
     "autoEnable": auto_enable,
     "failIfPreExistingSnapshots": fail_snapshots,
     "vmEnabled": False,
+    "vmConfigSignal": "UNKNOWN",
     "enabled": False,
     "enabledByFtctl": False,
     "enableAttempted": False,
@@ -1133,9 +1136,12 @@ try:
         write_status(80, "DR_VMWARE_CBT_DISK_ID_UNRESOLVED")
     vm_enabled, disk_rows, extra = read_state(initial_vm_info)
     status["vmEnabled"] = bool(vm_enabled)
+    status["vmConfigSignal"] = "TRUE" if vm_enabled else "FALSE"
     status["disks"] = disk_rows
-    status["enabled"] = bool(vm_enabled) and all(d.get("ctkEnabled") for d in disk_rows)
-    if status["enabled"]:
+    disk_configured = bool(disk_rows) and all(d.get("ctkEnabled") for d in disk_rows)
+    if disk_configured:
+        status["lifecycleState"] = "CONFIGURED_PENDING_ACTIVATION"
+        status["message"] = "CBT disk configuration is present; run snapshot activation evidence is pending"
         write_status(0, "")
     if not auto_enable:
         status["message"] = "VMware CBT is disabled and autoEnable is false"
@@ -1157,11 +1163,14 @@ try:
     status["enabledByFtctl"] = True
     vm_enabled, disk_rows, extra = read_state()
     status["vmEnabled"] = bool(vm_enabled)
+    status["vmConfigSignal"] = "TRUE" if vm_enabled else "FALSE"
     status["disks"] = disk_rows
-    status["enabled"] = bool(vm_enabled) and all(d.get("ctkEnabled") for d in disk_rows)
-    if status["enabled"]:
+    disk_configured = bool(disk_rows) and all(d.get("ctkEnabled") for d in disk_rows)
+    if disk_configured:
+        status["lifecycleState"] = "CONFIGURED_PENDING_ACTIVATION"
+        status["message"] = "CBT configuration was persisted; run snapshot activation evidence is pending"
         write_status(0, "")
-    status["message"] = "VMware CBT enable command completed but verification still failed"
+    status["message"] = "VMware CBT disk configuration did not persist after the enable command"
     write_status(79, "DR_VMWARE_CBT_VERIFY_FAILED")
 except RuntimeError as exc:
     status["message"] = str(exc)
@@ -1223,6 +1232,7 @@ ftctl_dr_vmware_replication_cycle() {
     FTCTL_DR_CHECKPOINT="${checkpoint_path}" \
     FTCTL_DR_CYCLE_METRICS_PATH="${metrics_path}" \
     FTCTL_DR_CYCLE_JOURNAL_PATH="${journal_path}" \
+    FTCTL_DR_CBT_STATUS_PATH="$(ftctl_dr_vmware_cbt_status_path "${plan}")" \
     FTCTL_DR_SOURCE_OPEN_STATUS_PATH="${source_open_status_path}" \
     FTCTL_DR_SOURCE_SNAPSHOT_STATUS_PATH="${source_snapshot_status_path}" \
     FTCTL_DR_CREDENTIALS_FILE="$([[ -f "${credentials_file}" ]] && printf '%s' "${credentials_file}")" \

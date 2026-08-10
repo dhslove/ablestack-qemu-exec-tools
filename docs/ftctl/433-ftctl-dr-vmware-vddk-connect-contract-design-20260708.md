@@ -607,6 +607,15 @@ Cleanup rules:
 The live validation VM already had `config.changeTrackingEnabled=true`, but the
 engine must handle disabled CBT as part of the DR contract.
 
+> 2026-08-10 update: the disabled-CBT branch was live-tested with powered-on VM
+> `w25-01` (`vm-18049`). VMware created CTK files, exposed a valid per-disk
+> change ID, and accepted `QueryChangedDiskAreas` after a snapshot stun/unstun,
+> while `govc vm.info` continued to report
+> `config.changeTrackingEnabled=false`. The VM-level Boolean is therefore no
+> longer a hard readiness gate. The authoritative state machine, disk evidence,
+> retry, and cleanup contract is defined in
+> `441-ftctl-dr-vmware-cbt-activation-evidence-design-20260810.md`.
+
 Implementation target:
 
 ```text

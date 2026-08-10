@@ -271,6 +271,11 @@ def main() -> None:
     # - We still keep this tool defensive: if change-id is "*" or empty, return empty areas to avoid
     #   accidental full-disk diffs.
     ap.add_argument("--change-id", default="", help="Previous CBT changeId for this disk (empty means unset)")
+    ap.add_argument(
+        "--verify-current",
+        action="store_true",
+        help="Require a current snapshot changeId and prove QueryChangedDiskAreas accepts it",
+    )
 
     args = ap.parse_args()
 
@@ -292,6 +297,23 @@ def main() -> None:
         # - If change_id is "*" or empty, DO NOT query changed areas.
         # - Just report empty areas and advance new_change_id to the current one.
         effective_change_id = (args.change_id or "").strip()
+        if args.verify_current:
+            current_change_id = _disk_backing_change_id(disk) or ""
+            if not current_change_id or current_change_id in ("null", "*"):
+                raise SystemExit(f"Current CBT changeId is unavailable for {args.disk_id}")
+            areas, areas_change_id = _query_changed_areas(vm, snap, disk, current_change_id)
+            print(json.dumps({
+                "disk_id": args.disk_id,
+                "snapshot": args.snapshot,
+                "start_change_id": current_change_id,
+                "change_id": current_change_id,
+                "new_change_id": str(areas_change_id or current_change_id),
+                "vmdk_path": _disk_backing_vmdk_path(disk),
+                "areas": areas,
+                "activation_verified": True,
+            }))
+            return
+
         if effective_change_id in ("", "null", "*"):
             vmdk_path = _disk_backing_vmdk_path(disk)
             cur = _disk_backing_change_id(disk) or ""
