@@ -341,10 +341,12 @@ Implemented on `feature/ftctl-cloud-integration` as follows:
 - `dr_runtime.sh` projects the complete transfer snapshot and marks a sample
   stale when its heartbeat is older than the configured threshold.
 
-Static verification includes Python compilation, shell syntax checks, the
-existing FTCTL self-test/shellcheck suite, and a controlled 1 MiB full-copy
-parser smoke test that produced a terminal schema-version 2 sample with
-`percent=100` and `bytesProcessed=1048576`.
+Static verification includes Python compilation, shell syntax checks, GitHub
+Actions RPM packaging, and a controlled 1 MiB full-copy parser smoke test that
+produced a terminal schema-version 2 sample with `percent=100` and
+`bytesProcessed=1048576`. The repository-wide self-test reached shellcheck but
+did not provide an independent PASS because existing unrelated shellcheck
+warnings remain; those diagnostics are not treated as a live-progress failure.
 
 Live acceptance remains deliberately separate from build acceptance. The next
 operator test must create a new plan, observe at least three increasing samples
