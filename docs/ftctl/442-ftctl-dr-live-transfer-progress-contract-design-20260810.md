@@ -406,3 +406,17 @@ The resolver now requires a non-empty file and catches file, encoding, and JSON
 decode failures. An empty or malformed optional snapshot tree therefore selects
 the existing fallback path without polluting service logs; a valid tree still
 returns the matching managed-object reference. Focused tests cover both cases.
+
+### 11.4 Final corrective deployment verification
+
+GitHub Actions run `31362359087` built and uploaded the RPM for commit
+`2a9f778`; only its optional GitHub Release publication step failed because of
+a GitHub secondary rate limit. The uploaded Actions artifact has SHA-256
+`d5da081c05e81dab5327c288a353feb7c9c79572991fdd958f617702efe9e4bd`
+and was installed on all three DR compute hosts.
+
+After restarting the plan scheduler on `10.10.32.2`, periodic cycle 36 copied
+1,638,400 bytes in `CBT_INCREMENTAL` mode and published a schema-version 2
+`COMPLETE` sample. No snapshot-tree traceback was emitted. This validates the
+fallback correction in a real periodic cycle; full-resynchronization live
+progress acceptance remains the next operator test.
