@@ -1,0 +1,353 @@
+# FTCTL DR Live Transfer Progress Contract Design
+
+- Date: 2026-08-10
+- Status: detailed design; implementation pending
+- Scope: VMware to ABLESTACK and ABLESTACK to VMware synchronization
+- Related: `441-ftctl-dr-vmware-cbt-activation-evidence-design-20260810.md`
+
+## 1. Purpose
+
+An operator must be able to distinguish a healthy long-running transfer from a
+stalled worker. The current operation progress remains at a phase constant
+while a VMware full seed is copying data. Completed cycle metrics are accurate,
+but they arrive only after the copy has finished.
+
+This design makes live transfer progress an FTCTL engine contract. Cloud may
+cache and display it, but must not estimate engine progress from elapsed time,
+RBD allocation, or a fixed workflow step.
+
+## 2. Confirmed Evidence And Root Cause
+
+Live validation used plan `ef73f5f3-9740-4bbd-8c9a-74a972e5f19f`, run
+`7b094458-9973-4874-bca3-3bee46c5d054`.
+
+During the first 100 GiB full seed:
+
+- `qemu-img convert --force-share -p` was alive and consuming CPU;
+- target RBD allocation increased while the process ran;
+- the FTCTL scheduler stayed at `full-seed-transfer`, progress `40`;
+- `transfer_activity_state` was `UNKNOWN`;
+- `transfer_payload_bytes` was `0`;
+- no progress journal existed below the plan runtime directory.
+
+After completion, cycle 1 correctly recorded:
+
+```text
+effectiveMode=FULL_SEED
+virtualBytes=107374182400
+transferPayloadBytes=107374182400
+durationMs=248894
+```
+
+Cycle 2 correctly recorded a 5,701,632 byte CBT incremental transfer. The
+terminal metrics path is therefore correct; the missing part is the live path.
+
+The source-level causes are:
+
+1. `dr_scheduler.sh` writes the fixed operation progress `40` before calling
+   the cycle driver.
+2. `dr_vmware_mover.sh` invokes `qemu-img convert -p` directly. Its carriage
+   return progress stream is not parsed or persisted.
+3. The forward CBT extent helper is called without `--progress-json`, although
+   `dr_extent_patch.py` already supports atomic progress publication.
+4. `FTCTL_DR_TRANSFER_PROGRESS_PATH` is wired into the reverse KVM to VMware
+   path, but not into the normal forward scheduler cycle.
+5. `dr-status` currently exports only transfer state and payload bytes; it has
+   no total, percentage, rate, ETA, sequence, or staleness contract.
+
+## 3. Authority And Semantics
+
+FTCTL is authoritative for the following live facts:
+
+- current cycle identity and transfer mode;
+- logical bytes expected for this cycle;
+- logical bytes successfully processed;
+- current disk and aggregate disk progress;
+- transfer heartbeat and worker identity;
+- terminal completion or failure.
+
+The terms have these meanings:
+
+| Field | Meaning |
+| --- | --- |
+| `bytesTotal` | Logical bytes that this cycle must process |
+| `bytesProcessed` | Logical bytes read and successfully handed to the target writer |
+| `bytesWritten` | Logical bytes confirmed written by the target writer |
+| `payloadBytes` | Data payload processed by the mover; terminal value matches cycle metrics |
+| `percent` | `bytesProcessed / bytesTotal * 100`, clamped to 0..100 |
+| `throughputBps` | Moving-window logical payload rate, not RBD allocated growth |
+| `etaSeconds` | Remaining logical bytes divided by the moving-window rate |
+
+RBD allocated bytes are diagnostic only. Sparse writes and overwrites can make
+allocation stay flat or change non-linearly, so `rbd du` must never be used as
+the canonical progress percentage.
+
+## 4. Versioned Progress Journal
+
+Each cycle owns one file:
+
+```text
+/run/ablestack-vm-ftctl/dr-runtime/plans/<plan>/progress/<run>-cycle-<sequence>.json
+```
+
+The scheduler stores this path in `transfer_progress_path` and passes it to the
+cycle driver as `FTCTL_DR_TRANSFER_PROGRESS_PATH`. The file is written through
+temporary-file, `fsync`, and `os.replace` so readers never observe partial JSON.
+
+Schema version 2:
+
+```json
+{
+  "schemaVersion": 2,
+  "planUuid": "plan-uuid",
+  "runUuid": "run-uuid",
+  "cycleSequence": 1,
+  "sampleSequence": 17,
+  "direction": "VMWARE_TO_KVM",
+  "mode": "FULL_SEED",
+  "phase": "TRANSFER",
+  "state": "COPYING",
+  "diskIndex": 0,
+  "diskCount": 1,
+  "diskLabel": "Disk 1",
+  "bytesTotal": 107374182400,
+  "bytesProcessed": 25032704000,
+  "sourceReadBytes": 25032704000,
+  "targetWrittenBytes": 25032704000,
+  "payloadBytes": 25032704000,
+  "verifiedBytes": 0,
+  "percent": 23.31,
+  "throughputBps": 418381824,
+  "etaSeconds": 197,
+  "estimated": true,
+  "source": "QEMU_IMG_PROGRESS",
+  "workerPid": 12345,
+  "workerStartTicks": 987654,
+  "sampledAtEpochMs": 1786332000000,
+  "heartbeatAtEpochMs": 1786332000000
+}
+```
+
+Allowed `state` values are `PREPARING`, `COPYING`, `VERIFYING`, `COMMITTING`,
+`COMPLETE`, `FAILED`, and `STALE`. `sampleSequence` is strictly increasing
+within one cycle. A reader rejects a sample whose plan, run, or cycle identity
+does not match the active authority.
+
+## 5. FTCTL Code-Level Changes
+
+### 5.1 `lib/ftctl/dr_scheduler.sh`
+
+Add `ftctl_dr_scheduler_cycle_progress_path(plan, run, sequence)` and create the
+parent directory with mode `0755` before starting a cycle.
+
+At cycle start:
+
+1. write an initial `PREPARING` journal with sample sequence 1;
+2. persist `transfer_progress_path` in plan and run state;
+3. invoke `ftctl_dr_scheduler_run_cycle` with
+   `FTCTL_DR_TRANSFER_PROGRESS_PATH=<path>`;
+4. project live journal values into `status.state` on each `dr-status` read;
+5. preserve the last valid sample on failure instead of resetting bytes to 0.
+
+The existing operation progress `40` becomes only a fallback for an engine that
+does not advertise `dr-live-transfer-progress-v2`. It is not the displayed data
+transfer percentage.
+
+### 5.2 New `lib/ftctl/dr_qemu_img_progress.py`
+
+This helper owns the full-seed child process. It receives the complete
+`qemu-img` argument vector without shell re-evaluation, captures stderr, and
+parses the `-p` carriage-return stream with a bounded expression equivalent to:
+
+```python
+r"\(?\s*(\d+(?:\.\d+)?)\s*/\s*100%\s*\)?"
+```
+
+For every accepted sample it:
+
+- rejects regressions within the same disk;
+- converts percentage to logical bytes using the disk virtual size;
+- computes a 10-second exponentially weighted throughput;
+- leaves throughput and ETA null until at least two non-zero samples spanning
+  one second exist, and leaves ETA null whenever the measured rate is zero;
+- writes no more than one journal update per second unless state changes;
+- forwards non-progress stderr to the mover log;
+- returns the exact child exit code;
+- writes `FAILED` before returning a non-zero exit code;
+- writes `COMPLETE` only after `qemu-img` exits zero.
+
+No credential, VDDK password-file path, or full image-options string is written
+to the progress journal.
+
+### 5.3 `lib/ftctl/dr_vmware_mover.sh`
+
+Extend `ftctl_vmware_mover_convert_disk` with progress identity, disk index,
+disk count, virtual bytes, and base bytes. Replace the direct `qemu-img`
+invocation with `dr_qemu_img_progress.py --progress-json ... -- qemu-img ...`.
+
+For CBT incremental copies, pass these existing helper arguments:
+
+```text
+--progress-json "$FTCTL_DR_TRANSFER_PROGRESS_PATH"
+--progress-base-bytes <completed-prior-disks>
+--progress-disk-index <index>
+```
+
+Before copying, calculate `bytesTotal` as:
+
+- full seed/reseed: sum of selected disk virtual bytes;
+- CBT incremental: sum of normalized changed extent lengths;
+- no change: 0, with a direct `COMPLETE` sample.
+
+### 5.4 `lib/ftctl/dr_extent_patch.py`
+
+Upgrade the existing writer to schema version 2 and accept plan, run, cycle,
+mode, disk count, total bytes, and base bytes. Publish after a successful write,
+not merely after a source read. During verification, keep transfer percentage at
+100 and publish a separate verification percentage/byte count.
+
+The same helper contract is used by VMware to KVM and KVM to VMware. Direction
+changes the provider-specific mover, not the progress schema.
+
+### 5.5 `lib/ftctl/dr_runtime.sh`
+
+Extend `dr-status` with:
+
+```text
+transfer_progress_schema_version
+transfer_cycle_sequence
+transfer_sample_sequence
+transfer_phase
+transfer_activity_state
+transfer_mode
+transfer_bytes_total
+transfer_bytes_processed
+transfer_source_read_bytes
+transfer_target_written_bytes
+transfer_payload_bytes
+transfer_verified_bytes
+transfer_percent
+transfer_throughput_bps
+transfer_eta_seconds
+transfer_current_disk_index
+transfer_disk_count
+transfer_progress_estimated
+transfer_progress_sampled_at_epoch_ms
+transfer_progress_stale
+```
+
+Staleness is true when an active transfer sample is older than
+`max(15 seconds, 3 * publication interval)`. If the worker PID/start ticks no
+longer match and no terminal journal exists, status becomes `STALE`, not
+`COMPLETE` and not an immediate destructive retry.
+
+At terminal completion, use committed cycle metrics to force an exact 100%
+sample. Full-seed `estimated=true` means the in-flight byte count was derived
+from `qemu-img` logical percentage; terminal metrics remain authoritative.
+The transfer may reach 100% while target flush, verification, and checkpoint
+commit are still running. In that state raw transfer stays at 100%, while the
+whole-operation progress remains below 100 until the terminal commit succeeds.
+
+## 6. Multi-Disk Aggregation
+
+Percentages are weighted by logical bytes:
+
+```text
+aggregateProcessed = completedPriorDiskBytes + currentDiskProcessed
+aggregatePercent = aggregateProcessed / aggregateTotal * 100
+```
+
+An arithmetic average of disk percentages is forbidden because a 1 GiB disk
+and a 1 TiB disk do not have equal weight. Disk indices are zero-based in the
+engine contract and rendered one-based by the UI.
+
+## 7. Operation Progress Mapping
+
+Transfer progress and whole-operation progress are separate values. FTCTL emits
+raw transfer progress; Cloud maps it into a workflow range:
+
+| Operation phase | Whole-operation range |
+| --- | --- |
+| prepare and preflight | 0-10 |
+| snapshot and CBT evidence | 10-20 |
+| target preparation | 20-30 |
+| data transfer | 30-85 |
+| verification | 85-92 |
+| checkpoint commit | 92-97 |
+| target materialization | 97-100 |
+
+For example, 50% transfer means 57.5% whole-operation progress. The UI must
+also show the raw 50% transfer value and bytes so the operator is not forced to
+interpret the workflow mapping.
+
+## 8. Validation
+
+Unit and integration tests must cover:
+
+1. qemu-img samples `0.00/100%`, `42.50/100%`, and `100.00/100%` separated by
+   carriage returns;
+2. malformed and unrelated stderr lines;
+3. child failure with exact exit-code propagation and last-byte preservation;
+4. atomic journal reads during concurrent writes;
+5. monotonic sample and byte enforcement;
+6. weighted multi-disk aggregation;
+7. full seed, CBT incremental, no-change, verify, and terminal samples;
+8. stale heartbeat and PID reuse detection;
+9. absence of credentials and image-option secrets;
+10. compatibility fallback when schema version 2 is absent.
+
+Live acceptance requires one new full seed and one later CBT incremental cycle.
+During both transfers, at least three increasing samples must be observed before
+completion. The completed journal bytes must match the committed cycle metrics.
+
+## 9. Implementation Priority
+
+1. **P0**: scheduler-owned progress path and forward mover publication.
+2. **P0**: qemu-img parser, extent-helper schema v2, and strict identity.
+3. **P0**: `dr-status` fields, staleness, and terminal reconciliation.
+4. **P1**: Agent/Cloud transport and UI presentation defined in the paired
+   Cloud document.
+5. **P1**: full-seed and incremental live acceptance tests.
+6. **P2**: optional long-term throughput trend analytics; not required for
+   correct live progress.
+
+## 10. AS-IS / TO-BE
+
+| Area | AS-IS | TO-BE |
+| --- | --- | --- |
+| Full seed | `qemu-img -p` output is not consumed | Dedicated parser publishes atomic progress samples |
+| Forward CBT | Extent helper called without a progress path | Existing progress writer receives full cycle identity and totals |
+| Reverse path | Partial live journal only | Same versioned schema in both directions |
+| Transfer percent | Fixed scheduler phase value `40` | Logical-byte weighted live percentage |
+| Transfer bytes | Zero while active, accurate only after completion | Monotonic processed/written bytes while active and exact terminal metrics |
+| Throughput/ETA | Not available | Moving-window throughput and bounded ETA |
+| Liveness | Worker and transfer evidence can disagree | Journal heartbeat plus PID/start-ticks identity |
+| Stalled transfer | Indistinguishable from slow transfer | Explicit stale state with last valid progress preserved |
+| RBD allocation | Tempting but misleading proxy | Diagnostic only; never progress authority |
+
+## 11. Implementation Result
+
+Implemented on `feature/ftctl-cloud-integration` as follows:
+
+- `dr_qemu_img_progress.py` owns full-seed `qemu-img` execution, parses its
+  carriage-return progress stream, and atomically publishes schema-version 2
+  samples without logging credentials or source options;
+- `dr_extent_patch.py` publishes the same schema during CBT extent transfer;
+- `dr_vmware_mover.sh` supplies plan, run, cycle, disk, total-byte, and
+  completed-byte identity to both transfer paths and writes an exact terminal
+  sample after all disks complete;
+- `dr_scheduler.sh` creates a run-scoped progress path and persists it in the
+  runtime state; `dr_vmware.sh` forwards it to the mover;
+- `dr_runtime.sh` projects the complete transfer snapshot and marks a sample
+  stale when its heartbeat is older than the configured threshold.
+
+Static verification includes Python compilation, shell syntax checks, the
+existing FTCTL self-test/shellcheck suite, and a controlled 1 MiB full-copy
+parser smoke test that produced a terminal schema-version 2 sample with
+`percent=100` and `bytesProcessed=1048576`.
+
+Live acceptance remains deliberately separate from build acceptance. The next
+operator test must create a new plan, observe at least three increasing samples
+during the initial full seed, then modify source data and confirm the following
+CBT cycle reports a smaller exact payload. Failover testing must not start until
+Agent, Cloud DB/API, and UI all agree with the FTCTL journal for both cycles.

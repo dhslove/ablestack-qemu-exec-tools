@@ -1202,7 +1202,7 @@ ftctl_dr_scheduler_worker() {
   local nbd_teardown_state nbd_teardown_started_at_ms nbd_teardown_completed_at_ms nbd_teardown_duration_ms
   local nbd_source_device_count nbd_target_device_count nbd_quarantined_device_count nbd_teardown_error_code nbd_teardown_error_message
   local cycle_started_epoch next_cycle_epoch next_cycle_at wait_seconds control_generation
-  local cycle_run cycle_request_mode cycle_request_owner cycle_request_state cycle_request_bound sequence_path
+  local cycle_run cycle_request_mode cycle_request_owner cycle_request_state cycle_request_bound sequence_path transfer_progress_path
   local session lease_epoch authority_sequence start_ticks owner_lock_path
 
   [[ -n "${plan}" && -n "${run}" && -f "${profile_file}" && -f "${state_path}" ]] || return 2
@@ -1359,6 +1359,7 @@ ftctl_dr_scheduler_worker() {
       cycle_type="$(ftctl_dr_scheduler_cycle_type "${sequence}" "${source_provider}" "${state_path}" "${target_provider}" "${plan}")"
     fi
     checkpoint_ref="ftctl:${plan}:${cycle_run}:${sequence}"
+    transfer_progress_path="$(ftctl_dr_runtime_run_journal_path "${plan}" "${cycle_run}" progress)"
     cycle_started_epoch="$(date +%s)"
     now="$(ftctl_now_iso8601)"
     if ! ftctl_dr_scheduler_lock_acquire "${plan}" "cycle" 202 0 "${run}:${sequence}"; then
@@ -1395,6 +1396,7 @@ ftctl_dr_scheduler_worker() {
       "current_checkpoint_invalid_baseline_disk_count=0" \
       "current_checkpoint_ref=${checkpoint_ref}" \
       "current_checkpoint_state=TRANSFERRING" \
+      "transfer_progress_path=${transfer_progress_path}" \
       "runtime_generation=${authority_sequence}" \
       "scheduler_session_uuid=${session}" \
       "scheduler_lease_epoch=${lease_epoch}" \
@@ -1411,7 +1413,8 @@ ftctl_dr_scheduler_worker() {
     fi
 
     rc=0
-    output="$(ftctl_dr_scheduler_run_cycle "${plan}" "${cycle_run}" "${profile_file}" "${sequence}" "${cycle_type}")" || rc=$?
+    output="$(FTCTL_DR_TRANSFER_PROGRESS_PATH="${transfer_progress_path}" \
+      ftctl_dr_scheduler_run_cycle "${plan}" "${cycle_run}" "${profile_file}" "${sequence}" "${cycle_type}")" || rc=$?
     ftctl_dr_scheduler_lock_release "${plan}" "cycle" 202
     if [[ "${rc}" != "0" ]]; then
       case "${rc}" in

@@ -47,6 +47,17 @@ def write_progress(path: str, payload: Dict[str, object]) -> None:
             os.unlink(temporary)
 
 
+def read_progress_sequence(path: str) -> int:
+    if not path:
+        return 0
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            value = json.load(handle)
+            return max(0, int(value.get("sampleSequence") or 0)) if isinstance(value, dict) else 0
+    except (OSError, TypeError, ValueError):
+        return 0
+
+
 def parse_rbd_target(target: str):
     if not target.startswith("rbd:"):
         return None
@@ -97,6 +108,14 @@ def copy_extents(
     progress_json: str = "",
     progress_base_bytes: int = 0,
     progress_disk_index: int = 0,
+    progress_total_bytes: int = 0,
+    progress_disk_count: int = 1,
+    progress_disk_label: str = "",
+    progress_mode: str = "CBT_INCREMENTAL",
+    progress_plan_uuid: str = "",
+    progress_run_uuid: str = "",
+    progress_cycle_sequence: int = 0,
+    progress_final_disk: bool = False,
 ) -> Dict[str, int]:
     source_fd = os.open(source, os.O_RDONLY)
     target_fd = None
@@ -108,22 +127,47 @@ def copy_extents(
     bytes_written = 0
     verified_bytes = 0
     last_progress = 0.0
+    sample_sequence = int(read_progress_sequence(progress_json))
+    expected_payload_bytes = sum(max(0, int(item.get("length", 0))) for item in areas)
+    aggregate_total_bytes = max(progress_total_bytes, progress_base_bytes + expected_payload_bytes)
 
     def publish_progress(state: str, force: bool = False) -> None:
-        nonlocal last_progress
+        nonlocal last_progress, sample_sequence
         now = time.monotonic()
         if not force and now - last_progress < 2.0:
             return
         last_progress = now
+        sample_sequence += 1
+        processed = progress_base_bytes + bytes_read
+        elapsed = max(0.001, (time.monotonic_ns() - started) / 1_000_000_000)
+        throughput = max(0, int(bytes_read / elapsed))
+        remaining = max(0, aggregate_total_bytes - processed)
+        percent = (processed * 100.0 / aggregate_total_bytes) if aggregate_total_bytes > 0 else 0.0
         write_progress(progress_json, {
-            "schemaVersion": 1,
+            "schemaVersion": 2,
+            "planUuid": progress_plan_uuid,
+            "runUuid": progress_run_uuid,
+            "cycleSequence": progress_cycle_sequence,
+            "sampleSequence": sample_sequence,
+            "phase": "VERIFY" if state == "VERIFYING" else "TRANSFER",
             "state": state,
+            "mode": progress_mode,
+            "direction": "VMWARE_TO_KVM",
             "diskIndex": progress_disk_index,
+            "diskCount": max(1, progress_disk_count),
+            "diskLabel": progress_disk_label,
+            "bytesTotal": aggregate_total_bytes,
+            "bytesProcessed": processed,
             "sourceReadBytes": progress_base_bytes + bytes_read,
             "targetWrittenBytes": progress_base_bytes + bytes_written,
             "transferPayloadBytes": progress_base_bytes + bytes_read,
             "verifiedBytes": verified_bytes,
+            "percent": round(max(0.0, min(100.0, percent)), 2),
+            "throughputBps": throughput,
+            "etaSeconds": int(remaining / throughput) if throughput > 0 and remaining > 0 else 0,
+            "progressEstimated": False,
             "updatedAtEpochMs": int(time.time() * 1000),
+            "heartbeatAtEpochMs": int(time.time() * 1000),
         })
     try:
         source_size = device_size(source_fd)
@@ -205,7 +249,7 @@ def copy_extents(
                     remaining -= amount
                     publish_progress("VERIFYING")
         duration_ms = max(1, (time.monotonic_ns() - started) // 1_000_000)
-        publish_progress("COMPLETE", True)
+        publish_progress("COMPLETE" if progress_final_disk else "COPYING", True)
         return {
             "changedExtentCount": len(normalized),
             "changedBytes": sum(item["length"] for item in normalized),
@@ -241,6 +285,14 @@ def main() -> int:
     parser.add_argument("--progress-json", default="")
     parser.add_argument("--progress-base-bytes", type=int, default=0)
     parser.add_argument("--progress-disk-index", type=int, default=0)
+    parser.add_argument("--progress-total-bytes", type=int, default=0)
+    parser.add_argument("--progress-disk-count", type=int, default=1)
+    parser.add_argument("--progress-disk-label", default="")
+    parser.add_argument("--progress-mode", default="CBT_INCREMENTAL")
+    parser.add_argument("--progress-plan-uuid", default="")
+    parser.add_argument("--progress-run-uuid", default="")
+    parser.add_argument("--progress-cycle-sequence", type=int, default=0)
+    parser.add_argument("--progress-final-disk", action="store_true")
     args = parser.parse_args()
     with open(args.areas_json, "r", encoding="utf-8") as handle:
         payload = json.load(handle)
@@ -255,6 +307,14 @@ def main() -> int:
         args.progress_json,
         max(0, args.progress_base_bytes),
         max(0, args.progress_disk_index),
+        max(0, args.progress_total_bytes),
+        max(1, args.progress_disk_count),
+        args.progress_disk_label,
+        args.progress_mode,
+        args.progress_plan_uuid,
+        args.progress_run_uuid,
+        max(0, args.progress_cycle_sequence),
+        args.progress_final_disk,
     )
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     return 0

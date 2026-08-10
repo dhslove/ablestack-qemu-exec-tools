@@ -3100,6 +3100,10 @@ ftctl_dr_runtime_emit_state_json() {
   local terminal_source terminal_version terminal_publication_pending terminal_publication_pending_since terminal_pending_age
   local worker_identity_state worker_liveness_state worker_launch_nonce worker_generation worker_heartbeat_current
   local transfer_activity_state transfer_payload_bytes owned_process_count reconciliation_required terminal_authoritative runtime_endpoints_drained
+  local transfer_progress_schema_version transfer_cycle_sequence transfer_sample_sequence transfer_phase transfer_mode
+  local transfer_bytes_total transfer_bytes_processed transfer_source_read_bytes transfer_target_written_bytes transfer_verified_bytes
+  local transfer_percent transfer_throughput_bps transfer_eta_seconds transfer_current_disk_index transfer_disk_count
+  local transfer_progress_estimated transfer_progress_sample_epoch_ms transfer_progress_stale
   local worker_journal_path terminal_journal_path progress_journal_path actual_worker_start_ticks heartbeat_age progress_updated_epoch progress_age
   local runtime_generation scheduler_pid_alive baseline_state reseed_reason consecutive_automatic_reseed_count
   local control_protocol_version control_generation control_ack_generation control_state cycle_state
@@ -3278,6 +3282,24 @@ ftctl_dr_runtime_emit_state_json() {
   worker_generation="0"
   transfer_activity_state="UNKNOWN"
   transfer_payload_bytes="0"
+  transfer_progress_schema_version="0"
+  transfer_cycle_sequence="0"
+  transfer_sample_sequence="0"
+  transfer_phase="UNKNOWN"
+  transfer_mode="UNKNOWN"
+  transfer_bytes_total="0"
+  transfer_bytes_processed="0"
+  transfer_source_read_bytes="0"
+  transfer_target_written_bytes="0"
+  transfer_verified_bytes="0"
+  transfer_percent="0"
+  transfer_throughput_bps="0"
+  transfer_eta_seconds="0"
+  transfer_current_disk_index="0"
+  transfer_disk_count="0"
+  transfer_progress_estimated="false"
+  transfer_progress_sample_epoch_ms="0"
+  transfer_progress_stale="false"
   owned_process_count="0"
   reconciliation_required="false"
   terminal_authoritative="false"
@@ -3307,11 +3329,31 @@ ftctl_dr_runtime_emit_state_json() {
     if [[ -f "${progress_journal_path}" ]]; then
       transfer_activity_state="$(jq -r '.state // "UNKNOWN"' "${progress_journal_path}" 2>/dev/null || printf UNKNOWN)"
       transfer_payload_bytes="$(jq -r '.transferPayloadBytes // 0' "${progress_journal_path}" 2>/dev/null || printf 0)"
+      transfer_progress_schema_version="$(jq -r '.schemaVersion // 0' "${progress_journal_path}" 2>/dev/null || printf 0)"
+      transfer_cycle_sequence="$(jq -r '.cycleSequence // 0' "${progress_journal_path}" 2>/dev/null || printf 0)"
+      transfer_sample_sequence="$(jq -r '.sampleSequence // 0' "${progress_journal_path}" 2>/dev/null || printf 0)"
+      transfer_phase="$(jq -r '.phase // "UNKNOWN"' "${progress_journal_path}" 2>/dev/null || printf UNKNOWN)"
+      transfer_mode="$(jq -r '.mode // "UNKNOWN"' "${progress_journal_path}" 2>/dev/null || printf UNKNOWN)"
+      transfer_bytes_total="$(jq -r '.bytesTotal // 0' "${progress_journal_path}" 2>/dev/null || printf 0)"
+      transfer_bytes_processed="$(jq -r '.bytesProcessed // .transferPayloadBytes // 0' "${progress_journal_path}" 2>/dev/null || printf 0)"
+      transfer_source_read_bytes="$(jq -r '.sourceReadBytes // 0' "${progress_journal_path}" 2>/dev/null || printf 0)"
+      transfer_target_written_bytes="$(jq -r '.targetWrittenBytes // 0' "${progress_journal_path}" 2>/dev/null || printf 0)"
+      transfer_verified_bytes="$(jq -r '.verifiedBytes // 0' "${progress_journal_path}" 2>/dev/null || printf 0)"
+      transfer_percent="$(jq -r '(.percent // 0) | floor' "${progress_journal_path}" 2>/dev/null || printf 0)"
+      transfer_throughput_bps="$(jq -r '.throughputBps // 0' "${progress_journal_path}" 2>/dev/null || printf 0)"
+      transfer_eta_seconds="$(jq -r '.etaSeconds // 0' "${progress_journal_path}" 2>/dev/null || printf 0)"
+      transfer_current_disk_index="$(jq -r '.diskIndex // 0' "${progress_journal_path}" 2>/dev/null || printf 0)"
+      transfer_disk_count="$(jq -r '.diskCount // 0' "${progress_journal_path}" 2>/dev/null || printf 0)"
+      transfer_progress_estimated="$(jq -r '.progressEstimated // false' "${progress_journal_path}" 2>/dev/null || printf false)"
       progress_updated_epoch="$(jq -r '.updatedAtEpochMs // 0' "${progress_journal_path}" 2>/dev/null || printf 0)"
+      transfer_progress_sample_epoch_ms="${progress_updated_epoch}"
       if [[ "${progress_updated_epoch}" =~ ^[0-9]+$ && "${progress_updated_epoch}" -gt 0 ]]; then
         progress_age=$(( $(date +%s) - (progress_updated_epoch / 1000) ))
       else
         progress_age=999999
+      fi
+      if [[ "${transfer_activity_state}" == "COPYING" || "${transfer_activity_state}" == "VERIFYING" ]]; then
+        [[ "${progress_age}" -le "${FTCTL_DR_TRANSFER_PROGRESS_STALE_SECONDS:-15}" ]] || transfer_progress_stale="true"
       fi
     else
       progress_age=999999
@@ -3883,6 +3925,24 @@ PY
   ftctl_dr_runtime_json_number_field "worker_generation" "${worker_generation}"
   ftctl_dr_runtime_json_string_field "transfer_activity_state" "${transfer_activity_state}"
   ftctl_dr_runtime_json_number_field "transfer_payload_bytes" "${transfer_payload_bytes}"
+  ftctl_dr_runtime_json_number_field "transfer_progress_schema_version" "${transfer_progress_schema_version}"
+  ftctl_dr_runtime_json_number_field "transfer_cycle_sequence" "${transfer_cycle_sequence}"
+  ftctl_dr_runtime_json_number_field "transfer_sample_sequence" "${transfer_sample_sequence}"
+  ftctl_dr_runtime_json_string_field "transfer_phase" "${transfer_phase}"
+  ftctl_dr_runtime_json_string_field "transfer_mode" "${transfer_mode}"
+  ftctl_dr_runtime_json_number_field "transfer_bytes_total" "${transfer_bytes_total}"
+  ftctl_dr_runtime_json_number_field "transfer_bytes_processed" "${transfer_bytes_processed}"
+  ftctl_dr_runtime_json_number_field "transfer_source_read_bytes" "${transfer_source_read_bytes}"
+  ftctl_dr_runtime_json_number_field "transfer_target_written_bytes" "${transfer_target_written_bytes}"
+  ftctl_dr_runtime_json_number_field "transfer_verified_bytes" "${transfer_verified_bytes}"
+  ftctl_dr_runtime_json_number_field "transfer_percent" "${transfer_percent}"
+  ftctl_dr_runtime_json_number_field "transfer_throughput_bps" "${transfer_throughput_bps}"
+  ftctl_dr_runtime_json_number_field "transfer_eta_seconds" "${transfer_eta_seconds}"
+  ftctl_dr_runtime_json_number_field "transfer_current_disk_index" "${transfer_current_disk_index}"
+  ftctl_dr_runtime_json_number_field "transfer_disk_count" "${transfer_disk_count}"
+  ftctl_dr_runtime_json_boolean_field "transfer_progress_estimated" "${transfer_progress_estimated}" || return $?
+  ftctl_dr_runtime_json_number_field "transfer_progress_sample_epoch_ms" "${transfer_progress_sample_epoch_ms}"
+  ftctl_dr_runtime_json_boolean_field "transfer_progress_stale" "${transfer_progress_stale}" || return $?
   ftctl_dr_runtime_json_number_field "owned_process_count" "${owned_process_count}"
   ftctl_dr_runtime_json_boolean_field "reconciliation_required" "${reconciliation_required}" || return $?
   ftctl_dr_runtime_json_boolean_field "runtime_endpoints_drained" "${runtime_endpoints_drained}" || return $?

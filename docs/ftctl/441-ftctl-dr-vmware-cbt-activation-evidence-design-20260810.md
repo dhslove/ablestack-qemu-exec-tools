@@ -11,6 +11,11 @@ The design applies to the VMware to KVM forward replication path. It does not
 change the already successful path for a VM whose selected disks already
 produce valid CBT change IDs.
 
+Live transfer observability after CBT activation is defined separately in
+`442-ftctl-dr-live-transfer-progress-contract-design-20260810.md`. That
+document is normative for in-flight bytes, percentage, throughput, ETA, and
+stalled-transfer detection; this document remains normative for CBT readiness.
+
 ## 2. Failure Evidence
 
 The failed run was `df40cd82-ac55-473e-a4e0-4a1dc94592d7`.

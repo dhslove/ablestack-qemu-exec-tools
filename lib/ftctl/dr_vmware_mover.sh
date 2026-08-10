@@ -921,6 +921,7 @@ ftctl_vmware_mover_patch_disk() {
   local source_vmdk="${1-}" source_vm_ref="${2-}" source_snapshot_ref="${3-}" target_uri="${4-}" target_format="${5-}" label="${6-}"
   local endpoint="${7-}" username="${8-}" password_file="${9-}" tls_verify="${10-}" thumbprint="${11-}" libdir="${12-}"
   local areas_path="${13-}" metrics_path="${14-}" expected_bytes="${15-}" work_dir socket_path pid="" source_opts safe_label nbdkit_log qemu_info_log transports
+  local progress_path="${16-}" progress_base_bytes="${17-0}" progress_total_bytes="${18-0}" progress_disk_index="${19-0}" progress_disk_count="${20-1}" progress_final_disk="${21-false}"
   local source_dev="" target_dev="" target_cleanup_dev="" target_direct=false target_direct_block=false
   local patch_helper lock_file="${FTCTL_DR_VMWARE_NBD_LOCK:-/run/ablestack-vm-ftctl/dr-runtime/nbd.lock}"
   local attach_attempt ready=false attached=false cleanup_rc=0
@@ -1047,8 +1048,16 @@ ftctl_vmware_mover_patch_disk() {
   flock -u 9
 
   patch_helper="${FTCTL_DR_VMWARE_EXTENT_PATCH_HELPER:-${FTCTL_DR_VMWARE_MOVER_LIB_DIR}/dr_extent_patch.py}"
-  if ! python3 "${patch_helper}" --source "${source_dev}" --target "${target_dev}" --areas-json "${areas_path}" \
-      --expected-source-size "${expected_bytes}" --expected-target-size "${expected_bytes}" > "${metrics_path}"; then
+  local patch_command=(python3 "${patch_helper}" --source "${source_dev}" --target "${target_dev}" --areas-json "${areas_path}"
+      --expected-source-size "${expected_bytes}" --expected-target-size "${expected_bytes}"
+      --progress-json "${progress_path}" --progress-base-bytes "${progress_base_bytes:-0}"
+      --progress-total-bytes "${progress_total_bytes:-0}" --progress-disk-index "${progress_disk_index:-0}"
+      --progress-disk-count "${progress_disk_count:-1}" --progress-disk-label "${label}"
+      --progress-mode "${FTCTL_DR_CYCLE_EFFECTIVE_MODE:-CBT_INCREMENTAL}"
+      --progress-plan-uuid "${FTCTL_DR_PLAN_UUID:-}" --progress-run-uuid "${FTCTL_DR_RUN_UUID:-}"
+      --progress-cycle-sequence "${FTCTL_DR_CHECKPOINT_SEQUENCE:-0}")
+  [[ "${progress_final_disk}" == "true" ]] && patch_command+=(--progress-final-disk)
+  if ! "${patch_command[@]}" > "${metrics_path}"; then
     cleanup_rc=0
     ftctl_vmware_mover_nbd_cleanup_pair "${target_cleanup_dev}" "${source_dev}" || cleanup_rc=$?
     ftctl_vmware_mover_cleanup_nbdkit "${pid}" "${work_dir}"
@@ -1075,6 +1084,66 @@ ftctl_vmware_mover_safe_label() {
   value="${value//[^A-Za-z0-9_.-]/_}"
   [[ -n "${value}" ]] || value="disk"
   printf '%s\n' "${value}"
+}
+
+ftctl_vmware_mover_finalize_transfer_progress() {
+  local path="${1-}" total_bytes="${2-0}" processed_bytes="${3-0}" mode="${4-}" disk_count="${5-0}"
+  [[ -n "${path}" ]] || return 0
+  python3 - "${path}" "${FTCTL_DR_PLAN_UUID:-}" "${FTCTL_DR_RUN_UUID:-}" "${FTCTL_DR_CHECKPOINT_SEQUENCE:-0}" \
+    "${total_bytes:-0}" "${processed_bytes:-0}" "${mode}" "${disk_count:-0}" <<'PY'
+import json
+import os
+import sys
+import tempfile
+import time
+
+path, plan, run, cycle, total, processed, mode, disk_count = sys.argv[1:9]
+previous = {}
+try:
+    with open(path, "r", encoding="utf-8") as handle:
+        value = json.load(handle)
+        previous = value if isinstance(value, dict) else {}
+except (OSError, ValueError):
+    pass
+total_value = max(0, int(total or 0))
+processed_value = max(0, int(processed or 0))
+now_ms = int(time.time() * 1000)
+payload = dict(previous)
+payload.update({
+    "schemaVersion": 2,
+    "planUuid": plan,
+    "runUuid": run,
+    "cycleSequence": max(0, int(cycle or 0)),
+    "sampleSequence": max(0, int(previous.get("sampleSequence") or 0)) + 1,
+    "phase": "COMPLETE",
+    "state": "COMPLETE",
+    "mode": mode,
+    "direction": "VMWARE_TO_KVM",
+    "diskCount": max(0, int(disk_count or 0)),
+    "bytesTotal": total_value,
+    "bytesProcessed": processed_value,
+    "sourceReadBytes": processed_value,
+    "targetWrittenBytes": processed_value,
+    "transferPayloadBytes": processed_value,
+    "percent": 100.0,
+    "etaSeconds": 0,
+    "updatedAtEpochMs": now_ms,
+    "heartbeatAtEpochMs": now_ms,
+})
+directory = os.path.dirname(path) or "."
+os.makedirs(directory, exist_ok=True)
+fd, temporary = tempfile.mkstemp(prefix=f".{os.path.basename(path)}.", dir=directory)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, sort_keys=True, separators=(",", ":"))
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
+finally:
+    if os.path.exists(temporary):
+        os.unlink(temporary)
+PY
 }
 
 ftctl_vmware_mover_normalize_vcenter_server() {
@@ -1412,7 +1481,8 @@ PY
 ftctl_vmware_mover_convert_disk() {
   local source_vmdk="${1-}" source_vm_ref="${2-}" source_snapshot_ref="${3-}" target_uri="${4-}" target_format="${5-}" label="${6-}"
   local endpoint="${7-}" username="${8-}" password_file="${9-}" tls_verify="${10-}" thumbprint="${11-}" libdir="${12-}"
-  local work_dir socket_path pid="" source_opts safe_label nbdkit_log qemu_info_log transports
+  local progress_path="${13-}" disk_index="${14-0}" disk_count="${15-1}" disk_bytes="${16-0}" total_bytes="${17-0}" base_bytes="${18-0}" final_disk="${19-false}"
+  local work_dir socket_path pid="" source_opts safe_label nbdkit_log qemu_info_log transports progress_helper
 
   [[ -n "${source_vmdk}" ]] || ftctl_vmware_mover_die 65 "source VMDK path is empty for ${label}"
   [[ -n "${target_uri}" ]] || ftctl_vmware_mover_die 65 "target disk path is empty for ${label}"
@@ -1482,7 +1552,28 @@ ftctl_vmware_mover_convert_disk() {
   fi
   ftctl_vmware_mover_write_source_open_status true "" "VDDK source open preflight succeeded" "${source_vm_ref}" "${source_snapshot_ref}" "${source_vmdk}"
 
-  if ! qemu-img convert --force-share -p -n --image-opts -O "${target_format:-raw}" "${source_opts}" "${target_uri}"; then
+  progress_helper="${FTCTL_DR_QEMU_IMG_PROGRESS_HELPER:-${FTCTL_DR_VMWARE_MOVER_LIB_DIR}/dr_qemu_img_progress.py}"
+  local qemu_command=(qemu-img convert --force-share -p -n --image-opts -O "${target_format:-raw}" "${source_opts}" "${target_uri}")
+  local progress_command=(python3 "${progress_helper}"
+    --progress-json "${progress_path}"
+    --plan-uuid "${FTCTL_DR_PLAN_UUID:-}"
+    --run-uuid "${FTCTL_DR_RUN_UUID:-}"
+    --cycle-sequence "${FTCTL_DR_CHECKPOINT_SEQUENCE:-0}"
+    --mode "${FTCTL_DR_CYCLE_EFFECTIVE_MODE:-FULL_SEED}"
+    --disk-index "${disk_index:-0}"
+    --disk-count "${disk_count:-1}"
+    --disk-label "${label}"
+    --disk-bytes "${disk_bytes:-0}"
+    --base-bytes "${base_bytes:-0}"
+    --total-bytes "${total_bytes:-0}")
+  [[ "${final_disk}" == "true" ]] && progress_command+=(--final-disk)
+  if [[ -n "${progress_path}" && -f "${progress_helper}" ]]; then
+    progress_command+=(-- "${qemu_command[@]}")
+    "${progress_command[@]}" || {
+      ftctl_vmware_mover_cleanup_nbdkit "${pid}" "${work_dir}"
+      ftctl_vmware_mover_die 68 "qemu-img conversion failed for ${label}"
+    }
+  elif ! "${qemu_command[@]}"; then
     ftctl_vmware_mover_cleanup_nbdkit "${pid}" "${work_dir}"
     ftctl_vmware_mover_die 68 "qemu-img conversion failed for ${label}"
   fi
@@ -1812,6 +1903,7 @@ main() {
   local govc_bin source_vm_ref_for_snapshot snapshot_name snapshot_ref snapshot_created="false" mover_rc=0
   local cycle_type requested_mode effective_mode_request mode_decision reseed_reason
   local metrics_path results_path result_tmp query_path patch_metrics_path journal_path commit_rc mode_state_path guard_rc cbt_evidence_path
+  local transfer_progress_path transfer_total_bytes transfer_completed_bytes=0 is_final_disk
 
   [[ -n "${disk_map}" && -f "${disk_map}" ]] || ftctl_vmware_mover_die 65 "FTCTL_DR_DISK_MAP is required"
   [[ -n "${target_disk_map}" && -f "${target_disk_map}" ]] ||
@@ -1857,6 +1949,9 @@ main() {
   rows="$(ftctl_vmware_mover_disk_plan "${disk_map}" "${target_disk_map}")"
   count="$(jq 'length' <<< "${rows}")"
   [[ "${count}" =~ ^[1-9][0-9]*$ ]] || ftctl_vmware_mover_die 65 "no VMware disk rows to move"
+  transfer_progress_path="${FTCTL_DR_TRANSFER_PROGRESS_PATH:-}"
+  transfer_total_bytes="$(jq '[.[].virtualBytes // 0] | add // 0' <<< "${rows}")"
+  [[ "${transfer_total_bytes}" =~ ^[0-9]+$ ]] || transfer_total_bytes=0
   cycle_type="${FTCTL_DR_CYCLE_TYPE:-full-seed}"
   case "${cycle_type}" in
     full-seed) requested_mode="FULL_SEED" ;;
@@ -1940,13 +2035,19 @@ main() {
     source_vmdk="$(jq -r '.vmdk_path // ""' "${query_path}")"
     areas_count="$(jq -r '(.areas // []) | length' "${query_path}")"
     changed_bytes="$(jq -r '[.areas[]?.length] | add // 0' "${query_path}")"
+    if [[ "${effective_mode_request}" == "CBT_INCREMENTAL" && "${count}" == "1" ]]; then
+      transfer_total_bytes="${changed_bytes:-0}"
+    fi
+    is_final_disk="$([[ $((i + 1)) -eq "${count}" ]] && printf true || printf false)"
     patch_metrics_path="$(mktemp -p "${FTCTL_DR_VMWARE_MOVER_LOG_DIR}" vmware-patch-metrics-${i}.XXXXXX.json)"
     if [[ "${effective_mode_request}" == "FULL_SEED" || "${effective_mode_request}" == "FULL_RESEED" ]]; then
       local copy_started_ms copy_finished_ms copy_duration_ms
       copy_started_ms="$(date +%s%3N)"
       printf 'VMware DR mover full copy: %s snapshot=%s -> %s\n' "${source_vmdk}" "${source_snapshot_ref:-none}" "${target_uri}" >&2
+      FTCTL_DR_CYCLE_EFFECTIVE_MODE="${effective_mode_request}"
       ftctl_vmware_mover_convert_disk "${source_vmdk}" "${source_vm_ref}" "${source_snapshot_ref}" "${target_uri}" "${target_format:-raw}" "${label:-disk${i}}" \
-        "${endpoint}" "${username}" "${password_file}" "${tls_verify}" "${thumbprint}" "${libdir}"
+        "${endpoint}" "${username}" "${password_file}" "${tls_verify}" "${thumbprint}" "${libdir}" \
+        "${transfer_progress_path}" "${i}" "${count}" "${virtual_bytes:-0}" "${transfer_total_bytes:-0}" "${transfer_completed_bytes:-0}" "${is_final_disk}"
       copy_finished_ms="$(date +%s%3N)"
       copy_duration_ms=$((copy_finished_ms - copy_started_ms))
       (( copy_duration_ms > 0 )) || copy_duration_ms=1
@@ -1962,8 +2063,10 @@ main() {
       effective_mode="CBT_INCREMENTAL"
       incremental_verified="true"
       printf 'VMware DR mover CBT patch: disk=%s extents=%s bytes=%s -> %s\n' "${label:-disk${i}}" "${areas_count}" "${changed_bytes}" "${target_uri}" >&2
+      FTCTL_DR_CYCLE_EFFECTIVE_MODE="CBT_INCREMENTAL"
       ftctl_vmware_mover_patch_disk "${source_vmdk}" "${source_vm_ref}" "${source_snapshot_ref}" "${target_uri}" "${target_format:-raw}" "${label:-disk${i}}" \
-        "${endpoint}" "${username}" "${password_file}" "${tls_verify}" "${thumbprint}" "${libdir}" "${query_path}" "${patch_metrics_path}" "${virtual_bytes}"
+        "${endpoint}" "${username}" "${password_file}" "${tls_verify}" "${thumbprint}" "${libdir}" "${query_path}" "${patch_metrics_path}" "${virtual_bytes}" \
+        "${transfer_progress_path}" "${transfer_completed_bytes:-0}" "${transfer_total_bytes:-0}" "${i}" "${count}" "${is_final_disk}"
     fi
     result_tmp="$(mktemp -p "${FTCTL_DR_VMWARE_MOVER_LOG_DIR}" vmware-cycle-result.XXXXXX.json)"
     if ! ftctl_vmware_mover_build_disk_result "${i}" "${label:-disk${i}}" "${requested_mode}" "${effective_mode}" \
@@ -1975,9 +2078,16 @@ main() {
     jq --slurpfile item "${result_tmp}" '. + $item' "${results_path}" > "${results_path}.tmp"
     mv -f "${results_path}.tmp" "${results_path}"
     ftctl_vmware_mover_write_cycle_journal "${journal_path}" "DATA_COPIED" "METADATA_ONLY" "" "" "${results_path}" "${mode_decision}"
+    if [[ "${effective_mode}" == "FULL_SEED" || "${effective_mode}" == "FULL_RESEED" ]]; then
+      transfer_completed_bytes=$((transfer_completed_bytes + virtual_bytes))
+    else
+      transfer_completed_bytes=$((transfer_completed_bytes + changed_bytes))
+    fi
     rm -f "${query_path}" "${patch_metrics_path}" "${result_tmp}"
     i=$((i + 1))
   done
+  ftctl_vmware_mover_finalize_transfer_progress "${transfer_progress_path}" "${transfer_total_bytes:-0}" \
+    "${transfer_completed_bytes:-0}" "${effective_mode_request}" "${count}"
   ftctl_vmware_mover_publish_cbt_active "${FTCTL_DR_CBT_STATUS_PATH:-}" "${cbt_evidence_path}" "${snapshot_name}" "${snapshot_ref}" || \
     ftctl_vmware_mover_die 82 "DR_CBT_QUERY_FAILED: CBT activation evidence could not be published"
   ftctl_vmware_mover_write_cycle_journal "${journal_path}" "METADATA_PREPARED" "METADATA_ONLY" "" "" "${results_path}" "${mode_decision}"

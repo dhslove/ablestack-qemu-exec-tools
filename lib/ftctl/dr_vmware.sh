@@ -1185,7 +1185,7 @@ PY
 ftctl_dr_vmware_replication_cycle() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" sequence="${4-}" cycle_type="${5-}"
   local disk_map target_disk_map capability_path manifest_path checkpoint_path metrics_path journal_path source_open_status_path source_snapshot_status_path cycle_run now mover_path mover_rc=0
-  local credentials_file=""
+  local credentials_file="" transfer_progress_path=""
   local source_at target_at snapshot_epoch_ms snapshot_source_at source_epoch target_epoch rpo="0"
 
   [[ -n "${plan}" && -n "${run}" && -n "${profile_file}" ]] || return 2
@@ -1198,6 +1198,7 @@ ftctl_dr_vmware_replication_cycle() {
   journal_path="$(ftctl_dr_vmware_cycle_journal_path "${plan}" "${cycle_run}")"
   source_open_status_path="$(ftctl_dr_vmware_source_open_status_path "${plan}")"
   source_snapshot_status_path="$(ftctl_dr_vmware_source_snapshot_status_path "${plan}")"
+  transfer_progress_path="${FTCTL_DR_TRANSFER_PROGRESS_PATH:-$(ftctl_dr_runtime_run_journal_path "${plan}" "${run}" progress)}"
   [[ -f "${disk_map}" ]] || ftctl_dr_vmware_canonicalize_profile "${profile_file}" "${disk_map}" || return $?
   target_disk_map="$(ftctl_dr_ablestack_disk_map_path "${plan}" 2>/dev/null || true)"
   if [[ -z "${target_disk_map}" ]] || ! command -v ftctl_dr_ablestack_canonicalize_profile >/dev/null 2>&1; then
@@ -1232,6 +1233,7 @@ ftctl_dr_vmware_replication_cycle() {
     FTCTL_DR_CHECKPOINT="${checkpoint_path}" \
     FTCTL_DR_CYCLE_METRICS_PATH="${metrics_path}" \
     FTCTL_DR_CYCLE_JOURNAL_PATH="${journal_path}" \
+    FTCTL_DR_TRANSFER_PROGRESS_PATH="${transfer_progress_path}" \
     FTCTL_DR_CBT_STATUS_PATH="$(ftctl_dr_vmware_cbt_status_path "${plan}")" \
     FTCTL_DR_SOURCE_OPEN_STATUS_PATH="${source_open_status_path}" \
     FTCTL_DR_SOURCE_SNAPSHOT_STATUS_PATH="${source_snapshot_status_path}" \
