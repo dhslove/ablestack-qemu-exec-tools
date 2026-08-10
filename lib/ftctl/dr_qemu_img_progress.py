@@ -18,10 +18,12 @@
 import argparse
 import json
 import os
+import queue
 import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from typing import Dict, List
 
@@ -106,24 +108,62 @@ def run(args: argparse.Namespace, command: List[str]) -> int:
     last_publish = 0.0
     last_percent = 0.0
     write_atomic(args.progress_json, payload(args, 0.0, "COPYING", started))
-    process = subprocess.Popen(command, stdout=None, stderr=subprocess.PIPE)
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     buffer = b""
-    assert process.stderr is not None
-    while True:
-        chunk = process.stderr.read(1)
-        if not chunk:
-            break
-        sys.stderr.buffer.write(chunk)
-        sys.stderr.buffer.flush()
-        buffer = (buffer + chunk)[-256:]
-        match = PROGRESS_PATTERN.search(buffer)
-        if not match:
-            continue
-        last_percent = float(match.group(1))
+    assert process.stdout is not None
+    chunks: "queue.Queue[object]" = queue.Queue()
+
+    def read_child_output() -> None:
+        try:
+            while True:
+                chunk = os.read(process.stdout.fileno(), 4096)
+                if not chunk:
+                    break
+                chunks.put(chunk)
+        finally:
+            chunks.put(None)
+
+    reader = threading.Thread(target=read_child_output, name="dr-qemu-progress-reader", daemon=True)
+    reader.start()
+
+    def publish(percent: float, force: bool = False) -> None:
+        nonlocal last_publish, last_percent
+        if percent < last_percent:
+            return
+        last_percent = percent
         now = time.monotonic()
-        if now - last_publish >= 2.0 or last_percent >= 100.0:
+        if force or now - last_publish >= args.publish_interval:
             write_atomic(args.progress_json, payload(args, last_percent, "COPYING", started))
             last_publish = now
+
+    def consume(data: bytes, final: bool = False) -> None:
+        nonlocal buffer
+        buffer += data
+        records = re.split(rb"[\r\n]+", buffer)
+        buffer = b"" if final else records.pop()
+        for record in records:
+            for match in PROGRESS_PATTERN.finditer(record):
+                percent = float(match.group(1))
+                publish(percent, percent >= 100.0)
+        if len(buffer) > 4096:
+            buffer = buffer[-4096:]
+
+    while True:
+        try:
+            chunk = chunks.get(timeout=min(0.5, args.publish_interval))
+            if chunk is None:
+                break
+            if isinstance(chunk, bytes):
+                # Keep stdout reserved for machine-readable wrapper results.
+                # qemu-img progress and diagnostics are relayed to stderr.
+                sys.stderr.buffer.write(chunk)
+                sys.stderr.buffer.flush()
+                consume(chunk)
+        except queue.Empty:
+            if process.poll() is None:
+                publish(last_percent)
+    reader.join(timeout=1.0)
+    consume(b"", final=True)
     return_code = process.wait()
     terminal_state = "COMPLETE" if return_code == 0 and args.final_disk else ("COPYING" if return_code == 0 else "FAILED")
     terminal_percent = 100.0 if return_code == 0 else last_percent
@@ -145,9 +185,11 @@ def main() -> int:
     parser.add_argument("--disk-bytes", type=int, default=0)
     parser.add_argument("--base-bytes", type=int, default=0)
     parser.add_argument("--total-bytes", type=int, default=0)
+    parser.add_argument("--publish-interval", type=float, default=2.0)
     parser.add_argument("--final-disk", action="store_true")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
+    args.publish_interval = max(0.01, args.publish_interval)
     command = args.command[1:] if args.command and args.command[0] == "--" else args.command
     return run(args, command)
 

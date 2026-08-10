@@ -1950,7 +1950,7 @@ main() {
   count="$(jq 'length' <<< "${rows}")"
   [[ "${count}" =~ ^[1-9][0-9]*$ ]] || ftctl_vmware_mover_die 65 "no VMware disk rows to move"
   transfer_progress_path="${FTCTL_DR_TRANSFER_PROGRESS_PATH:-}"
-  transfer_total_bytes="$(jq '[.[].virtualBytes // 0] | add // 0' <<< "${rows}")"
+  transfer_total_bytes="$(jq -r '[.[] | (.virtualBytes | tonumber? // 0)] | add // 0' <<< "${rows}")"
   [[ "${transfer_total_bytes}" =~ ^[0-9]+$ ]] || transfer_total_bytes=0
   cycle_type="${FTCTL_DR_CYCLE_TYPE:-full-seed}"
   case "${cycle_type}" in

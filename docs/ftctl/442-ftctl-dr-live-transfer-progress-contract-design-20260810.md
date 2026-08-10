@@ -1,7 +1,7 @@
 # FTCTL DR Live Transfer Progress Contract Design
 
 - Date: 2026-08-10
-- Status: detailed design; implementation pending
+- Status: corrective implementation complete; build and live acceptance pending
 - Scope: VMware to ABLESTACK and ABLESTACK to VMware synchronization
 - Related: `441-ftctl-dr-vmware-cbt-activation-evidence-design-20260810.md`
 
@@ -42,18 +42,21 @@ durationMs=248894
 Cycle 2 correctly recorded a 5,701,632 byte CBT incremental transfer. The
 terminal metrics path is therefore correct; the missing part is the live path.
 
-The source-level causes are:
+The first implementation added the journal and status fields, but live
+validation of full-reseed run `8aa9d51f-3d29-4236-9c5b-c7427bee4675`
+identified two corrective defects:
 
-1. `dr_scheduler.sh` writes the fixed operation progress `40` before calling
-   the cycle driver.
-2. `dr_vmware_mover.sh` invokes `qemu-img convert -p` directly. Its carriage
-   return progress stream is not parsed or persisted.
-3. The forward CBT extent helper is called without `--progress-json`, although
-   `dr_extent_patch.py` already supports atomic progress publication.
-4. `FTCTL_DR_TRANSFER_PROGRESS_PATH` is wired into the reverse KVM to VMware
-   path, but not into the normal forward scheduler cycle.
-5. `dr-status` currently exports only transfer state and payload bytes; it has
-   no total, percentage, rate, ETA, sequence, or staleness contract.
+1. `dr_qemu_img_progress.py` reads only child `stderr`. On the deployed qemu
+   build, the `-p` stream is observable through inherited `stdout`, so only the
+   initial and terminal samples are persisted. Inherited output can also enter
+   an outer command-substitution channel and corrupt the expected JSON result.
+2. `dr_vmware_mover.sh` calculates the aggregate with `jq` without raw output.
+   Disk-plan `virtualBytes` values are strings, so the result includes quotes,
+   fails the integer regular expression, and is reset to `0`.
+
+The copy itself completed successfully: cycle 25 transferred
+`107374182400` bytes in about 269 seconds. The defect is live telemetry, not
+the VMware/VDDK to RBD data path.
 
 ## 3. Authority And Semantics
 
@@ -156,8 +159,10 @@ transfer percentage.
 ### 5.2 New `lib/ftctl/dr_qemu_img_progress.py`
 
 This helper owns the full-seed child process. It receives the complete
-`qemu-img` argument vector without shell re-evaluation, captures stderr, and
-parses the `-p` carriage-return stream with a bounded expression equivalent to:
+`qemu-img` argument vector without shell re-evaluation, merges child stdout and
+stderr into one parser pipe, and relays that pipe to the wrapper's stderr.
+Wrapper stdout remains reserved for machine-readable JSON. The helper parses
+the `-p` carriage-return stream with a bounded expression equivalent to:
 
 ```python
 r"\(?\s*(\d+(?:\.\d+)?)\s*/\s*100%\s*\)?"
@@ -171,6 +176,8 @@ For every accepted sample it:
 - leaves throughput and ETA null until at least two non-zero samples spanning
   one second exist, and leaves ETA null whenever the measured rate is zero;
 - writes no more than one journal update per second unless state changes;
+- publishes a heartbeat at the configured interval even when no new percent
+  token arrives;
 - forwards non-progress stderr to the mover log;
 - returns the exact child exit code;
 - writes `FAILED` before returning a non-zero exit code;
@@ -193,7 +200,8 @@ For CBT incremental copies, pass these existing helper arguments:
 --progress-disk-index <index>
 ```
 
-Before copying, calculate `bytesTotal` as:
+Before copying, normalize every `virtualBytes` value with `tonumber?`, request
+raw `jq -r` output, and calculate `bytesTotal` as:
 
 - full seed/reseed: sum of selected disk virtual bytes;
 - CBT incremental: sum of normalized changed extent lengths;
@@ -285,7 +293,7 @@ interpret the workflow mapping.
 Unit and integration tests must cover:
 
 1. qemu-img samples `0.00/100%`, `42.50/100%`, and `100.00/100%` separated by
-   carriage returns;
+   carriage returns on either stdout or stderr;
 2. malformed and unrelated stderr lines;
 3. child failure with exact exit-code propagation and last-byte preservation;
 4. atomic journal reads during concurrent writes;
@@ -353,3 +361,17 @@ operator test must create a new plan, observe at least three increasing samples
 during the initial full seed, then modify source data and confirm the following
 CBT cycle reports a smaller exact payload. Failover testing must not start until
 Agent, Cloud DB/API, and UI all agree with the FTCTL journal for both cycles.
+
+### 11.1 Corrective implementation after run 8aa9d51f
+
+- child stdout and stderr are consumed through one bounded parser pipe;
+- all child output is relayed to stderr so wrapper stdout cannot corrupt JSON;
+- progress publication includes interval heartbeats and monotonic percentage
+  rejection;
+- aggregate full-seed bytes use raw numeric `jq` conversion;
+- unit coverage exercises stdout progress, stderr progress, exact child exit
+  propagation, non-zero totals, and monotonic observed samples.
+
+The corrective patch is not accepted until the installed helper produces at
+least three increasing samples with `bytesTotal=107374182400` during a new
+full resynchronization.
