@@ -69,16 +69,26 @@ for required in (
     "sha256sum -c SHA256SUMS",
     "Required WinPE artifact directory was not found",
     "RPM-installed WinPE ISO metadata/link/checksum validation failed.",
-    "Expected exactly 14 GitHub Release assets",
+    "Expected exactly 22 GitHub Release assets",
+    'ABLESTACK-Tools-rocky${ver}-${VERSION}.iso',
+    "GitHub Release asset must be smaller than 2 GiB",
+    "-size +2147483647c",
 ):
     if required not in workflow:
         fail(f"build.yml is missing release guard: {required}")
-if workflow.count('host_os_minor: ["9.6", "9.7", "9.8"]') != 2:
-    fail("build.yml does not build both V2K and N2K for Rocky 9.8")
-if workflow.count('9.8) REPO_ROOT="https://dl.rockylinux.org/pub/rocky/${ROCKY_MINOR}"') != 3:
-    fail("build.yml does not route every Rocky 9.8 V2K/N2K repo setup to pub")
-if workflow.count("for ver in 9.6 9.7 9.8; do") != 4:
-    fail("build.yml does not collect and package every Rocky 9.8 V2K/N2K repo")
+if workflow.count('host_os_minor: ["9.6", "9.7", "9.8"]') != 5:
+    fail("build.yml does not build core, HANGCTL, FTCTL, V2K, and N2K for every Rocky minor")
+if workflow.count('9.8) REPO_ROOT="https://dl.rockylinux.org/pub/rocky/${ROCKY_MINOR}"') != 6:
+    fail("build.yml does not route every Rocky 9.8 package repo setup to pub")
+if workflow.count("for ver in 9.6 9.7 9.8; do") != 6:
+    fail("build.yml does not collect and package every Rocky package repository")
+for artifact_pattern in (
+    "rpm-package-${{ matrix.host_os_minor }}",
+    "hangctl-rpm-package-rocky${{ matrix.host_os_minor }}",
+    "ftctl-rpm-package-rocky${{ matrix.host_os_minor }}",
+):
+    if artifact_pattern not in workflow:
+        fail(f"build.yml is missing versioned Rocky artifact: {artifact_pattern}")
 for required_path in (
     "v2k/v2k-rpm-rocky9.8",
     "n2k/n2k-rpm-rocky9.8",

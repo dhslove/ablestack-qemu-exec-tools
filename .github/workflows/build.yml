@@ -83,11 +83,13 @@ jobs:
       retention_days: "14"
       test_mode: false
 
-  # 1) RPM BUILD (Rocky 9.6)
-  # 1) RPM BUILD (Rocky 9.6)
+  # 1) RPM BUILD (Rocky 9.6 / 9.7 / 9.8)
   # ======================================================================
   build-rpm:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        host_os_minor: ["9.6", "9.7", "9.8"]
     container:
       image: rockylinux/rockylinux:9
       options: --user 0
@@ -97,45 +99,55 @@ jobs:
           fetch-depth: 0
           ref: ${{ env.WORKFLOW_SOURCE_REF }}
 
-      - name: Install build deps (Rocky 9.6 vault)
+      - name: Install build deps (Rocky ${{ matrix.host_os_minor }})
         run: |
           set -euo pipefail
-          cat > /etc/yum.repos.d/rocky-vault-9.6.repo <<'EOF'
-          [rocky-vault-9.6-baseos]
-          name=Rocky Linux 9.6 - BaseOS (vault)
-          baseurl=https://dl.rockylinux.org/vault/rocky/9.6/BaseOS/$basearch/os/
+          ROCKY_MINOR="${{ matrix.host_os_minor }}"
+          REPO_PREFIX="rocky-build-${ROCKY_MINOR}"
+          case "${ROCKY_MINOR}" in
+            9.6|9.7) REPO_ROOT="https://dl.rockylinux.org/vault/rocky/${ROCKY_MINOR}" ;;
+            9.8) REPO_ROOT="https://dl.rockylinux.org/pub/rocky/${ROCKY_MINOR}" ;;
+            *) echo "[ERR] Unsupported Rocky minor for core RPM build: ${ROCKY_MINOR}" >&2; exit 2 ;;
+          esac
+
+          cat > "/etc/yum.repos.d/${REPO_PREFIX}.repo" <<EOF
+          [${REPO_PREFIX}-baseos]
+          name=Rocky Linux ${ROCKY_MINOR} - BaseOS
+          baseurl=${REPO_ROOT}/BaseOS/\$basearch/os/
           enabled=1
           gpgcheck=0
 
-          [rocky-vault-9.6-appstream]
-          name=Rocky Linux 9.6 - AppStream (vault)
-          baseurl=https://dl.rockylinux.org/vault/rocky/9.6/AppStream/$basearch/os/
+          [${REPO_PREFIX}-appstream]
+          name=Rocky Linux ${ROCKY_MINOR} - AppStream
+          baseurl=${REPO_ROOT}/AppStream/\$basearch/os/
           enabled=1
           gpgcheck=0
 
-          [rocky-vault-9.6-crb]
-          name=Rocky Linux 9.6 - CRB (vault)
-          baseurl=https://dl.rockylinux.org/vault/rocky/9.6/CRB/$basearch/os/
+          [${REPO_PREFIX}-crb]
+          name=Rocky Linux ${ROCKY_MINOR} - CRB
+          baseurl=${REPO_ROOT}/CRB/\$basearch/os/
           enabled=1
           gpgcheck=0
           EOF
 
           dnf clean all
-          dnf -y --disablerepo="*" --enablerepo="rocky-vault-9.6-*" makecache
-          dnf -y --disablerepo="*" --enablerepo="rocky-vault-9.6-*" install make rpm-build tar git dnf-plugins-core createrepo_c
+          dnf -y --disablerepo="*" --enablerepo="${REPO_PREFIX}-*" makecache
+          dnf -y --disablerepo="*" --enablerepo="${REPO_PREFIX}-*" install make rpm-build tar git dnf-plugins-core createrepo_c
 
       - name: Build RPM
         run: make rpm
 
-      - name: Create RPM repo (with dependencies) for Rocky 9.6
+      - name: Create RPM repo (with dependencies) for Rocky ${{ matrix.host_os_minor }}
         run: |
           set -euo pipefail
-          WORKDIR="repo/rpm-rocky9.6"
+          ROCKY_MINOR="${{ matrix.host_os_minor }}"
+          REPO_PREFIX="rocky-build-${ROCKY_MINOR}"
+          WORKDIR="repo/rpm-rocky${ROCKY_MINOR}"
           mkdir -p "$WORKDIR"
           cp rpmbuild/RPMS/*/*.rpm "$WORKDIR"/
 
           echo "[INFO] Downloading runtime dependencies..."
-          dnf --disablerepo="*" --enablerepo="rocky-vault-9.6-*" download --resolve --alldeps \
+          dnf --disablerepo="*" --enablerepo="${REPO_PREFIX}-*" download --resolve --alldeps \
             --destdir="$WORKDIR" \
             bash jq libvirt-client cloud-init || true
 
@@ -147,10 +159,13 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: rpm-package-9.6
+          name: rpm-package-${{ matrix.host_os_minor }}
           path: release/rpm/**
   build-hangctl-rpm:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        host_os_minor: ["9.6", "9.7", "9.8"]
     container:
       image: rockylinux/rockylinux:9
       options: --user 0
@@ -160,31 +175,39 @@ jobs:
           fetch-depth: 0
           ref: ${{ env.WORKFLOW_SOURCE_REF }}
 
-      - name: Install build deps (hangctl, Rocky 9.6 vault)
+      - name: Install build deps (hangctl, Rocky ${{ matrix.host_os_minor }})
         run: |
           set -euo pipefail
-          cat > /etc/yum.repos.d/rocky-vault-9.6.repo <<'EOF'
-          [rocky-vault-9.6-baseos]
-          name=Rocky Linux 9.6 - BaseOS (vault)
-          baseurl=https://dl.rockylinux.org/vault/rocky/9.6/BaseOS/$basearch/os/
+          ROCKY_MINOR="${{ matrix.host_os_minor }}"
+          REPO_PREFIX="rocky-build-${ROCKY_MINOR}"
+          case "${ROCKY_MINOR}" in
+            9.6|9.7) REPO_ROOT="https://dl.rockylinux.org/vault/rocky/${ROCKY_MINOR}" ;;
+            9.8) REPO_ROOT="https://dl.rockylinux.org/pub/rocky/${ROCKY_MINOR}" ;;
+            *) echo "[ERR] Unsupported Rocky minor for HANGCTL build: ${ROCKY_MINOR}" >&2; exit 2 ;;
+          esac
+
+          cat > "/etc/yum.repos.d/${REPO_PREFIX}.repo" <<EOF
+          [${REPO_PREFIX}-baseos]
+          name=Rocky Linux ${ROCKY_MINOR} - BaseOS
+          baseurl=${REPO_ROOT}/BaseOS/\$basearch/os/
           enabled=1
           gpgcheck=0
 
-          [rocky-vault-9.6-appstream]
-          name=Rocky Linux 9.6 - AppStream (vault)
-          baseurl=https://dl.rockylinux.org/vault/rocky/9.6/AppStream/$basearch/os/
+          [${REPO_PREFIX}-appstream]
+          name=Rocky Linux ${ROCKY_MINOR} - AppStream
+          baseurl=${REPO_ROOT}/AppStream/\$basearch/os/
           enabled=1
           gpgcheck=0
 
-          [rocky-vault-9.6-crb]
-          name=Rocky Linux 9.6 - CRB (vault)
-          baseurl=https://dl.rockylinux.org/vault/rocky/9.6/CRB/$basearch/os/
+          [${REPO_PREFIX}-crb]
+          name=Rocky Linux ${ROCKY_MINOR} - CRB
+          baseurl=${REPO_ROOT}/CRB/\$basearch/os/
           enabled=1
           gpgcheck=0
           EOF
           dnf clean all
-          dnf -y --disablerepo="*" --enablerepo="rocky-vault-9.6-*" makecache
-          dnf -y --disablerepo="*" --enablerepo="rocky-vault-9.6-*" install make rpm-build tar git dnf-plugins-core createrepo_c systemd-rpm-macros systemd
+          dnf -y --disablerepo="*" --enablerepo="${REPO_PREFIX}-*" makecache
+          dnf -y --disablerepo="*" --enablerepo="${REPO_PREFIX}-*" install make rpm-build tar git dnf-plugins-core createrepo_c systemd-rpm-macros systemd
 
       - name: Build HANGCTL RPM (ablestack_vm_hangctl.spec)
         shell: bash
@@ -232,11 +255,12 @@ jobs:
           echo "[INFO] Built RPM(s):"
           ls -lah build/rpm-hangctl || true
 
-      - name: Create HANGCTL RPM repo (Rocky 9.6)
+      - name: Create HANGCTL RPM repo (Rocky ${{ matrix.host_os_minor }})
         shell: bash
         run: |
           set -euo pipefail
-          WORKDIR="repo/hangctl-rpm-rocky9.6"
+          ROCKY_MINOR="${{ matrix.host_os_minor }}"
+          WORKDIR="repo/hangctl-rpm-rocky${ROCKY_MINOR}"
           mkdir -p "$WORKDIR"
           # Copy built hangctl RPMs into the local repository
           cp -v build/rpm-hangctl/*.rpm "$WORKDIR"/
@@ -249,14 +273,17 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: hangctl-rpm-package
+          name: hangctl-rpm-package-rocky${{ matrix.host_os_minor }}
           path: release/hangctl-rpm/**
 
   # ======================================================================
-  # 1-B) FTCTL RPM BUILD (Rocky 9.6)
+  # 1-B) FTCTL RPM BUILD (Rocky 9.6 / 9.7 / 9.8)
   # ======================================================================
   build-ftctl-rpm:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        host_os_minor: ["9.6", "9.7", "9.8"]
     container:
       image: rockylinux/rockylinux:9
       options: --user 0
@@ -266,31 +293,39 @@ jobs:
           fetch-depth: 0
           ref: ${{ env.WORKFLOW_SOURCE_REF }}
 
-      - name: Install build deps (ftctl, Rocky 9.6 vault)
+      - name: Install build deps (ftctl, Rocky ${{ matrix.host_os_minor }})
         run: |
           set -euo pipefail
-          cat > /etc/yum.repos.d/rocky-vault-9.6.repo <<'EOF'
-          [rocky-vault-9.6-baseos]
-          name=Rocky Linux 9.6 - BaseOS (vault)
-          baseurl=https://dl.rockylinux.org/vault/rocky/9.6/BaseOS/$basearch/os/
+          ROCKY_MINOR="${{ matrix.host_os_minor }}"
+          REPO_PREFIX="rocky-build-${ROCKY_MINOR}"
+          case "${ROCKY_MINOR}" in
+            9.6|9.7) REPO_ROOT="https://dl.rockylinux.org/vault/rocky/${ROCKY_MINOR}" ;;
+            9.8) REPO_ROOT="https://dl.rockylinux.org/pub/rocky/${ROCKY_MINOR}" ;;
+            *) echo "[ERR] Unsupported Rocky minor for FTCTL build: ${ROCKY_MINOR}" >&2; exit 2 ;;
+          esac
+
+          cat > "/etc/yum.repos.d/${REPO_PREFIX}.repo" <<EOF
+          [${REPO_PREFIX}-baseos]
+          name=Rocky Linux ${ROCKY_MINOR} - BaseOS
+          baseurl=${REPO_ROOT}/BaseOS/\$basearch/os/
           enabled=1
           gpgcheck=0
 
-          [rocky-vault-9.6-appstream]
-          name=Rocky Linux 9.6 - AppStream (vault)
-          baseurl=https://dl.rockylinux.org/vault/rocky/9.6/AppStream/$basearch/os/
+          [${REPO_PREFIX}-appstream]
+          name=Rocky Linux ${ROCKY_MINOR} - AppStream
+          baseurl=${REPO_ROOT}/AppStream/\$basearch/os/
           enabled=1
           gpgcheck=0
 
-          [rocky-vault-9.6-crb]
-          name=Rocky Linux 9.6 - CRB (vault)
-          baseurl=https://dl.rockylinux.org/vault/rocky/9.6/CRB/$basearch/os/
+          [${REPO_PREFIX}-crb]
+          name=Rocky Linux ${ROCKY_MINOR} - CRB
+          baseurl=${REPO_ROOT}/CRB/\$basearch/os/
           enabled=1
           gpgcheck=0
           EOF
           dnf clean all
-          dnf -y --disablerepo="*" --enablerepo="rocky-vault-9.6-*" makecache
-          dnf -y --disablerepo="*" --enablerepo="rocky-vault-9.6-*" install make rpm-build tar git dnf-plugins-core createrepo_c systemd-rpm-macros systemd
+          dnf -y --disablerepo="*" --enablerepo="${REPO_PREFIX}-*" makecache
+          dnf -y --disablerepo="*" --enablerepo="${REPO_PREFIX}-*" install make rpm-build tar git dnf-plugins-core createrepo_c systemd-rpm-macros systemd
 
       - name: Build FTCTL RPM (ablestack_vm_ftctl.spec)
         shell: bash
@@ -298,14 +333,16 @@ jobs:
           set -euo pipefail
           make ftctl-rpm
 
-      - name: Create FTCTL RPM repo (Rocky 9.6)
+      - name: Create FTCTL RPM repo (Rocky ${{ matrix.host_os_minor }})
         shell: bash
         run: |
           set -euo pipefail
-          WORKDIR="repo/ftctl-rpm-rocky9.6"
+          ROCKY_MINOR="${{ matrix.host_os_minor }}"
+          REPO_PREFIX="rocky-build-${ROCKY_MINOR}"
+          WORKDIR="repo/ftctl-rpm-rocky${ROCKY_MINOR}"
           mkdir -p "$WORKDIR"
           cp -v build/rpm-ftctl/*.rpm "$WORKDIR"/
-          dnf --disablerepo="*" --enablerepo="rocky-vault-9.6-*" download --resolve --alldeps \
+          dnf --disablerepo="*" --enablerepo="${REPO_PREFIX}-*" download --resolve --alldeps \
             --destdir="$WORKDIR" \
             bash jq libvirt-client openssh-clients python3 qemu-img firewalld nmap-ncat socat util-linux || true
           createrepo_c "$WORKDIR"
@@ -314,7 +351,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ftctl-rpm-package
+          name: ftctl-rpm-package-rocky${{ matrix.host_os_minor }}
           path: release/ftctl-rpm/**
 
           
@@ -892,7 +929,7 @@ jobs:
           mkdir -p release/rpm release/deb release/msi release/assets/v2k/wheels release/v2k release/completions release/bin
 
           echo "[INFO] Collecting RPM repos..."
-          for ver in 9.6; do
+          for ver in 9.6 9.7 9.8; do
             SRC_DIR=$(find dist -type d -path "*/rpm-package-${ver}/release/rpm/repo/rpm-rocky${ver}" | head -n 1)
             if [ -d "$SRC_DIR" ]; then
               echo "[INFO] Found $SRC_DIR"
@@ -905,36 +942,37 @@ jobs:
                 mkdir -p release/rpm/rpm-rocky${ver}
                 cp -r "$SRC_DIR"/* release/rpm/rpm-rocky${ver}/
               else
-                echo "[WARN] No RPM repo found for version ${ver}"
+                echo "[ERR] No core RPM repo found for Rocky ${ver}." >&2
+                exit 2
               fi
             fi
           done
 
-          echo "[INFO] Collecting HANGCTL RPM repo (Rocky 9.6)..."
-          HANGCTL_DIR="$(find dist -type d \( \
-                          -path "*/hangctl-rpm-package/release/hangctl-rpm/repo/hangctl-rpm-rocky9.6" -o \
-                          -path "*/hangctl-rpm-package/repo/hangctl-rpm-rocky9.6" \
-                        \) | head -n 1 || true)"
-          if [[ -n "${HANGCTL_DIR}" && -d "${HANGCTL_DIR}" ]]; then
-            echo "[INFO] Found ${HANGCTL_DIR}"
-            mkdir -p release/rpm/hangctl-rpm-rocky9.6
-            cp -r "${HANGCTL_DIR}/." release/rpm/hangctl-rpm-rocky9.6/
-          else
-            echo "[WARN] No HANGCTL RPM repo found (hangctl-rpm-package)."
-          fi
+          for ver in 9.6 9.7 9.8; do
+            echo "[INFO] Collecting HANGCTL RPM repo (Rocky ${ver})..."
+            HANGCTL_DIR="$(find dist -type d \( \
+                            -path "*/hangctl-rpm-package-rocky${ver}/release/hangctl-rpm/repo/hangctl-rpm-rocky${ver}" -o \
+                            -path "*/hangctl-rpm-package-rocky${ver}/repo/hangctl-rpm-rocky${ver}" \
+                          \) | head -n 1 || true)"
+            if [[ -z "${HANGCTL_DIR}" || ! -d "${HANGCTL_DIR}" ]]; then
+              echo "[ERR] No HANGCTL RPM repo found for Rocky ${ver}." >&2
+              exit 2
+            fi
+            mkdir -p "release/rpm/hangctl-rpm-rocky${ver}"
+            cp -r "${HANGCTL_DIR}/." "release/rpm/hangctl-rpm-rocky${ver}/"
 
-          echo "[INFO] Collecting FTCTL RPM repo (Rocky 9.6)..."
-          FTCTL_DIR="$(find dist -type d \( \
-                          -path "*/ftctl-rpm-package/release/ftctl-rpm/repo/ftctl-rpm-rocky9.6" -o \
-                          -path "*/ftctl-rpm-package/repo/ftctl-rpm-rocky9.6" \
-                        \) | head -n 1 || true)"
-          if [[ -n "${FTCTL_DIR}" && -d "${FTCTL_DIR}" ]]; then
-            echo "[INFO] Found ${FTCTL_DIR}"
-            mkdir -p release/rpm/ftctl-rpm-rocky9.6
-            cp -r "${FTCTL_DIR}/." release/rpm/ftctl-rpm-rocky9.6/
-          else
-            echo "[WARN] No FTCTL RPM repo found (ftctl-rpm-package)."
-          fi
+            echo "[INFO] Collecting FTCTL RPM repo (Rocky ${ver})..."
+            FTCTL_DIR="$(find dist -type d \( \
+                            -path "*/ftctl-rpm-package-rocky${ver}/release/ftctl-rpm/repo/ftctl-rpm-rocky${ver}" -o \
+                            -path "*/ftctl-rpm-package-rocky${ver}/repo/ftctl-rpm-rocky${ver}" \
+                          \) | head -n 1 || true)"
+            if [[ -z "${FTCTL_DIR}" || ! -d "${FTCTL_DIR}" ]]; then
+              echo "[ERR] No FTCTL RPM repo found for Rocky ${ver}." >&2
+              exit 2
+            fi
+            mkdir -p "release/rpm/ftctl-rpm-rocky${ver}"
+            cp -r "${FTCTL_DIR}/." "release/rpm/ftctl-rpm-rocky${ver}/"
+          done
 
           echo "[INFO] Staging bash completion files..."
           if [[ -f completions/ablestack_v2k ]]; then
@@ -1912,25 +1950,7 @@ jobs:
 
           mkdir -p build/iso/rocky build/iso/ubuntu build/iso/windows
           rm -rf build/iso-staging
-          mkdir -p build/iso-staging/rocky build/iso-staging/ubuntu build/iso-staging/windows
-
-          cat <<'EOF' > build/iso-staging/rocky/README.txt
-          ABLESTACK QEMU Exec Tools Offline ISO
-          Target OS: Rocky Linux / ABLESTACK Host
-
-          Contents
-            - rpm/rpm-rocky9.6
-            - rpm/hangctl-rpm-rocky9.6
-            - v2k/v2k-rpm-rocky9.6
-            - v2k/v2k-rpm-rocky9.7
-            - v2k/v2k-rpm-rocky9.8
-            - n2k/n2k-rpm-rocky9.6
-            - n2k/n2k-rpm-rocky9.7
-            - n2k/n2k-rpm-rocky9.8
-            - completions/
-            - install-linux.sh
-            - uninstall-linux.sh
-          EOF
+          mkdir -p build/iso-staging/ubuntu build/iso-staging/windows
 
           cat <<'EOF' > build/iso-staging/ubuntu/README.txt
           ABLESTACK QEMU Exec Tools Offline ISO
@@ -1956,30 +1976,44 @@ jobs:
             - install.ps1
           EOF
 
-          mkdir -p build/iso-staging/rocky/rpm build/iso-staging/rocky/v2k build/iso-staging/rocky/n2k build/iso-staging/rocky/completions build/iso-staging/rocky/bin
-          cp -a release/rpm/rpm-rocky9.6 build/iso-staging/rocky/rpm/
-          if [[ -d release/rpm/hangctl-rpm-rocky9.6 ]]; then
-            cp -a release/rpm/hangctl-rpm-rocky9.6 build/iso-staging/rocky/rpm/
-          fi
-          if [[ -d release/rpm/ftctl-rpm-rocky9.6 ]]; then
-            cp -a release/rpm/ftctl-rpm-rocky9.6 build/iso-staging/rocky/rpm/
-          fi
           for ver in 9.6 9.7 9.8; do
-            if [[ -d "release/v2k/v2k-rpm-rocky${ver}" ]]; then
-              cp -a "release/v2k/v2k-rpm-rocky${ver}" build/iso-staging/rocky/v2k/
+            rocky_staging="build/iso-staging/rocky${ver}"
+            mkdir -p "${rocky_staging}"/{rpm,v2k,n2k,completions,bin}
+
+            cat > "${rocky_staging}/README.txt" <<EOF
+          ABLESTACK QEMU Exec Tools Offline ISO
+          Target OS: Rocky Linux ${ver} / ABLESTACK Host
+
+          Contents
+            - rpm/rpm-rocky${ver}
+            - rpm/hangctl-rpm-rocky${ver}
+            - rpm/ftctl-rpm-rocky${ver}
+            - v2k/v2k-rpm-rocky${ver}
+            - n2k/n2k-rpm-rocky${ver}
+            - completions/
+            - install-linux.sh
+            - uninstall-linux.sh
+          EOF
+
+            cp -a "release/rpm/rpm-rocky${ver}" "${rocky_staging}/rpm/"
+            cp -a "release/rpm/hangctl-rpm-rocky${ver}" "${rocky_staging}/rpm/"
+            cp -a "release/rpm/ftctl-rpm-rocky${ver}" "${rocky_staging}/rpm/"
+            cp -a "release/v2k/v2k-rpm-rocky${ver}" "${rocky_staging}/v2k/"
+            cp -a "release/n2k/n2k-rpm-rocky${ver}" "${rocky_staging}/n2k/"
+            if [[ -d release/completions ]]; then
+              cp -a release/completions/. "${rocky_staging}/completions/"
             fi
-            if [[ -d "release/n2k/n2k-rpm-rocky${ver}" ]]; then
-              cp -a "release/n2k/n2k-rpm-rocky${ver}" build/iso-staging/rocky/n2k/
+            if [[ -d release/bin ]]; then
+              cp -a release/bin/. "${rocky_staging}/bin/"
             fi
+            cp -a release/install-linux.sh "${rocky_staging}/"
+            cp -a release/uninstall-linux.sh "${rocky_staging}/"
+
+            volume_minor="${ver/.}"
+            mkisofs -o "build/iso/rocky/ABLESTACK-Tools-rocky${ver}-${VERSION}.iso" \
+              -V "ABLESTACK-Rocky${volume_minor}" \
+              -r -J "${rocky_staging}"
           done
-          if [[ -d release/completions ]]; then
-            cp -a release/completions/. build/iso-staging/rocky/completions/
-          fi
-          if [[ -d release/bin ]]; then
-            cp -a release/bin/. build/iso-staging/rocky/bin/
-          fi
-          cp -a release/install-linux.sh build/iso-staging/rocky/
-          cp -a release/uninstall-linux.sh build/iso-staging/rocky/
 
           mkdir -p build/iso-staging/ubuntu/deb build/iso-staging/ubuntu/completions
           cp -a release/deb/. build/iso-staging/ubuntu/deb/
@@ -1999,10 +2033,6 @@ jobs:
           cp -a release/install.bat build/iso-staging/windows/
           cp -a release/install.ps1 build/iso-staging/windows/
 
-          mkisofs -o "build/iso/rocky/ABLESTACK-Tools-rocky-${VERSION}.iso" \
-            -V "ABLESTACK-Rocky" \
-            -r -J build/iso-staging/rocky
-
           mkisofs -o "build/iso/ubuntu/ABLESTACK-Tools-ubuntu-${VERSION}.iso" \
             -V "ABLESTACK-Ubuntu" \
             -r -J build/iso-staging/ubuntu
@@ -2020,9 +2050,9 @@ jobs:
           name: release-validation-${{ github.run_number }}
           path: |
             build/iso/**
-            release/rpm/rpm-rocky9.6/ablestack-qemu-exec-tools-*.rpm
-            release/rpm/hangctl-rpm-rocky9.6/ablestack_vm_hangctl-*.rpm
-            release/rpm/ftctl-rpm-rocky9.6/ablestack_vm_ftctl-*.rpm
+            release/rpm/rpm-rocky9.*/ablestack-qemu-exec-tools-*.rpm
+            release/rpm/hangctl-rpm-rocky9.*/ablestack_vm_hangctl-*.rpm
+            release/rpm/ftctl-rpm-rocky9.*/ablestack_vm_ftctl-*.rpm
             release/v2k/v2k-rpm-rocky9.6/ablestack_v2k-*.noarch.rpm
             release/v2k/v2k-rpm-rocky9.7/ablestack_v2k-*.noarch.rpm
             release/v2k/v2k-rpm-rocky9.8/ablestack_v2k-*.noarch.rpm
@@ -2076,17 +2106,16 @@ jobs:
             copy_plain "${winpe_asset}"
           done
 
-          for rpm in release/rpm/rpm-rocky9.6/ablestack-qemu-exec-tools-*.rpm; do
-            copy_plain "${rpm}"
-          done
-          for rpm in release/rpm/hangctl-rpm-rocky9.6/ablestack_vm_hangctl-*.rpm; do
-            copy_plain "${rpm}"
-          done
-          for rpm in release/rpm/ftctl-rpm-rocky9.6/ablestack_vm_ftctl-*.rpm; do
-            copy_plain "${rpm}"
-          done
-
           for ver in 9.6 9.7 9.8; do
+            for rpm in "release/rpm/rpm-rocky${ver}"/ablestack-qemu-exec-tools-*.rpm; do
+              copy_rpm_with_suffix "${rpm}" "rocky${ver}"
+            done
+            for rpm in "release/rpm/hangctl-rpm-rocky${ver}"/ablestack_vm_hangctl-*.rpm; do
+              copy_rpm_with_suffix "${rpm}" "rocky${ver}"
+            done
+            for rpm in "release/rpm/ftctl-rpm-rocky${ver}"/ablestack_vm_ftctl-*.rpm; do
+              copy_rpm_with_suffix "${rpm}" "rocky${ver}"
+            done
             for rpm in "release/v2k/v2k-rpm-rocky${ver}"/ablestack_v2k-*.noarch.rpm; do
               copy_rpm_with_suffix "${rpm}" "rocky${ver}"
             done
@@ -2108,9 +2137,16 @@ jobs:
           fi
 
           asset_count="$(find "${OUT_DIR}" -maxdepth 1 -type f | wc -l)"
-          if [[ "${asset_count}" -ne 14 ]]; then
-            echo "[ERR] Expected exactly 14 GitHub Release assets, found ${asset_count}." >&2
+          if [[ "${asset_count}" -ne 22 ]]; then
+            echo "[ERR] Expected exactly 22 GitHub Release assets, found ${asset_count}." >&2
             find "${OUT_DIR}" -maxdepth 1 -type f -printf '%f\n' | sort >&2
+            exit 2
+          fi
+
+          oversized_asset="$(find "${OUT_DIR}" -maxdepth 1 -type f -size +2147483647c -print -quit)"
+          if [[ -n "${oversized_asset}" ]]; then
+            echo "[ERR] GitHub Release asset must be smaller than 2 GiB: ${oversized_asset}" >&2
+            stat -c '[ERR] size=%s bytes file=%n' "${oversized_asset}" >&2
             exit 2
           fi
 
