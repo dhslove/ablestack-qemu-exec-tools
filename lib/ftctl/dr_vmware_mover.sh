@@ -1583,13 +1583,17 @@ ftctl_vmware_mover_convert_disk() {
 
 ftctl_vmware_mover_snapshot_ref_from_tree() {
   local json_path="${1-}" snapshot_name="${2-}"
+  [[ -s "${json_path}" && -n "${snapshot_name}" ]] || return 1
   python3 - "${json_path}" "${snapshot_name}" <<'PY'
 import json
 import sys
 
 path, name = sys.argv[1:3]
-with open(path, "r", encoding="utf-8") as fh:
-    data = json.load(fh)
+try:
+    with open(path, "r", encoding="utf-8") as fh:
+        data = json.load(fh)
+except (OSError, UnicodeError, json.JSONDecodeError):
+    sys.exit(1)
 
 def text(value):
     if value is None:

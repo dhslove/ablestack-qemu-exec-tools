@@ -1,7 +1,7 @@
 # FTCTL DR Live Transfer Progress Contract Design
 
 - Date: 2026-08-10
-- Status: corrective implementation complete; build and live acceptance pending
+- Status: corrective build and deployment complete; live acceptance pending
 - Scope: VMware to ABLESTACK and ABLESTACK to VMware synchronization
 - Related: `441-ftctl-dr-vmware-cbt-activation-evidence-design-20260810.md`
 
@@ -375,3 +375,34 @@ Agent, Cloud DB/API, and UI all agree with the FTCTL journal for both cycles.
 The corrective patch is not accepted until the installed helper produces at
 least three increasing samples with `bytesTotal=107374182400` during a new
 full resynchronization.
+
+### 11.2 Corrective build and deployment evidence
+
+- GitHub Actions run `31360367860` built commit `5da8126` successfully;
+- the resulting `ablestack_vm_ftctl-0.9.5-1.noarch.rpm` has SHA-256
+  `645dc0ef06be593e025700ea4e2530907b5f22614ef41335c5df3d38f782ce66`;
+- that exact RPM was installed on `10.10.32.1`, `10.10.32.2`, and
+  `10.10.32.3`, and every `mold-agent` returned `active` after restart;
+- installed files on all three hosts contain merged stdout/stderr capture and
+  raw numeric `virtualBytes` aggregation;
+- an installed-helper smoke test on every host produced a schema-version 2
+  `COMPLETE` sample with a non-zero `bytesTotal` while wrapper stdout remained
+  empty.
+
+This proves package and host-level contract deployment. It does not replace
+the operator-started full-resynchronization acceptance test, which must still
+demonstrate several increasing samples during a real 100 GiB transfer.
+
+### 11.3 Post-deployment periodic-cycle finding
+
+The first periodic CBT cycle after deployment copied 16,646,144 bytes and
+published a valid schema-version 2 terminal sample. Its subsequent VMware
+snapshot-reference fallback received an empty `govc snapshot.tree -json`
+payload even though `govc` returned success. The resolver previously attempted
+to parse that empty file and emitted a Python traceback, while the cycle itself
+continued and committed successfully.
+
+The resolver now requires a non-empty file and catches file, encoding, and JSON
+decode failures. An empty or malformed optional snapshot tree therefore selects
+the existing fallback path without polluting service logs; a valid tree still
+returns the matching managed-object reference. Focused tests cover both cases.
