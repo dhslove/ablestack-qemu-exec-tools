@@ -3108,9 +3108,10 @@ ftctl_dr_runtime_emit_state_json() {
   local runtime_generation scheduler_pid_alive baseline_state reseed_reason consecutive_automatic_reseed_count
   local control_protocol_version control_generation control_ack_generation control_state cycle_state
   local scheduler_session_uuid scheduler_lease_epoch authority_sequence plan_cycle_sequence scheduler_health
-  local resume_baseline_checkpoint_sequence minimum_completed_checkpoint_sequence immediate_cycle_pending immediate_cycle_owner_run
+  local resume_baseline_checkpoint_sequence minimum_completed_checkpoint_sequence immediate_cycle_pending immediate_cycle_owner_run scheduler_immediate_cycle_owner_run
   local replication_activity protection_state active_worker_run_uuid active_worker_pid active_worker_start_ticks
-  local worker_heartbeat_at control_request_run_uuid owner_matched
+  local worker_heartbeat_at control_request_run_uuid scheduler_control_request_run_uuid owner_matched
+  local transfer_owner_run_uuid progress_plan_uuid progress_run_uuid progress_cycle_sequence
   local scheduler_desired_state scheduler_service_unit scheduler_unit_active_state scheduler_unit_sub_state
   local scheduler_unit_main_pid scheduler_cgroup scheduler_recovery_state scheduler_recovery_trigger scheduler_recovered_at
   local transition_state transition_action transition_quiesced_at checkpoint_lease_state checkpoint_lease_path
@@ -3441,8 +3442,59 @@ ftctl_dr_runtime_emit_state_json() {
   resume_baseline_checkpoint_sequence="$(ftctl_state_read_kv "$(ftctl_dr_scheduler_sequence_path "${plan}")" "resume_baseline_checkpoint_sequence" 2>/dev/null || true)"
   minimum_completed_checkpoint_sequence="$(ftctl_state_read_kv "$(ftctl_dr_scheduler_sequence_path "${plan}")" "minimum_completed_checkpoint_sequence" 2>/dev/null || true)"
   immediate_cycle_pending="$(ftctl_state_read_kv "$(ftctl_dr_scheduler_sequence_path "${plan}")" "immediate_cycle_pending" 2>/dev/null || true)"
-  immediate_cycle_owner_run="$(ftctl_state_read_kv "$(ftctl_dr_scheduler_sequence_path "${plan}")" "immediate_cycle_owner_run" 2>/dev/null || true)"
-  control_request_run_uuid="$(ftctl_dr_scheduler_control_value "${plan}" "owner_run")"
+  scheduler_immediate_cycle_owner_run="$(ftctl_state_read_kv "$(ftctl_dr_scheduler_sequence_path "${plan}")" "immediate_cycle_owner_run" 2>/dev/null || true)"
+  [[ -z "${scheduler_immediate_cycle_owner_run}" ]] || immediate_cycle_owner_run="${scheduler_immediate_cycle_owner_run}"
+  scheduler_control_request_run_uuid="$(ftctl_dr_scheduler_control_value "${plan}" "owner_run")"
+  [[ -z "${scheduler_control_request_run_uuid}" ]] || control_request_run_uuid="${scheduler_control_request_run_uuid}"
+  if [[ -z "${run}" ]]; then
+    transfer_owner_run_uuid="${control_request_run_uuid:-${immediate_cycle_owner_run:-${active_worker_run_uuid}}}"
+    progress_journal_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "transfer_progress_path")"
+    if [[ -n "${transfer_owner_run_uuid}" && -f "${progress_journal_path}" ]]; then
+      progress_plan_uuid="$(jq -r '.planUuid // empty' "${progress_journal_path}" 2>/dev/null || true)"
+      progress_run_uuid="$(jq -r '.runUuid // empty' "${progress_journal_path}" 2>/dev/null || true)"
+      progress_cycle_sequence="$(jq -r '.cycleSequence // 0' "${progress_journal_path}" 2>/dev/null || printf 0)"
+      if [[ "${progress_plan_uuid}" == "${plan}" \
+            && "${progress_run_uuid}" == "${transfer_owner_run_uuid}" \
+            && "${progress_cycle_sequence}" =~ ^[0-9]+$ \
+            && ( ! "${plan_cycle_sequence}" =~ ^[0-9]+$ || "${plan_cycle_sequence}" == "0" \
+                 || "${progress_cycle_sequence}" == "${plan_cycle_sequence}" ) \
+            ]] && jq -e '(.schemaVersion // 0) >= 2 and (.bytesTotal // 0) > 0' \
+                 "${progress_journal_path}" >/dev/null 2>&1; then
+        transfer_activity_state="$(jq -r '.state // "UNKNOWN"' "${progress_journal_path}")"
+        transfer_payload_bytes="$(jq -r '.transferPayloadBytes // 0' "${progress_journal_path}")"
+        transfer_progress_schema_version="$(jq -r '.schemaVersion // 0' "${progress_journal_path}")"
+        transfer_cycle_sequence="${progress_cycle_sequence}"
+        transfer_sample_sequence="$(jq -r '.sampleSequence // 0' "${progress_journal_path}")"
+        transfer_phase="$(jq -r '.phase // "UNKNOWN"' "${progress_journal_path}")"
+        transfer_mode="$(jq -r '.mode // "UNKNOWN"' "${progress_journal_path}")"
+        transfer_bytes_total="$(jq -r '.bytesTotal // 0' "${progress_journal_path}")"
+        transfer_bytes_processed="$(jq -r '.bytesProcessed // .transferPayloadBytes // 0' "${progress_journal_path}")"
+        transfer_source_read_bytes="$(jq -r '.sourceReadBytes // 0' "${progress_journal_path}")"
+        transfer_target_written_bytes="$(jq -r '.targetWrittenBytes // 0' "${progress_journal_path}")"
+        transfer_verified_bytes="$(jq -r '.verifiedBytes // 0' "${progress_journal_path}")"
+        transfer_percent="$(jq -r '(.percent // 0) | floor' "${progress_journal_path}")"
+        transfer_throughput_bps="$(jq -r '.throughputBps // 0' "${progress_journal_path}")"
+        transfer_eta_seconds="$(jq -r '.etaSeconds // 0' "${progress_journal_path}")"
+        transfer_current_disk_index="$(jq -r '.diskIndex // 0' "${progress_journal_path}")"
+        transfer_disk_count="$(jq -r '.diskCount // 0' "${progress_journal_path}")"
+        transfer_progress_estimated="$(jq -r '.progressEstimated // false' "${progress_journal_path}")"
+        progress_updated_epoch="$(jq -r '.updatedAtEpochMs // 0' "${progress_journal_path}")"
+        transfer_progress_sample_epoch_ms="${progress_updated_epoch}"
+        if [[ "${progress_updated_epoch}" =~ ^[0-9]+$ && "${progress_updated_epoch}" -gt 0 ]]; then
+          progress_age=$(( $(date +%s) - (progress_updated_epoch / 1000) ))
+        else
+          progress_age=999999
+        fi
+        transfer_progress_stale="false"
+        if [[ "${transfer_activity_state}" == "COPYING" || "${transfer_activity_state}" == "VERIFYING" ]]; then
+          [[ "${progress_age}" -le "${FTCTL_DR_TRANSFER_PROGRESS_STALE_SECONDS:-15}" ]] || transfer_progress_stale="true"
+          if [[ "${transfer_progress_stale}" != "true" ]]; then
+            worker_liveness_state="ALIVE"
+          fi
+        fi
+      fi
+    fi
+  fi
   [[ -n "${replication_activity}" ]] || replication_activity="IDLE"
   [[ -n "${protection_state}" ]] || protection_state="${state}"
   retryable="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "retryable")"

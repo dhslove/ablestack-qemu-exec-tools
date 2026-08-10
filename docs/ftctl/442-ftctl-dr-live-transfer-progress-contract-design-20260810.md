@@ -407,6 +407,36 @@ decode failures. An empty or malformed optional snapshot tree therefore selects
 the existing fallback path without polluting service logs; a valid tree still
 returns the matching managed-object reference. Focused tests cover both cases.
 
+### 11.5 Plan-authority live progress projection
+
+The live run journal is also the transfer authority for a plan-level status
+request while that run owns the current cycle. `dr-status` with
+`PLAN_AUTHORITY` therefore resolves the progress journal recorded in the plan
+status and overlays only its transfer fields. It does not replace scheduler,
+protection, checkpoint, or terminal authority with operation state.
+
+The overlay is accepted only when all of the following are true:
+
+- the journal uses schema version 2 or later and has a non-zero byte total;
+- `planUuid` matches the requested plan;
+- `runUuid` matches the control-request owner, immediate-cycle owner, or active
+  worker run selected by the scheduler;
+- `cycleSequence` matches the plan cycle sequence when both are available;
+- the sample is a valid JSON object. A stale sample remains visible with its
+  stale flag rather than being replaced by zeroes.
+
+This contract makes plan and operation scopes agree on the same transfer
+sample without weakening their separate authority boundaries. A missing,
+malformed, cross-plan, cross-run, or cross-cycle journal leaves the plan-level
+transfer fields unchanged.
+
+| Area | AS-IS | TO-BE |
+| --- | --- | --- |
+| Plan status | Emits schema 0 and zero bytes while an operation journal advances | Projects the correlated active journal as schema-v2 transfer fields |
+| Correlation | Progress path is trusted only by operation scope | Plan, run, and cycle identity are verified before overlay |
+| Stale sample | Empty plan fields hide the last valid operation sample | Last valid sample remains visible and is explicitly marked stale |
+| Authority | Operation data is absent from plan authority | Only transfer telemetry is overlaid; scheduler/protection authority remains plan-owned |
+
 ### 11.4 Final corrective deployment verification
 
 GitHub Actions run `31362359087` built and uploaded the RPM for commit
