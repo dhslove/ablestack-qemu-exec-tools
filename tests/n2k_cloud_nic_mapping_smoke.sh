@@ -177,10 +177,14 @@ n2k_interactive_cloud_choices \
 
 mismatch_manifest="${WORK_DIR}/mismatch.json"
 jq '.target.cloud.network_ids = ["network-a"]' "${manifest}" > "${mismatch_manifest}"
-if n2k_cloud_target_ensure_manifest_nic_mappings "${mismatch_manifest}" >/dev/null 2>&1; then
-  echo "[ERR] NIC/network count mismatch was accepted" >&2
-  exit 1
-fi
+n2k_cloud_target_ensure_manifest_nic_mappings "${mismatch_manifest}" >/dev/null 2>&1
+jq -e '
+  .target.cloud.network_fallback.enabled == true
+  and (.target.cloud.nic_mappings | length) == 1
+  and .target.cloud.nic_mappings[0].network_id == "network-a"
+  and .target.cloud.nic_mappings[0].mac == ""
+  and .runtime.cloud.readiness.inspection_required == true
+' "${mismatch_manifest}" >/dev/null
 
 duplicate_network_manifest="${WORK_DIR}/duplicate-network.json"
 jq '.target.cloud.network_ids = ["network-a", "network-a"]' \
@@ -193,17 +197,15 @@ fi
 invalid_mac_manifest="${WORK_DIR}/invalid-mac.json"
 jq '.source.vm.nics[1].mac = "53:54:00:65:43:20"' \
   "${manifest}" > "${invalid_mac_manifest}"
-if n2k_cloud_target_ensure_manifest_nic_mappings "${invalid_mac_manifest}" >/dev/null 2>&1; then
-  echo "[ERR] Non-unicast source MAC was accepted" >&2
-  exit 1
-fi
+n2k_cloud_target_ensure_manifest_nic_mappings "${invalid_mac_manifest}" >/dev/null 2>&1
+jq -e '.target.cloud.network_fallback.enabled == true and (.target.cloud.nic_mappings | all(.mac == ""))' \
+  "${invalid_mac_manifest}" >/dev/null
 
 duplicate_mac_manifest="${WORK_DIR}/duplicate-mac.json"
 jq '.source.vm.nics[1].mac = .source.vm.nics[0].mac' \
   "${manifest}" > "${duplicate_mac_manifest}"
-if n2k_cloud_target_ensure_manifest_nic_mappings "${duplicate_mac_manifest}" >/dev/null 2>&1; then
-  echo "[ERR] Duplicate source MAC addresses were accepted" >&2
-  exit 1
-fi
+n2k_cloud_target_ensure_manifest_nic_mappings "${duplicate_mac_manifest}" >/dev/null 2>&1
+jq -e '.target.cloud.network_fallback.enabled == true and (.target.cloud.nic_mappings | all(.mac == ""))' \
+  "${duplicate_mac_manifest}" >/dev/null
 
 echo "[OK] n2k Cloud multi-NIC mapping and MAC preservation helpers passed"

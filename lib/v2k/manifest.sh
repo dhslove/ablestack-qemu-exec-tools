@@ -787,6 +787,12 @@ v2k_manifest_is_windows() {
       [
         s(.source.vm.guestId),
         s(.source.vm.guest_id),
+        s(.source.vm.guestFamily),
+        s(.source.vm.guest_family),
+        s(.source.vm.guestFullName),
+        s(.source.vm.guest_full_name),
+        s(.source.vm.osFullName),
+        s(.source.vm.os_full_name),
         s(.source.vm.config.guestId),
         s(.source.vm.config.guest_id),
         s(.source.vm.guest.guestId),

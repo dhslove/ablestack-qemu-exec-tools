@@ -586,6 +586,44 @@ jq -e '."details[0].rootDiskController" == "sata"' <<<"${deploy_params}" >/dev/n
   exit 1
 }
 
+cloud_fallback_manifest="${WORK_DIR}/cloud-fallback.json"
+cat > "${cloud_fallback_manifest}" <<'JSON'
+{
+  "source":{"vm":{"cpu":4,"memory_mb":8192,"firmware":"bios"}},
+  "target":{
+    "provider":"ablestack-cloud",
+    "cloud":{
+      "cpu_speed":"1000",
+      "disk_controller_plan":{
+        "status":"failed",
+        "source":{"root":"scsi","data":"scsi","data_kinds":["scsi"]},
+        "effective":{"root":"","data":""},
+        "failure_reason":"stale-plan"
+      }
+    }
+  },
+  "runtime":{"source_validation":{"status":"passed"}},
+  "disks":[
+    {"disk_id":"scsi0:0","role":"root","size_bytes":107374182400,"controller":{"kind":"scsi"}},
+    {"disk_id":"scsi0:1","role":"data","size_bytes":214748364800,"controller":{"kind":"scsi"}}
+  ]
+}
+JSON
+v2k_select_bootstrap_fallback \
+  "${cloud_fallback_manifest}" "guest_classification" 0 \
+  "unknown guest test" "off"
+cloud_fallback_params="$(v2k_cloud_target_source_deploy_params_json "${cloud_fallback_manifest}")"
+jq -e '
+  .runtime.cloud.readiness.inspection_required == true
+  and .runtime.bootstrap_fallback.scope == "all-disks"
+  and .target.cloud.disk_controller_plan.effective.root == "sata"
+  and .target.cloud.disk_controller_plan.effective.data == "sata"
+' "${cloud_fallback_manifest}" >/dev/null
+jq -e '
+  .["details[0].rootDiskController"] == "sata"
+  and .["details[0].dataDiskController"] == "sata"
+' <<<"${cloud_fallback_params}" >/dev/null
+
 complete_coverage='{
   "coverage": {
     "mode": "delta",

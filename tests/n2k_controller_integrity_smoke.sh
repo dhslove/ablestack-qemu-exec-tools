@@ -256,6 +256,20 @@ jq -e '
   echo "[ERR] Cloud mixed data-controller failure was not recorded" >&2
   exit 1
 }
+n2k_cloud_target_force_sata_fallback \
+  "${cloud_mixed_manifest}" "cloud-controller-plan" 44 \
+  "cloud_mixed_data_controller_unsupported"
+cloud_mixed_params="$(n2k_cloud_target_source_deploy_params_json "${cloud_mixed_manifest}")"
+jq -e '
+  .target.cloud.disk_controller_plan.status == "passed"
+  and .target.cloud.disk_controller_plan.effective.root == "sata"
+  and .target.cloud.disk_controller_plan.effective.data == "sata"
+  and .runtime.cloud.readiness.inspection_required == true
+' "${cloud_mixed_manifest}" >/dev/null
+jq -e '
+  .["details[0].rootDiskController"] == "sata"
+  and .["details[0].dataDiskController"] == "sata"
+' <<<"${cloud_mixed_params}" >/dev/null
 
 cloud_supported_manifest="${WORK_DIR}/cloud-supported.json"
 jq -n --argjson inventory "${explicit_boot}" '

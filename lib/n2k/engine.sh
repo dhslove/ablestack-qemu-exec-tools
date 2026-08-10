@@ -303,31 +303,62 @@ n2k_cmd_init() {
           }' "${N2K_MANIFEST}")"
     else
       controller_validation_rc=$?
-      n2k_event ERROR "init" "" "source_disk_controller_validation_failed" \
-        "$(jq -c '{
-            code:(.runtime.last_error.code // 44),
-            reason:(.runtime.last_error.reason // "source_controller_plan_failed"),
-            controller_plan:(.source.controller_plan // {}),
-            action:"stop_before_snapshot"
-          }' "${N2K_MANIFEST}")"
-      return "${controller_validation_rc}"
+      local controller_validation_reason
+      controller_validation_reason="$(jq -r '.runtime.last_error.reason // "source_controller_plan_failed"' "${N2K_MANIFEST}")"
+      if [[ "${target_provider}" == "ablestack-cloud" \
+          && "${controller_validation_reason}" == "unsupported_disk_controller" ]] \
+          && n2k_cloud_target_force_sata_fallback \
+            "${N2K_MANIFEST}" "source-controller-validation" \
+            "${controller_validation_rc}" "${controller_validation_reason}"; then
+        n2k_event WARN "init" "" "source_disk_controller_validation_degraded" \
+          "$(jq -c '{
+              reason:.runtime.cloud.readiness.components.controller.reason,
+              fallback:.runtime.cloud.readiness.components.controller.fallback,
+              action:"continue_with_all_disks_sata"
+            }' "${N2K_MANIFEST}")"
+      else
+        n2k_event ERROR "init" "" "source_disk_controller_validation_failed" \
+          "$(jq -c '{
+              code:(.runtime.last_error.code // 44),
+              reason:(.runtime.last_error.reason // "source_controller_plan_failed"),
+              controller_plan:(.source.controller_plan // {}),
+              action:"stop_before_snapshot"
+            }' "${N2K_MANIFEST}")"
+        return "${controller_validation_rc}"
+      fi
     fi
   fi
   if [[ "${target_provider}" == "ablestack-cloud" ]]; then
     local cloud_controller_plan_rc=0
-    if n2k_cloud_target_prepare_disk_controller_plan "${N2K_MANIFEST}"; then
+    if n2k_cloud_target_disk_controller_plan_is_valid "${N2K_MANIFEST}"; then
+      n2k_event INFO "init" "" "cloud_disk_controller_plan_ready" \
+        "$(jq -c '.target.cloud.disk_controller_plan' "${N2K_MANIFEST}")"
+    elif n2k_cloud_target_prepare_disk_controller_plan "${N2K_MANIFEST}"; then
       n2k_event INFO "init" "" "cloud_disk_controller_plan_ready" \
         "$(jq -c '.target.cloud.disk_controller_plan' "${N2K_MANIFEST}")"
     else
       cloud_controller_plan_rc=$?
-      n2k_event ERROR "init" "" "cloud_disk_controller_plan_failed" \
-        "$(jq -c '{
-            code:(.runtime.last_error.code // 44),
-            reason:(.runtime.last_error.reason // "cloud_disk_controller_plan_failed"),
-            plan:(.target.cloud.disk_controller_plan // {}),
-            action:"stop_before_snapshot"
-          }' "${N2K_MANIFEST}")"
-      return "${cloud_controller_plan_rc}"
+      local cloud_plan_reason
+      cloud_plan_reason="$(jq -r '.runtime.last_error.reason // "cloud_disk_controller_plan_failed"' "${N2K_MANIFEST}")"
+      case "${cloud_plan_reason}" in
+        cloud_root_controller_unsupported|cloud_data_controller_unsupported|cloud_mixed_data_controller_unsupported)
+          n2k_cloud_target_force_sata_fallback \
+            "${N2K_MANIFEST}" "cloud-controller-plan" \
+            "${cloud_controller_plan_rc}" "${cloud_plan_reason}" || return $?
+          n2k_event WARN "init" "" "cloud_disk_controller_plan_degraded" \
+            "$(jq -c '{plan:.target.cloud.disk_controller_plan,action:"continue_with_all_disks_sata"}' "${N2K_MANIFEST}")"
+          ;;
+        *)
+          n2k_event ERROR "init" "" "cloud_disk_controller_plan_failed" \
+            "$(jq -c '{
+                code:(.runtime.last_error.code // 44),
+                reason:(.runtime.last_error.reason // "cloud_disk_controller_plan_failed"),
+                plan:(.target.cloud.disk_controller_plan // {}),
+                action:"stop_before_snapshot"
+              }' "${N2K_MANIFEST}")"
+          return "${cloud_controller_plan_rc}"
+          ;;
+      esac
     fi
     n2k_cloud_target_ensure_manifest_nic_mappings "${N2K_MANIFEST}" || \
       n2k_die "Failed to create ordered source NIC to Cloud network mappings"
@@ -684,17 +715,35 @@ n2k_require_disk_controller_integrity() {
   local manifest="$1"
   local provider plan_status
 
+  provider="$(jq -r '.target.provider // "libvirt"' "${manifest}")"
   if ! n2k_manifest_source_controller_validation_is_valid "${manifest}"; then
-    echo "N2K migration requires an unambiguous, supported source disk-controller plan. Start phase1 with a new workdir after correcting the source inventory." >&2
-    return 44
+    if [[ "${provider}" != "ablestack-cloud" ]] \
+        || ! n2k_cloud_target_disk_controller_plan_is_valid "${manifest}" \
+        || ! jq -e '
+          .runtime.cloud.readiness.components.controller.fallback == "sata"
+          and (([.disks[]? | select((.role // "") == "root")] | length) == 1)
+        ' "${manifest}" >/dev/null 2>&1; then
+      echo "N2K migration requires an unambiguous source disk identity and a valid target controller plan." >&2
+      return 44
+    fi
   fi
 
-  provider="$(jq -r '.target.provider // "libvirt"' "${manifest}")"
   case "${provider}" in
     ablestack-cloud)
       plan_status="$(jq -r '.target.cloud.disk_controller_plan.status // ""' "${manifest}")"
       if [[ -z "${plan_status}" ]]; then
-        n2k_cloud_target_prepare_disk_controller_plan "${manifest}" || return $?
+        local plan_rc=0 plan_reason
+        n2k_cloud_target_prepare_disk_controller_plan "${manifest}" || plan_rc=$?
+        if [[ "${plan_rc}" -ne 0 ]]; then
+          plan_reason="$(jq -r '.runtime.last_error.reason // "cloud_disk_controller_plan_failed"' "${manifest}")"
+          case "${plan_reason}" in
+            cloud_root_controller_unsupported|cloud_data_controller_unsupported|cloud_mixed_data_controller_unsupported)
+              n2k_cloud_target_force_sata_fallback \
+                "${manifest}" "cloud-controller-integrity" "${plan_rc}" "${plan_reason}" || return $?
+              ;;
+            *) return "${plan_rc}" ;;
+          esac
+        fi
       fi
       n2k_cloud_target_disk_controller_plan_is_valid "${manifest}" || {
         echo "ABLESTACK Cloud migration requires a valid single root/data disk-controller plan." >&2
@@ -1478,6 +1527,12 @@ n2k_cmd_run() {
   if ! n2k_run_manifest_phase_done "${N2K_MANIFEST}" "cutover"; then
     n2k_event INFO "run" "" "step" '{"step":"cutover"}'
     n2k_cmd_cutover "${cutover_args[@]}"
+  fi
+  if jq -e '.runtime.cloud.inspection_required == true or .runtime.cloud.checkpoint.inspection_required == true' \
+      "${N2K_MANIFEST}" >/dev/null 2>&1; then
+    cleanup_source_points=false
+    n2k_event WARN "run" "" "source_points_cleanup_blocked" \
+      '{"reason":"cloud target requires engineer inspection"}'
   fi
   if [[ "${cleanup_source_points}" == "true" && "${N2K_DRY_RUN:-0}" -ne 1 ]]; then
     n2k_run_cleanup_source_recovery_points "${N2K_MANIFEST}" "${source_endpoint}" "${username}" "${password}" "${insecure}"
