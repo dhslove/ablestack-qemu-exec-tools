@@ -9699,6 +9699,16 @@ selftest_case_dr_failback_resume_checkpoint_publishes_terminal_state() {
   selftest_assert_file_contains "${status_path}" "post_failback_checkpoint_sequence=8"
   output="$(ftctl_dr_runtime_emit_state_json "dr-status" "ok" "${plan}" "" "${status_path}" "0")"
   selftest_assert_contains "${output}" '"post_failback_checkpoint_sequence":8' "plan authority emits post-failback sequence"
+
+  # Reproduce the production race: a forward cycle publishes first and the
+  # failback sidecar reaches COMPLETED immediately afterward. A plan-level
+  # status read must reconstruct sticky authority without another write.
+  cp -f "${forward_run_path}" "${status_path}"
+  selftest_assert_file_not_contains "${status_path}" "failback_phase=COMPLETED"
+  output="$(ftctl_dr_runtime_status "${plan}" "" "0" "20" "1")"
+  selftest_assert_contains "${output}" '"failback_phase":"COMPLETED"' "status read restores failback phase"
+  selftest_assert_contains "${output}" '"post_failback_checkpoint_sequence":8' "status read restores post-failback sequence"
+  selftest_assert_file_contains "${status_path}" "active_side=SOURCE"
 }
 
 selftest_case_dr_failback_commit_pending_is_not_authoritative_terminal() {

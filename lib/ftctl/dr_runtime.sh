@@ -6370,6 +6370,12 @@ ftctl_dr_runtime_status() {
   fi
 
   [[ -n "${run}" && ! -f "$(ftctl_dr_runtime_run_path "${plan}" "${run}")" ]] && result="run_not_found"
+  if [[ -z "${run}" ]]; then
+    # The durable failback sidecar can reach COMPLETED just after a forward
+    # cycle publishes status. Rebuild plan authority at read time as well so
+    # Cloud never loses the sticky failback completion contract to that race.
+    ftctl_dr_runtime_overlay_failback_plan_authority "${path}" "${path}" || true
+  fi
   if [[ "${json}" == "1" ]]; then
     payload="$(ftctl_dr_runtime_emit_state_json "dr-status" "${result}" "${plan}" "${run}" "${path}" "${events_offset}" "${events_limit}")" || payload=""
     max_payload_bytes="${FTCTL_DR_STATUS_MAX_BYTES:-262144}"

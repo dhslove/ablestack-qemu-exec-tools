@@ -68,6 +68,13 @@ then applies the durable failback authority overlay. The overlay is accepted
 only for `PROTECTION_RESUMING` or `COMPLETED` active sessions and is rejected
 for Failover/Reprotect or target-active Runs.
 
+Live preflight also exposed a publish-order race: a forward cycle can publish
+immediately before the durable failback sidecar reaches `COMPLETED`.
+`ftctl_dr_runtime_status()` therefore applies the same overlay immediately
+before a plan-level status response. This is a read-repair of already durable
+authority, not a new lifecycle transition, and it is not applied to a
+run-specific status query.
+
 `ftctl_dr_runtime_emit_state_json()` emits
 `post_failback_checkpoint_sequence`. It also normalizes data-worker terminal
 markers to non-authoritative while the Cloud lifecycle remains pending.
@@ -80,9 +87,10 @@ snapshots, restart transfer, or change the established RBD and VDDK data paths.
 Automated FTCTL tests must prove:
 
 1. a completed active failback survives a subsequent forward status publish;
-2. pending commit state cannot be authoritative terminal even with a data-worker terminal journal;
-3. the post-failback checkpoint sequence is emitted;
-4. existing reverse incremental and baseline tests remain green.
+2. a plan-level status read repairs the forward-publish/failback-complete race;
+3. pending commit state cannot be authoritative terminal even with a data-worker terminal journal;
+4. the post-failback checkpoint sequence is emitted;
+5. existing reverse incremental and baseline tests remain green.
 
 Runtime PASS requires one Failover to Failback cycle where VMware is powered
 on, the ABLESTACK serving VM is powered off, reverse transfer is incremental,
@@ -95,6 +103,7 @@ share the same successful terminal outcome.
 |---|---|---|
 | Worker terminal | Reverse data terminal may look lifecycle-terminal | Pending commit/resume is explicitly non-terminal |
 | Plan authority | Forward Run copy removes failback authority fields | Durable active failback fields survive normal forward publication |
+| Publish-order race | Sidecar completion after publish waits for another write | Plan-level status read immediately repairs the projection |
 | Sequence evidence | Post-failback sequence exists only in sidecar | Sequence is emitted in plan authority JSON |
 | Cloud convergence | Late ACK can leave Run/session failed or pending | Cloud receives durable evidence and converges all records |
 | PASS decision | VM and bytes can look successful independently | VM, bytes, FTCTL, Run, session, Plan, and replica must all agree |
