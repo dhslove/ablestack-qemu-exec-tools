@@ -860,7 +860,56 @@ ftctl_dr_runtime_path_set() {
 ftctl_dr_runtime_publish_status() {
   local run_path="${1-}" status_path="${2-}"
   [[ -n "${run_path}" && -f "${run_path}" && -n "${status_path}" ]] || return 1
-  ftctl_dr_runtime_atomic_copy "${run_path}" "${status_path}" "0644"
+  ftctl_dr_runtime_atomic_copy "${run_path}" "${status_path}" "0644" || return $?
+  ftctl_dr_runtime_overlay_failback_plan_authority "${run_path}" "${status_path}"
+}
+
+ftctl_dr_runtime_overlay_failback_plan_authority() {
+  local run_path="${1-}" status_path="${2-}" plan_dir active_path
+  local action current_active_side active_state active_side session_id
+  local source_power target_power engine_ack engine_ack_at commit_outcome completed_at post_sequence
+  local cloud_lifecycle_state
+  local -a updates=()
+  [[ -f "${run_path}" && -f "${status_path}" ]] || return 1
+
+  action="$(ftctl_state_read_kv "${run_path}" action 2>/dev/null || true)"
+  current_active_side="$(ftctl_state_read_kv "${run_path}" active_side 2>/dev/null || true)"
+  case "${action}" in
+    dr-failover*|dr-reprotect*) return 0 ;;
+  esac
+  [[ "${current_active_side}" != "TARGET" ]] || return 0
+
+  plan_dir="$(dirname "${status_path}")"
+  active_path="${plan_dir}/failbacks/active.json"
+  [[ -s "${active_path}" ]] || return 0
+  active_state="$(jq -r '.state // empty' "${active_path}" 2>/dev/null || true)"
+  [[ "${active_state}" == "PROTECTION_RESUMING" || "${active_state}" == "COMPLETED" ]] || return 0
+  active_side="$(jq -r '.activeSide // empty' "${active_path}" 2>/dev/null || true)"
+  [[ "${active_side}" == "SOURCE" ]] || return 0
+
+  session_id="$(jq -r '.sessionId // empty' "${active_path}" 2>/dev/null || true)"
+  source_power="$(jq -r '.sourcePowerState // empty' "${active_path}" 2>/dev/null || true)"
+  target_power="$(jq -r '.targetPowerState // empty' "${active_path}" 2>/dev/null || true)"
+  engine_ack="$(jq -r '.engineAckState // empty' "${active_path}" 2>/dev/null || true)"
+  engine_ack_at="$(jq -r '.engineAckAt // empty' "${active_path}" 2>/dev/null || true)"
+  commit_outcome="$(jq -r '.commitOutcome // empty' "${active_path}" 2>/dev/null || true)"
+  completed_at="$(jq -r '.completedAt // empty' "${active_path}" 2>/dev/null || true)"
+  post_sequence="$(jq -r '.postFailbackCheckpointSequence // empty' "${active_path}" 2>/dev/null || true)"
+  [[ "${active_state}" == "COMPLETED" ]] && cloud_lifecycle_state="COMPLETED" || cloud_lifecycle_state="COMMITTED"
+
+  updates+=("active_side=SOURCE" "failback_phase=${active_state}" "cloud_lifecycle_state=${cloud_lifecycle_state}")
+  [[ -n "${session_id}" ]] && updates+=("failback_session_id=${session_id}")
+  [[ -n "${source_power}" ]] && updates+=("source_power_state=${source_power}")
+  [[ -n "${target_power}" ]] && updates+=("target_power_state=${target_power}")
+  [[ -n "${engine_ack}" ]] && updates+=("engine_ack_state=${engine_ack}")
+  [[ -n "${engine_ack_at}" ]] && updates+=("engine_ack_at=${engine_ack_at}")
+  [[ -n "${commit_outcome}" ]] && updates+=("failback_commit_outcome=${commit_outcome}")
+  [[ -n "${completed_at}" ]] && updates+=("failback_completed_at=${completed_at}")
+  if [[ "${post_sequence}" =~ ^[1-9][0-9]*$ ]]; then
+    updates+=("post_failback_checkpoint_sequence=${post_sequence}")
+    updates+=("resume_checkpoint_completed_sequence=${post_sequence}")
+  fi
+  ftctl_dr_runtime_path_set "${status_path}" "${updates[@]}"
 }
 
 ftctl_dr_runtime_apply_target_authority_terminal_state() {
@@ -3188,7 +3237,7 @@ ftctl_dr_runtime_emit_state_json() {
   local failback_restore_point_ref failback_restore_point_sequence
   local failback_manifest_path failback_checkpoint_path failback_requested_at reverse_sync_started_at
   local reverse_target_ready_at source_promote_started_at source_power_on_at failback_completed_at
-  local failback_rto_actual_seconds source_power_state source_promotion_state failback_worker_pid
+  local failback_rto_actual_seconds source_power_state source_promotion_state failback_worker_pid post_failback_checkpoint_sequence
   local reprotect_session_id reprotect_mode reprotect_restore_point_ref reprotect_restore_point_sequence
   local reprotect_manifest_path reprotect_checkpoint_path reprotect_requested_at reprotect_completed_at
   local reprotect_rto_actual_seconds route_contract_version replication_direction reverse_direction provider_pair reverse_profile_path reverse_restore_points_path reprotect_worker_pid
@@ -3769,6 +3818,13 @@ PY
   source_power_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "source_power_state")"
   source_promotion_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "source_promotion_state")"
   failback_worker_pid="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "failback_worker_pid")"
+  post_failback_checkpoint_sequence="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "post_failback_checkpoint_sequence")"
+  [[ -n "${post_failback_checkpoint_sequence}" ]] || post_failback_checkpoint_sequence="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "resume_checkpoint_completed_sequence")"
+  if [[ "${failback_phase}" == "COMMIT_VERIFYING" || "${failback_phase}" == "PROTECTION_RESUMING" ]]; then
+    terminal_authoritative="false"
+    runtime_endpoints_drained="false"
+    [[ "${terminal_source}" == "ENGINE_TERMINAL" ]] && terminal_source="DATA_TERMINAL"
+  fi
   reprotect_session_id="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "reprotect_session_id")"
   reprotect_mode="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "reprotect_mode")"
   reprotect_restore_point_ref="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "reprotect_restore_point_ref")"
@@ -4170,6 +4226,7 @@ PY
   ftctl_dr_runtime_json_string_field "source_power_on_at" "${source_power_on_at}"
   ftctl_dr_runtime_json_string_field "failback_completed_at" "${failback_completed_at}"
   ftctl_dr_runtime_json_number_field "failback_rto_actual_seconds" "${failback_rto_actual_seconds}"
+  ftctl_dr_runtime_json_number_field "post_failback_checkpoint_sequence" "${post_failback_checkpoint_sequence}"
   ftctl_dr_runtime_json_string_field "source_power_state" "${source_power_state}"
   ftctl_dr_runtime_json_string_field "source_promotion_state" "${source_promotion_state}"
   ftctl_dr_runtime_json_number_field "failback_worker_pid" "${failback_worker_pid}"

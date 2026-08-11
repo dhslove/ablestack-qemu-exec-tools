@@ -9674,7 +9674,7 @@ selftest_case_dr_failback_resume_checkpoint_publishes_terminal_state() {
   cp -f "${run_path}" "${status_path}"
   ftctl_state_write_kv_all "${commit_path}" "phase=ACKNOWLEDGED" "outcome=ACKNOWLEDGED"
   printf '%s\n' \
-    "{\"planUuid\":\"${plan}\",\"runUuid\":\"${run}\",\"state\":\"PROTECTION_RESUMING\",\"activeSide\":\"SOURCE\"}" \
+    "{\"planUuid\":\"${plan}\",\"runUuid\":\"${run}\",\"sessionId\":\"${plan}:${run}\",\"state\":\"PROTECTION_RESUMING\",\"activeSide\":\"SOURCE\",\"sourcePowerState\":\"POWERED_ON\",\"targetPowerState\":\"POWERED_OFF\"}" \
     > "${session_path}"
 
   ftctl_dr_runtime_complete_failback_resume_checkpoint "${plan}" 8
@@ -9686,6 +9686,42 @@ selftest_case_dr_failback_resume_checkpoint_publishes_terminal_state() {
   selftest_assert_file_contains "${commit_path}" "phase=COMPLETED"
   selftest_assert_file_contains "${session_path}" '"state":"COMPLETED"'
   selftest_assert_file_contains "${active_path}" '"postFailbackCheckpointSequence":8'
+
+  local forward_run_path="${plan_dir}/runs/run-forward.state" output
+  ftctl_state_write_kv_all "${forward_run_path}" \
+    "plan=${plan}" "run=run-forward" "action=dr-sync-start" \
+    "state=READY" "step=target-checkpoint-ready" "progress=100" \
+    "latest_completed_checkpoint_sequence=9"
+  ftctl_dr_runtime_publish_status "${forward_run_path}" "${status_path}"
+  selftest_assert_file_contains "${status_path}" "active_side=SOURCE"
+  selftest_assert_file_contains "${status_path}" "failback_phase=COMPLETED"
+  selftest_assert_file_contains "${status_path}" "engine_ack_state=ACKNOWLEDGED"
+  selftest_assert_file_contains "${status_path}" "post_failback_checkpoint_sequence=8"
+  output="$(ftctl_dr_runtime_emit_state_json "dr-status" "ok" "${plan}" "" "${status_path}" "0")"
+  selftest_assert_contains "${output}" '"post_failback_checkpoint_sequence":8' "plan authority emits post-failback sequence"
+}
+
+selftest_case_dr_failback_commit_pending_is_not_authoritative_terminal() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR data-worker terminal does not terminalize a pending Failback commit"
+
+  local plan="plan-failback-commit-pending" run="run-failback-commit-pending"
+  local run_path output
+  ftctl_dr_runtime_ensure_plan_dirs "${plan}"
+  run_path="$(ftctl_dr_runtime_run_path "${plan}" "${run}")"
+  ftctl_state_write_kv_all "${run_path}" \
+    "plan=${plan}" "run=${run}" "action=dr-failback-commit" \
+    "state=SYNCING" "step=commit-verifying" "progress=90" \
+    "failback_phase=COMMIT_VERIFYING" "cloud_lifecycle_state=COMMIT_VERIFYING" \
+    "failback_commit_outcome=UNKNOWN" "engine_ack_state=UNKNOWN" \
+    "error_code=DR_FAILBACK_COMMIT_ACK_PENDING" "retryable=true"
+  ftctl_dr_runtime_terminal_journal_write "${plan}" "${run}" "nonce-pending" "1" \
+    "SUCCEEDED" "0" "" "$(ftctl_now_iso8601)"
+
+  output="$(ftctl_dr_runtime_emit_state_json "dr-failback-commit" "unknown" "${plan}" "${run}" "${run_path}" "0")"
+  selftest_assert_contains "${output}" '"terminal_authoritative":false' "pending commit is not lifecycle terminal"
+  selftest_assert_contains "${output}" '"terminal_source":"DATA_TERMINAL"' "worker terminal is data scoped"
+  selftest_assert_contains "${output}" '"failback_phase":"COMMIT_VERIFYING"' "pending lifecycle phase is retained"
 }
 
 selftest_case_dr_kvm_vmware_reverses_forward_profile_roles() {
@@ -10148,6 +10184,7 @@ selftest_main() {
   selftest_case_dr_kvm_vmware_reverse_route_and_baseline_contract
   selftest_case_dr_kvm_vmware_failover_seeds_reverse_baseline
   selftest_case_dr_failback_resume_checkpoint_publishes_terminal_state
+  selftest_case_dr_failback_commit_pending_is_not_authoritative_terminal
   selftest_case_dr_kvm_vmware_reverses_forward_profile_roles
   selftest_case_dr_kvm_vmware_initial_seed_accepts_missing_baseline
   selftest_case_dr_kvm_vmware_reverse_preflight_clears_return_trap

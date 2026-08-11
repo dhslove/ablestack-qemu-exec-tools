@@ -1,5 +1,9 @@
 # 456. FTCTL DR Cutover Reverse Baseline And Terminal Convergence Design
 
+> Follow-up: `457-ftctl-dr-failback-terminal-late-ack-plan-authority-convergence-design-20260811.md`
+> defines late-ACK handling and sticky plan-authority publication after the
+> post-failback checkpoint.
+
 - Date: 2026-08-11
 - Status: implementation contract
 - Scope: VMware to ABLESTACK Failover, KVM to VMware Failback, scheduler terminal publication
