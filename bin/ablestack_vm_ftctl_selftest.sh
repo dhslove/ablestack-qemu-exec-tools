@@ -9605,6 +9605,89 @@ JSON
   selftest_assert_contains "${out}" "reverse-writer:${plan}:reverse-incremental" "provider pair routes to reverse writer"
 }
 
+selftest_case_dr_kvm_vmware_failover_seeds_reverse_baseline() (
+  selftest_reset_env
+  selftest_info "FTCTL_DR failover seeds a durable KVM cutover baseline for the first reverse delta"
+
+  local plan="plan-cutover-baseline" run="run-cutover-baseline"
+  local profile="${SELFTEST_ROOT}/cutover-baseline-profile.json"
+  local baseline_path="" rbd_log="${SELFTEST_ROOT}/rbd-cutover-baseline.log"
+  cat > "${profile}" <<JSON
+{
+  "planUuid":"${plan}",
+  "runUuid":"${run}",
+  "direction":"VMWARE_TO_KVM",
+  "source":{"provider":"VMWARE","externalRef":"vm-101"},
+  "target":{"provider":"ABLESTACK","externalRef":"target-vm","instanceName":"i-2-266-VM"},
+  "mapping":{"disks":[{
+    "device":"sda",
+    "sizeBytes":1048576,
+    "sourcePath":"[datastore] w22-01/w22-01.vmdk",
+    "targetPath":"rbd/rbd/w22-01-dr-disk-0",
+    "source":{"vmdkPath":"[datastore] w22-01/w22-01.vmdk"},
+    "target":{"storagePath":"rbd","name":"w22-01-dr-disk-0"}
+  }]}
+}
+JSON
+
+  rbd() {
+    printf '%s\n' "$*" >> "${rbd_log}"
+    if [[ "${1-} ${2-}" == "snap ls" ]]; then
+      printf '[]\n'
+    fi
+  }
+
+  ftctl_dr_kvm_vmware_seed_cutover_baseline "${plan}" "${run}" "${profile}" 7
+  baseline_path="$(ftctl_dr_kvm_vmware_baseline_path "${plan}")"
+  selftest_assert_file_contains "${baseline_path}" '"origin":"FAILOVER_CUTOVER"'
+  selftest_assert_file_contains "${baseline_path}" '"createdFromCheckpoint":7'
+  selftest_assert_file_contains "${baseline_path}" '"state":"LOCAL_DURABLE"'
+  selftest_assert_file_contains "${baseline_path}" '"snapshot":"ftctl-dr-plan-cut-cutover-7-run-cuto-0"'
+  selftest_assert_file_contains "${rbd_log}" 'snap create rbd/w22-01-dr-disk-0@ftctl-dr-plan-cut-cutover-7-run-cuto-0'
+  selftest_assert_contains "$(ftctl_dr_kvm_vmware_mode_decision "${plan}" FAILBACK_FINAL AUTO)" \
+    $'LOCAL_DURABLE\tREVERSE_FINAL\tDURABLE_BASELINE_FINAL_DELTA\tfalse' \
+    "cutover baseline makes the first failback incremental"
+)
+
+selftest_case_dr_failback_resume_checkpoint_publishes_terminal_state() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR post-failback checkpoint publishes one terminal state across runtime artifacts"
+
+  local plan="plan-failback-terminal" run="run-failback-terminal"
+  local plan_dir="${SELFTEST_ROOT}/run/dr-runtime/plans/${plan}"
+  local run_path="${plan_dir}/runs/${run}.state"
+  local status_path="${plan_dir}/status.state"
+  local sequence_path="${plan_dir}/scheduler/sequence.state"
+  local commit_path="${plan_dir}/failbacks/${run}.commit.state"
+  local session_path="${plan_dir}/failbacks/${run}.json"
+  local active_path="${plan_dir}/failbacks/active.json"
+  mkdir -p "${plan_dir}/runs" "${plan_dir}/scheduler" "${plan_dir}/failbacks"
+  ftctl_state_write_kv_all "${sequence_path}" \
+    "minimum_completed_checkpoint_sequence=8" \
+    "immediate_cycle_pending=false" \
+    "immediate_cycle_owner_run=${run}"
+  ftctl_state_write_kv_all "${run_path}" \
+    "plan=${plan}" "run=${run}" "state=SYNCING" "step=protection-resuming" \
+    "failback_session_id=${plan}:${run}" "active_side=SOURCE" \
+    "engine_ack_state=ACKNOWLEDGED" "source_power_state=POWERED_ON" \
+    "target_power_state=POWERED_OFF"
+  cp -f "${run_path}" "${status_path}"
+  ftctl_state_write_kv_all "${commit_path}" "phase=ACKNOWLEDGED" "outcome=ACKNOWLEDGED"
+  printf '%s\n' \
+    "{\"planUuid\":\"${plan}\",\"runUuid\":\"${run}\",\"state\":\"PROTECTION_RESUMING\",\"activeSide\":\"SOURCE\"}" \
+    > "${session_path}"
+
+  ftctl_dr_runtime_complete_failback_resume_checkpoint "${plan}" 8
+
+  selftest_assert_file_contains "${run_path}" "state=READY"
+  selftest_assert_file_contains "${run_path}" "failback_phase=COMPLETED"
+  selftest_assert_file_contains "${run_path}" "terminal_authoritative=true"
+  selftest_assert_file_contains "${status_path}" "step=target-checkpoint-ready"
+  selftest_assert_file_contains "${commit_path}" "phase=COMPLETED"
+  selftest_assert_file_contains "${session_path}" '"state":"COMPLETED"'
+  selftest_assert_file_contains "${active_path}" '"postFailbackCheckpointSequence":8'
+}
+
 selftest_case_dr_kvm_vmware_reverses_forward_profile_roles() {
   selftest_reset_env
   selftest_info "FTCTL_DR derives the KVM to VMware route from a forward VMware to KVM profile"
@@ -10063,6 +10146,8 @@ selftest_main() {
   selftest_case_dr_vmware_forward_target_map_reuses_ablestack_locator
   selftest_case_dr_vmware_mover_uses_raw_over_nbd_image_opts
   selftest_case_dr_kvm_vmware_reverse_route_and_baseline_contract
+  selftest_case_dr_kvm_vmware_failover_seeds_reverse_baseline
+  selftest_case_dr_failback_resume_checkpoint_publishes_terminal_state
   selftest_case_dr_kvm_vmware_reverses_forward_profile_roles
   selftest_case_dr_kvm_vmware_initial_seed_accepts_missing_baseline
   selftest_case_dr_kvm_vmware_reverse_preflight_clears_return_trap

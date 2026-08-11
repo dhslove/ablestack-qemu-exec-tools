@@ -2322,9 +2322,41 @@ ftctl_dr_runtime_failover_worker() {
     fi
   fi
 
-  local cutover_workdir direction
+  local cutover_workdir direction cutover_checkpoint_sequence
   direction="$(jq -r '.direction // ""' "${profile_file}" 2>/dev/null || true)"
   if [[ "${direction}" == "VMWARE_TO_KVM" ]]; then
+    cutover_checkpoint_sequence="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "checkpoint_sequence")"
+    [[ "${cutover_checkpoint_sequence}" =~ ^[1-9][0-9]*$ ]] \
+      || cutover_checkpoint_sequence="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "latest_completed_checkpoint_sequence")"
+    if [[ ! "${cutover_checkpoint_sequence}" =~ ^[1-9][0-9]*$ && "${restore_point##*:}" =~ ^[1-9][0-9]*$ ]]; then
+      cutover_checkpoint_sequence="${restore_point##*:}"
+    fi
+    ftctl_dr_runtime_path_set "${run_path}" \
+      "state=RUNNING" \
+      "step=reverse-baseline-seed" \
+      "progress=75" \
+      "reverse_baseline_state=PREPARING" \
+      "updated_at=$(ftctl_now_iso8601)" || true
+    cp -f "${run_path}" "${status_path}" 2>/dev/null || true
+    ftctl_dr_kvm_vmware_seed_cutover_baseline "${plan}" "${run}" "${profile_file}" \
+      "${cutover_checkpoint_sequence}" || rc=$?
+    if [[ "${rc}" != "0" ]]; then
+      ftctl_dr_runtime_path_set "${run_path}" \
+        "state=ERROR" "step=reverse-baseline-seed-failed" "progress=100" \
+        "accepted=false" "worker_state=FAILED" "worker_pid=$$" "worker_exit_code=${rc}" \
+        "reverse_baseline_state=FAILED" "error_code=DR_REVERSE_BASELINE_SEED_FAILED" \
+        "error_message=Unable to establish the KVM cutover baseline before target activation" \
+        "updated_at=$(ftctl_now_iso8601)" || true
+      cp -f "${run_path}" "${status_path}" 2>/dev/null || true
+      ftctl_log_event "dr-runtime" "dr.failover.reverse-baseline" "fail" "" \
+        "DR_REVERSE_BASELINE_SEED_FAILED" "plan=${plan} run=${run} checkpoint=${cutover_checkpoint_sequence} rc=${rc}"
+      return "${rc}"
+    fi
+    ftctl_dr_runtime_path_set "${run_path}" \
+      "reverse_baseline_state=LOCAL_DURABLE" \
+      "reverse_baseline_generation=${cutover_checkpoint_sequence}" \
+      "reverse_baseline_origin=FAILOVER_CUTOVER" \
+      "updated_at=$(ftctl_now_iso8601)" || true
     cutover_workdir="$(ftctl_dr_runtime_failover_dir "${plan}")/$(ftctl_dr_runtime_key "${run}")-guestprep"
     ftctl_dr_runtime_path_set "${run_path}" \
       "state=RUNNING" \
@@ -5650,6 +5682,81 @@ ftctl_dr_runtime_reconcile_failback_commit() {
   return 0
 }
 
+ftctl_dr_runtime_complete_failback_resume_checkpoint() {
+  local plan="${1-}" completed="${2-}" sequence_path owner_run minimum
+  local run_path status_path commit_path session_path active_path now session_id
+  [[ -n "${plan}" && "${completed}" =~ ^[1-9][0-9]*$ ]] || return 2
+  sequence_path="$(ftctl_dr_scheduler_sequence_path "${plan}")"
+  owner_run="$(ftctl_state_read_kv "${sequence_path}" "immediate_cycle_owner_run" 2>/dev/null || true)"
+  minimum="$(ftctl_state_read_kv "${sequence_path}" "minimum_completed_checkpoint_sequence" 2>/dev/null || true)"
+  [[ -n "${owner_run}" && "${minimum}" =~ ^[1-9][0-9]*$ && "${completed}" -ge "${minimum}" ]] || return 0
+  run_path="$(ftctl_dr_runtime_run_path "${plan}" "${owner_run}")"
+  status_path="$(ftctl_dr_runtime_status_path "${plan}")"
+  [[ -f "${run_path}" && -f "${status_path}" ]] || return 0
+  [[ "$(ftctl_dr_runtime_state_get_from_path "${run_path}" "active_side")" == "SOURCE" \
+        && "$(ftctl_dr_runtime_state_get_from_path "${run_path}" "engine_ack_state")" == "ACKNOWLEDGED" \
+        && "$(ftctl_dr_runtime_state_get_from_path "${run_path}" "source_power_state")" == "POWERED_ON" \
+        && "$(ftctl_dr_runtime_state_get_from_path "${run_path}" "target_power_state")" == "POWERED_OFF" ]] || return 0
+
+  now="$(ftctl_now_iso8601)"
+  session_id="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "failback_session_id")"
+  commit_path="$(ftctl_dr_runtime_failback_commit_state_path "${plan}" "${owner_run}")"
+  session_path="$(ftctl_dr_runtime_failback_session_path "${plan}" "${owner_run}")"
+  active_path="$(ftctl_dr_runtime_active_failback_session_path "${plan}")"
+
+  ftctl_dr_runtime_path_set "${run_path}" \
+    "state=READY" "step=completed" "progress=100" \
+    "failback_phase=COMPLETED" "cloud_lifecycle_state=COMPLETED" \
+    "active_side=SOURCE" "scheduler_state=RUNNING" "scheduler_health=HEALTHY" \
+    "immediate_cycle_pending=false" "resume_checkpoint_completed_sequence=${completed}" \
+    "resume_checkpoint_completed_at=${now}" "failback_completed_at=${now}" \
+    "worker_state=TERMINAL_PUBLISHED" "worker_exit_code=0" \
+    "transfer_activity_state=IDLE" "terminal_source=ENGINE_TERMINAL" \
+    "terminal_version=1" "terminal_authoritative=true" \
+    "retryable=false" "error_code=" "error_message=" "updated_at=${now}" || return 2
+  ftctl_dr_runtime_path_set "${status_path}" \
+    "state=READY" "step=target-checkpoint-ready" "progress=100" \
+    "failback_phase=COMPLETED" "cloud_lifecycle_state=COMPLETED" \
+    "active_side=SOURCE" "scheduler_state=RUNNING" "scheduler_health=HEALTHY" \
+    "immediate_cycle_pending=false" "resume_checkpoint_completed_sequence=${completed}" \
+    "resume_checkpoint_completed_at=${now}" "failback_completed_at=${now}" \
+    "transfer_activity_state=IDLE" "terminal_source=ENGINE_TERMINAL" \
+    "terminal_version=1" "terminal_authoritative=true" \
+    "retryable=false" "error_code=" "error_message=" "updated_at=${now}" || return 2
+  if [[ -f "${commit_path}" ]]; then
+    ftctl_state_set_path "${commit_path}" \
+      "phase=COMPLETED" "outcome=ACKNOWLEDGED" \
+      "resume_checkpoint_completed_sequence=${completed}" \
+      "resume_checkpoint_completed_at=${now}" "updated_at=${now}" || return 2
+  fi
+  if [[ -f "${session_path}" ]]; then
+    python3 - "${session_path}" "${active_path}" "${completed}" "${now}" <<'PY' || return 2
+import json
+import os
+import shutil
+import sys
+
+path, active_path, completed, now = sys.argv[1:5]
+with open(path, "r", encoding="utf-8") as handle:
+    session = json.load(handle)
+session["state"] = "COMPLETED"
+session["activeSide"] = "SOURCE"
+session["postFailbackCheckpointSequence"] = int(completed)
+session["protectionResumeVerifiedAt"] = now
+session["completedAt"] = now
+session["engineAckState"] = "ACKNOWLEDGED"
+session["commitOutcome"] = "ACKNOWLEDGED"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(session, handle, sort_keys=True, separators=(",", ":"))
+    handle.write("\n")
+os.makedirs(os.path.dirname(active_path), exist_ok=True)
+shutil.copyfile(path, active_path)
+PY
+  fi
+  ftctl_log_event "dr-runtime" "dr.failback.resume-checkpoint" "ok" "" "" \
+    "plan=${plan} run=${owner_run} session=${session_id} checkpoint=${completed} state=COMPLETED"
+}
+
 ftctl_dr_runtime_failback_commit_envelope_sha256() {
   python3 - "$@" <<'PY'
 import hashlib
@@ -6167,7 +6274,7 @@ ftctl_dr_runtime_capabilities() {
       first="0"
       printf '"%s"' "$(ftctl__json_escape "${command}")"
     done
-    printf '],"supported_features":["async-run","status-projection","status-scope-v2","target-materialized-notify","target-materialized-idempotent","target-materialization-manifest-v2","target-resource-ownership-generation-v1","hardware-contract-projection","control-protocol-v2","control-protocol-v3","control-protocol-v4","dr-scheduler-singleton-v1","dr-scheduler-self-owner-repair-v1","dr-scheduler-systemd-unit-v1","dr-sync-recover-v1","dr-local-reconcile-fence-v1","dr-checkpoint-producer-v1","dr-nbd-deterministic-drain-v1","dr-nbd-cleanup-recovery-v1","dr-plan-authority-snapshot-v1","dr-failover-authority-snapshot-v1","dr-completed-cycle-evidence-v2","dr-failover-abort-v1","dr-transition-preflight-v1","dr-transition-preflight-v2","dr-reverse-preflight-v2","dr-reverse-evidence-publication-v1","dr-reverse-rbd-snapshot-readonly-v1","dr-terminal-causality-v1","dr-worker-journal-v1","dr-live-transfer-progress-v1","dr-runtime-reconciliation-v1","dr-release-tombstone-v1","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","guest-preparation-v1","guest-preparation-v2","test-domain-lifecycle-v1","test-artifact-lifecycle-v2","cloud-managed-test-vm-v1","cutover-ready-v1","cutover-manifest-v2","cutover-preflight-v1","cloud-cutover-commit-v1","cloud-cutover-commit-envelope-v2","cloud-cutover-commit-journal-v2","cloud-cutover-commit-status-v1","cloud-failback-lifecycle-v1","dr-failback-commit-journal-v1","dr-failback-commit-journal-v2","dr-failback-commit-envelope-v1","dr-failback-commit-journal-v3","dr-failback-late-ack-reconcile-v1","dr-failback-rollback-fence-v1"]}\n'
+    printf '],"supported_features":["async-run","status-projection","status-scope-v2","target-materialized-notify","target-materialized-idempotent","target-materialization-manifest-v2","target-resource-ownership-generation-v1","hardware-contract-projection","control-protocol-v2","control-protocol-v3","control-protocol-v4","dr-scheduler-singleton-v1","dr-scheduler-self-owner-repair-v1","dr-scheduler-systemd-unit-v1","dr-sync-recover-v1","dr-local-reconcile-fence-v1","dr-checkpoint-producer-v1","dr-nbd-deterministic-drain-v1","dr-nbd-cleanup-recovery-v1","dr-plan-authority-snapshot-v1","dr-failover-authority-snapshot-v1","dr-completed-cycle-evidence-v2","dr-failover-abort-v1","dr-failover-cutover-reverse-baseline-v1","dr-transition-preflight-v1","dr-transition-preflight-v2","dr-reverse-preflight-v2","dr-reverse-evidence-publication-v1","dr-reverse-rbd-snapshot-readonly-v1","dr-terminal-causality-v1","dr-failback-resume-terminal-v1","dr-worker-journal-v1","dr-live-transfer-progress-v1","dr-runtime-reconciliation-v1","dr-release-tombstone-v1","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","guest-preparation-v1","guest-preparation-v2","test-domain-lifecycle-v1","test-artifact-lifecycle-v2","cloud-managed-test-vm-v1","cutover-ready-v1","cutover-manifest-v2","cutover-preflight-v1","cloud-cutover-commit-v1","cloud-cutover-commit-envelope-v2","cloud-cutover-commit-journal-v2","cloud-cutover-commit-status-v1","cloud-failback-lifecycle-v1","dr-failback-commit-journal-v1","dr-failback-commit-journal-v2","dr-failback-commit-envelope-v1","dr-failback-commit-journal-v3","dr-failback-late-ack-reconcile-v1","dr-failback-rollback-fence-v1"]}\n'
     return 0
   fi
 

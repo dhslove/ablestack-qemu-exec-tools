@@ -1668,6 +1668,9 @@ ftctl_dr_scheduler_worker() {
       "error_message=" \
       "failed_component=" \
       "updated_at=${now}" || true
+    if command -v ftctl_dr_runtime_complete_failback_resume_checkpoint >/dev/null 2>&1; then
+      ftctl_dr_runtime_complete_failback_resume_checkpoint "${plan}" "${sequence}" || true
+    fi
     ftctl_log_event "dr-runtime" "dr.scheduler.cycle" "ok" "" "" \
       "plan=${plan} run=${cycle_run} sequence=${sequence} type=${cycle_type} checkpoint=${checkpoint_path} rpo=${rpo}"
     if [[ "${cycle_request_bound}" == "true" ]]; then

@@ -1,5 +1,10 @@
 # 445. FTCTL DR Bidirectional Incremental Replication And Reverse Guest Compatibility Design
 
+> 2026-08-11 cutover-baseline and terminal convergence correction:
+> [456-ftctl-dr-cutover-reverse-baseline-and-terminal-convergence-design-20260811.md](456-ftctl-dr-cutover-reverse-baseline-and-terminal-convergence-design-20260811.md)
+> makes a durable KVM baseline part of VMware-to-KVM Failover and requires the
+> post-Failback forward checkpoint to publish one authoritative terminal state.
+>
 > 2026-08-05 route-contract v2 correction:
 > [452-ftctl-dr-failback-route-envelope-and-cloud-lifecycle-boundary-design-20260805.md](452-ftctl-dr-failback-route-envelope-and-cloud-lifecycle-boundary-design-20260805.md)
 > separates `KVM_TO_VMWARE` topology from `ABLESTACK_TO_VMWARE` provider pair
@@ -114,7 +119,9 @@ firmware, Secure Boot, NIC model, and VMware bootability before cutback.
 2. VMware CBT is valid only while VMware is the change-tracked source.
 3. KVM changes are never inferred from VMware CBT change IDs.
 4. Every incremental cycle references one immutable baseline ID and generation.
-5. The first reverse cycle without a valid KVM baseline is `FULL_REVERSE_SEED`.
+5. A patched Failover creates a valid KVM cutover baseline, so its first
+   Failback is `REVERSE_FINAL`; `FULL_REVERSE_SEED` is a compatibility fallback
+   only for legacy plans whose cutover baseline is genuinely absent.
 6. Reverse writes target a staging VMDK/VM, never the only known-good source disk.
 7. Cloud powers off the active KVM VM only after a final reverse checkpoint is durable.
 8. Windows data readiness and Windows VMware boot readiness are separate gates.
@@ -489,7 +496,13 @@ Implemented source boundaries:
 - `lib/ftctl/dr_scheduler.sh`: forward CBT reader and reverse VDDK writer are selected independently;
 - `lib/ftctl/dr_runtime.sh`: reverse baseline, tracker, writer, write verification, and guest compatibility evidence are projected before `FAILBACK_DATA_READY`.
 
-The first reverse cycle is always `FULL_REVERSE_SEED`. Later cycles use `REVERSE_INCREMENTAL`; the previous RBD baseline snapshot is removed only after VDDK flush, read-after-write verification, and atomic local baseline commit. A failed cycle keeps the previous baseline and target authority.
+Before the 2026-08-11 correction, a missing reverse baseline selected
+`FULL_REVERSE_SEED`. Patched Failover now commits a `FAILOVER_CUTOVER` RBD
+baseline before guest preparation and target activation. Its first Failback
+therefore uses `REVERSE_FINAL`; `FULL_REVERSE_SEED` remains only for legacy
+plans without that baseline. The previous RBD baseline snapshot is removed
+only after the replacement baseline or reverse checkpoint is durable. A failed
+cycle keeps the previous baseline and current authority.
 
 Live acceptance remains mandatory before production qualification. It must prove a non-zero KVM-to-VMware delta, a verified no-change cycle, VMware guest heartbeat, and a subsequent forward CBT cycle.
 

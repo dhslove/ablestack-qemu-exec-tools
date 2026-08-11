@@ -164,6 +164,145 @@ ftctl_dr_kvm_vmware_baseline_state() {
   fi
 }
 
+ftctl_dr_kvm_vmware_snapshot_exists() {
+  local pool="${1-}" image="${2-}" snapshot="${3-}"
+  [[ -n "${pool}" && -n "${image}" && -n "${snapshot}" ]] || return 1
+  rbd snap ls --format json "${pool}/${image}" 2>/dev/null \
+    | jq -e --arg snapshot "${snapshot}" \
+        'any(.[]; (.name // .snapshot // "") == $snapshot)' >/dev/null 2>&1
+}
+
+ftctl_dr_kvm_vmware_seed_cutover_baseline() {
+  local plan="${1-}" run="${2-}" profile_file="${3-}" checkpoint_sequence="${4-}"
+  local root map_path baseline_path work_dir rows_path created_path old_path
+  local row index pool image snapshot old_snapshot rc=0
+  [[ -n "${plan}" && -n "${run}" && -f "${profile_file}" \
+        && "${checkpoint_sequence}" =~ ^[1-9][0-9]*$ ]] || return 2
+  [[ "$(jq -r '.direction // ""' "${profile_file}" 2>/dev/null || true)" == "VMWARE_TO_KVM" ]] || return 0
+
+  root="$(ftctl_dr_kvm_vmware_root "${plan}")"
+  map_path="$(ftctl_dr_kvm_vmware_disk_map_path "${plan}")"
+  baseline_path="$(ftctl_dr_kvm_vmware_baseline_path "${plan}")"
+  ftctl_ensure_dir "${root}" "0755"
+  ftctl_dr_kvm_vmware_canonicalize_profile "${profile_file}" "${map_path}" || return 67
+
+  if [[ -s "${baseline_path}" ]]; then
+    jq -e '.schemaVersion == 1 and .state == "LOCAL_DURABLE"
+      and .direction == "KVM_TO_VMWARE" and (.disks | type == "array")' \
+      "${baseline_path}" >/dev/null 2>&1 || return 84
+    if jq -e --arg run "${run}" --argjson sequence "${checkpoint_sequence}" \
+        '.origin == "FAILOVER_CUTOVER" and .runUuid == $run
+         and .createdFromCheckpoint == $sequence' "${baseline_path}" >/dev/null 2>&1; then
+      while IFS=$'\t' read -r pool image snapshot; do
+        ftctl_dr_kvm_vmware_snapshot_exists "${pool}" "${image}" "${snapshot}" || return 85
+      done < <(jq -r '.disks[] | [.pool,.image,.snapshot] | @tsv' "${baseline_path}")
+      return 0
+    fi
+  fi
+
+  work_dir="$(mktemp -d -t ftctl.dr.cutover.baseline.XXXXXX)" || return 2
+  rows_path="${work_dir}/rows.json"
+  created_path="${work_dir}/created.tsv"
+  old_path="${work_dir}/old.tsv"
+  printf '[]\n' > "${rows_path}"
+  : > "${created_path}"
+  : > "${old_path}"
+  if [[ -s "${baseline_path}" ]]; then
+    jq -r '.disks[] | [.pool,.image,.snapshot] | @tsv' "${baseline_path}" > "${old_path}"
+  fi
+
+  while IFS= read -r row; do
+    index="$(jq -r '.diskIndex' <<< "${row}")"
+    pool="$(jq -r '.sourcePool' <<< "${row}")"
+    image="$(jq -r '.sourceImage' <<< "${row}")"
+    old_snapshot="$(jq -r --argjson index "${index}" \
+      '[.disks[]? | select(.diskIndex == $index) | .snapshot][0] // ""' \
+      "${baseline_path}" 2>/dev/null || true)"
+    snapshot="ftctl-dr-${plan:0:8}-cutover-${checkpoint_sequence}-${run:0:8}-${index}"
+    if ftctl_dr_kvm_vmware_snapshot_exists "${pool}" "${image}" "${snapshot}"; then
+      rbd snap rm "${pool}/${image}@${snapshot}" >/dev/null 2>&1 || { rc=86; break; }
+    fi
+    rbd snap create "${pool}/${image}@${snapshot}" || { rc=86; break; }
+    printf '%s\t%s\t%s\n' "${pool}" "${image}" "${snapshot}" >> "${created_path}"
+    row="$(jq -c --arg snapshot "${snapshot}" --arg old "${old_snapshot}" \
+      '. + {snapshot:$snapshot,previousSnapshot:$old}' <<< "${row}")"
+    if ! jq --argjson row "${row}" '. + [$row]' "${rows_path}" > "${rows_path}.tmp" \
+        || ! mv -f "${rows_path}.tmp" "${rows_path}"; then
+      rc=2
+      break
+    fi
+  done < <(jq -c '.disks[]' "${map_path}")
+
+  if [[ "${rc}" == "0" ]]; then
+    python3 - "${map_path}" "${rows_path}" "${baseline_path}" "${plan}" "${run}" "${checkpoint_sequence}" <<'PY' || rc=$?
+import datetime
+import json
+import os
+import sys
+
+map_path, rows_path, output_path, plan, run, sequence = sys.argv[1:7]
+with open(map_path, "r", encoding="utf-8") as handle:
+    disk_map = json.load(handle)
+with open(rows_path, "r", encoding="utf-8") as handle:
+    rows = json.load(handle)
+generation = int(sequence)
+disks = []
+for row in rows:
+    disks.append({
+        "diskIndex": int(row["diskIndex"]),
+        "diskIdentityHash": row["diskIdentityHash"],
+        "pool": row["sourcePool"],
+        "image": row["sourceImage"],
+        "snapshot": row["snapshot"],
+        "previousSnapshot": row.get("previousSnapshot", ""),
+        "generation": generation,
+        "state": "LOCAL_DURABLE",
+    })
+payload = {
+    "schemaVersion": 1,
+    "planUuid": plan,
+    "runUuid": run,
+    "direction": "KVM_TO_VMWARE",
+    "providerPair": "ABLESTACK_TO_VMWARE",
+    "origin": "FAILOVER_CUTOVER",
+    "generation": generation,
+    "createdFromCheckpoint": generation,
+    "state": "LOCAL_DURABLE",
+    "committedAt": datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+    "virtualBytes": sum(int(row.get("virtualBytes") or 0) for row in disk_map.get("disks", [])),
+    "disks": disks,
+}
+tmp = output_path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as handle:
+    json.dump(payload, handle, sort_keys=True, separators=(",", ":"))
+    handle.write("\n")
+    handle.flush()
+    os.fsync(handle.fileno())
+os.replace(tmp, output_path)
+PY
+  fi
+
+  if [[ "${rc}" != "0" ]]; then
+    while IFS=$'\t' read -r pool image snapshot; do
+      if [[ -n "${snapshot}" ]]; then
+        rbd snap rm "${pool}/${image}@${snapshot}" >/dev/null 2>&1 || true
+      fi
+    done < "${created_path}"
+    rm -rf "${work_dir}"
+    return "${rc}"
+  fi
+
+  while IFS=$'\t' read -r pool image snapshot; do
+    [[ -n "${snapshot}" ]] || continue
+    if ! grep -Fqx "${pool}"$'\t'"${image}"$'\t'"${snapshot}" "${created_path}"; then
+      rbd snap rm "${pool}/${image}@${snapshot}" >/dev/null 2>&1 || true
+    fi
+  done < "${old_path}"
+  rm -rf "${work_dir}"
+  ftctl_log_event "dr-runtime" "dr.reverse.baseline.seed" "ok" "" "" \
+    "plan=${plan} run=${run} checkpoint=${checkpoint_sequence} origin=FAILOVER_CUTOVER"
+}
+
 ftctl_dr_kvm_vmware_mode_decision() {
   local plan="${1-}" operation_intent="${2-}" requested_mode="${3-AUTO}" baseline_state effective_mode decision_code initial_seed=false
   operation_intent="${operation_intent^^}"
