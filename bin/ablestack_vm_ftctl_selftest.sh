@@ -9670,7 +9670,10 @@ selftest_case_dr_failback_resume_checkpoint_publishes_terminal_state() {
     "plan=${plan}" "run=${run}" "state=SYNCING" "step=protection-resuming" \
     "failback_session_id=${plan}:${run}" "active_side=SOURCE" \
     "engine_ack_state=ACKNOWLEDGED" "source_power_state=POWERED_ON" \
-    "target_power_state=POWERED_OFF"
+    "target_power_state=POWERED_OFF" "baseline_generation=8" \
+    "baseline_state=LOCAL_DURABLE" "tracker_state=LOCAL_DURABLE" \
+    "writer_state=DURABLE" "target_written=true" "write_verified=true" \
+    "reverse_guest_compatibility_state=READY"
   cp -f "${run_path}" "${status_path}"
   ftctl_state_write_kv_all "${commit_path}" "phase=ACKNOWLEDGED" "outcome=ACKNOWLEDGED"
   printf '%s\n' \
@@ -9697,8 +9700,11 @@ selftest_case_dr_failback_resume_checkpoint_publishes_terminal_state() {
   selftest_assert_file_contains "${status_path}" "failback_phase=COMPLETED"
   selftest_assert_file_contains "${status_path}" "engine_ack_state=ACKNOWLEDGED"
   selftest_assert_file_contains "${status_path}" "post_failback_checkpoint_sequence=8"
+  selftest_assert_file_contains "${status_path}" "reverse_evidence_run_uuid=${run}"
   output="$(ftctl_dr_runtime_emit_state_json "dr-status" "ok" "${plan}" "" "${status_path}" "0")"
   selftest_assert_contains "${output}" '"post_failback_checkpoint_sequence":8' "plan authority emits post-failback sequence"
+  selftest_assert_contains "${output}" '"reverse_evidence_state":"COMPLETE"' "completed failback evidence remains complete"
+  selftest_assert_contains "${output}" '"reverse_evidence_run_uuid":"run-failback-terminal"' "completed failback Run owns reverse evidence"
 
   # Reproduce the production race: a forward cycle publishes first and the
   # failback sidecar reaches COMPLETED immediately afterward. A plan-level
@@ -9708,6 +9714,9 @@ selftest_case_dr_failback_resume_checkpoint_publishes_terminal_state() {
   output="$(ftctl_dr_runtime_status "${plan}" "" "0" "20" "1")"
   selftest_assert_contains "${output}" '"failback_phase":"COMPLETED"' "status read restores failback phase"
   selftest_assert_contains "${output}" '"post_failback_checkpoint_sequence":8' "status read restores post-failback sequence"
+  selftest_assert_contains "${output}" '"reverse_evidence_state":"COMPLETE"' "read repair restores complete reverse evidence"
+  selftest_assert_contains "${output}" '"reverse_evidence_run_uuid":"run-failback-terminal"' "read repair restores failback evidence owner"
+  selftest_assert_contains "${output}" '"reverse_evidence_missing_fields":[]' "read repair restores all reverse evidence fields"
   selftest_assert_file_contains "${status_path}" "active_side=SOURCE"
 }
 

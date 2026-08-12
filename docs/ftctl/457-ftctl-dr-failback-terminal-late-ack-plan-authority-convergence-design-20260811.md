@@ -107,3 +107,10 @@ share the same successful terminal outcome.
 | Sequence evidence | Post-failback sequence exists only in sidecar | Sequence is emitted in plan authority JSON |
 | Cloud convergence | Late ACK can leave Run/session failed or pending | Cloud receives durable evidence and converges all records |
 | PASS decision | VM and bytes can look successful independently | VM, bytes, FTCTL, Run, session, Plan, and replica must all agree |
+
+## 7. Reverse Evidence Owner Follow-up
+
+Sticky lifecycle authority also needs a sticky reverse-evidence owner. The
+completed Failback Run UUID precedence, legacy session fallback, and regression
+test are defined in
+`458-ftctl-dr-completed-failback-reverse-evidence-retention-design-20260812.md`.

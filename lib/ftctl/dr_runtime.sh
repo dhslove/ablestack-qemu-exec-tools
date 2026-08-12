@@ -867,7 +867,7 @@ ftctl_dr_runtime_publish_status() {
 ftctl_dr_runtime_overlay_failback_plan_authority() {
   local run_path="${1-}" status_path="${2-}" plan_dir active_path
   local action current_active_side active_state active_side session_id
-  local source_power target_power engine_ack engine_ack_at commit_outcome completed_at post_sequence
+  local source_power target_power engine_ack engine_ack_at commit_outcome completed_at post_sequence evidence_run
   local cloud_lifecycle_state
   local -a updates=()
   [[ -f "${run_path}" && -f "${status_path}" ]] || return 1
@@ -895,6 +895,7 @@ ftctl_dr_runtime_overlay_failback_plan_authority() {
   commit_outcome="$(jq -r '.commitOutcome // empty' "${active_path}" 2>/dev/null || true)"
   completed_at="$(jq -r '.completedAt // empty' "${active_path}" 2>/dev/null || true)"
   post_sequence="$(jq -r '.postFailbackCheckpointSequence // empty' "${active_path}" 2>/dev/null || true)"
+  evidence_run="$(jq -r '.runUuid // empty' "${active_path}" 2>/dev/null || true)"
   [[ "${active_state}" == "COMPLETED" ]] && cloud_lifecycle_state="COMPLETED" || cloud_lifecycle_state="COMMITTED"
 
   updates+=("active_side=SOURCE" "failback_phase=${active_state}" "cloud_lifecycle_state=${cloud_lifecycle_state}")
@@ -905,6 +906,7 @@ ftctl_dr_runtime_overlay_failback_plan_authority() {
   [[ -n "${engine_ack_at}" ]] && updates+=("engine_ack_at=${engine_ack_at}")
   [[ -n "${commit_outcome}" ]] && updates+=("failback_commit_outcome=${commit_outcome}")
   [[ -n "${completed_at}" ]] && updates+=("failback_completed_at=${completed_at}")
+  [[ -n "${evidence_run}" ]] && updates+=("reverse_evidence_run_uuid=${evidence_run}")
   if [[ "${post_sequence}" =~ ^[1-9][0-9]*$ ]]; then
     updates+=("post_failback_checkpoint_sequence=${post_sequence}")
     updates+=("resume_checkpoint_completed_sequence=${post_sequence}")
@@ -1333,6 +1335,7 @@ ftctl_dr_runtime_reverse_checkpoint() {
     "target_written=${target_written}" \
     "write_verified=${write_verified}" \
     "reverse_guest_compatibility_state=${guest_compatibility_state}" \
+    "reverse_evidence_run_uuid=${run}" \
     "updated_at=${now}" || true
   cp -f "${run_path}" "${status_path}" 2>/dev/null || true
 }
@@ -3841,7 +3844,12 @@ PY
   reverse_profile_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "reverse_profile_path")"
   reverse_restore_points_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "reverse_restore_points_path")"
   reprotect_worker_pid="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "reprotect_worker_pid")"
-  reverse_evidence_run_uuid="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "run")"
+  reverse_evidence_run_uuid="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "reverse_evidence_run_uuid")"
+  if [[ -z "${reverse_evidence_run_uuid}" && -n "${failback_session_id}" \
+      && "${failback_session_id}" == "${plan}:"* ]]; then
+    reverse_evidence_run_uuid="${failback_session_id#"${plan}:"}"
+  fi
+  [[ -n "${reverse_evidence_run_uuid}" ]] || reverse_evidence_run_uuid="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "run")"
   [[ -n "${reverse_evidence_run_uuid}" ]] || reverse_evidence_run_uuid="${run}"
   [[ -n "${reverse_evidence_run_uuid}" ]] || reverse_evidence_run_uuid="${external_job_ref}"
   [[ -n "${reverse_evidence_run_uuid}" ]] || reverse_evidence_run_uuid="${control_request_run_uuid}"
@@ -5767,6 +5775,7 @@ ftctl_dr_runtime_complete_failback_resume_checkpoint() {
     "active_side=SOURCE" "scheduler_state=RUNNING" "scheduler_health=HEALTHY" \
     "immediate_cycle_pending=false" "resume_checkpoint_completed_sequence=${completed}" \
     "resume_checkpoint_completed_at=${now}" "failback_completed_at=${now}" \
+    "reverse_evidence_run_uuid=${owner_run}" \
     "worker_state=TERMINAL_PUBLISHED" "worker_exit_code=0" \
     "transfer_activity_state=IDLE" "terminal_source=ENGINE_TERMINAL" \
     "terminal_version=1" "terminal_authoritative=true" \
@@ -5777,6 +5786,7 @@ ftctl_dr_runtime_complete_failback_resume_checkpoint() {
     "active_side=SOURCE" "scheduler_state=RUNNING" "scheduler_health=HEALTHY" \
     "immediate_cycle_pending=false" "resume_checkpoint_completed_sequence=${completed}" \
     "resume_checkpoint_completed_at=${now}" "failback_completed_at=${now}" \
+    "reverse_evidence_run_uuid=${owner_run}" \
     "transfer_activity_state=IDLE" "terminal_source=ENGINE_TERMINAL" \
     "terminal_version=1" "terminal_authoritative=true" \
     "retryable=false" "error_code=" "error_message=" "updated_at=${now}" || return 2
