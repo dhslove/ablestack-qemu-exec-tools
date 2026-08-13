@@ -54,7 +54,7 @@ assert_file_contains() {
 }
 
 assert_manifest_values() {
-  local manifest="$1" expected_profile="$2"
+  local manifest="$1" expected_profile="$2" expected_esxi_version="${3:-}"
   jq -e --arg profile "${expected_profile}" --arg root "${COMPAT_ROOT}" '
     .source.compat.selected_profile == $profile
     and .source.compat.requested_profile == "auto"
@@ -62,11 +62,30 @@ assert_manifest_values() {
     and (.source.compat.tools.python_bin == ($root + "/" + $profile + "/venv/bin/python3"))
     and (.source.compat.tools.vddk_libdir == ($root + "/" + $profile + "/vddk"))
   ' "${manifest}" >/dev/null
+
+  if [[ "${expected_profile}" == "esxi55" ]]; then
+    jq -e --arg profile "${expected_profile}" --arg root "${COMPAT_ROOT}" '
+      .source.compat.tools.nbdkit_bin == ($root + "/" + $profile + "/nbdkit/bin/nbdkit")
+    ' "${manifest}" >/dev/null
+  fi
+
+  if [[ -n "${expected_esxi_version}" ]]; then
+    jq -e --arg version "${expected_esxi_version}" '
+      .source.esxi_version == $version
+      and .source.compat.detected_esxi_version == $version
+    ' "${manifest}" >/dev/null
+  fi
 }
 
 run_case() {
-  local version="$1" expected_profile="$2" compat_mode="${3:-explicit}"
+  local version="$1" expected_profile="$2" compat_mode="${3:-explicit}" host_fixture="${4:-host.info.json}"
+  local expected_call_profile="${5-${expected_profile}}"
+  local expected_esxi_version=""
+  if [[ "${host_fixture}" == "host.info.esxi55.json" ]]; then
+    expected_esxi_version="5.5.0"
+  fi
   local safe_version="${version//./_}"
+  safe_version="${safe_version}_${expected_profile}_${compat_mode}"
   local workdir="${WORK_ROOT}/${safe_version}"
   local dst="${DST_ROOT}/${safe_version}"
   local cred="${workdir}/govc.env"
@@ -95,10 +114,12 @@ EOF
   export V2K_COMPAT_TEST_ABOUT_VERSION="${version}"
   export V2K_COMPAT_TEST_VM_INFO_JSON_FILE="${FIXTURE_DIR}/vm.info.json"
   export V2K_COMPAT_TEST_DEVICE_INFO_JSON_FILE="${FIXTURE_DIR}/device.info.json"
-  export V2K_COMPAT_TEST_HOST_INFO_JSON_FILE="${FIXTURE_DIR}/host.info.json"
+  export V2K_COMPAT_TEST_HOST_INFO_JSON_FILE="${FIXTURE_DIR}/${host_fixture}"
   export V2K_COMPAT_TEST_CALL_LOG="${call_log}"
   export V2K_VDDK_THUMBPRINT="AA:BB:CC:DD"
-  unset V2K_COMPAT_SELECTED_PROFILE V2K_GOVC_BIN V2K_PYTHON_BIN VDDK_LIBDIR V2K_COMPAT_DETECTED_VCENTER_VERSION
+  export V2K_COMPAT_SELECTED_PROFILE="vsphere60"
+  export V2K_GOVC_BIN="${COMPAT_ROOT}/vsphere60/bin/govc"
+  unset V2K_PYTHON_BIN VDDK_LIBDIR V2K_NBDKIT_BIN V2K_NBDKIT_VDDK_PLUGIN V2K_COMPAT_DETECTED_VCENTER_VERSION
 
   if [[ "${compat_mode}" == "explicit" ]]; then
     init_args+=( --compat-profile auto )
@@ -115,19 +136,203 @@ EOF
     exit 1
   }
 
-  assert_manifest_values "${manifest}" "${expected_profile}" || {
+  assert_manifest_values "${manifest}" "${expected_profile}" "${expected_esxi_version}" || {
     echo "[ERR] Manifest compat metadata mismatch for version=${version}" >&2
     jq '.source.compat' "${manifest}" >&2
     exit 1
   }
 
-  assert_file_contains "${call_log}" "${COMPAT_ROOT}/${expected_profile}/bin/govc"
+  if [[ -n "${expected_call_profile}" ]]; then
+    assert_file_contains "${call_log}" "${COMPAT_ROOT}/${expected_call_profile}/bin/govc"
+  fi
   assert_file_contains "${call_log}" "about -json"
   assert_file_contains "${call_log}" "vm.info -json demo-vm"
   assert_file_contains "${call_log}" "device.info -json -vm demo-vm"
   assert_file_contains "${call_log}" "host.info -json -host host-11"
+  if [[ "${expected_profile}" == "esxi55" ]]; then
+    jq -s -e '
+      any(.[]; .phase == "init"
+        and .event == "phase_start"
+        and .detail.compat_selected_profile == "esxi55")
+    ' "${workdir}/events.log" >/dev/null || {
+      echo "[ERR] init event did not record final esxi55 compat profile" >&2
+      cat "${workdir}/events.log" >&2
+      exit 1
+    }
+  fi
 
-  echo "[OK] version=${version} profile=${expected_profile} compat_mode=${compat_mode}"
+  echo "[OK] version=${version} profile=${expected_profile} compat_mode=${compat_mode} host_fixture=${host_fixture}"
+}
+
+run_wizard_case() {
+  local workdir="${WORK_ROOT}/wizard_esxi55"
+  local dst="${DST_ROOT}/wizard_esxi55"
+  local cred="${workdir}/govc.env"
+  local call_log="${workdir}/govc.calls.log"
+
+  rm -rf "${workdir}" "${dst}"
+  mkdir -p "${workdir}" "${dst}"
+
+  cat > "${cred}" <<EOF
+GOVC_URL=https://vc.example.local/sdk
+GOVC_USERNAME=administrator@vsphere.local
+GOVC_PASSWORD=dummy-password
+GOVC_INSECURE=1
+EOF
+
+  export V2K_COMPAT_ROOT="${COMPAT_ROOT}"
+  export V2K_COMPAT_TEST_ABOUT_VERSION="6.0.0"
+  export V2K_COMPAT_TEST_VM_INFO_JSON_FILE="${FIXTURE_DIR}/vm.info.json"
+  export V2K_COMPAT_TEST_DEVICE_INFO_JSON_FILE="${FIXTURE_DIR}/device.info.json"
+  export V2K_COMPAT_TEST_HOST_INFO_JSON_FILE="${FIXTURE_DIR}/host.info.esxi55.json"
+  export V2K_COMPAT_TEST_CALL_LOG="${call_log}"
+  export V2K_WORKDIR="${workdir}"
+  export V2K_MANIFEST="${workdir}/manifest.json"
+  unset V2K_COMPAT_SELECTED_PROFILE V2K_COMPAT_PROFILE_DIR V2K_GOVC_BIN V2K_PYTHON_BIN VDDK_LIBDIR V2K_NBDKIT_BIN V2K_NBDKIT_VDDK_PLUGIN V2K_COMPAT_DETECTED_VCENTER_VERSION
+
+  bash "${ROOT_DIR}/bin/ablestack_v2k.sh" \
+    wizard \
+    --yes \
+    --print-command \
+    --vm "demo-vm" \
+    --vcenter "vc.example.local" \
+    --cred-file "${cred}" \
+    --compat-profile esxi55 \
+    --target-profile libvirt-rbd \
+    --dst "rbd:rbd/v2k-wizard-esxi55" >/dev/null
+
+  [[ -f "${call_log}" ]] || {
+    echo "[ERR] wizard govc call log not created: ${call_log}" >&2
+    exit 1
+  }
+  assert_file_contains "${call_log}" "${COMPAT_ROOT}/esxi55/bin/govc"
+  assert_file_contains "${call_log}" "vm.info -json demo-vm"
+  assert_file_contains "${call_log}" "device.info -json -vm demo-vm"
+
+  echo "[OK] wizard explicit esxi55 compat profile uses profile-local govc"
+}
+
+run_vddk_env_isolation_case() {
+  # shellcheck source=/dev/null
+  source "${ROOT_DIR}/lib/v2k/compat.sh"
+
+  local workdir="${WORK_ROOT}/vddk_env_isolation"
+  local vddk="${workdir}/vddk"
+  mkdir -p "${vddk}/lib64" "${workdir}/keep1" "${workdir}/keep2"
+
+  export VDDK_LIBDIR="${vddk}"
+  export V2K_WORKDIR="${workdir}"
+  export LD_LIBRARY_PATH="${vddk}/lib64:${workdir}/keep1:${vddk}:${workdir}/keep2"
+
+  local child_ld prefix cfg
+  child_ld="$(v2k_compat_child_ld_library_path)"
+  [[ "${child_ld}" == "${workdir}/keep1:${workdir}/keep2" ]] || {
+    echo "[ERR] VDDK library paths leaked into child LD_LIBRARY_PATH: ${child_ld}" >&2
+    exit 1
+  }
+
+  prefix="$(v2k_compat_vddk_child_env_prefix)"
+  [[ "${prefix}" == "env LD_LIBRARY_PATH=\"${workdir}/keep1:${workdir}/keep2\"" ]] || {
+    echo "[ERR] Unexpected child env prefix: ${prefix}" >&2
+    exit 1
+  }
+
+  cfg="$(v2k_compat_vddk_config_file)"
+  [[ "${cfg}" == "${workdir}/vddk.conf" && -f "${cfg}" ]] || {
+    echo "[ERR] VDDK config file was not created in workdir: ${cfg}" >&2
+    exit 1
+  }
+
+  unset LD_LIBRARY_PATH
+  prefix="$(v2k_compat_vddk_child_env_prefix)"
+  [[ "${prefix}" == "env -u LD_LIBRARY_PATH" ]] || {
+    echo "[ERR] Expected LD_LIBRARY_PATH unset prefix, got: ${prefix}" >&2
+    exit 1
+  }
+
+  echo "[OK] VDDK LD_LIBRARY_PATH isolation helper passed"
+}
+
+run_cloud_deploy_params_case() {
+  # shellcheck source=/dev/null
+  source "${ROOT_DIR}/lib/v2k/cloudstack_api.sh"
+  # shellcheck source=/dev/null
+  source "${ROOT_DIR}/lib/v2k/target_cloud.sh"
+
+  local workdir="${WORK_ROOT}/cloud_deploy_params"
+  local manifest="${workdir}/manifest.json"
+  local manifest_ceil="${workdir}/manifest.ceil.json"
+  local params params_ceil body headers summary
+  mkdir -p "${workdir}"
+
+  cat > "${manifest}" <<'EOF'
+{
+  "source": {
+    "vm": {
+      "cpu": 2,
+      "memory_mb": 4096,
+      "firmware": "bios",
+      "secure_boot": false
+    }
+  },
+  "target": {
+    "cloud": {
+      "cpu_speed": "1000"
+    }
+  },
+  "disks": [
+    {
+      "size_bytes": 32212254720,
+      "controller": {
+        "type": "ParaVirtualSCSIController"
+      }
+    }
+  ]
+}
+EOF
+
+  params="$(v2k_cloud_target_source_deploy_params_json "${manifest}")"
+  jq -e '
+    .["details[0].cpuNumber"] == "2"
+    and .["details[0].cpuSpeed"] == "1000"
+    and .["details[0].io.policy"] == "io_uring"
+    and .["details[0].iothreads"] == "true"
+    and .["details[0].memory"] == "4096"
+    and .["details[0].rootdisksize"] == "30"
+    and .["details[0].rootDiskController"] == "scsi"
+    and .boottype == "BIOS"
+    and .bootmode == "LEGACY"
+  ' <<<"${params}" >/dev/null || {
+    echo "[ERR] Cloud deploy params did not include expected rootdisksize/details" >&2
+    printf '%s\n' "${params}" >&2
+    exit 1
+  }
+
+  jq '.disks[0].size_bytes = 32212254721' "${manifest}" > "${manifest_ceil}"
+  params_ceil="$(v2k_cloud_target_source_deploy_params_json "${manifest_ceil}")"
+  jq -e '.["details[0].rootdisksize"] == "31"' <<<"${params_ceil}" >/dev/null || {
+    echo "[ERR] Cloud deploy rootdisksize was not rounded up to GiB" >&2
+    printf '%s\n' "${params_ceil}" >&2
+    exit 1
+  }
+
+  body="${workdir}/cloud-error-body.json"
+  headers="${workdir}/cloud-error-headers.txt"
+  cat > "${body}" <<'EOF'
+{"deployvirtualmachineforvolumeresponse":{"uuidList":[],"errorcode":431,"cserrorcode":4350,"errortext":"This disk offering requires a custom size specified"}}
+EOF
+  cat > "${headers}" <<'EOF'
+HTTP/1.1 431 Request Header Fields Too Large
+Content-Type: application/json;charset=utf-8
+X-Description: This disk offering requires a custom size specified
+EOF
+  summary="$(v2k_cloud_response_error_summary "${body}" "${headers}")"
+  [[ "${summary}" == *"errorcode=431"* && "${summary}" == *"cserrorcode=4350"* && "${summary}" == *"errortext=This disk offering requires a custom size specified"* ]] || {
+    echo "[ERR] Cloud API error summary did not include expected errortext: ${summary}" >&2
+    exit 1
+  }
+
+  echo "[OK] Cloud deploy params rootdisksize and API error summary helpers passed"
 }
 
 main() {
@@ -146,9 +351,13 @@ main() {
     --no-profiled >/dev/null
 
   run_case "6.0.0" "vsphere60"
-  run_case "6.7.0" "vsphere67"
-  run_case "8.0.1" "vsphere80"
-  run_case "8.0.1" "vsphere80" "implicit"
+  run_case "6.0.0" "esxi55" "explicit" "host.info.esxi55.json" "vsphere60"
+  run_case "6.7.0" "vsphere67" "explicit" "host.info.json" ""
+  run_case "8.0.1" "vsphere80" "explicit" "host.info.json" ""
+  run_case "8.0.1" "vsphere80" "implicit" "host.info.json" ""
+  run_wizard_case
+  run_vddk_env_isolation_case
+  run_cloud_deploy_params_case
 
   echo "[OK] installer-runtime smoke test passed"
 }

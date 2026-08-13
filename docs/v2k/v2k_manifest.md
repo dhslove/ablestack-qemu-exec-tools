@@ -35,6 +35,8 @@ It records:
 | `source.vddk` | VDDK connection metadata |
 | `source.compat` | selected compatibility profile and tool paths |
 | `target.storage` | file/block/rbd target settings |
+| `target.cloud.network_ids` | ordered Cloud network IDs, one per source NIC |
+| `target.cloud.nic_mappings` | frozen source NIC key/MAC to Cloud network mapping |
 | `disks[]` | per-disk transfer state |
 | `phases` | phase completion markers |
 | `runtime` | resume, split-run, and sync-issue metadata |
@@ -94,6 +96,114 @@ Example:
   }
 }
 ```
+
+## CBT Coverage State
+
+After a successful incremental or final patch, each disk records the coverage
+that authorized its `last_change_id` advancement:
+
+```json
+{
+  "disks": [
+    {
+      "cbt": {
+        "base_change_id": "...",
+        "last_change_id": "...",
+        "last_coverage": {
+          "phase": "final",
+          "mode": "delta",
+          "complete": true,
+          "start_offset": 0,
+          "end_offset": 3298534883328,
+          "disk_capacity": 3298534883328,
+          "pages": 3,
+          "areas": 1735,
+          "bytes": 5796528128,
+          "start_change_id": "...",
+          "new_change_id": "...",
+          "ts": "..."
+        }
+      }
+    }
+  ]
+}
+```
+
+`last_change_id` and `last_coverage` are committed atomically after patch
+application and target flush. Missing or incomplete coverage must not advance
+the change ID.
+
+## Bootstrap Fallback State
+
+The canonical fallback path is:
+
+```json
+{
+  "runtime": {
+    "bootstrap_fallback": {
+      "enabled": true,
+      "bus": "sata",
+      "phase": "linux_bootstrap",
+      "code": 80,
+      "reason": "Cloud Linux bootstrap(initramfs) failed"
+    }
+  }
+}
+```
+
+Cloud and libvirt target generation must read this same runtime path.
+
+## Cloud NIC Mapping
+
+For `target.provider=ablestack-cloud`, `init` derives one mapping per source NIC.
+Source NICs are sorted by VMware device key and target network IDs use the CLI or
+wizard selection order.
+
+```json
+{
+  "source": {
+    "vm": {
+      "nics": [
+        {
+          "key": 4000,
+          "label": "Network adapter 1",
+          "mac": "52:54:00:12:34:56",
+          "network": "VM Network",
+          "connected": true,
+          "start_connected": true
+        }
+      ]
+    }
+  },
+  "target": {
+    "provider": "ablestack-cloud",
+    "cloud": {
+      "network_ids": ["network-a"],
+      "nic_mappings": [
+        {
+          "source_index": 0,
+          "source_key": "4000",
+          "source_label": "Network adapter 1",
+          "source_network": "VM Network",
+          "mac": "52:54:00:12:34:56",
+          "network_id": "network-a",
+          "default": true
+        }
+      ]
+    }
+  }
+}
+```
+
+Mapping validation fails before Cloud import/deploy when:
+
+- source NIC and target network counts differ
+- a network ID is empty or duplicated
+- a source MAC is missing, duplicated, invalid, or multicast
+
+After deployment, `runtime.cloud.nic_verification` records the expected mapping,
+actual Cloud NICs, and match result. Cutover does not start a VM whose
+network/MAC verification failed.
 
 ## RBD Runtime State
 

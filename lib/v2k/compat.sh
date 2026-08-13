@@ -40,6 +40,18 @@ v2k_compat_schema_id() {
   printf '%s' "ablestack-v2k/compat-profile-v1"
 }
 
+v2k_compat_metadata_python() {
+  if [[ -n "${V2K_COMPAT_METADATA_PYTHON:-}" && -x "${V2K_COMPAT_METADATA_PYTHON}" ]]; then
+    printf '%s' "${V2K_COMPAT_METADATA_PYTHON}"
+    return 0
+  fi
+  if [[ -x /usr/bin/python3 ]]; then
+    printf '%s' "/usr/bin/python3"
+    return 0
+  fi
+  command -v python3
+}
+
 v2k_compat_root_has_profiles() {
   local root="${1:-}"
   [[ -n "${root}" && -d "${root}" ]] || return 1
@@ -89,6 +101,10 @@ v2k_compat_selected_profile() {
   printf '%s' "${V2K_COMPAT_SELECTED_PROFILE:-}"
 }
 
+v2k_compat_detected_esxi_version() {
+  printf '%s' "${V2K_COMPAT_DETECTED_ESXI_VERSION:-}"
+}
+
 v2k_compat_profile_dir() {
   local profile="${1:-}"
   [[ -n "${profile}" ]] || return 1
@@ -114,7 +130,7 @@ v2k_compat_profile_is_valid() {
   [[ -f "${profile_json}" ]] || return 1
   schema_id="$(v2k_compat_schema_id)"
 
-  PROFILE_JSON="${profile_json}" PROFILE_ID="${profile}" PROFILE_SCHEMA_ID="${schema_id}" v2k_python - <<'PY'
+  PROFILE_JSON="${profile_json}" PROFILE_ID="${profile}" PROFILE_SCHEMA_ID="${schema_id}" "$(v2k_compat_metadata_python)" - <<'PY'
 import json
 import os
 import sys
@@ -151,7 +167,7 @@ v2k_compat_profile_tool_path() {
   [[ -f "${profile_json}" ]] || return 1
 
   local rel
-  rel="$(PROFILE_JSON="${profile_json}" PROFILE_FIELD="${field}" PROFILE_DEFAULT_REL="${default_rel}" v2k_python - <<'PY'
+  rel="$(PROFILE_JSON="${profile_json}" PROFILE_FIELD="${field}" PROFILE_DEFAULT_REL="${default_rel}" "$(v2k_compat_metadata_python)" - <<'PY'
 import json
 import os
 import sys
@@ -221,7 +237,7 @@ v2k_compat_profile_supports_version() {
   version_prefix="$(v2k_compat_version_prefix "${version}")" || return 1
   version_key="$(v2k_compat_version_key "${version}")" || return 1
 
-  PROFILE_JSON="${profile_json}" VERSION_PREFIX="${version_prefix}" VERSION_KEY="${version_key}" v2k_python - <<'PY'
+  PROFILE_JSON="${profile_json}" VERSION_PREFIX="${version_prefix}" VERSION_KEY="${version_key}" "$(v2k_compat_metadata_python)" - <<'PY'
 import json
 import os
 import sys
@@ -267,6 +283,63 @@ sys.exit(1)
 PY
 }
 
+v2k_compat_profile_supports_esxi_version() {
+  local profile="${1:-}" version="${2:-}"
+  local profile_json version_prefix version_key
+  profile_json="$(v2k_compat_profile_json "${profile}")" || return 1
+  [[ -f "${profile_json}" ]] || return 1
+  version_prefix="$(v2k_compat_version_prefix "${version}")" || return 1
+  version_key="$(v2k_compat_version_key "${version}")" || return 1
+
+  PROFILE_JSON="${profile_json}" VERSION_PREFIX="${version_prefix}" VERSION_KEY="${version_key}" "$(v2k_compat_metadata_python)" - <<'PY'
+import json
+import os
+import sys
+
+path = os.environ["PROFILE_JSON"]
+version_prefix = os.environ["VERSION_PREFIX"]
+version_key = int(os.environ["VERSION_KEY"])
+
+def version_to_key(raw: str):
+    if not raw:
+        return None
+    parts = raw.split(".")
+    if len(parts) < 2:
+        return None
+    try:
+        major = int(parts[0])
+        minor = int(parts[1])
+    except ValueError:
+        return None
+    return int(f"{major:03d}{minor:03d}")
+
+with open(path, "r", encoding="utf-8") as f:
+    obj = json.load(f)
+
+supported = obj.get("supported_esxi") or {}
+if not supported:
+    sys.exit(1)
+
+versions = supported.get("versions") or []
+for item in versions:
+    item = str(item)
+    if version_prefix == item or version_prefix.startswith(item + "."):
+        sys.exit(0)
+
+min_key = version_to_key(str(supported.get("min") or ""))
+max_key = version_to_key(str(supported.get("max") or ""))
+
+if min_key is not None and version_key < min_key:
+    sys.exit(1)
+if max_key is not None and version_key > max_key:
+    sys.exit(1)
+if min_key is not None or max_key is not None:
+    sys.exit(0)
+
+sys.exit(1)
+PY
+}
+
 v2k_compat_select_profile_for_version() {
   local version="${1:-}"
   [[ -n "${version}" ]] || return 1
@@ -275,6 +348,22 @@ v2k_compat_select_profile_for_version() {
   while IFS= read -r profile; do
     [[ -n "${profile}" ]] || continue
     if v2k_compat_profile_supports_version "${profile}" "${version}"; then
+      printf '%s' "${profile}"
+      return 0
+    fi
+  done < <(v2k_compat_list_profiles | sort)
+
+  return 1
+}
+
+v2k_compat_select_profile_for_esxi_version() {
+  local version="${1:-}"
+  [[ -n "${version}" ]] || return 1
+
+  local profile
+  while IFS= read -r profile; do
+    [[ -n "${profile}" ]] || continue
+    if v2k_compat_profile_supports_esxi_version "${profile}" "${version}"; then
       printf '%s' "${profile}"
       return 0
     fi
@@ -300,10 +389,12 @@ v2k_compat_export_tool_paths() {
   local profile="${1:-}"
   [[ -n "${profile}" ]] || return 1
 
-  local govc_bin python_bin vddk_dir
+  local govc_bin python_bin vddk_dir nbdkit_bin nbdkit_plugin
   govc_bin="$(v2k_compat_profile_tool_path "${profile}" "govc" "bin/govc" 2>/dev/null || true)"
   python_bin="$(v2k_compat_profile_tool_path "${profile}" "python" "venv/bin/python3" 2>/dev/null || true)"
   vddk_dir="$(v2k_compat_profile_tool_path "${profile}" "vddk_libdir" "vddk" 2>/dev/null || true)"
+  nbdkit_bin="$(v2k_compat_profile_tool_path "${profile}" "nbdkit" "" 2>/dev/null || true)"
+  nbdkit_plugin="$(v2k_compat_profile_tool_path "${profile}" "nbdkit_vddk_plugin" "" 2>/dev/null || true)"
 
   if [[ -n "${govc_bin}" && -x "${govc_bin}" ]]; then
     export V2K_GOVC_BIN="${govc_bin}"
@@ -314,12 +405,21 @@ v2k_compat_export_tool_paths() {
   if [[ -n "${vddk_dir}" && -d "${vddk_dir}" ]]; then
     export VDDK_LIBDIR="${vddk_dir}"
   fi
+  if [[ -n "${nbdkit_bin}" && -x "${nbdkit_bin}" ]]; then
+    export V2K_NBDKIT_BIN="${nbdkit_bin}"
+  fi
+  if [[ -n "${nbdkit_plugin}" && -f "${nbdkit_plugin}" ]]; then
+    export V2K_NBDKIT_VDDK_PLUGIN="${nbdkit_plugin}"
+  fi
 
   if [[ -n "${python_bin}" ]]; then
     v2k_compat_path_prepend "$(dirname "${python_bin}")"
   fi
   if [[ -n "${govc_bin}" ]]; then
     v2k_compat_path_prepend "$(dirname "${govc_bin}")"
+  fi
+  if [[ -n "${nbdkit_bin}" ]]; then
+    v2k_compat_path_prepend "$(dirname "${nbdkit_bin}")"
   fi
 }
 
@@ -353,28 +453,37 @@ v2k_compat_load_from_manifest() {
   compat_json="$(jq -c '.source.compat // empty' "${manifest}" 2>/dev/null || true)"
   [[ -n "${compat_json}" ]] || return 1
 
-  local requested selected detected root govc_bin python_bin vddk_libdir
+  local requested selected detected detected_esxi root govc_bin python_bin vddk_libdir nbdkit_bin nbdkit_plugin
   requested="$(printf '%s' "${compat_json}" | jq -r '.requested_profile // empty' 2>/dev/null || true)"
   selected="$(printf '%s' "${compat_json}" | jq -r '.selected_profile // empty' 2>/dev/null || true)"
   detected="$(printf '%s' "${compat_json}" | jq -r '.detected_vcenter_version // empty' 2>/dev/null || true)"
+  detected_esxi="$(printf '%s' "${compat_json}" | jq -r '.detected_esxi_version // empty' 2>/dev/null || true)"
   root="$(printf '%s' "${compat_json}" | jq -r '.compat_root // empty' 2>/dev/null || true)"
   govc_bin="$(printf '%s' "${compat_json}" | jq -r '.tools.govc_bin // empty' 2>/dev/null || true)"
   python_bin="$(printf '%s' "${compat_json}" | jq -r '.tools.python_bin // empty' 2>/dev/null || true)"
   vddk_libdir="$(printf '%s' "${compat_json}" | jq -r '.tools.vddk_libdir // empty' 2>/dev/null || true)"
+  nbdkit_bin="$(printf '%s' "${compat_json}" | jq -r '.tools.nbdkit_bin // empty' 2>/dev/null || true)"
+  nbdkit_plugin="$(printf '%s' "${compat_json}" | jq -r '.tools.nbdkit_vddk_plugin // empty' 2>/dev/null || true)"
 
   [[ -n "${requested}" ]] && export V2K_COMPAT_PROFILE="${requested}"
   [[ -n "${selected}" ]] && export V2K_COMPAT_SELECTED_PROFILE="${selected}"
   [[ -n "${detected}" ]] && export V2K_COMPAT_DETECTED_VCENTER_VERSION="${detected}"
+  [[ -n "${detected_esxi}" ]] && export V2K_COMPAT_DETECTED_ESXI_VERSION="${detected_esxi}"
   [[ -n "${root}" ]] && export V2K_COMPAT_ROOT="${root}"
   [[ -n "${govc_bin}" ]] && export V2K_GOVC_BIN="${govc_bin}"
   [[ -n "${python_bin}" ]] && export V2K_PYTHON_BIN="${python_bin}"
   [[ -n "${vddk_libdir}" ]] && export VDDK_LIBDIR="${vddk_libdir}"
+  [[ -n "${nbdkit_bin}" ]] && export V2K_NBDKIT_BIN="${nbdkit_bin}"
+  [[ -n "${nbdkit_plugin}" ]] && export V2K_NBDKIT_VDDK_PLUGIN="${nbdkit_plugin}"
 
   if [[ -n "${govc_bin}" ]]; then
     v2k_compat_path_prepend "$(dirname "${govc_bin}")"
   fi
   if [[ -n "${python_bin}" ]]; then
     v2k_compat_path_prepend "$(dirname "${python_bin}")"
+  fi
+  if [[ -n "${nbdkit_bin}" ]]; then
+    v2k_compat_path_prepend "$(dirname "${nbdkit_bin}")"
   fi
 
   if [[ -n "${selected}" && -z "${V2K_COMPAT_PROFILE_DIR:-}" ]]; then
@@ -399,6 +508,9 @@ v2k_compat_load_from_workdir() {
   if [[ -n "${V2K_PYTHON_BIN:-}" ]]; then
     v2k_compat_path_prepend "$(dirname "${V2K_PYTHON_BIN}")"
   fi
+  if [[ -n "${V2K_NBDKIT_BIN:-}" ]]; then
+    v2k_compat_path_prepend "$(dirname "${V2K_NBDKIT_BIN}")"
+  fi
 }
 
 v2k_compat_write_env() {
@@ -411,12 +523,104 @@ V2K_COMPAT_ROOT=${V2K_COMPAT_ROOT:-}
 V2K_COMPAT_PROFILE=${V2K_COMPAT_PROFILE:-auto}
 V2K_COMPAT_SELECTED_PROFILE=${V2K_COMPAT_SELECTED_PROFILE:-}
 V2K_COMPAT_DETECTED_VCENTER_VERSION=${V2K_COMPAT_DETECTED_VCENTER_VERSION:-}
+V2K_COMPAT_DETECTED_ESXI_VERSION=${V2K_COMPAT_DETECTED_ESXI_VERSION:-}
 V2K_COMPAT_PROFILE_DIR=${V2K_COMPAT_PROFILE_DIR:-}
 V2K_GOVC_BIN=${V2K_GOVC_BIN:-}
 V2K_PYTHON_BIN=${V2K_PYTHON_BIN:-}
 VDDK_LIBDIR=${VDDK_LIBDIR:-}
+V2K_NBDKIT_BIN=${V2K_NBDKIT_BIN:-}
+V2K_NBDKIT_VDDK_PLUGIN=${V2K_NBDKIT_VDDK_PLUGIN:-}
 EOF
   chmod 600 "${env_file}" 2>/dev/null || true
+}
+
+v2k_compat_nbdkit_bin() {
+  if [[ -n "${V2K_NBDKIT_BIN:-}" ]]; then
+    printf '%s' "${V2K_NBDKIT_BIN}"
+    return 0
+  fi
+  command -v nbdkit
+}
+
+v2k_compat_nbdkit_vddk_plugin() {
+  if [[ -n "${V2K_NBDKIT_VDDK_PLUGIN:-}" ]]; then
+    printf '%s' "${V2K_NBDKIT_VDDK_PLUGIN}"
+  else
+    printf '%s' "vddk"
+  fi
+}
+
+v2k_compat_vddk_ld_library_path() {
+  local vddk="${VDDK_LIBDIR:-}"
+  local out=""
+  if [[ -n "${vddk}" ]]; then
+    if [[ -d "${vddk}/lib64" ]]; then
+      out="${vddk}/lib64"
+    fi
+    if [[ -d "${vddk}" ]]; then
+      out="${out:+${out}:}${vddk}"
+    fi
+  fi
+  if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
+    out="${out:+${out}:}${LD_LIBRARY_PATH}"
+  fi
+  printf '%s' "${out}"
+}
+
+v2k_compat_child_ld_library_path() {
+  local vddk="${VDDK_LIBDIR:-}"
+  local vddk_lib64="" vddk_root="" part out=""
+  if [[ -n "${vddk}" ]]; then
+    if [[ -d "${vddk}/lib64" ]]; then
+      vddk_lib64="$(cd "${vddk}/lib64" 2>/dev/null && pwd -P || printf '%s' "${vddk}/lib64")"
+    fi
+    if [[ -d "${vddk}" ]]; then
+      vddk_root="$(cd "${vddk}" 2>/dev/null && pwd -P || printf '%s' "${vddk}")"
+    fi
+  fi
+
+  IFS=':' read -r -a _v2k_ld_parts <<< "${LD_LIBRARY_PATH:-}"
+  for part in "${_v2k_ld_parts[@]}"; do
+    [[ -n "${part}" ]] || continue
+    local real_part="${part}"
+    if [[ -d "${part}" ]]; then
+      real_part="$(cd "${part}" 2>/dev/null && pwd -P || printf '%s' "${part}")"
+    fi
+    [[ -n "${vddk_lib64}" && "${real_part}" == "${vddk_lib64}" ]] && continue
+    [[ -n "${vddk_root}" && "${real_part}" == "${vddk_root}" ]] && continue
+    out="${out:+${out}:}${part}"
+  done
+  printf '%s' "${out}"
+}
+
+v2k_compat_vddk_child_env_prefix() {
+  local child_ld
+  child_ld="$(v2k_compat_child_ld_library_path)"
+  if [[ -n "${child_ld}" ]]; then
+    printf 'env LD_LIBRARY_PATH="%s"' "${child_ld}"
+  else
+    printf 'env -u LD_LIBRARY_PATH'
+  fi
+}
+
+v2k_compat_vddk_config_file() {
+  if [[ -n "${V2K_VDDK_CONFIG:-}" ]]; then
+    [[ -f "${V2K_VDDK_CONFIG}" ]] || {
+      echo "V2K_VDDK_CONFIG not found: ${V2K_VDDK_CONFIG}" >&2
+      return 1
+    }
+    printf '%s' "${V2K_VDDK_CONFIG}"
+    return 0
+  fi
+
+  local dir="${V2K_WORKDIR:-/tmp}" cfg
+  mkdir -p "${dir}"
+  cfg="${dir}/vddk.conf"
+  if [[ ! -f "${cfg}" ]]; then
+    : > "${cfg}"
+    chmod 600 "${cfg}" 2>/dev/null || true
+  fi
+  printf '%s' "${cfg}"
 }
 
 v2k_compat_extract_version_from_about_json() {
@@ -526,6 +730,10 @@ v2k_compat_resolve_profile() {
   [[ -n "${requested}" ]] || requested="auto"
   export V2K_COMPAT_PROFILE="${requested}"
 
+  if [[ "${requested}" != "auto" && -n "${V2K_COMPAT_SELECTED_PROFILE:-}" && "${V2K_COMPAT_SELECTED_PROFILE}" != "${requested}" ]]; then
+    unset V2K_COMPAT_SELECTED_PROFILE V2K_COMPAT_PROFILE_DIR V2K_GOVC_BIN V2K_PYTHON_BIN VDDK_LIBDIR V2K_NBDKIT_BIN V2K_NBDKIT_VDDK_PLUGIN
+  fi
+
   if [[ -n "${manifest}" ]]; then
     v2k_compat_guard_manifest_profile "${manifest}" "${requested}" || return 1
   fi
@@ -542,7 +750,8 @@ v2k_compat_resolve_profile() {
     return 0
   fi
 
-  local detected selected available_count
+  local detected detected_esxi selected available_count
+  detected_esxi="${V2K_COMPAT_DETECTED_ESXI_VERSION:-}"
   detected="$(v2k_compat_detect_vcenter_version 2>/dev/null || true)"
   if [[ -z "${detected}" ]]; then
     local probe_profile
@@ -555,8 +764,11 @@ v2k_compat_resolve_profile() {
   [[ -n "${detected}" ]] && export V2K_COMPAT_DETECTED_VCENTER_VERSION="${detected}"
 
   selected=""
+  if [[ -n "${detected_esxi}" ]]; then
+    selected="$(v2k_compat_select_profile_for_esxi_version "${detected_esxi}" 2>/dev/null || true)"
+  fi
   if [[ -n "${detected}" ]]; then
-    selected="$(v2k_compat_select_profile_for_version "${detected}" 2>/dev/null || true)"
+    selected="${selected:-$(v2k_compat_select_profile_for_version "${detected}" 2>/dev/null || true)}"
   fi
 
   if [[ -n "${selected}" ]]; then

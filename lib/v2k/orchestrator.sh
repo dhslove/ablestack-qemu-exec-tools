@@ -487,6 +487,15 @@ v2k_cmd_run_foreground() {
   v2k_parse_arg_string "${cutover_args_str}" cutover_extra
 
   local winpe_bootstrap_auto="${V2K_RUN_WINPE_BOOTSTRAP_AUTO:-1}"
+  local cutover_policy_explicit=0
+  local a
+  for a in "${cutover_extra[@]}"; do
+    case "${a}" in
+      --define-only|--apply|--start)
+        cutover_policy_explicit=1
+        ;;
+    esac
+  done
 
   # Pipeline start
   local skip_init=0
@@ -579,7 +588,7 @@ v2k_cmd_run_foreground() {
       if ! v2k_cmd_sync incr "${sync_defaults[@]}" "${incr_extra[@]}"; then
         incr_failed=1
         if declare -F v2k_event >/dev/null 2>&1; then
-          v2k_event WARN "orchestrator" "" "incr_failed_continue_to_cutover" \
+          v2k_event ERROR "orchestrator" "" "incr_failed_stop_before_cutover" \
             "{\"iter\":${iter}}"
         fi
         break
@@ -617,9 +626,13 @@ v2k_cmd_run_foreground() {
     done
  
     if [[ "${incr_failed}" -eq 1 ]]; then
+      if [[ "${V2K_ALLOW_CUTOVER_AFTER_INCR_FAIL:-0}" != "1" ]]; then
+        echo "[run] incremental sync failed; stopping before cutover to protect target consistency." >&2
+        return 44
+      fi
       if declare -F v2k_event >/dev/null 2>&1; then
-        v2k_event INFO "orchestrator" "" "incr_aborted_proceed_cutover" \
-          "{\"iter\":${iter}}"
+        v2k_event WARN "orchestrator" "" "incr_aborted_proceed_cutover" \
+          "{\"iter\":${iter},\"override\":\"V2K_ALLOW_CUTOVER_AFTER_INCR_FAIL\"}"
       fi
     fi
 
@@ -648,7 +661,7 @@ v2k_cmd_run_foreground() {
   local -a cutover_args=(--shutdown "${shutdown}")
 
   if [[ "${is_windows}" -eq 1 && "${V2K_RUN_WINPE_BOOTSTRAP_AUTO}" == "1" ]]; then
-    if [[ "${kvm_vm_policy}" == "none" ]]; then
+    if [[ "${kvm_vm_policy}" == "none" && "${cutover_policy_explicit}" -eq 0 ]]; then
       kvm_vm_policy="define-and-start"
     fi
     cutover_args+=(--winpe-bootstrap)
@@ -663,7 +676,6 @@ v2k_cmd_run_foreground() {
   if [[ "${winpe_bootstrap_auto}" == "1" ]]; then
     if declare -F v2k_manifest_is_windows >/dev/null 2>&1 && v2k_manifest_is_windows "${V2K_MANIFEST}"; then
       local winpe_explicit=0
-      local a
       for a in "${cutover_extra[@]}"; do
         case "${a}" in
           --winpe-bootstrap|--winpe-iso|--virtio-iso|--winpe-timeout)
@@ -675,6 +687,18 @@ v2k_cmd_run_foreground() {
         cutover_args+=(--winpe-bootstrap)
       fi
     fi
+  fi
+
+  if declare -F v2k_event >/dev/null 2>&1; then
+    local cutover_args_preview
+    cutover_args_preview="$(printf '%s\n' "${cutover_args[@]}" "${cutover_extra[@]}" | jq -R . | jq -sc .)"
+    v2k_event INFO "orchestrator" "" "cutover_policy_resolved" \
+      "$(jq -nc \
+        --arg kvm_vm_policy "${kvm_vm_policy}" \
+        --argjson cutover_policy_explicit "${cutover_policy_explicit}" \
+        --arg winpe_bootstrap_auto "${winpe_bootstrap_auto}" \
+        --argjson args "${cutover_args_preview}" \
+        '{kvm_vm_policy:$kvm_vm_policy,cutover_policy_explicit:$cutover_policy_explicit,winpe_bootstrap_auto:$winpe_bootstrap_auto,cutover_args:$args}')"
   fi
 
   cutover_args+=("${cutover_extra[@]}")

@@ -70,6 +70,8 @@ if [[ "${V2K_DEBUG_ENV:-0}" -eq 1 ]]; then
   echo "[DEBUG] V2K_GOVC_BIN='${V2K_GOVC_BIN-}'" >&2
   echo "[DEBUG] V2K_PYTHON_BIN='${V2K_PYTHON_BIN-}'" >&2
   echo "[DEBUG] VDDK_LIBDIR='${VDDK_LIBDIR-}'" >&2
+  echo "[DEBUG] V2K_NBDKIT_BIN='${V2K_NBDKIT_BIN-}'" >&2
+  echo "[DEBUG] V2K_NBDKIT_VDDK_PLUGIN='${V2K_NBDKIT_VDDK_PLUGIN-}'" >&2
 fi
 
 usage() {
@@ -118,6 +120,8 @@ Environment:
   V2K_COMPAT_SELECTED_PROFILE
   V2K_GOVC_BIN
   V2K_PYTHON_BIN
+  V2K_NBDKIT_BIN
+  V2K_NBDKIT_VDDK_PLUGIN
 EOF
 }
 
@@ -190,8 +194,8 @@ ABLESTACK Cloud target options:
   --cloud-cred-file <file>
   --cloud-zone-id <id>
   --cloud-service-offering-id <id>
-  --cloud-network-id <id>                   Repeatable
-  --cloud-network-ids <id,id,...>
+  --cloud-network-id <id>                   Repeat once per source NIC, in NIC order
+  --cloud-network-ids <id,id,...>           One unique network ID per source NIC
   --cloud-storage-id <id>
   --cloud-disk-offering-id <id>
   --cloud-host-id <id>
@@ -259,8 +263,8 @@ ABLESTACK Cloud options:
   --cloud-cred-file <file>
   --cloud-zone-id <id>
   --cloud-service-offering-id <id>
-  --cloud-network-id <id>                   Repeatable
-  --cloud-network-ids <id,id,...>
+  --cloud-network-id <id>                   Repeat once per source NIC, in NIC order
+  --cloud-network-ids <id,id,...>           One unique network ID per source NIC
   --cloud-storage-id <id>
   --cloud-disk-offering-id <id>
   --cloud-host-id <id>
@@ -299,8 +303,8 @@ ABLESTACK Cloud target options:
   --cloud-endpoint <url>                    Stored as non-secret manifest metadata
   --cloud-zone-id <id>
   --cloud-service-offering-id <id>
-  --cloud-network-id <id>                   Repeatable
-  --cloud-network-ids <id,id,...>
+  --cloud-network-id <id>                   Repeat once per source NIC, in NIC order
+  --cloud-network-ids <id,id,...>           One unique network ID per source NIC
   --cloud-storage-id <id>
   --cloud-disk-offering-id <id>
   --cloud-host-id <id>
@@ -403,11 +407,13 @@ Options:
   --vlan <id>                               Default: unset
   --winpe-bootstrap                         Default: on for Windows guests, auto-skip for non-Windows
   --no-winpe-bootstrap
-  --winpe-iso <path>                        Default: /usr/share/ablestack/v2k/winpe.iso
-  --virtio-iso <path>                       Default: /usr/share/virtio-win/virtio-win.iso
+  --winpe-iso <path>                        Default: RPM metadata/link auto-resolution
+  --virtio-iso <path>                       Default: installed VirtIO ISO auto-resolution
   --winpe-timeout <SEC>                     Default: 600
   --linux-bootstrap                         Default: auto for Linux guests
   --no-linux-bootstrap
+  --bootstrap-fallback sata|off             Default: sata; Cloud targets always use SATA fallback
+  --no-bootstrap-fallback                   Disables fallback only for direct libvirt targets
   --safe-mode                               Default: off
   --force-cleanup                           Default: off
 
@@ -420,8 +426,8 @@ ABLESTACK Cloud target options:
   --cloud-cred-file <file>
   --cloud-zone-id <id>
   --cloud-service-offering-id <id>
-  --cloud-network-id <id>                   Repeatable
-  --cloud-network-ids <id,id,...>
+  --cloud-network-id <id>                   Repeat once per source NIC, in NIC order
+  --cloud-network-ids <id,id,...>           One unique network ID per source NIC
   --cloud-storage-id <id>
   --cloud-disk-offering-id <id>
   --cloud-host-id <id>

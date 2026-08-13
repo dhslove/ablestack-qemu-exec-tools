@@ -3,6 +3,11 @@ name: WinPE Build Core
 on:
   workflow_call:
     inputs:
+      source_ref:
+        description: "Source commit or ref to package into WinPE. Empty uses the caller ref."
+        required: false
+        default: ""
+        type: string
       test_mode:
         description: "If true, put /ablestack/TEST_MODE into ISO (do not shutdown in WinPE)"
         required: false
@@ -66,6 +71,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref != '' && inputs.source_ref || github.ref }}
 
       - name: Prepare folders
         shell: pwsh
@@ -331,7 +338,14 @@ jobs:
           $sum = Join-Path $env:OUTDIR "SHA256SUMS"
 
           $hash = (Get-FileHash -Algorithm SHA256 $iso).Hash.ToLower()
-          "$hash  $file" | Out-File -Encoding ascii -Force $sum
+          # Keep this checksum file portable for Linux release assembly and
+          # `sha256sum -c`: PowerShell's default Windows newline leaves a
+          # trailing CR in the parsed filename.
+          [System.IO.File]::WriteAllText(
+            $sum,
+            "$hash  $file`n",
+            [System.Text.Encoding]::ASCII
+          )
           Get-Content $sum
 
       - name: Upload artifact (ISO + SHA256SUMS)

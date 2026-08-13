@@ -1,0 +1,341 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+WORK_DIR="${TMPDIR:-/tmp}/v2k_inventory_disk_order_smoke"
+
+require_cmd() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "[ERR] Missing command: $1" >&2
+    exit 2
+  }
+}
+
+cleanup() {
+  rm -rf "${WORK_DIR}"
+}
+
+require_cmd jq
+trap cleanup EXIT
+rm -rf "${WORK_DIR}"
+mkdir -p "${WORK_DIR}"
+
+# shellcheck source=/dev/null
+source "${ROOT_DIR}/lib/v2k/vmware_govc.sh"
+
+fake_govc="${WORK_DIR}/govc"
+cat > "${fake_govc}" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+case "$*" in
+  "vm.info -json demo-vm")
+    cat "${V2K_TEST_VM_INFO_JSON}"
+    ;;
+  "device.info -json -vm demo-vm")
+    cat "${V2K_TEST_DEVICE_INFO_JSON}"
+    ;;
+  "host.info -json -host host-11")
+    cat "${V2K_TEST_HOST_INFO_JSON}"
+    ;;
+  *)
+    echo "unexpected govc call: $*" >&2
+    exit 2
+    ;;
+esac
+SH
+chmod +x "${fake_govc}"
+
+host_info="${WORK_DIR}/host.info.json"
+cat > "${host_info}" <<'JSON'
+{
+  "hostSystems": [
+    {
+      "summary": {
+        "config": {
+          "name": "192.0.2.10",
+          "product": {"version": "7.0.3"},
+          "sslThumbprint": "AA:BB:CC"
+        }
+      },
+      "config": {
+        "product": {"version": "7.0.3"}
+      }
+    }
+  ]
+}
+JSON
+
+write_vm_info() {
+  local path="$1" boot_order="$2"
+  if [[ "${boot_order}" == "unit1" ]]; then
+    cat > "${path}" <<'JSON'
+{
+  "virtualMachines": [
+    {
+      "self": {"value": "vm-101"},
+      "config": {
+        "uuid": "demo-vm-uuid",
+        "guestId": "ubuntu64Guest",
+        "firmware": "bios",
+        "bootOptions": {
+          "bootOrder": [
+            {"deviceKey": 2001}
+          ]
+        },
+        "hardware": {
+          "numCPU": 2,
+          "memoryMB": 4096,
+          "device": [
+            {
+              "key": 4000,
+              "deviceInfo": {"label": "Network adapter 1", "summary": "VM Network"},
+              "macAddress": "52:54:00:12:34:56",
+              "backing": {"deviceName": "VM Network"},
+              "connectable": {"connected": true, "startConnected": true}
+            },
+            {
+              "key": 4001,
+              "deviceInfo": {"label": "Network adapter 2", "summary": "Backup Network"},
+              "macAddress": "52:54:00:65:43:20",
+              "backing": {
+                "port": {
+                  "portgroupKey": "dvportgroup-22",
+                  "switchUuid": "dvs-uuid-22"
+                }
+              },
+              "connectable": {"connected": true, "startConnected": false}
+            }
+          ]
+        }
+      },
+      "guest": {"guestFamily": "linuxGuest"},
+      "runtime": {"host": {"value": "host-11"}}
+    }
+  ]
+}
+JSON
+  else
+    cat > "${path}" <<'JSON'
+{
+  "virtualMachines": [
+    {
+      "self": {"value": "vm-101"},
+      "config": {
+        "uuid": "demo-vm-uuid",
+        "guestId": "ubuntu64Guest",
+        "firmware": "bios",
+        "bootOptions": {},
+        "hardware": {
+          "numCPU": 2,
+          "memoryMB": 4096,
+          "device": [
+            {
+              "key": 4000,
+              "deviceInfo": {"label": "Network adapter 1", "summary": "VM Network"},
+              "macAddress": "52:54:00:12:34:56",
+              "backing": {"deviceName": "VM Network"},
+              "connectable": {"connected": true, "startConnected": true}
+            },
+            {
+              "key": 4001,
+              "deviceInfo": {"label": "Network adapter 2", "summary": "Backup Network"},
+              "macAddress": "52:54:00:65:43:20",
+              "backing": {
+                "port": {
+                  "portgroupKey": "dvportgroup-22",
+                  "switchUuid": "dvs-uuid-22"
+                }
+              },
+              "connectable": {"connected": true, "startConnected": false}
+            }
+          ]
+        }
+      },
+      "guest": {"guestFamily": "linuxGuest"},
+      "runtime": {"host": {"value": "host-11"}}
+    }
+  ]
+}
+JSON
+  fi
+}
+
+device_info="${WORK_DIR}/device.info.json"
+cat > "${device_info}" <<'JSON'
+{
+  "devices": [
+    {
+      "key": 1000,
+      "type": "VirtualLsiLogicController",
+      "busNumber": 0,
+      "deviceInfo": {"label": "SCSI controller 0"}
+    },
+    {
+      "key": 2001,
+      "type": "VirtualDisk",
+      "controllerKey": 1000,
+      "unitNumber": 1,
+      "deviceInfo": {"label": "Hard disk 2"},
+      "backing": {"fileName": "[datastore1] demo-vm/demo-vm_1.vmdk"},
+      "capacityInBytes": 1073741824000
+    },
+    {
+      "key": 2000,
+      "type": "VirtualDisk",
+      "controllerKey": 1000,
+      "unitNumber": 0,
+      "deviceInfo": {"label": "Hard disk 1"},
+      "backing": {"fileName": "[datastore1] demo-vm/demo-vm.vmdk"},
+      "capacityInBytes": 536870912000
+    }
+  ]
+}
+JSON
+
+export V2K_GOVC_BIN="${fake_govc}"
+export V2K_TEST_DEVICE_INFO_JSON="${device_info}"
+export V2K_TEST_HOST_INFO_JSON="${host_info}"
+export GOVC_URL="https://vc.example.local/sdk"
+export GOVC_USERNAME="administrator@vsphere.local"
+export GOVC_PASSWORD="dummy-password"
+export GOVC_INSECURE="1"
+
+vm_info_no_boot="${WORK_DIR}/vm.no-boot.json"
+write_vm_info "${vm_info_no_boot}" "none"
+export V2K_TEST_VM_INFO_JSON="${vm_info_no_boot}"
+inventory_fallback="$(v2k_vmware_inventory_json "demo-vm" "vc.example.local")"
+
+jq -e '
+  .disks[0].disk_id == "scsi0:0"
+  and .disks[0].device_key == "2000"
+  and .disks[0].role == "root"
+  and .disks[1].disk_id == "scsi0:1"
+  and .disks[1].device_key == "2001"
+  and .disks[1].role == "data"
+  and (.vm.nics | length) == 2
+  and .vm.nics[0].key == 4000
+  and .vm.nics[0].label == "Network adapter 1"
+  and .vm.nics[0].mac == "52:54:00:12:34:56"
+  and .vm.nics[0].network == "VM Network"
+  and .vm.nics[0].connected == true
+  and .vm.nics[0].start_connected == true
+  and .vm.nics[1].key == 4001
+  and .vm.nics[1].mac == "52:54:00:65:43:20"
+  and .vm.nics[1].backing.portgroup_key == "dvportgroup-22"
+  and .vm.nics[1].backing.switch_uuid == "dvs-uuid-22"
+' <<<"${inventory_fallback}" >/dev/null || {
+  echo "[ERR] VMware disk inventory was not ordered by controller address fallback" >&2
+  printf '%s\n' "${inventory_fallback}" >&2
+  exit 1
+}
+
+vm_info_boot_unit1="${WORK_DIR}/vm.boot-unit1.json"
+write_vm_info "${vm_info_boot_unit1}" "unit1"
+export V2K_TEST_VM_INFO_JSON="${vm_info_boot_unit1}"
+inventory_boot="$(v2k_vmware_inventory_json "demo-vm" "vc.example.local")"
+
+jq -e '
+  .disks[0].disk_id == "scsi0:1"
+  and .disks[0].device_key == "2001"
+  and .disks[0].role == "root"
+  and .disks[1].disk_id == "scsi0:0"
+  and .disks[1].device_key == "2000"
+  and .disks[1].role == "data"
+' <<<"${inventory_boot}" >/dev/null || {
+  echo "[ERR] VMware explicit boot disk order did not take precedence" >&2
+  printf '%s\n' "${inventory_boot}" >&2
+  exit 1
+}
+
+mixed_device_info="${WORK_DIR}/device.mixed-controller.json"
+cat > "${mixed_device_info}" <<'JSON'
+{
+  "devices": [
+    {
+      "key": 200,
+      "type": "VirtualIDEController",
+      "busNumber": 0,
+      "deviceInfo": {"label": "IDE 0"}
+    },
+    {
+      "key": 1000,
+      "type": "VirtualLsiLogicController",
+      "busNumber": 0,
+      "deviceInfo": {"label": "SCSI controller 0"}
+    },
+    {
+      "key": 15000,
+      "type": "VirtualAHCIController",
+      "busNumber": 0,
+      "deviceInfo": {"label": "SATA controller 0"}
+    },
+    {
+      "key": 31000,
+      "type": "VirtualNVMEController",
+      "busNumber": 0,
+      "deviceInfo": {"label": "NVME controller 0"}
+    },
+    {
+      "key": 2000,
+      "type": "VirtualDisk",
+      "controllerKey": 1000,
+      "unitNumber": 0,
+      "deviceInfo": {"label": "Hard disk 2"},
+      "backing": {"fileName": "[datastore1] demo-vm/data-scsi.vmdk"},
+      "capacityInBytes": 75161927680
+    },
+    {
+      "key": 3000,
+      "type": "VirtualDisk",
+      "controllerKey": 200,
+      "unitNumber": 0,
+      "deviceInfo": {"label": "Hard disk 1"},
+      "backing": {"fileName": "[datastore1] demo-vm/root-ide.vmdk"},
+      "capacityInBytes": 69787975680
+    },
+    {
+      "key": 16000,
+      "type": "VirtualDisk",
+      "controllerKey": 15000,
+      "unitNumber": 0,
+      "deviceInfo": {"label": "Hard disk 3"},
+      "backing": {"fileName": "[datastore1] demo-vm/data-sata.vmdk"},
+      "capacityInBytes": 10737418240
+    },
+    {
+      "key": 32000,
+      "type": "VirtualDisk",
+      "controllerKey": 31000,
+      "unitNumber": 0,
+      "deviceInfo": {"label": "Hard disk 4"},
+      "backing": {"fileName": "[datastore1] demo-vm/data-nvme.vmdk"},
+      "capacityInBytes": 21474836480
+    }
+  ]
+}
+JSON
+
+export V2K_TEST_VM_INFO_JSON="${vm_info_no_boot}"
+export V2K_TEST_DEVICE_INFO_JSON="${mixed_device_info}"
+inventory_mixed="$(v2k_vmware_inventory_json "demo-vm" "vc.example.local")"
+
+jq -e '
+  .disks[0].disk_id == "ide0:0"
+  and .disks[0].device_key == "3000"
+  and .disks[0].controller.kind == "ide"
+  and .disks[0].role == "root"
+  and .disks[1].disk_id == "scsi0:0"
+  and .disks[1].controller.kind == "scsi"
+  and .disks[1].role == "data"
+  and .disks[2].disk_id == "sata0:0"
+  and .disks[2].controller.kind == "sata"
+  and .disks[3].disk_id == "nvme0:0"
+  and .disks[3].controller.kind == "nvme"
+' <<<"${inventory_mixed}" >/dev/null || {
+  echo "[ERR] VMware mixed-controller inventory was not normalized safely" >&2
+  printf '%s\n' "${inventory_mixed}" >&2
+  exit 1
+}
+
+echo "[OK] v2k VMware inventory disk ordering passed"

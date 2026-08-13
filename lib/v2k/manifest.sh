@@ -36,6 +36,11 @@ v2k_manifest_path() {
   echo "${V2K_MANIFEST:?Manifest path not set}"
 }
 
+v2k_manifest_now() {
+  date +"%Y-%m-%dT%H:%M:%S%z" \
+    | sed 's/\([+-][0-9][0-9]\)\([0-9][0-9]\)$/\1:\2/'
+}
+
 # ---------------------------------------------------------------------
 # Runtime helpers (split-run/state machine)
 # [추가: 런타임(split/state machine) 헬퍼]
@@ -44,6 +49,23 @@ v2k_manifest_path() {
 v2k_manifest_runtime_set() {
   # Usage: v2k_manifest_runtime_set <manifest> <jq_path> <json_value>
   local manifest="$1" path="$2" value_json="${3:-null}"
+
+  # Legacy orchestrator paths used to write only runtime.split, leaving the
+  # authoritative phases marker and timestamps inconsistent. Route those
+  # exact completion writes through the atomic dual-view helper.
+  if [[ "${value_json}" == "true" ]]; then
+    case "${path}" in
+      .runtime.split.phase1.done)
+        v2k_manifest_mark_split_done "${manifest}" "phase1"
+        return
+        ;;
+      .runtime.split.phase2.done)
+        v2k_manifest_mark_split_done "${manifest}" "phase2"
+        return
+        ;;
+    esac
+  fi
+
   local tmp
   tmp="$(mktemp)"
   jq --arg path "${path}" --argjson v "${value_json}" '
@@ -51,27 +73,6 @@ v2k_manifest_runtime_set() {
     (setpath(($path|ltrimstr(".")|split(".")); $v))
   ' "${manifest}" > "${tmp}" && mv "${tmp}" "${manifest}"
 }
-
-v2k_manifest_mark_split_done() {
-  # Usage: v2k_manifest_mark_split_done <manifest> <phase1|phase2>
-  local manifest="$1" which="$2"
-  local ts
-  ts="$(date +"%Y-%m-%dT%H:%M:%S%z" | sed 's/\([+-][0-9][0-9]\)\([0-9][0-9]\)$/\1:\2/')"
-  local tmp
-  tmp="$(mktemp)"
-  jq --arg which "${which}" --arg ts "${ts}" '
-    .runtime = (.runtime // {}) |
-    .runtime.split = (.runtime.split // {phase1:{done:false,ts:""},phase2:{done:false,ts:""}}) |
-    .runtime.split[$which].done = true |
-    .runtime.split[$which].ts = $ts
-  ' "${manifest}" > "${tmp}" && mv "${tmp}" "${manifest}"
-}
-
-v2k_manifest_split_done() {
-  local manifest="$1" which="$2"
-  jq -r --arg which "${which}" '.runtime.split[$which].done // false' "${manifest}" 2>/dev/null
-}
-
 
 v2k_manifest_set_rbd_mapped_device() {
   # Usage: v2k_manifest_set_rbd_mapped_device <manifest> <disk_id> <uri> <dev_path>
@@ -129,15 +130,18 @@ v2k_manifest_init() {
   vddk_user="${V2K_VDDK_USER-}"
   vddk_cred_file="${V2K_VDDK_CRED_FILE-}"
 
-  local compat_requested_profile compat_selected_profile compat_detected_vcenter_version
-  local compat_root compat_govc_bin compat_python_bin compat_vddk_libdir
+  local compat_requested_profile compat_selected_profile compat_detected_vcenter_version compat_detected_esxi_version
+  local compat_root compat_govc_bin compat_python_bin compat_vddk_libdir compat_nbdkit_bin compat_nbdkit_plugin
   compat_requested_profile="${V2K_COMPAT_PROFILE:-auto}"
   compat_selected_profile="${V2K_COMPAT_SELECTED_PROFILE-}"
   compat_detected_vcenter_version="${V2K_COMPAT_DETECTED_VCENTER_VERSION-}"
+  compat_detected_esxi_version="${V2K_COMPAT_DETECTED_ESXI_VERSION-}"
   compat_root="${V2K_COMPAT_ROOT-}"
   compat_govc_bin="${V2K_GOVC_BIN-}"
   compat_python_bin="${V2K_PYTHON_BIN-}"
   compat_vddk_libdir="${VDDK_LIBDIR-}"
+  compat_nbdkit_bin="${V2K_NBDKIT_BIN-}"
+  compat_nbdkit_plugin="${V2K_NBDKIT_VDDK_PLUGIN-}"
 
   # Optional env overrides (set by engine.sh from CLI options)
   # - V2K_TARGET_FORMAT: qcow2|raw
@@ -220,10 +224,13 @@ v2k_manifest_init() {
     --arg compat_requested_profile "${compat_requested_profile}" \
     --arg compat_selected_profile "${compat_selected_profile}" \
     --arg compat_detected_vcenter_version "${compat_detected_vcenter_version}" \
+    --arg compat_detected_esxi_version "${compat_detected_esxi_version}" \
     --arg compat_root "${compat_root}" \
     --arg compat_govc_bin "${compat_govc_bin}" \
     --arg compat_python_bin "${compat_python_bin}" \
     --arg compat_vddk_libdir "${compat_vddk_libdir}" \
+    --arg compat_nbdkit_bin "${compat_nbdkit_bin}" \
+    --arg compat_nbdkit_plugin "${compat_nbdkit_plugin}" \
     --arg vmhash "${vmhash}" \
     --argjson storage_map "${map_compact}" \
     --argjson cloud "${cloud_compact}" \
@@ -281,7 +288,10 @@ v2k_manifest_init() {
                       end
                     end
                   ),
-                  base_done:false, incr_seq:0, last_synced_at:""
+                  base_done:false,
+                  incr_seq:0,
+                  last_synced_at:"",
+                  last_sync:null
                 },
                 metrics:{ base_bytes_written:0, incr_bytes_written:0, incr_areas:0 }
               })
@@ -321,6 +331,7 @@ v2k_manifest_init() {
           # ESXi host where the VM is currently running (kept for future use)
           esxi_host: ($inv.esxi_host // ""),
           esxi_name: ($inv.esxi_name // ""),
+          esxi_version: ($inv.esxi_version // ""),
           esxi_thumbprint: ($inv.esxi_thumbprint // ""),
 
           # VDDK 접근 정보 (vCenter 중심)
@@ -337,11 +348,14 @@ v2k_manifest_init() {
             requested_profile: (if ($compat_requested_profile|length) > 0 then $compat_requested_profile else "auto" end),
             selected_profile: (if ($compat_selected_profile|length) > 0 then $compat_selected_profile else "" end),
             detected_vcenter_version: (if ($compat_detected_vcenter_version|length) > 0 then $compat_detected_vcenter_version else "" end),
+            detected_esxi_version: (if ($compat_detected_esxi_version|length) > 0 then $compat_detected_esxi_version else "" end),
             compat_root: (if ($compat_root|length) > 0 then $compat_root else "" end),
             tools: {
               govc_bin: (if ($compat_govc_bin|length) > 0 then $compat_govc_bin else "" end),
               python_bin: (if ($compat_python_bin|length) > 0 then $compat_python_bin else "" end),
-              vddk_libdir: (if ($compat_vddk_libdir|length) > 0 then $compat_vddk_libdir else "" end)
+              vddk_libdir: (if ($compat_vddk_libdir|length) > 0 then $compat_vddk_libdir else "" end),
+              nbdkit_bin: (if ($compat_nbdkit_bin|length) > 0 then $compat_nbdkit_bin else "" end),
+              nbdkit_vddk_plugin: (if ($compat_nbdkit_plugin|length) > 0 then $compat_nbdkit_plugin else "" end)
             }
           }
         },
@@ -361,7 +375,7 @@ v2k_manifest_init() {
         disks: $disks,
         policy:{purge_snapshots_on_success:true},
         phases:{
-          init:{done:true, ts:$created_at},
+          init:{done:false, ts:""},
           cbt_enable:{done:false, ts:""},
           base_sync:{done:false, ts:""},
           incr_sync:{done:false, ts:""},
@@ -370,6 +384,12 @@ v2k_manifest_init() {
         },
         runtime:{
           split:{phase1:{done:false,ts:""},phase2:{done:false,ts:""}},
+          source_validation:{
+            status:"pending",
+            policy_version:1,
+            supported_controllers:["ide","scsi","sata"],
+            unsupported_disks:[]
+          },
           cloud:{},
           progress:{percent:0,last_step:""},
           sync_within_deadline:null,
@@ -378,6 +398,110 @@ v2k_manifest_init() {
         }
       }
   ' > "${manifest}"
+}
+
+v2k_manifest_validate_source_disk_controllers() {
+  local manifest="$1"
+  local ts tmp status
+
+  [[ -f "${manifest}" ]] || return 2
+  ts="$(v2k_manifest_now)"
+  tmp="$(mktemp "${manifest}.tmp.XXXXXX")"
+  chmod 600 "${tmp}" 2>/dev/null || true
+
+  if ! jq \
+      --arg ts "${ts}" '
+      def normalized_kind($disk):
+        (($disk.controller.kind // "") | tostring | ascii_downcase) as $kind
+        | (($disk.controller.type // "") | tostring | ascii_downcase) as $type
+        | (($disk.disk_id // "") | tostring | ascii_downcase) as $disk_id
+        | if (["ide","scsi","sata","nvme"] | index($kind)) != null then $kind
+          elif ($type | test("nvme")) then "nvme"
+          elif ($type | test("idecontroller")) then "ide"
+          elif ($type | test("sata|ahci")) then "sata"
+          elif ($type | test("scsi|lsilogic|paravirtual|pvscsi|buslogic")) then "scsi"
+          elif ($disk_id | test("^nvme[0-9]+:[0-9]+$")) then "nvme"
+          elif ($disk_id | test("^ide[0-9]+:[0-9]+$")) then "ide"
+          elif ($disk_id | test("^scsi[0-9]+:[0-9]+$")) then "scsi"
+          elif ($disk_id | test("^sata[0-9]+:[0-9]+$")) then "sata"
+          else "unknown"
+          end;
+
+      def supported_address($kind; $disk_id):
+        ((["ide","scsi","sata"] | index($kind)) != null)
+        and (($disk_id | tostring | ascii_downcase)
+          | test("^" + $kind + "[0-9]+:[0-9]+$"));
+
+      .disks = (
+        (.disks // [])
+        | to_entries
+        | map(
+            .key as $idx
+            | .value
+            | normalized_kind(.) as $kind
+            | ((.disk_id // "") | tostring) as $disk_id
+            | .role = (if $idx == 0 then "root" else "data" end)
+            | .controller = (.controller // {})
+            | .controller.kind = $kind
+            | .controller.supported = supported_address($kind; $disk_id)
+          )
+      )
+      | ([
+          .disks[]
+          | select(.controller.supported != true)
+          | (.controller.kind // "unknown") as $controller_kind
+          | {
+              disk_id:(.disk_id // ""),
+              device_key:(.device_key // ""),
+              role:(.role // ""),
+              controller_kind:(.controller.kind // "unknown"),
+              controller_type:(.controller.type // "unknown"),
+              reason:(
+                if $controller_kind == "nvme" then "nvme_support_deferred"
+                elif ((["ide","scsi","sata"] | index($controller_kind)) != null)
+                  then "controller_address_invalid"
+                else "controller_unrecognized"
+                end
+              )
+            }
+        ]) as $unsupported
+      | .runtime = (.runtime // {})
+      | .runtime.source_validation = {
+          status:(if ($unsupported | length) == 0 then "passed" else "failed" end),
+          policy_version:1,
+          validated_at:$ts,
+          supported_controllers:["ide","scsi","sata"],
+          unsupported_disks:$unsupported
+        }
+      | if ($unsupported | length) > 0 then
+          .runtime.last_error = {
+            code:44,
+            reason:"unsupported_source_disk_controller",
+            ts:$ts,
+            details:{unsupported_disks:$unsupported}
+          }
+        else
+          .
+        end
+    ' "${manifest}" > "${tmp}"; then
+    rm -f "${tmp}" >/dev/null 2>&1 || true
+    return 2
+  fi
+  mv -f "${tmp}" "${manifest}"
+
+  status="$(jq -r '.runtime.source_validation.status // "failed"' "${manifest}" 2>/dev/null || echo failed)"
+  [[ "${status}" == "passed" ]] && return 0
+  return 44
+}
+
+v2k_manifest_source_controller_validation_is_done() {
+  local manifest="$1"
+  jq -e '
+    .runtime.source_validation.status == "passed"
+    and (.runtime.source_validation.policy_version // 0) >= 1
+    and (.runtime.source_validation.supported_controllers == ["ide","scsi","sata"])
+    and ([.disks[]? | select(.controller.supported != true)] | length) == 0
+  ' "${manifest}" >/dev/null 2>&1
 }
 
 v2k_manifest_get_compat_requested_profile() {
@@ -393,6 +517,11 @@ v2k_manifest_get_compat_selected_profile() {
 v2k_manifest_get_compat_detected_vcenter_version() {
   local manifest="$1"
   jq -r '.source.compat.detected_vcenter_version // empty' "${manifest}" 2>/dev/null
+}
+
+v2k_manifest_get_compat_detected_esxi_version() {
+  local manifest="$1"
+  jq -r '.source.compat.detected_esxi_version // empty' "${manifest}" 2>/dev/null
 }
 
 v2k_manifest_get_compat_root() {
@@ -413,6 +542,16 @@ v2k_manifest_get_compat_python_bin() {
 v2k_manifest_get_compat_vddk_libdir() {
   local manifest="$1"
   jq -r '.source.compat.tools.vddk_libdir // empty' "${manifest}" 2>/dev/null
+}
+
+v2k_manifest_get_compat_nbdkit_bin() {
+  local manifest="$1"
+  jq -r '.source.compat.tools.nbdkit_bin // empty' "${manifest}" 2>/dev/null
+}
+
+v2k_manifest_get_compat_nbdkit_vddk_plugin() {
+  local manifest="$1"
+  jq -r '.source.compat.tools.nbdkit_vddk_plugin // empty' "${manifest}" 2>/dev/null
 }
 
 v2k_manifest_set_compat_requested_profile() {
@@ -448,22 +587,37 @@ v2k_manifest_set_compat_detected_vcenter_version() {
   ' "${manifest}" > "${tmp}" && mv "${tmp}" "${manifest}"
 }
 
+v2k_manifest_set_compat_detected_esxi_version() {
+  local manifest="$1" detected_version="${2:-}"
+  local tmp
+  tmp="$(mktemp)"
+  jq --arg detected_version "${detected_version}" '
+    .source = (.source // {}) |
+    .source.compat = (.source.compat // {}) |
+    .source.compat.detected_esxi_version = $detected_version
+  ' "${manifest}" > "${tmp}" && mv "${tmp}" "${manifest}"
+}
+
 v2k_manifest_set_compat_tool_paths() {
-  local manifest="$1" compat_root="${2:-}" govc_bin="${3:-}" python_bin="${4:-}" vddk_libdir="${5:-}"
+  local manifest="$1" compat_root="${2:-}" govc_bin="${3:-}" python_bin="${4:-}" vddk_libdir="${5:-}" nbdkit_bin="${6:-}" nbdkit_plugin="${7:-}"
   local tmp
   tmp="$(mktemp)"
   jq \
     --arg compat_root "${compat_root}" \
     --arg govc_bin "${govc_bin}" \
     --arg python_bin "${python_bin}" \
-    --arg vddk_libdir "${vddk_libdir}" '
+    --arg vddk_libdir "${vddk_libdir}" \
+    --arg nbdkit_bin "${nbdkit_bin}" \
+    --arg nbdkit_plugin "${nbdkit_plugin}" '
     .source = (.source // {}) |
     .source.compat = (.source.compat // {}) |
     .source.compat.compat_root = $compat_root |
     .source.compat.tools = (.source.compat.tools // {}) |
     .source.compat.tools.govc_bin = $govc_bin |
     .source.compat.tools.python_bin = $python_bin |
-    .source.compat.tools.vddk_libdir = $vddk_libdir
+    .source.compat.tools.vddk_libdir = $vddk_libdir |
+    .source.compat.tools.nbdkit_bin = $nbdkit_bin |
+    .source.compat.tools.nbdkit_vddk_plugin = $nbdkit_plugin
   ' "${manifest}" > "${tmp}" && mv "${tmp}" "${manifest}"
 }
 
@@ -505,15 +659,106 @@ v2k_manifest_policy_purge_snapshots_on_success() {
   [[ "${v}" == "true" ]]
 }
 
-# split execution completion markers (used by orchestrator split=phase2 gating)
+# Split completion is consumed through two compatibility paths:
+# - .phases["split.phaseN"] is the authoritative state-machine marker.
+# - .runtime.split.phaseN is used by fleet/status views.
+# Persist both in one manifest-local rename so they can never diverge.
 v2k_manifest_mark_split_done() {
   local manifest="$1" which="$2"
-  v2k_manifest_phase_done "${manifest}" "split.${which}"
+  local ts tmp
+
+  case "${which}" in
+    phase1|phase2) ;;
+    *)
+      echo "Invalid split completion marker: ${which}" >&2
+      return 2
+      ;;
+  esac
+
+  ts="$(v2k_manifest_now)"
+  tmp="$(mktemp "${manifest}.tmp.XXXXXX")"
+  chmod 600 "${tmp}" 2>/dev/null || true
+  if ! jq --arg which "${which}" --arg ts "${ts}" '
+      (.phases["split." + $which] // {}) as $phase_before
+      | (.runtime.split[$which] // {}) as $runtime_before
+      | (
+          if (
+            ($phase_before.done // false)
+            and (($phase_before.ts // "") | length) > 0
+          )
+          then $phase_before.ts
+          elif (
+            ($runtime_before.done // false)
+            and (($runtime_before.ts // "") | length) > 0
+          )
+          then $runtime_before.ts
+          else $ts
+          end
+        ) as $effective_ts
+      | .phases = (.phases // {})
+      | .phases["split." + $which] = {done:true, ts:$effective_ts}
+      | .runtime = (.runtime // {})
+      | .runtime.split = (
+          .runtime.split
+          // {phase1:{done:false,ts:""},phase2:{done:false,ts:""}}
+        )
+      | .runtime.split[$which] = {done:true, ts:$effective_ts}
+      | reduce ["phase1", "phase2"][] as $phase (.;
+          (.phases["split." + $phase] // {}) as $phase_view
+          | (.runtime.split[$phase] // {}) as $runtime_view
+          | .runtime.split[$phase] = {
+              done:(
+                $phase_view.done
+                // $runtime_view.done
+                // false
+              ),
+              ts:(
+                if (($phase_view.ts // "") | length) > 0
+                then $phase_view.ts
+                else ($runtime_view.ts // "")
+                end
+              )
+            }
+        )
+    ' "${manifest}" > "${tmp}"; then
+    rm -f "${tmp}" >/dev/null 2>&1 || true
+    return 1
+  fi
+  mv -f "${tmp}" "${manifest}"
+}
+
+v2k_manifest_split_done() {
+  local manifest="$1" which="$2"
+  jq -r --arg which "${which}" '
+    .phases["split." + $which].done
+    // .runtime.split[$which].done
+    // false
+  ' "${manifest}" 2>/dev/null
 }
 
 v2k_manifest_split_is_done() {
   local manifest="$1" which="$2"
-  v2k_manifest_phase_is_done "${manifest}" "split.${which}"
+  [[ -f "${manifest}" ]] || return 1
+  if [[ "${which}" == "phase1" ]]; then
+    local validation_status
+    validation_status="$(jq -r '.runtime.source_validation.status // empty' "${manifest}" 2>/dev/null || true)"
+    if [[ -n "${validation_status}" ]]; then
+      if ! v2k_manifest_source_controller_validation_is_done "${manifest}"; then
+        echo "Phase1 manifest failed IDE/SCSI/SATA disk-controller validation; restart phase1 with a new workdir." >&2
+        return 1
+      fi
+      if [[ "$(jq -r '.target.provider // "libvirt"' "${manifest}" 2>/dev/null || echo libvirt)" == "ablestack-cloud" ]]; then
+        if ! declare -F v2k_cloud_target_disk_controller_plan_is_valid >/dev/null 2>&1 \
+          || ! v2k_cloud_target_disk_controller_plan_is_valid "${manifest}"; then
+          echo "Phase1 manifest has no valid Cloud disk-controller plan; restart phase1 with a new workdir." >&2
+          return 1
+        fi
+      fi
+    fi
+  fi
+  jq -e --arg which "${which}" \
+    '.phases["split." + $which].done == true' \
+    "${manifest}" >/dev/null 2>&1
 }
 
 v2k_manifest_snapshot_set() {
@@ -542,6 +787,12 @@ v2k_manifest_is_windows() {
       [
         s(.source.vm.guestId),
         s(.source.vm.guest_id),
+        s(.source.vm.guestFamily),
+        s(.source.vm.guest_family),
+        s(.source.vm.guestFullName),
+        s(.source.vm.guest_full_name),
+        s(.source.vm.osFullName),
+        s(.source.vm.os_full_name),
         s(.source.vm.config.guestId),
         s(.source.vm.config.guest_id),
         s(.source.vm.guest.guestId),
@@ -605,24 +856,41 @@ v2k_manifest_set_disk_last_change_id() {
   mv "${tmp}" "${manifest}"
 }
 
-# After a successful incremental/final patch, advance CBT changeIds.
+# After a successful incremental/final patch, atomically advance CBT changeIds
+# and persist the coverage record that authorized the advancement.
 # - If base_change_id is empty or "*", set it to prev_last_change_id (the baseline for deltas).
 # - Always set last_change_id to new_last_change_id.
+# - Never publish a new changeId separately from its verified coverage metadata.
 v2k_manifest_advance_cbt_change_ids() {
   local manifest="$1" idx="$2" prev_last_change_id="$3" new_last_change_id="$4"
-  local base
-  base="$(v2k_manifest_get_disk_base_change_id "${manifest}" "${idx}")"
+  local coverage_json="${5:-null}"
+  local tmp
 
   if [[ -z "${new_last_change_id}" || "${new_last_change_id}" == "null" ]]; then
     return 0
   fi
 
-  if [[ -z "${base}" || "${base}" == "null" || "${base}" == "*" ]]; then
-    if [[ -n "${prev_last_change_id}" && "${prev_last_change_id}" != "null" && "${prev_last_change_id}" != "*" ]]; then
-      v2k_manifest_set_disk_base_change_id "${manifest}" "${idx}" "${prev_last_change_id}"
-    fi
-  fi
-  v2k_manifest_set_disk_last_change_id "${manifest}" "${idx}" "${new_last_change_id}"
+  tmp="$(mktemp)"
+  jq \
+    --argjson idx "${idx}" \
+    --arg prev "${prev_last_change_id}" \
+    --arg new "${new_last_change_id}" \
+    --argjson coverage "${coverage_json}" '
+      .disks[$idx].cbt = (.disks[$idx].cbt // {})
+      | if (
+          ((.disks[$idx].cbt.base_change_id // "") == "")
+          or ((.disks[$idx].cbt.base_change_id // "") == "null")
+          or ((.disks[$idx].cbt.base_change_id // "") == "*")
+        ) and ($prev != "") and ($prev != "null") and ($prev != "*")
+        then .disks[$idx].cbt.base_change_id = $prev
+        else .
+        end
+      | .disks[$idx].cbt.last_change_id = $new
+      | if $coverage == null
+        then .
+        else .disks[$idx].cbt.last_coverage = $coverage
+        end
+    ' "${manifest}" > "${tmp}" && mv "${tmp}" "${manifest}"
 }
 
 # Ensure CBT changeId fields are normalized for all CBT-enabled disks.
@@ -677,15 +945,168 @@ v2k_manifest_set_disk_metric_incr() {
   mv "${tmp}" "${manifest}"
 }
 
+# Commit all successful incremental/final observability together with the CBT
+# state that authorizes the next delta. A failed manifest write therefore
+# cannot expose a new changeId without its matching counters and timestamp.
+v2k_manifest_record_patch_success() {
+  local manifest="$1"
+  local idx="$2"
+  local which="$3"
+  local prev_last_change_id="$4"
+  local new_last_change_id="$5"
+  local coverage_json="${6:-null}"
+  local bytes="${7:-0}"
+  local areas="${8:-0}"
+  local ts tmp
+
+  case "${which}" in
+    incr|final) ;;
+    *)
+      echo "Invalid patch success phase: ${which}" >&2
+      return 2
+      ;;
+  esac
+  [[ "${idx}" =~ ^[0-9]+$ ]] || return 2
+  [[ "${bytes}" =~ ^[0-9]+$ ]] || return 2
+  [[ "${areas}" =~ ^[0-9]+$ ]] || return 2
+  if ! printf '%s' "${coverage_json}" | jq -e \
+      'type == "object" or . == null' >/dev/null 2>&1; then
+    return 2
+  fi
+
+  ts="$(v2k_manifest_now)"
+  tmp="$(mktemp "${manifest}.tmp.XXXXXX")"
+  chmod 600 "${tmp}" 2>/dev/null || true
+  if ! jq \
+      --argjson idx "${idx}" \
+      --arg which "${which}" \
+      --arg prev "${prev_last_change_id}" \
+      --arg new "${new_last_change_id}" \
+      --argjson coverage "${coverage_json}" \
+      --argjson bytes "${bytes}" \
+      --argjson areas "${areas}" \
+      --arg ts "${ts}" '
+        .disks[$idx].cbt = (.disks[$idx].cbt // {})
+        | if (
+            ((.disks[$idx].cbt.base_change_id // "") == "")
+            or ((.disks[$idx].cbt.base_change_id // "") == "null")
+            or ((.disks[$idx].cbt.base_change_id // "") == "*")
+          ) and ($prev != "") and ($prev != "null") and ($prev != "*")
+          then .disks[$idx].cbt.base_change_id = $prev
+          else .
+          end
+        | if ($new != "") and ($new != "null")
+          then .disks[$idx].cbt.last_change_id = $new
+          else .
+          end
+        | if $coverage == null
+          then .
+          else .disks[$idx].cbt.last_coverage = $coverage
+          end
+        | .disks[$idx].metrics = (.disks[$idx].metrics // {})
+        | .disks[$idx].metrics.incr_bytes_written =
+            ((.disks[$idx].metrics.incr_bytes_written // 0) + $bytes)
+        | .disks[$idx].metrics.incr_areas =
+            ((.disks[$idx].metrics.incr_areas // 0) + $areas)
+        | .disks[$idx].transfer = (.disks[$idx].transfer // {})
+        | .disks[$idx].transfer.incr_seq =
+            ((.disks[$idx].transfer.incr_seq // 0) + 1)
+        | .disks[$idx].transfer.last_synced_at = $ts
+        | .disks[$idx].transfer.last_sync = {
+            phase:$which,
+            bytes_written:$bytes,
+            areas:$areas,
+            ts:$ts
+          }
+      ' "${manifest}" > "${tmp}"; then
+    rm -f "${tmp}" >/dev/null 2>&1 || true
+    return 1
+  fi
+  mv -f "${tmp}" "${manifest}"
+}
+
 v2k_manifest_mark_base_done() {
-  local manifest="$1" idx="$2"
-  local ts
-  ts="$(date +"%Y-%m-%dT%H:%M:%S%z" | sed 's/\([+-][0-9][0-9]\)\([0-9][0-9]\)$/\1:\2/')"
-  local tmp
-  tmp="$(mktemp)"
-  jq --argjson idx "${idx}" --arg ts "${ts}" \
-    '.disks[$idx].transfer.base_done=true | .disks[$idx].transfer.last_synced_at=$ts' "${manifest}" > "${tmp}"
-  mv "${tmp}" "${manifest}"
+  local manifest="$1" idx="$2" logical_bytes="${3:-0}"
+  local ts tmp
+
+  [[ "${idx}" =~ ^[0-9]+$ ]] || return 2
+  [[ "${logical_bytes}" =~ ^[0-9]+$ ]] || return 2
+  ts="$(v2k_manifest_now)"
+  tmp="$(mktemp "${manifest}.tmp.XXXXXX")"
+  chmod 600 "${tmp}" 2>/dev/null || true
+  if ! jq \
+      --argjson idx "${idx}" \
+      --argjson bytes "${logical_bytes}" \
+      --arg ts "${ts}" '
+        .disks[$idx].transfer = (.disks[$idx].transfer // {})
+        | .disks[$idx].transfer.base_done = true
+        | .disks[$idx].transfer.last_synced_at = $ts
+        | .disks[$idx].transfer.last_sync = {
+            phase:"base",
+            bytes_written:$bytes,
+            areas:0,
+            ts:$ts
+          }
+        | .disks[$idx].metrics = (.disks[$idx].metrics // {})
+        | .disks[$idx].metrics.base_bytes_written = $bytes
+      ' "${manifest}" > "${tmp}"; then
+    rm -f "${tmp}" >/dev/null 2>&1 || true
+    return 1
+  fi
+  mv -f "${tmp}" "${manifest}"
+}
+
+v2k_manifest_record_sync_failure() {
+  local manifest="$1"
+  local which="$2"
+  local idx="$3"
+  local code="$4"
+  local reason="$5"
+  local details_json="${6-}"
+  local ts tmp
+
+  [[ -n "${details_json}" ]] || details_json='{}'
+  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  if ! printf '%s' "${details_json}" | jq -e 'type == "object"' >/dev/null 2>&1; then
+    details_json='{}'
+  fi
+  tmp="$(mktemp "${manifest}.tmp.XXXXXX")"
+  chmod 600 "${tmp}" 2>/dev/null || true
+  if ! jq \
+      --arg which "${which}" \
+      --argjson idx "${idx}" \
+      --argjson code "${code}" \
+      --arg reason "${reason}" \
+      --arg ts "${ts}" \
+      --argjson details "${details_json}" \
+      '
+        .runtime = (.runtime // {})
+        | .runtime.sync_issues = (.runtime.sync_issues // [])
+        | .runtime.sync_issues += [{
+            which:$which,
+            disk_index:$idx,
+            code:$code,
+            reason:$reason,
+            ts:$ts,
+            details:$details
+          }]
+        | .runtime.last_error = {
+            code:$code,
+            reason:$reason,
+            ts:$ts
+          }
+        | .disks[$idx].transfer.base_done = false
+        | .disks[$idx].transfer.last_error = {
+            code:$code,
+            reason:$reason,
+            ts:$ts,
+            details:$details
+          }
+      ' "${manifest}" > "${tmp}"; then
+    rm -f "${tmp}" >/dev/null 2>&1 || true
+    return 1
+  fi
+  mv -f "${tmp}" "${manifest}"
 }
 
 v2k_manifest_status_summary() {
@@ -705,13 +1126,55 @@ v2k_manifest_status_summary() {
           target:.transfer.target_path,
           base_done:.transfer.base_done,
           incr_seq:.transfer.incr_seq,
+          last_synced_at:(.transfer.last_synced_at // ""),
+          last_sync:(.transfer.last_sync // null),
+          base_bytes_written:(.metrics.base_bytes_written // 0),
+          incr_bytes_written:(.metrics.incr_bytes_written // 0),
+          incr_areas:(.metrics.incr_areas // 0),
           cbt_enabled:.cbt.enabled,
           base_change_id:(.cbt.base_change_id // ""),
-          last_change_id:(.cbt.last_change_id // "")
+          last_change_id:(.cbt.last_change_id // ""),
+          last_coverage:(.cbt.last_coverage // null)
         })),
 
         # ---- Status observability additions ----
         runtime:{
+          split:{
+            phase1:(
+              (.phases["split.phase1"] // {}) as $phase_view
+              | ($rt.split.phase1 // {}) as $runtime_view
+              | {
+                  done:(
+                    $phase_view.done
+                    // $runtime_view.done
+                    // false
+                  ),
+                  ts:(
+                    if (($phase_view.ts // "") | length) > 0
+                    then $phase_view.ts
+                    else ($runtime_view.ts // "")
+                    end
+                  )
+                }
+            ),
+            phase2:(
+              (.phases["split.phase2"] // {}) as $phase_view
+              | ($rt.split.phase2 // {}) as $runtime_view
+              | {
+                  done:(
+                    $phase_view.done
+                    // $runtime_view.done
+                    // false
+                  ),
+                  ts:(
+                    if (($phase_view.ts // "") | length) > 0
+                    then $phase_view.ts
+                    else ($runtime_view.ts // "")
+                    end
+                  )
+                }
+            )
+          },
           sync_issues:$issues,
           last_sync_issue:(if ($issues|length) > 0 then $issues[-1] else null end)
         },
@@ -735,7 +1198,8 @@ v2k_manifest_status_summary() {
 
 v2k_manifest_fetch_and_save_base_change_ids() {
   local manifest="$1" py_script="$2"
-  local count i disk_id vm_name snap_name json_out new_id
+  local count i disk_id device_key vm_name snap_name json_out new_id source rc err_file err detail
+  local missing=0
 
   # Python 스크립트 실행을 위한 환경변수 설정 (govc 환경변수 사용)
   export VCENTER_HOST="${GOVC_URL:?missing GOVC_URL}"
@@ -751,14 +1215,58 @@ v2k_manifest_fetch_and_save_base_change_ids() {
 
   for ((i=0;i<count;i++)); do
     disk_id="$(jq -r ".disks[$i].disk_id" "${manifest}")"
+    device_key="$(jq -r ".disks[$i].device_key // empty" "${manifest}")"
     
     # --change-id "*"를 넘겨 현재 시점의 Change ID(new_change_id)만 받아온다.
-    json_out="$(v2k_python "${py_script}" --vm "${vm_name}" --snapshot "${snap_name}" --disk-id "${disk_id}" --change-id "*" 2>/dev/null || true)"
-    new_id="$(echo "${json_out}" | jq -r '.new_change_id // empty')"
+    err_file="$(mktemp)"
+    json_out=""
+    local -a selector_args=(
+      --vm "${vm_name}"
+      --snapshot "${snap_name}"
+      --disk-id "${disk_id}"
+      --change-id "*"
+    )
+    if [[ -n "${device_key}" && "${device_key}" != "null" ]]; then
+      selector_args+=(--device-key "${device_key}")
+    fi
+    if json_out="$(v2k_python "${py_script}" "${selector_args[@]}" 2>"${err_file}")"; then
+      rc=0
+    else
+      rc=$?
+    fi
+    err="$(cat "${err_file}" 2>/dev/null || true)"
+    rm -f "${err_file}"
+    new_id="$(echo "${json_out}" | jq -r '.new_change_id // empty' 2>/dev/null || true)"
+    source="$(echo "${json_out}" | jq -r '.change_id_source // empty' 2>/dev/null || true)"
 
-    if [[ -n "${new_id}" && "${new_id}" != "null" ]]; then
+    if [[ "${rc}" -eq 0 && -n "${new_id}" && "${new_id}" != "null" ]]; then
       # 조회한 ID를 last_change_id로 저장 (다음 incr의 기준선으로 사용)
       v2k_manifest_set_disk_last_change_id "${manifest}" "${i}" "${new_id}"
+      if declare -F v2k_event >/dev/null 2>&1; then
+        detail="$(jq -n --arg disk_id "${disk_id}" --arg device_key "${device_key}" --arg source "${source:-unknown}" \
+          '{disk_id:$disk_id,device_key:$device_key,source:$source}')"
+        v2k_event INFO "sync.base" "${disk_id}" "cbt_base_change_id_saved" "${detail}"
+      fi
+    else
+      missing=1
+      if declare -F v2k_event >/dev/null 2>&1; then
+        detail="$(jq -n --arg disk_id "${disk_id}" --arg device_key "${device_key}" --argjson code "${rc:-0}" --arg stderr "${err}" \
+          '{disk_id:$disk_id,device_key:$device_key,code:$code,stderr:$stderr,action:"stop_before_base"}')"
+        v2k_event ERROR "sync.base" "${disk_id}" "cbt_base_change_id_missing" "${detail}"
+      fi
+      detail="$(jq -n --arg disk_id "${disk_id}" --arg device_key "${device_key}" --arg stderr "${err}" \
+        '{disk_id:$disk_id,device_key:$device_key,action:"stop_before_base",stderr:$stderr}')"
+      if declare -F v2k_manifest_record_sync_failure >/dev/null 2>&1; then
+        v2k_manifest_record_sync_failure \
+          "${manifest}" "base" "${i}" 44 \
+          "cbt_base_change_id_missing" "${detail}" || true
+      elif declare -F v2k_manifest_append_sync_issue >/dev/null 2>&1; then
+        v2k_manifest_append_sync_issue "base" 44 "cbt_base_change_id_missing" "${detail}" || true
+      fi
     fi
   done
+
+  if [[ "${missing}" -ne 0 ]]; then
+    return 44
+  fi
 }

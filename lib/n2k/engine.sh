@@ -292,6 +292,77 @@ n2k_cmd_init() {
     cloud_config_json="$(jq -c --argjson pool "${storage_pool_config}" '. + {storage_pool:$pool}' <<<"${cloud_config_json}")"
   fi
   n2k_manifest_init "${N2K_MANIFEST}" "${N2K_RUN_ID}" "${N2K_WORKDIR}" "${vm}" "${pc}" "${mode}" "${dst}" "${target_format}" "${target_storage}" "${target_map_json}" "${inventory_json}" "${rbd_access_mode}" "${target_provider}" "${cloud_config_json}"
+  if [[ -n "${inventory_json}" ]]; then
+    local controller_validation_rc=0
+    if n2k_manifest_record_source_controller_validation "${N2K_MANIFEST}"; then
+      n2k_event INFO "init" "" "source_disk_controller_validation_passed" \
+        "$(jq -c '{
+            supported_controllers:.runtime.source_validation.supported_controllers,
+            root_selection:.runtime.source_validation.root_selection,
+            controller_plan:.source.controller_plan
+          }' "${N2K_MANIFEST}")"
+    else
+      controller_validation_rc=$?
+      local controller_validation_reason
+      controller_validation_reason="$(jq -r '.runtime.last_error.reason // "source_controller_plan_failed"' "${N2K_MANIFEST}")"
+      if [[ "${target_provider}" == "ablestack-cloud" \
+          && "${controller_validation_reason}" == "unsupported_disk_controller" ]] \
+          && n2k_cloud_target_force_sata_fallback \
+            "${N2K_MANIFEST}" "source-controller-validation" \
+            "${controller_validation_rc}" "${controller_validation_reason}"; then
+        n2k_event WARN "init" "" "source_disk_controller_validation_degraded" \
+          "$(jq -c '{
+              reason:.runtime.cloud.readiness.components.controller.reason,
+              fallback:.runtime.cloud.readiness.components.controller.fallback,
+              action:"continue_with_all_disks_sata"
+            }' "${N2K_MANIFEST}")"
+      else
+        n2k_event ERROR "init" "" "source_disk_controller_validation_failed" \
+          "$(jq -c '{
+              code:(.runtime.last_error.code // 44),
+              reason:(.runtime.last_error.reason // "source_controller_plan_failed"),
+              controller_plan:(.source.controller_plan // {}),
+              action:"stop_before_snapshot"
+            }' "${N2K_MANIFEST}")"
+        return "${controller_validation_rc}"
+      fi
+    fi
+  fi
+  if [[ "${target_provider}" == "ablestack-cloud" ]]; then
+    local cloud_controller_plan_rc=0
+    if n2k_cloud_target_disk_controller_plan_is_valid "${N2K_MANIFEST}"; then
+      n2k_event INFO "init" "" "cloud_disk_controller_plan_ready" \
+        "$(jq -c '.target.cloud.disk_controller_plan' "${N2K_MANIFEST}")"
+    elif n2k_cloud_target_prepare_disk_controller_plan "${N2K_MANIFEST}"; then
+      n2k_event INFO "init" "" "cloud_disk_controller_plan_ready" \
+        "$(jq -c '.target.cloud.disk_controller_plan' "${N2K_MANIFEST}")"
+    else
+      cloud_controller_plan_rc=$?
+      local cloud_plan_reason
+      cloud_plan_reason="$(jq -r '.runtime.last_error.reason // "cloud_disk_controller_plan_failed"' "${N2K_MANIFEST}")"
+      case "${cloud_plan_reason}" in
+        cloud_root_controller_unsupported|cloud_data_controller_unsupported|cloud_mixed_data_controller_unsupported)
+          n2k_cloud_target_force_sata_fallback \
+            "${N2K_MANIFEST}" "cloud-controller-plan" \
+            "${cloud_controller_plan_rc}" "${cloud_plan_reason}" || return $?
+          n2k_event WARN "init" "" "cloud_disk_controller_plan_degraded" \
+            "$(jq -c '{plan:.target.cloud.disk_controller_plan,action:"continue_with_all_disks_sata"}' "${N2K_MANIFEST}")"
+          ;;
+        *)
+          n2k_event ERROR "init" "" "cloud_disk_controller_plan_failed" \
+            "$(jq -c '{
+                code:(.runtime.last_error.code // 44),
+                reason:(.runtime.last_error.reason // "cloud_disk_controller_plan_failed"),
+                plan:(.target.cloud.disk_controller_plan // {}),
+                action:"stop_before_snapshot"
+              }' "${N2K_MANIFEST}")"
+          return "${cloud_controller_plan_rc}"
+          ;;
+      esac
+    fi
+    n2k_cloud_target_ensure_manifest_nic_mappings "${N2K_MANIFEST}" || \
+      n2k_die "Failed to create ordered source NIC to Cloud network mappings"
+  fi
   n2k_event INFO "init" "" "manifest_created" "{\"manifest\":\"${N2K_MANIFEST}\"}"
   if [[ -n "${inventory_json}" ]]; then
     n2k_event INFO "init" "" "inventory_loaded" "${inventory_json}"
@@ -384,6 +455,26 @@ n2k_cmd_status() {
         "Mode: " + (.source.mode // "") + "\n" +
         "Target: " + (.target.storage // "") + "/" + (.target.format // "") + "\n" +
         "Disks: " + ((.disks_count // 0) | tostring) + "\n" +
+        "Disk sync:\n" +
+        (
+          (.disks // [])
+          | map(
+              "  [" + (.index | tostring) + "] " + (.disk_id // "") +
+              " base=" + ((.base_done // false) | tostring) +
+              " base_bytes=" + ((.base_bytes_written // 0) | tostring) +
+              " incr_bytes=" + ((.incr_bytes_written // 0) | tostring) +
+              " regions=" + ((.incr_regions // 0) | tostring) +
+              " last=" + (.last_sync.phase // "none") +
+              "@" + (.last_synced_at // "") +
+              (
+                if ((.last_error.reason // "") | length) > 0
+                then " error=" + .last_error.reason
+                else ""
+                end
+              )
+            )
+          | if length > 0 then join("\n") else "  (none)" end
+        ) + "\n" +
         "Workdir: " + (.workdir // "") + "\n" +
         "Last step: " + (.runtime.progress.last_step // "") + "\n" +
         "Progress: " + ((.resume.percent // 0) | tostring) + "%\n" +
@@ -618,6 +709,58 @@ n2k_run_manifest_has_recovery_point() {
 n2k_run_manifest_value() {
   local manifest="$1" filter="$2"
   jq -r "${filter}" "${manifest}"
+}
+
+n2k_require_disk_controller_integrity() {
+  local manifest="$1"
+  local provider plan_status
+
+  provider="$(jq -r '.target.provider // "libvirt"' "${manifest}")"
+  if ! n2k_manifest_source_controller_validation_is_valid "${manifest}"; then
+    if [[ "${provider}" != "ablestack-cloud" ]] \
+        || ! n2k_cloud_target_disk_controller_plan_is_valid "${manifest}" \
+        || ! jq -e '
+          .runtime.cloud.readiness.components.controller.fallback == "sata"
+          and (([.disks[]? | select((.role // "") == "root")] | length) == 1)
+        ' "${manifest}" >/dev/null 2>&1; then
+      echo "N2K migration requires an unambiguous source disk identity and a valid target controller plan." >&2
+      return 44
+    fi
+  fi
+
+  case "${provider}" in
+    ablestack-cloud)
+      plan_status="$(jq -r '.target.cloud.disk_controller_plan.status // ""' "${manifest}")"
+      if [[ -z "${plan_status}" ]]; then
+        local plan_rc=0 plan_reason
+        n2k_cloud_target_prepare_disk_controller_plan "${manifest}" || plan_rc=$?
+        if [[ "${plan_rc}" -ne 0 ]]; then
+          plan_reason="$(jq -r '.runtime.last_error.reason // "cloud_disk_controller_plan_failed"' "${manifest}")"
+          case "${plan_reason}" in
+            cloud_root_controller_unsupported|cloud_data_controller_unsupported|cloud_mixed_data_controller_unsupported)
+              n2k_cloud_target_force_sata_fallback \
+                "${manifest}" "cloud-controller-integrity" "${plan_rc}" "${plan_reason}" || return $?
+              ;;
+            *) return "${plan_rc}" ;;
+          esac
+        fi
+      fi
+      n2k_cloud_target_disk_controller_plan_is_valid "${manifest}" || {
+        echo "ABLESTACK Cloud migration requires a valid single root/data disk-controller plan." >&2
+        return 44
+      }
+      ;;
+    libvirt)
+      n2k_libvirt_disk_controller_plan_is_valid "${manifest}" || {
+        echo "Libvirt migration requires supported disk controllers and an explicit boot disk for mixed-controller inventories." >&2
+        return 44
+      }
+      ;;
+    *)
+      echo "Unsupported target provider for disk-controller validation: ${provider}" >&2
+      return 44
+      ;;
+  esac
 }
 
 n2k_run_text_or_json() {
@@ -888,6 +1031,7 @@ n2k_run_start_background() {
   [[ "${N2K_FORCE:-0}" -eq 1 ]] && worker_cmd+=(--force)
   worker_cmd+=(run --foreground "$@")
 
+  # shellcheck disable=SC2094  # log_file is recorded as metadata, not read.
   (
     n2k_run_write_runner_state "running" "${BASHPID}" "${split}" "${log_file}" ""
     set +e
@@ -951,7 +1095,7 @@ n2k_cmd_run() {
   fi
 
   local vm="" pc="" dst="" mode="auto" cred_file=""
-  local username="" password="" insecure="1" inventory_source="api"
+  local username="" password="" insecure="1" inventory_source="api" inventory_json_arg=""
   local target_format="qcow2" target_storage="file" target_map_json="" rbd_access_mode="librbd"
   local rbd_access_mode_arg_set=0
   local target_provider="libvirt" target_provider_arg_set=0
@@ -986,6 +1130,7 @@ n2k_cmd_run() {
       --username) username="${2:-}"; shift 2 ;;
       --password) password="${2:-}"; shift 2 ;;
       --insecure) insecure="${2:-}"; shift 2 ;;
+      --inventory-json) inventory_json_arg="${2:-}"; inventory_source="fixture"; shift 2 ;;
       --inventory-source) inventory_source="${2:-}"; shift 2 ;;
       --target-format) target_format="${2:-}"; shift 2 ;;
       --target-storage) target_storage="${2:-}"; shift 2 ;;
@@ -1135,6 +1280,7 @@ n2k_cmd_run() {
     [[ -n "${vm}" ]] || n2k_die "run --split ${split} requires --vm when no manifest exists"
     [[ -n "${pc}" ]] || n2k_die "run --split ${split} requires --pc when no manifest exists"
     local -a init_args=(--vm "${vm}" --pc "${pc}" --mode "${mode}" --inventory-source "${inventory_source}" --target-format "${target_format}" --target-storage "${target_storage}" --rbd-access-mode "${rbd_access_mode}")
+    [[ -n "${inventory_json_arg}" ]] && init_args+=(--inventory-json "${inventory_json_arg}")
     [[ "${target_provider_arg_set}" -eq 1 ]] && init_args+=(--target-provider "${target_provider}")
     [[ -n "${dst}" ]] && init_args+=(--dst "${dst}")
     [[ -n "${target_map_json}" ]] && init_args+=(--target-map-json "${target_map_json}")
@@ -1166,6 +1312,7 @@ n2k_cmd_run() {
     n2k_cloud_target_apply_manifest_config "${N2K_MANIFEST}" "$(if [[ "${target_provider_arg_set}" -eq 1 ]]; then printf '%s' "${target_provider}"; else printf ''; fi)" "${cloud_config_json}"
   fi
   target_provider="$(jq -r '.target.provider // "libvirt"' "${N2K_MANIFEST}")"
+  n2k_require_disk_controller_integrity "${N2K_MANIFEST}" || return $?
   if [[ "${target_provider}" == "ablestack-cloud" && "$(jq -r '.target.storage.type // ""' "${N2K_MANIFEST}")" == "file" ]]; then
     n2k_cloud_target_resolve_file_storage_for_manifest "${N2K_MANIFEST}" "${cloud_endpoint}" "${cloud_api_key}" "${cloud_secret_key}" "${cloud_cred_file}" >/dev/null
   fi
@@ -1381,6 +1528,12 @@ n2k_cmd_run() {
     n2k_event INFO "run" "" "step" '{"step":"cutover"}'
     n2k_cmd_cutover "${cutover_args[@]}"
   fi
+  if jq -e '.runtime.cloud.inspection_required == true or .runtime.cloud.checkpoint.inspection_required == true' \
+      "${N2K_MANIFEST}" >/dev/null 2>&1; then
+    cleanup_source_points=false
+    n2k_event WARN "run" "" "source_points_cleanup_blocked" \
+      '{"reason":"cloud target requires engineer inspection"}'
+  fi
   if [[ "${cleanup_source_points}" == "true" && "${N2K_DRY_RUN:-0}" -ne 1 ]]; then
     n2k_run_cleanup_source_recovery_points "${N2K_MANIFEST}" "${source_endpoint}" "${username}" "${password}" "${insecure}"
   else
@@ -1463,6 +1616,7 @@ n2k_cmd_snapshot() {
     export N2K_EVENTS_LOG
   fi
   n2k_require_manifest
+  n2k_require_disk_controller_integrity "${N2K_MANIFEST}" || return $?
 
   local metadata_json="{}"
   if [[ "${source_api}" == "v3" && "${create_vm_snapshot}" == "true" ]]; then
@@ -1866,6 +2020,7 @@ n2k_cmd_sync() {
     export N2K_EVENTS_LOG
   fi
   n2k_require_manifest
+  n2k_require_disk_controller_integrity "${N2K_MANIFEST}" || return $?
 
   case "${insecure}" in
     0|1) ;;
@@ -1966,6 +2121,119 @@ n2k_cmd_sync() {
   esac
 }
 n2k_cmd_verify() { n2k_not_implemented "verify"; }
+
+n2k_cutover_integrity_json() {
+  local manifest="$1"
+  local state errors targets="[]" count idx disk_id target_path target_storage target_format
+  local expected_size actual_size="" target_ok target_reason
+
+  state="$(jq -c '
+    (.runtime.selected_mode // "") as $selected_mode
+    | (
+        if ($selected_mode | IN("v4-incremental","v3-incremental","legacy-cbt")) then "incremental"
+        elif $selected_mode == "cold-export" then "cold"
+        elif $selected_mode == "manual-disk" then "manual"
+        else (.runtime.sync.mode // "manual")
+        end
+      ) as $sync_mode
+    | (($sync_mode == "manual") or ($selected_mode == "manual-disk")) as $manual
+    | {
+        sync_mode:$sync_mode,
+        selected_mode:$selected_mode,
+        manual:$manual,
+        disk_count:(.disks | length),
+        base_sync_done:(.phases.base_sync.done // false),
+        final_sync_done:(.phases.final_sync.done // false),
+        final_ready:(.runtime.sync.final_ready // false),
+        base_disks_complete:(
+          (.disks | length) > 0
+          and all(.disks[]; (.transfer.base_done // false) == true)
+        ),
+        errors:(
+          []
+          + (if (.disks | length) == 0 then ["manifest_has_no_disks"] else [] end)
+          + (if ($manual | not) and ((.phases.base_sync.done // false) | not)
+             then ["base_sync_incomplete"] else [] end)
+          + (if ($manual | not) and (
+                ((.disks | length) == 0)
+                or (all(.disks[]; (.transfer.base_done // false) == true) | not)
+             ) then ["base_disk_incomplete"] else [] end)
+          + (if $sync_mode == "incremental" and ((.phases.final_sync.done // false) | not)
+             then ["final_sync_incomplete"] else [] end)
+          + (if $sync_mode == "incremental" and ((.runtime.sync.final_ready // false) | not)
+             then ["final_sync_not_ready"] else [] end)
+        )
+      }
+  ' "${manifest}")"
+  errors="$(jq -c '.errors' <<<"${state}")"
+  count="$(jq -r '.disks | length' "${manifest}")"
+  target_storage="$(jq -r '.target.storage.type // "file"' "${manifest}")"
+  target_format="$(jq -r '.target.format // "qcow2"' "${manifest}")"
+
+  for ((idx=0; idx<count; idx++)); do
+    disk_id="$(jq -r ".disks[${idx}].disk_id // .disks[${idx}].device_key // \"disk${idx}\"" "${manifest}")"
+    target_path="$(jq -r ".disks[${idx}].transfer.target_path // \"\"" "${manifest}")"
+    expected_size="$(jq -r ".disks[${idx}].size_bytes // .disks[${idx}].disk_size_bytes // .disks[${idx}].capacity_bytes // .disks[${idx}].size // 0" "${manifest}")"
+    actual_size=""
+    target_ok=true
+    target_reason=""
+
+    if [[ -z "${target_path}" ]]; then
+      target_ok=false
+      target_reason="target_path_missing"
+    elif [[ "${target_path}" == *".n2k-stage-"* ]]; then
+      target_ok=false
+      target_reason="staging_target_not_publishable"
+    elif [[ ! "${expected_size}" =~ ^[0-9]+$ || "${expected_size}" -le 0 ]]; then
+      target_ok=false
+      target_reason="expected_size_invalid"
+    else
+      actual_size="$(n2k_storage_target_size_bytes \
+        "${target_path}" "${target_storage}" "${target_format}" 2>/dev/null || true)"
+      if [[ ! "${actual_size}" =~ ^[0-9]+$ || "${actual_size}" -lt "${expected_size}" ]]; then
+        target_ok=false
+        target_reason="target_size_incomplete"
+      fi
+    fi
+
+    targets="$(jq -c \
+      --argjson targets "${targets}" \
+      --argjson idx "${idx}" \
+      --arg disk_id "${disk_id}" \
+      --arg target_path "${target_path}" \
+      --arg expected_size "${expected_size}" \
+      --arg actual_size "${actual_size}" \
+      --argjson ok "${target_ok}" \
+      --arg reason "${target_reason}" \
+      '$targets + [{
+        disk_index:$idx,
+        disk_id:$disk_id,
+        target_path:$target_path,
+        expected_size:($expected_size | tonumber?),
+        actual_size:($actual_size | tonumber?),
+        ok:$ok,
+        reason:(if $ok then null else $reason end)
+      }]' <<<"{}")"
+    if [[ "${target_ok}" != "true" ]]; then
+      errors="$(jq -c --arg reason "${target_reason}" --argjson idx "${idx}" \
+        '. + [("disk_" + ($idx | tostring) + "_" + $reason)]' <<<"${errors}")"
+    fi
+  done
+
+  jq -nc \
+    --argjson state "${state}" \
+    --argjson targets "${targets}" \
+    --argjson errors "${errors}" \
+    '{
+      ok:(($errors | length) == 0),
+      sync_mode:$state.sync_mode,
+      selected_mode:$state.selected_mode,
+      state:$state,
+      targets:$targets,
+      errors:$errors
+    }'
+}
+
 n2k_cmd_cutover() {
   local define_only=0 apply_define=0 start_vm=0
   local rbd_access_mode=""
@@ -2023,6 +2291,7 @@ n2k_cmd_cutover() {
     export N2K_EVENTS_LOG
   fi
   n2k_require_manifest
+  n2k_require_disk_controller_integrity "${N2K_MANIFEST}" || return $?
   [[ "${start_vm}" -eq 0 || "${apply_define}" -eq 1 ]] || n2k_die "--start requires --apply"
 
   if [[ -n "${rbd_access_mode}" ]]; then
@@ -2048,6 +2317,20 @@ n2k_cmd_cutover() {
     n2k_cloud_target_apply_manifest_config "${N2K_MANIFEST}" "$(if [[ "${target_provider_arg_set}" -eq 1 ]]; then printf '%s' "${target_provider}"; else printf ''; fi)" "${cloud_config_json}"
   fi
   target_provider="$(jq -r '.target.provider // "libvirt"' "${N2K_MANIFEST}")"
+
+  if [[ "${apply_define}" -eq 1 || "${start_vm}" -eq 1 ]]; then
+    local integrity_json
+    integrity_json="$(n2k_cutover_integrity_json "${N2K_MANIFEST}")"
+    if ! jq -e '.ok == true' <<<"${integrity_json}" >/dev/null; then
+      n2k_manifest_record_sync_failure \
+        "${N2K_MANIFEST}" "cutover" -1 46 "cutover_integrity_failed" "${integrity_json}" || true
+      n2k_event ERROR "cutover" "" "integrity_failed" "${integrity_json}"
+      echo "Cutover integrity validation failed; refusing to apply or start the target." >&2
+      jq -c '.errors' <<<"${integrity_json}" >&2
+      return 46
+    fi
+    n2k_event INFO "cutover" "" "integrity_verified" "${integrity_json}"
+  fi
 
   local xml_path vm cloud_result
   if [[ "${target_provider}" == "ablestack-cloud" ]]; then

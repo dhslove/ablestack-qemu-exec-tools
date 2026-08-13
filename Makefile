@@ -17,6 +17,7 @@
 NAME = ablestack-qemu-exec-tools
 V2K_NAME = ablestack_v2k
 V2K_SPEC = rpm/$(V2K_NAME).spec
+V2K_WITH_WINPE = $(if $(wildcard winpe/*.iso),1,0)
 N2K_NAME = ablestack_n2k
 N2K_SPEC = rpm/$(N2K_NAME).spec
 N2K_COMPLETIONS_FILE = completions/$(N2K_NAME)
@@ -43,6 +44,7 @@ COMPLETIONS_FILE = $(COMPLETIONS_SRC)/$(V2K_NAME)
 DEB_PKG = $(NAME)_$(VERSION)-$(RELEASE)
 DEB_BUILD_DIR = $(DEB_PKG)
 DEB_DOC_DIR = $(DEB_BUILD_DIR)/usr/share/doc/$(NAME)
+DEB_SHARE_DIR = $(DEB_BUILD_DIR)/usr/share/$(NAME)
 DEB_BIN_DIR = $(DEB_BUILD_DIR)/usr/bin
 DEB_LIB_DIR = $(DEB_BUILD_DIR)/usr/libexec/$(NAME)
 DEB_DEBIAN_DIR = $(DEB_BUILD_DIR)/DEBIAN
@@ -66,6 +68,8 @@ install:
 	@if [ -f install.sh ]; then install -m 0755 install.sh $(BIN_DIR)/install_ablestack_qemu_exec_tools; fi
 	install -d $(LIB_TARGET)
 	cp -a lib/* $(LIB_TARGET)/
+	chmod 0755 $(LIB_TARGET)/guest-network-snapshot
+	chmod 0755 $(LIB_TARGET)/install-qga-network-selinux-policy
 	@if [ -f completions/ablestack_v2k ] || [ -f completions/ablestack_vm_ftctl ]; then \
 		install -d $(COMPLETIONS_TARGET); \
 	fi
@@ -151,11 +155,18 @@ rpm:
 		--transform="s,^,ablestack-qemu-exec-tools-$(VERSION)/," \
 		--exclude=./rpmbuild \
 		--exclude=./rpmbuild_v2k \
+		--exclude=./rpmbuild_n2k \
 		--exclude=./rpmbuild_hangctl \
+		--exclude=./rpmbuild_ftctl \
 		--exclude=./build \
 		--exclude=./release \
 		--exclude=./repo \
 		--exclude=./dist \
+		--exclude=./.git \
+		--exclude=./assets \
+		--exclude=./windows \
+		--exclude=./output \
+		--exclude=./tmp \
 		. ; \
 	mv -f "$$TMP_TGZ" "rpmbuild/SOURCES/ablestack-qemu-exec-tools-$(VERSION).tar.gz"
 
@@ -185,7 +196,9 @@ hangctl-rpm:
 		--transform="s,^,$(HANGCTL_NAME)-$(VERSION)/," \
 		--exclude=./rpmbuild \
 		--exclude=./rpmbuild_v2k \
+		--exclude=./rpmbuild_n2k \
 		--exclude=./rpmbuild_hangctl \
+		--exclude=./rpmbuild_ftctl \
 		--exclude=./build \
 		--exclude=./release \
 		--exclude=./repo \
@@ -218,6 +231,7 @@ ftctl-rpm:
 		--transform="s,^,$(FTCTL_NAME)-$(VERSION)/," \
 		--exclude=./rpmbuild \
 		--exclude=./rpmbuild_v2k \
+		--exclude=./rpmbuild_n2k \
 		--exclude=./rpmbuild_hangctl \
 		--exclude=./rpmbuild_ftctl \
 		--exclude=./build \
@@ -260,7 +274,9 @@ v2k-rpm:
 		--transform="s,^,ablestack_v2k-$(VERSION)/," \
 		--exclude=./rpmbuild \
 		--exclude=./rpmbuild_v2k \
+		--exclude=./rpmbuild_n2k \
 		--exclude=./rpmbuild_hangctl \
+		--exclude=./rpmbuild_ftctl \
 		--exclude=./build \
 		--exclude=./release \
 		--exclude=./repo \
@@ -274,6 +290,7 @@ v2k-rpm:
 	         --define "version $(VERSION)" \
 	         --define "release $(RELEASE)" \
 	         --define "githash $(GIT_HASH)" \
+	         --define "with_winpe $(V2K_WITH_WINPE)" \
 	         rpmbuild_v2k/SPECS/$(V2K_NAME).spec
 
 	mkdir -p build/rpm-v2k
@@ -295,9 +312,21 @@ v2k-rpm:
 	  (echo "[ERR] profile govc runtime asset missing in RPM: $$RPM_FILE" >&2; exit 2); \
 	rpm -qlp "$$RPM_FILE" | grep -qE "/usr/share/ablestack/v2k/compat/vsphere80/profile.json$$" || \
 	  (echo "[ERR] compat profile missing in RPM: $$RPM_FILE" >&2; exit 2); \
+	rpm -qlp "$$RPM_FILE" | grep -qE "/usr/share/ablestack/v2k/compat/esxi55/profile.json$$" || \
+	  (echo "[ERR] esxi55 compat profile missing in RPM: $$RPM_FILE" >&2; exit 2); \
+	rpm -qlp "$$RPM_FILE" | grep -qE "/usr/share/ablestack/v2k/runtime-assets/assets/compat/esxi55/VMware-vix-disklib-6[.]5[.]0-4604867[.]x86_64[.]tar[.]gz$$" || \
+	  (echo "[ERR] esxi55 VDDK runtime asset missing in RPM: $$RPM_FILE" >&2; exit 2); \
+	rpm -qlp "$$RPM_FILE" | grep -qE "/usr/share/ablestack/v2k/runtime-assets/assets/compat/esxi55/nbdkit-vddk-legacy-1[.]14[.]2-rocky9-x86_64[.]tar[.]gz$$" || \
+	  (echo "[ERR] esxi55 legacy nbdkit runtime asset missing in RPM: $$RPM_FILE" >&2; exit 2); \
+	rpm -qlp "$$RPM_FILE" | grep -qE "/usr/share/ablestack/v2k/runtime-assets/assets/compat/esxi55/wheels/pyvmomi-5[.]5[.]0[.]2014[.]1[.]1[.]tar[.]gz$$" || \
+	  (echo "[ERR] esxi55 pyVmomi runtime asset missing in RPM: $$RPM_FILE" >&2; exit 2); \
 	if find winpe -maxdepth 1 -type f -name '*.iso' 2>/dev/null | grep -q .; then \
 	  rpm -qlp "$$RPM_FILE" | grep -qE "/usr/share/ablestack/v2k/winpe/.*[.]iso$$" || \
 	    (echo "[ERR] staged WinPE ISO missing in RPM: $$RPM_FILE" >&2; exit 2); \
+	  rpm -qlp "$$RPM_FILE" | grep -qE "/usr/share/ablestack/v2k/winpe/current[.]json$$" || \
+	    (echo "[ERR] WinPE metadata missing in RPM: $$RPM_FILE" >&2; exit 2); \
+	  rpm -qlp "$$RPM_FILE" | grep -qE "/usr/share/ablestack/v2k/winpe[.]iso$$" || \
+	    (echo "[ERR] RPM-owned WinPE compatibility link missing: $$RPM_FILE" >&2; exit 2); \
 	fi
 
 	@echo "V2K RPM package created: build/rpm-v2k/"
@@ -382,7 +411,7 @@ n2k-deb:
 deb:
 	@echo "Building DEB..."
 	rm -rf $(DEB_BUILD_DIR)
-	mkdir -p $(DEB_DEBIAN_DIR) $(DEB_BIN_DIR) $(DEB_LIB_DIR) $(DEB_DOC_DIR)
+	mkdir -p $(DEB_DEBIAN_DIR) $(DEB_BIN_DIR) $(DEB_LIB_DIR) $(DEB_DOC_DIR) $(DEB_SHARE_DIR)/selinux
 
 	# bin
 	install -m 0755 bin/vm_exec.sh $(DEB_BIN_DIR)/vm_exec
@@ -392,6 +421,10 @@ deb:
 
 	# lib
 	cp -a lib/* $(DEB_LIB_DIR)/ 2>/dev/null || :
+	chmod 0755 $(DEB_LIB_DIR)/guest-network-snapshot
+	chmod 0755 $(DEB_LIB_DIR)/install-qga-network-selinux-policy
+	install -m 0644 selinux/ablestack_qga_observer.te \
+		$(DEB_SHARE_DIR)/selinux/ablestack_qga_observer.te
 
 	# docs and examples
 	cp -a README.md $(DEB_DOC_DIR)/
@@ -422,7 +455,8 @@ windows:
 	powershell -ExecutionPolicy Bypass -File windows/msi/build-msi.ps1 \
 		-Version $(VERSION) -Release $(RELEASE) -GitHash $(GIT_HASH)
 	mkdir -p build/msi
-	cp windows/msi/out/* build/msi/ || echo "[WARN] No MSI files copied"
+	cp windows/msi/out/*.msi build/msi/
+	test -n "$$(find build/msi -maxdepth 1 -type f -name '*.msi' -print -quit)"
 	@echo "Windows MSI built under build/msi/"
 
 
