@@ -21,6 +21,15 @@
 - The VMware test vCenter endpoint is `10.10.21.10`.
 - Never store test passwords, API keys, or VMware credentials in repository files. Use the GitHub `dr-test` environment secrets documented in the Cloud deployment record.
 - Recheck the SSH port before a destructive or deployment action because the 22 cluster port changed from the historical `10022` setting to `22`.
+- Use native `rpm` for the 22 cluster and the administrator wrapper `aspkg` for
+  the 32 cluster. Direct RPM commands are intentionally blocked on the 32
+  cluster and that policy is not a host failure.
+- After a 32-cluster Cloud management package replacement, verify
+  `aspkg -V cloudstack-management` and `management-server.err` before declaring
+  startup healthy. The 2026-08-13 test release exposed a package cleanup case
+  that moved package-owned Cloud JARs into `legacy-lib` and caused
+  `ClassNotFoundException: org.apache.cloudstack.ServerDaemon`; the exact
+  recovery evidence is recorded in the linked Cloud deployment document.
 - Existing VMware DR profiles may store a numeric `cbtDiskId` such as `2000`. The mover must pass the matching `sourceDiskKey` as `--device-key`; do not send the numeric ID as a bare controller-address selector. Validate this compatibility before restarting a persistent DR scheduler after package deployment.
 - The dual-cluster test-release baseline and GitHub `dr-test` environment
   secret names are recorded in Cloud document
