@@ -975,7 +975,7 @@ ftctl_vmware_mover_patch_disk() {
   if [[ -z "${source_dev}" ]]; then
     flock -u 9
     ftctl_vmware_mover_cleanup_nbdkit "${pid}" "${work_dir}"
-    ftctl_vmware_mover_die 86 "DR_CBT_PATCH_FAILED: no free source NBD device"
+    ftctl_vmware_mover_die 97 "DR_RESOURCE_BUSY: no free source NBD device"
   fi
   if ! nbd-client -u -N default "${socket_path}" "${source_dev}" >/dev/null; then
     flock -u 9
@@ -1010,7 +1010,7 @@ ftctl_vmware_mover_patch_disk() {
       flock -u 9
       ftctl_vmware_mover_cleanup_nbdkit "${pid}" "${work_dir}"
       [[ "${cleanup_rc}" == "0" ]] || ftctl_vmware_mover_nbd_die "${cleanup_rc}"
-      ftctl_vmware_mover_die 86 "DR_CBT_PATCH_FAILED: no free target NBD device"
+      ftctl_vmware_mover_die 97 "DR_RESOURCE_BUSY: no free target NBD device"
     fi
     target_cleanup_dev="${target_dev}"
     for ((attach_attempt=1; attach_attempt<=FTCTL_DR_NBD_ATTACH_ATTEMPTS; attach_attempt++)); do
@@ -1057,6 +1057,9 @@ ftctl_vmware_mover_patch_disk() {
       --progress-mode "${FTCTL_DR_CYCLE_EFFECTIVE_MODE:-CBT_INCREMENTAL}"
       --progress-plan-uuid "${FTCTL_DR_PLAN_UUID:-}" --progress-run-uuid "${FTCTL_DR_RUN_UUID:-}"
       --progress-cycle-sequence "${FTCTL_DR_CHECKPOINT_SEQUENCE:-0}")
+  if [[ "${FTCTL_DR_BANDWIDTH_LIMIT_MBPS:-0}" =~ ^[1-9][0-9]*$ ]]; then
+    patch_command+=(--bandwidth-limit-mbps "${FTCTL_DR_BANDWIDTH_LIMIT_MBPS}")
+  fi
   [[ "${progress_final_disk}" == "true" ]] && patch_command+=(--progress-final-disk)
   if ! "${patch_command[@]}" > "${metrics_path}"; then
     cleanup_rc=0

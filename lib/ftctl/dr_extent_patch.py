@@ -116,6 +116,7 @@ def copy_extents(
     progress_run_uuid: str = "",
     progress_cycle_sequence: int = 0,
     progress_final_disk: bool = False,
+    bandwidth_limit_mbps: int = 0,
 ) -> Dict[str, int]:
     source_fd = os.open(source, os.O_RDONLY)
     target_fd = None
@@ -130,6 +131,16 @@ def copy_extents(
     sample_sequence = int(read_progress_sequence(progress_json))
     expected_payload_bytes = sum(max(0, int(item.get("length", 0))) for item in areas)
     aggregate_total_bytes = max(progress_total_bytes, progress_base_bytes + expected_payload_bytes)
+    bandwidth_bytes_per_second = max(0, bandwidth_limit_mbps) * 1_000_000 / 8.0
+
+    def throttle() -> None:
+        if bandwidth_bytes_per_second <= 0 or bytes_read <= 0:
+            return
+        expected_elapsed = bytes_read / bandwidth_bytes_per_second
+        actual_elapsed = (time.monotonic_ns() - started) / 1_000_000_000
+        delay = expected_elapsed - actual_elapsed
+        if delay > 0:
+            time.sleep(delay)
 
     def publish_progress(state: str, force: bool = False) -> None:
         nonlocal last_progress, sample_sequence
@@ -213,6 +224,7 @@ def copy_extents(
                 if len(data) != amount:
                     raise IOError(f"short source read at {offset}: expected={amount} actual={len(data)}")
                 bytes_read += len(data)
+                throttle()
                 if image is not None:
                     image.write(data, offset)
                     bytes_written += len(data)
@@ -260,6 +272,7 @@ def copy_extents(
             "throughputBps": (bytes_read * 1000) // duration_ms,
             "writeVerified": bool(verify),
             "verifiedBytes": verified_bytes,
+            "bandwidthLimitMbps": max(0, bandwidth_limit_mbps),
         }
     finally:
         if image is not None:
@@ -293,6 +306,7 @@ def main() -> int:
     parser.add_argument("--progress-run-uuid", default="")
     parser.add_argument("--progress-cycle-sequence", type=int, default=0)
     parser.add_argument("--progress-final-disk", action="store_true")
+    parser.add_argument("--bandwidth-limit-mbps", type=int, default=0)
     args = parser.parse_args()
     with open(args.areas_json, "r", encoding="utf-8") as handle:
         payload = json.load(handle)
@@ -315,6 +329,7 @@ def main() -> int:
         args.progress_run_uuid,
         max(0, args.progress_cycle_sequence),
         args.progress_final_disk,
+        max(0, args.bandwidth_limit_mbps),
     )
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     return 0

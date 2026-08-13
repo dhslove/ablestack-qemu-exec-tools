@@ -133,7 +133,7 @@ ftctl_kvm_vmware_patch_disk() {
   exec 9>"${lock_file}"
   flock -x 9
   source_dev="$(ftctl_vmware_mover_free_nbd || true)"
-  [[ -n "${source_dev}" ]] || { flock -u 9; rm -rf "${work_dir}"; return 86; }
+  [[ -n "${source_dev}" ]] || { flock -u 9; rm -rf "${work_dir}"; return 97; }
   ftctl_kvm_vmware_attach_source_snapshot "${source_dev}" "${source_uri}" || {
     flock -u 9; rm -rf "${work_dir}"; return 86;
   }
@@ -145,7 +145,7 @@ ftctl_kvm_vmware_patch_disk() {
   target_dev="$(ftctl_vmware_mover_free_nbd "${source_dev}" || true)"
   [[ -n "${target_dev}" ]] || {
     ftctl_vmware_mover_nbd_drain "${source_dev}" "SOURCE" "QEMU_NBD" >/dev/null 2>&1 || true
-    flock -u 9; rm -rf "${work_dir}"; return 86;
+    flock -u 9; rm -rf "${work_dir}"; return 97;
   }
   pid="$(ftctl_kvm_vmware_start_writer "${endpoint}" "${username}" "${password_file}" "${tls_verify}" "${thumbprint}" "${libdir}" "${vm_ref}" "${vmdk}" "${work_dir}/writer.sock" "${writer_log}")" || rc=$?
   if [[ "${rc}" != "0" ]] || ! ftctl_vmware_mover_wait_for_socket "${work_dir}/writer.sock" "${pid}" "${FTCTL_DR_VMWARE_NBDKIT_READY_TIMEOUT}"; then
@@ -164,10 +164,14 @@ ftctl_kvm_vmware_patch_disk() {
   fi
   flock -u 9
 
-  python3 "${FTCTL_DR_KVM_VMWARE_LIB_DIR}/dr_extent_patch.py" --source "${source_dev}" --target "${target_dev}" \
-    --areas-json "${extent_path}" --expected-source-size "${virtual_bytes}" --expected-target-size "${virtual_bytes}" --verify \
-    --progress-json "${progress_path}" --progress-base-bytes "${progress_base_bytes}" \
-    --progress-disk-index "$(jq -r '.diskIndex // 0' <<< "${row}")" > "${metrics_path}" || rc=$?
+  local patch_command=(python3 "${FTCTL_DR_KVM_VMWARE_LIB_DIR}/dr_extent_patch.py" --source "${source_dev}" --target "${target_dev}"
+    --areas-json "${extent_path}" --expected-source-size "${virtual_bytes}" --expected-target-size "${virtual_bytes}" --verify
+    --progress-json "${progress_path}" --progress-base-bytes "${progress_base_bytes}"
+    --progress-disk-index "$(jq -r '.diskIndex // 0' <<< "${row}")")
+  if [[ "${FTCTL_DR_BANDWIDTH_LIMIT_MBPS:-0}" =~ ^[1-9][0-9]*$ ]]; then
+    patch_command+=(--bandwidth-limit-mbps "${FTCTL_DR_BANDWIDTH_LIMIT_MBPS}")
+  fi
+  "${patch_command[@]}" > "${metrics_path}" || rc=$?
   cleanup_rc=0
   ftctl_vmware_mover_nbd_drain "${target_dev}" "TARGET" "NBD_CLIENT" || cleanup_rc=$?
   if [[ "${cleanup_rc}" == "0" ]]; then

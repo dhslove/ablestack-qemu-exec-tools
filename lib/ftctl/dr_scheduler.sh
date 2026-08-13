@@ -21,7 +21,81 @@ FTCTL_DR_SCHEDULER_DISABLE="${FTCTL_DR_SCHEDULER_DISABLE:-0}"
 FTCTL_DR_CONTROL_ACK_TIMEOUT_SEC="${FTCTL_DR_CONTROL_ACK_TIMEOUT_SEC:-600}"
 FTCTL_DR_TRANSITION_LOCK_TIMEOUT_SEC="${FTCTL_DR_TRANSITION_LOCK_TIMEOUT_SEC:-5}"
 FTCTL_DR_SCHEDULER_HEARTBEAT_TIMEOUT_SEC="${FTCTL_DR_SCHEDULER_HEARTBEAT_TIMEOUT_SEC:-30}"
+FTCTL_DR_FULL_SEED_MAX_CONCURRENT="${FTCTL_DR_FULL_SEED_MAX_CONCURRENT:-2}"
+FTCTL_DR_INCREMENTAL_MAX_CONCURRENT="${FTCTL_DR_INCREMENTAL_MAX_CONCURRENT:-4}"
+FTCTL_DR_RESOURCE_RETRY_SEC="${FTCTL_DR_RESOURCE_RETRY_SEC:-15}"
+FTCTL_DR_INITIAL_JITTER_MAX_SEC="${FTCTL_DR_INITIAL_JITTER_MAX_SEC:-0}"
 FTCTL_DR_CONTROL_PROTOCOL_VERSION="4"
+
+ftctl_dr_scheduler_slot_class() {
+  local cycle_type="${1-}"
+  case "${cycle_type}" in
+    full-seed|full-reseed|full-reverse-seed) printf 'full-seed\n' ;;
+    *) printf 'incremental\n' ;;
+  esac
+}
+
+ftctl_dr_scheduler_slot_limit() {
+  local profile_file="${1-}" slot_class="${2-}" configured profile_limit
+  if [[ "${slot_class}" == "full-seed" ]]; then
+    configured="${FTCTL_DR_FULL_SEED_MAX_CONCURRENT}"
+    profile_limit="$(ftctl_dr_scheduler_profile_int "${profile_file}" "policy.fullSeedMaxConcurrent" "${configured}")"
+  else
+    configured="${FTCTL_DR_INCREMENTAL_MAX_CONCURRENT}"
+    profile_limit="$(ftctl_dr_scheduler_profile_int "${profile_file}" "policy.incrementalMaxConcurrent" "${configured}")"
+  fi
+  [[ "${configured}" =~ ^[1-9][0-9]*$ ]] || configured=1
+  [[ "${profile_limit}" =~ ^[1-9][0-9]*$ ]] || profile_limit="${configured}"
+  (( profile_limit > configured )) && profile_limit="${configured}"
+  printf '%s\n' "${profile_limit}"
+}
+
+ftctl_dr_scheduler_slot_acquire() {
+  local plan="${1-}" profile_file="${2-}" cycle_type="${3-}" fd="${4-203}"
+  local slot_class limit slot slot_path
+  slot_class="$(ftctl_dr_scheduler_slot_class "${cycle_type}")"
+  limit="$(ftctl_dr_scheduler_slot_limit "${profile_file}" "${slot_class}")"
+  ftctl_ensure_dir "${FTCTL_RUN_DIR}/dr-resource-slots/${slot_class}" "0755"
+  for ((slot=0; slot<limit; slot++)); do
+    slot_path="${FTCTL_RUN_DIR}/dr-resource-slots/${slot_class}/${slot}.lock"
+    eval "exec ${fd}>\"${slot_path}\""
+    if flock -n "${fd}"; then
+      {
+        printf 'plan=%s\n' "${plan}"
+        printf 'cycle_type=%s\n' "${cycle_type}"
+        printf 'pid=%s\n' "$$"
+        printf 'started_at=%s\n' "$(ftctl_now_iso8601)"
+      } > "${slot_path}.meta" 2>/dev/null || true
+      FTCTL_DR_HELD_RESOURCE_SLOT="${slot_class}:${slot}:${slot_path}"
+      return 0
+    fi
+    eval "exec ${fd}>&-" 2>/dev/null || true
+  done
+  FTCTL_DR_WAITING_SLOT_CLASS="${slot_class}"
+  FTCTL_DR_WAITING_SLOT_LIMIT="${limit}"
+  return 97
+}
+
+ftctl_dr_scheduler_slot_release() {
+  local fd="${1-203}" held="${FTCTL_DR_HELD_RESOURCE_SLOT:-}" slot_path=""
+  [[ -n "${held}" ]] && slot_path="${held#*:*:}"
+  flock -u "${fd}" 2>/dev/null || true
+  eval "exec ${fd}>&-" 2>/dev/null || true
+  [[ -n "${slot_path}" ]] && rm -f "${slot_path}.meta" 2>/dev/null || true
+  FTCTL_DR_HELD_RESOURCE_SLOT=""
+}
+
+ftctl_dr_scheduler_initial_jitter() {
+  local plan="${1-}" profile_file="${2-}" interval="${3-0}" salt="${4-0}" configured jitter hash
+  configured="$(ftctl_dr_scheduler_profile_int "${profile_file}" "schedule.jitterSeconds" "${FTCTL_DR_INITIAL_JITTER_MAX_SEC}")"
+  [[ "${configured}" =~ ^[0-9]+$ ]] || configured=0
+  [[ "${interval}" =~ ^[0-9]+$ ]] || interval=0
+  (( configured > FTCTL_DR_INITIAL_JITTER_MAX_SEC )) && configured="${FTCTL_DR_INITIAL_JITTER_MAX_SEC}"
+  (( interval > 1 && configured >= interval )) && configured=$((interval - 1))
+  (( configured > 0 )) || { printf '0\n'; return 0; }
+  hash="$(printf '%s:%s' "${plan}" "${salt}" | cksum | awk '{print $1}')"
+  printf '%s\n' $((hash % (configured + 1)))
+}
 
 ftctl_dr_scheduler_dir() {
   local plan="${1-}"
@@ -1201,9 +1275,10 @@ ftctl_dr_scheduler_worker() {
   local incremental_verified metrics_estimated virtual_bytes changed_bytes source_read_bytes target_written_bytes transfer_payload_bytes changed_extent_count duration_ms throughput_bps baseline_generation cycle_token cycle_metrics_path
   local nbd_teardown_state nbd_teardown_started_at_ms nbd_teardown_completed_at_ms nbd_teardown_duration_ms
   local nbd_source_device_count nbd_target_device_count nbd_quarantined_device_count nbd_teardown_error_code nbd_teardown_error_message
-  local cycle_started_epoch next_cycle_epoch next_cycle_at wait_seconds control_generation
+  local cycle_started_epoch next_cycle_epoch next_cycle_at wait_seconds control_generation next_sequence
   local cycle_run cycle_request_mode cycle_request_owner cycle_request_state cycle_request_bound sequence_path transfer_progress_path
   local session lease_epoch authority_sequence start_ticks owner_lock_path
+  local initial_jitter cycle_jitter bandwidth_limit_mbps resource_retry_sec
 
   [[ -n "${plan}" && -n "${run}" && -f "${profile_file}" && -f "${state_path}" ]] || return 2
   ftctl_ensure_dir "$(ftctl_dr_scheduler_dir "${plan}")" "0755"
@@ -1238,6 +1313,10 @@ ftctl_dr_scheduler_worker() {
   source_provider="$(ftctl_dr_scheduler_profile_provider "${profile_file}" source)"
   target_provider="$(ftctl_dr_scheduler_profile_provider "${profile_file}" target)"
   driver="$(ftctl_dr_scheduler_driver_name "${source_provider}" "${target_provider}")"
+  bandwidth_limit_mbps="$(ftctl_dr_scheduler_profile_int "${profile_file}" "policy.bandwidthLimitMbps" "0")"
+  [[ "${bandwidth_limit_mbps}" =~ ^[0-9]+$ ]] || bandwidth_limit_mbps=0
+  resource_retry_sec="${FTCTL_DR_RESOURCE_RETRY_SEC}"
+  [[ "${resource_retry_sec}" =~ ^[1-9][0-9]*$ ]] || resource_retry_sec=15
 
   printf '%s\n' "$$" > "${pid_path}"
   control_generation="$(ftctl_dr_scheduler_control_generation "${plan}")"
@@ -1272,6 +1351,20 @@ ftctl_dr_scheduler_worker() {
     "updated_at=${now}" || true
   ftctl_log_event "dr-runtime" "dr.scheduler.start" "ok" "" "" \
     "plan=${plan} run=${run} driver=${driver} interval=${interval} max_cycles=${max_cycles}"
+
+  cycle_request_state="$(ftctl_state_read_kv "${sequence_path}" "requested_cycle_state" 2>/dev/null || true)"
+  if [[ "${cycle_request_state}" != "PENDING" ]]; then
+    initial_jitter="$(ftctl_dr_scheduler_initial_jitter "${plan}" "${profile_file}" "${interval}")"
+    if [[ "${initial_jitter}" =~ ^[1-9][0-9]*$ ]]; then
+      ftctl_dr_scheduler_update_state "${state_path}" "${status_path}" \
+        "scheduler_state=RUNNING" \
+        "scheduler_health=HEALTHY" \
+        "replication_activity=WAITING_SCHEDULE" \
+        "initial_jitter_seconds=${initial_jitter}" \
+        "updated_at=$(ftctl_now_iso8601)" || true
+      ftctl_dr_scheduler_sleep_or_stop "${plan}" "${initial_jitter}" "${control_generation}" || true
+    fi
+  fi
 
   while true; do
     if ! ftctl_dr_scheduler_active_worker_valid "${plan}" "${session}" \
@@ -1340,12 +1433,15 @@ ftctl_dr_scheduler_worker() {
       "control_ack_generation=${control_generation}" \
       "control_state=RUNNING" \
       "cycle_state=IDLE" \
+      "retryable=false" \
+      "retry_after_sec=" \
+      "error_code=" \
+      "error_message=" \
       "updated_at=$(ftctl_now_iso8601)" || true
 
     persisted_sequence="$(ftctl_dr_scheduler_current_plan_sequence "${plan}")"
     (( sequence >= persisted_sequence )) || sequence="${persisted_sequence}"
-    sequence=$((sequence + 1))
-    authority_sequence="$(ftctl_dr_scheduler_record_plan_sequence "${plan}" "${sequence}")"
+    next_sequence=$((sequence + 1))
     cycle_run="${run}"
     cycle_request_bound="false"
     cycle_request_state="$(ftctl_state_read_kv "${sequence_path}" "requested_cycle_state" 2>/dev/null || true)"
@@ -1356,17 +1452,39 @@ ftctl_dr_scheduler_worker() {
       [[ -n "${cycle_request_owner}" ]] && cycle_run="${cycle_request_owner}"
       cycle_request_bound="true"
     else
-      cycle_type="$(ftctl_dr_scheduler_cycle_type "${sequence}" "${source_provider}" "${state_path}" "${target_provider}" "${plan}")"
+      cycle_type="$(ftctl_dr_scheduler_cycle_type "${next_sequence}" "${source_provider}" "${state_path}" "${target_provider}" "${plan}")"
     fi
-    checkpoint_ref="ftctl:${plan}:${cycle_run}:${sequence}"
+    checkpoint_ref="ftctl:${plan}:${cycle_run}:${next_sequence}"
     transfer_progress_path="$(ftctl_dr_runtime_run_journal_path "${plan}" "${cycle_run}" progress)"
     cycle_started_epoch="$(date +%s)"
     now="$(ftctl_now_iso8601)"
     if ! ftctl_dr_scheduler_lock_acquire "${plan}" "cycle" 202 0 "${run}:${sequence}"; then
-      sequence=$((sequence - 1))
       sleep 1
       continue
     fi
+    if ! ftctl_dr_scheduler_slot_acquire "${plan}" "${profile_file}" "${cycle_type}" 203; then
+      ftctl_dr_scheduler_lock_release "${plan}" "cycle" 202
+      ftctl_dr_scheduler_update_state "${state_path}" "${status_path}" \
+        "state=$([[ "${sequence}" -gt 0 ]] && printf READY || printf SYNCING)" \
+        "step=waiting-resource-slot" \
+        "scheduler_state=RUNNING" \
+        "scheduler_health=WAITING_RESOURCE" \
+        "cycle_state=WAITING_RESOURCE" \
+        "replication_activity=WAITING_RESOURCE" \
+        "resource_slot_class=${FTCTL_DR_WAITING_SLOT_CLASS:-unknown}" \
+        "resource_slot_limit=${FTCTL_DR_WAITING_SLOT_LIMIT:-0}" \
+        "retryable=true" \
+        "retry_after_sec=${resource_retry_sec}" \
+        "error_code=DR_RESOURCE_BUSY" \
+        "error_message=Replication capacity is temporarily unavailable" \
+        "updated_at=$(ftctl_now_iso8601)" || true
+      ftctl_log_event "dr-runtime" "dr.scheduler.admission" "skip" "" "97" \
+        "plan=${plan} cycle_type=${cycle_type} reason=resource_slots_exhausted retry_after=${resource_retry_sec}"
+      ftctl_dr_scheduler_sleep_or_stop "${plan}" "${resource_retry_sec}" "${control_generation}" || true
+      continue
+    fi
+    sequence="${next_sequence}"
+    authority_sequence="$(ftctl_dr_scheduler_record_plan_sequence "${plan}" "${sequence}")"
     if [[ "${cycle_request_bound}" == "true" ]]; then
       ftctl_state_set_path "${sequence_path}" \
         "requested_cycle_state=RUNNING" \
@@ -1406,6 +1524,11 @@ ftctl_dr_scheduler_worker() {
       "owner_matched=true" \
       "baseline_state=$([[ "${cycle_type}" == "full-reseed" ]] && printf REBUILDING || printf COMMITTED)" \
       "reseed_reason=$([[ "${cycle_type}" == "full-reseed" ]] && printf MISSING_OR_INVALID_COMMITTED_BASELINE || printf '')" \
+      "resource_slot_class=$(ftctl_dr_scheduler_slot_class "${cycle_type}")" \
+      "retryable=false" \
+      "retry_after_sec=" \
+      "error_code=" \
+      "error_message=" \
       "updated_at=${now}" || true
     if [[ "${cycle_request_bound}" == "true" ]]; then
       ftctl_dr_scheduler_project_requested_cycle_run "${plan}" "${cycle_run}" "${status_path}" \
@@ -1414,9 +1537,37 @@ ftctl_dr_scheduler_worker() {
 
     rc=0
     output="$(FTCTL_DR_TRANSFER_PROGRESS_PATH="${transfer_progress_path}" \
+      FTCTL_DR_BANDWIDTH_LIMIT_MBPS="${bandwidth_limit_mbps}" \
       ftctl_dr_scheduler_run_cycle "${plan}" "${cycle_run}" "${profile_file}" "${sequence}" "${cycle_type}")" || rc=$?
+    ftctl_dr_scheduler_slot_release 203
     ftctl_dr_scheduler_lock_release "${plan}" "cycle" 202
     if [[ "${rc}" != "0" ]]; then
+      if [[ "${rc}" == "97" ]]; then
+        now="$(ftctl_now_iso8601)"
+        if [[ "${cycle_request_bound}" == "true" ]]; then
+          ftctl_state_set_path "${sequence_path}" \
+            "requested_cycle_state=PENDING" \
+            "requested_cycle_sequence=" \
+            "requested_cycle_started_at=" || true
+        fi
+        ftctl_dr_scheduler_update_state "${state_path}" "${status_path}" \
+          "state=$([[ "${sequence}" -gt 1 ]] && printf READY || printf SYNCING)" \
+          "step=waiting-nbd-resource" \
+          "scheduler_state=RUNNING" \
+          "scheduler_health=WAITING_RESOURCE" \
+          "cycle_state=WAITING_RESOURCE" \
+          "replication_activity=WAITING_RESOURCE" \
+          "current_checkpoint_state=WAITING_RESOURCE" \
+          "retryable=true" \
+          "retry_after_sec=${resource_retry_sec}" \
+          "error_code=DR_RESOURCE_BUSY" \
+          "error_message=An NBD resource is temporarily unavailable" \
+          "updated_at=${now}" || true
+        ftctl_log_event "dr-runtime" "dr.scheduler.resource" "skip" "" "97" \
+          "plan=${plan} run=${cycle_run} sequence=${sequence} retry_after=${resource_retry_sec}"
+        ftctl_dr_scheduler_sleep_or_stop "${plan}" "${resource_retry_sec}" "${control_generation}" || true
+        continue
+      fi
       case "${rc}" in
         65) error_code="DR_VMWARE_MOVER_UNAVAILABLE" ;;
         68) error_code="DR_VMWARE_MOVER_FAILED" ;;
@@ -1446,6 +1597,7 @@ ftctl_dr_scheduler_worker() {
         94) error_code="DR_NBD_DEVICE_BUSY" ;;
         95) error_code="DR_NBD_DEVICE_QUARANTINED" ;;
         96) error_code="DR_NBD_TARGET_FLUSH_FAILED" ;;
+        97) error_code="DR_RESOURCE_BUSY" ;;
         66) error_code="DR_UNSUPPORTED_DIRECTION" ;;
         *) error_code="DR_REPLICATION_CYCLE_FAILED" ;;
       esac
@@ -1693,13 +1845,16 @@ ftctl_dr_scheduler_worker() {
       break
     fi
 
-    next_cycle_epoch=$((cycle_started_epoch + interval))
+    cycle_jitter="$(ftctl_dr_scheduler_initial_jitter "${plan}" "${profile_file}" "${interval}" "${sequence}")"
+    [[ "${cycle_jitter}" =~ ^[0-9]+$ ]] || cycle_jitter=0
+    next_cycle_epoch=$((cycle_started_epoch + interval + cycle_jitter))
     wait_seconds=$((next_cycle_epoch - $(date +%s)))
     (( wait_seconds < 0 )) && wait_seconds=0
     next_cycle_at="$(ftctl_dr_scheduler_iso_from_epoch "${next_cycle_epoch}" 2>/dev/null || true)"
     ftctl_dr_scheduler_update_state "${state_path}" "${status_path}" \
       "next_cycle_at=${next_cycle_at}" \
       "next_cycle_wait_seconds=${wait_seconds}" \
+      "cycle_jitter_seconds=${cycle_jitter}" \
       "updated_at=$(ftctl_now_iso8601)" || true
     ftctl_dr_scheduler_sleep_or_stop "${plan}" "${wait_seconds}" "${control_generation}" || true
   done
