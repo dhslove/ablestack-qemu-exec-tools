@@ -21,3 +21,4 @@
 - The VMware test vCenter endpoint is `10.10.21.10`.
 - Never store test passwords, API keys, or VMware credentials in repository files. Use the GitHub `dr-test` environment secrets documented in the Cloud deployment record.
 - Recheck the SSH port before a destructive or deployment action because the 22 cluster port changed from the historical `10022` setting to `22`.
+- Existing VMware DR profiles may store a numeric `cbtDiskId` such as `2000`. The mover must pass the matching `sourceDiskKey` as `--device-key`; do not send the numeric ID as a bare controller-address selector. Validate this compatibility before restarting a persistent DR scheduler after package deployment.

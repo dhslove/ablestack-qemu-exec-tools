@@ -1280,3 +1280,35 @@ older generic source graph error, hiding the real recovery direction.
 | Timeout | qemu probe has a timeout, but the whole preflight path can still hang around SSH/shell/process cleanup | Entire source-open probe is wall-time bounded and cleans nbdkit/qemu/temp files through trap |
 | Error code | `VixDiskLib_ConnectEx` appears as `DR_VMWARE_MOVER_SOURCE_GRAPH_INVALID` | `VixDiskLib_ConnectEx` maps to `DR_VMWARE_VDDK_CONNECT_INVALID` with sanitized evidence |
 | Runtime status | No structured source-open object | `source_open` and `source_snapshot` are exposed in redacted status JSON |
+
+## 24. Legacy Numeric CBT Selector Compatibility
+
+An existing DR plan can persist the VMware `VirtualDisk.key` in both
+`cbtDiskId` and `sourceDiskKey`. For example, the durable disk map may contain
+`cbtDiskId=2000` and `sourceDiskKey=2000` instead of the address form
+`scsi0:0`. The strict mixed-controller resolver correctly rejects a bare
+numeric `disk_id`, but the mover must not discard the accompanying immutable
+device key.
+
+The mover contract is therefore:
+
+1. Preserve `cbtDiskId` as the historical/logical disk label.
+2. Read `sourceDiskKey` from the normalized row.
+3. Pass both `--disk-id <cbtDiskId>` and `--device-key <sourceDiskKey>` to the
+   changed-area helper.
+4. Resolve by immutable device key first; use controller address only for old
+   manifests that do not contain a device key.
+5. Never reinterpret a numeric VMware disk key as a local path or controller
+   address.
+
+The compatibility preflight on 2026-08-13 created a temporary memoryless
+snapshot for `vm-18049`, queried `disk_id=2000` with `device_key=2000`, and
+returned 228 changed areas with complete `107374182400/107374182400` coverage
+and a new change ID. The temporary snapshot was removed after the query.
+
+| Area | AS-IS | TO-BE |
+| --- | --- | --- |
+| Mover query | Numeric `cbtDiskId` is passed without `sourceDiskKey` | Query carries both logical disk ID and immutable device key |
+| Strict helper | Correctly rejects unsupported bare numeric selector | Resolves the same existing plan by `device_key=2000` |
+| Upgrade compatibility | Existing schedules fail immediately after package restart | Existing and new profiles use the same device-key-first contract |
+| Regression test | Helper selection is tested, mover argument propagation is not | Unit test asserts that mover emits `--device-key` |

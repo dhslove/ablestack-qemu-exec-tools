@@ -319,7 +319,7 @@ PY
 ftctl_vmware_mover_query_cbt() {
   local endpoint="${1-}" username="${2-}" password_file="${3-}" tls_verify="${4-}" libdir="${5-}"
   local vm_ref="${6-}" snapshot_name="${7-}" disk_id="${8-}" previous_change_id="${9-}" output_path="${10-}"
-  local verify_current="${11-false}" python_bin helper
+  local verify_current="${11-false}" device_key="${12-}" python_bin helper
   python_bin="$(ftctl_vmware_mover_resolve_cbt_python "${libdir}" || true)"
   helper="${FTCTL_DR_VMWARE_CBT_QUERY_HELPER:-${FTCTL_DR_VMWARE_MOVER_LIB_DIR}/dr_vmware_changed_areas.py}"
   [[ -n "${python_bin}" ]] || ftctl_vmware_mover_die 82 "DR_CBT_QUERY_FAILED: pyVmomi runtime was not found"
@@ -327,6 +327,7 @@ ftctl_vmware_mover_query_cbt() {
   [[ -n "${vm_ref}" && -n "${snapshot_name}" && -n "${disk_id}" ]] || \
     ftctl_vmware_mover_die 80 "DR_VMWARE_CBT_DISK_ID_UNRESOLVED: VM, snapshot, or disk identifier is empty"
   local -a helper_args=(--vm "${vm_ref}" --snapshot "${snapshot_name}" --disk-id "${disk_id}" --change-id "${previous_change_id}")
+  [[ -n "${device_key}" && "${device_key}" != "null" ]] && helper_args+=(--device-key "${device_key}")
   [[ "${verify_current}" == "true" ]] && helper_args+=(--verify-current)
   if ! VCENTER_HOST="$(ftctl_vmware_mover_govc_url "${endpoint}")" \
   VCENTER_USER="${username}" \
@@ -2006,13 +2007,14 @@ main() {
   while [[ "${i}" -lt "${count}" ]]; do
     row="$(jq -c ".[$i]" <<< "${rows}")"
     local label source_vmdk source_vm_ref source_snapshot_ref target_path target_name target_storage_path target_storage_type target_uri target_format
-    local cbt_disk_id previous_change_id new_change_id virtual_bytes areas_count changed_bytes effective_mode incremental_verified
+    local cbt_disk_id source_disk_key previous_change_id new_change_id virtual_bytes areas_count changed_bytes effective_mode incremental_verified
     label="$(jq -r '.label // ""' <<< "${row}")"
     source_vmdk="$(jq -r '.sourceVmdk // ""' <<< "${row}")"
     source_vm_ref="$(jq -r '.sourceVmRef // ""' <<< "${row}")"
     source_snapshot_ref="$(jq -r '.sourceSnapshotRef // ""' <<< "${row}")"
     [[ -n "${source_snapshot_ref}" ]] || source_snapshot_ref="${snapshot_ref}"
     cbt_disk_id="$(jq -r '.cbtDiskId // ""' <<< "${row}")"
+    source_disk_key="$(jq -r '.sourceDiskKey // ""' <<< "${row}")"
     previous_change_id="$(jq -r '.previousChangeId // ""' <<< "${row}")"
     virtual_bytes="$(jq -r '.virtualBytes // 0' <<< "${row}")"
     target_path="$(jq -r '.targetPath // ""' <<< "${row}")"
@@ -2031,7 +2033,8 @@ main() {
     ftctl_vmware_mover_query_cbt "${endpoint}" "${username}" "${password_file}" "${tls_verify}" "${libdir}" \
       "${source_vm_ref}" "${snapshot_name}" "${cbt_disk_id}" \
       "$([[ "${effective_mode_request}" == "CBT_INCREMENTAL" ]] && printf '%s' "${previous_change_id}")" "${query_path}" \
-      "$([[ "${effective_mode_request}" == "FULL_SEED" || "${effective_mode_request}" == "FULL_RESEED" ]] && printf true || printf false)"
+      "$([[ "${effective_mode_request}" == "FULL_SEED" || "${effective_mode_request}" == "FULL_RESEED" ]] && printf true || printf false)" \
+      "${source_disk_key}"
     new_change_id="$(jq -r '.new_change_id // ""' "${query_path}")"
     jq --arg diskId "${cbt_disk_id}" --arg changeId "${new_change_id}" \
       '. + [{diskId:$diskId,changeId:$changeId,querySucceeded:true}]' "${cbt_evidence_path}" > "${cbt_evidence_path}.tmp"
