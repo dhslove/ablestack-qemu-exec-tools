@@ -28,3 +28,13 @@ Future VMDK to qcow2 and qcow2 to qcow2 drivers shall implement the same return 
 6. Real 10, 30, and 100 VM end-to-end qualification remains a separate release
    gate and must not be reported as passed without matching VM inventory and
    full seed, incremental, failure, and restart evidence.
+
+## Test deployment evidence
+
+- GitHub Actions run: `31710261670`
+- Source commit: `5937d9b7e58e5df6903a80c42afa54456e1e6ea5`
+- Artifact: `ablestack_vm_ftctl-0.9.5-1.noarch.rpm`
+- SHA256: `c3e96eac9cf71992a740679bfb82fd9d5a86d4955cd9f97dcbb4a2c735eb9b85`
+- Deployed hosts: `10.10.32.1/2/3`, `10.10.22.1/2/3`
+- Post-deployment checks: Mold Agent active, FTCTL timer active, slot limit,
+  retryable NBD, and bandwidth markers present; no recent slot owner remained.
