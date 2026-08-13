@@ -23,6 +23,8 @@ Future VMDK to qcow2 and qcow2 to qcow2 drivers shall implement the same return 
 4. Deployed VMware to ABLESTACK RBD full seed and incremental cycle.
 5. Synthetic 10, 30, and 100 request admission tests prove bounded concurrency,
    retry, and eventual admission for both slot classes.
+   The same suite kills a slot holder and verifies that the kernel flock is
+   released so a restarted worker continues without manual lock cleanup.
 6. Real 10, 30, and 100 VM end-to-end qualification remains a separate release
    gate and must not be reported as passed without matching VM inventory and
    full seed, incremental, failure, and restart evidence.

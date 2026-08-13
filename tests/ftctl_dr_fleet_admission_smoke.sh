@@ -35,6 +35,24 @@ ftctl_dr_scheduler_slot_release 210
 ftctl_dr_scheduler_slot_acquire plan-b /dev/null full-seed 211
 ftctl_dr_scheduler_slot_release 211
 
+crash_ready="${TMP}/crash-holder-ready"
+(
+  ftctl_dr_scheduler_slot_acquire crash-holder /dev/null full-seed 212
+  touch "${crash_ready}"
+  while :; do :; done
+) &
+crash_pid=$!
+for _ in {1..100}; do
+  [[ -f "${crash_ready}" ]] && break
+  sleep 0.01
+done
+[[ -f "${crash_ready}" ]]
+kill -9 "${crash_pid}"
+wait "${crash_pid}" 2>/dev/null || true
+ftctl_dr_scheduler_slot_acquire post-crash-recovery /dev/null full-seed 213
+ftctl_dr_scheduler_slot_release 213
+echo "[OK] crashed worker released its resource slot"
+
 run_fleet_case() {
   local count="$1" slot_class="$2" cycle_type="$3" limit="$4"
   local state_dir="${TMP}/fleet-${count}-${slot_class}" pid
