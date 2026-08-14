@@ -208,7 +208,7 @@ v2k_cmd_wizard() {
 
   if [[ "${target_provider}" == "ablestack-cloud" ]]; then
     [[ -z "${cloud_cred_file}" ]] || v2k_cloud_load_cred_file "${cloud_cred_file}"
-    cloud_endpoint="${cloud_endpoint:-${V2K_CLOUD_ENDPOINT:-${ABLESTACK_CLOUD_ENDPOINT:-${CLOUDSTACK_ENDPOINT:-}}}}"; cloud_api_key="$(v2k_cloud_resolve_api_key "${cloud_api_key}")"; cloud_secret_key="$(v2k_cloud_resolve_secret_key "${cloud_secret_key}")"; cloud_cpu_speed="${cloud_cpu_speed:-1000}"
+    cloud_endpoint="${cloud_endpoint:-${V2K_CLOUD_ENDPOINT:-${ABLESTACK_CLOUD_ENDPOINT:-${CLOUDSTACK_ENDPOINT:-}}}}"; cloud_api_key="$(v2k_cloud_resolve_api_key "${cloud_api_key}")"; cloud_secret_key="$(v2k_cloud_resolve_secret_key "${cloud_secret_key}")"
     [[ -n "${cloud_endpoint}" ]] || { echo "--cloud-endpoint is required" >&2; return 2; }; [[ -n "${cloud_api_key}" ]] || { echo "--cloud-api-key/env/cred-file is required" >&2; return 2; }; [[ -n "${cloud_secret_key}" ]] || { echo "--cloud-secret-key/env/cred-file is required" >&2; return 2; }
     [[ -n "${cloud_zone_id}" ]] || { cloud_choices="$(v2k_interactive_cloud_choices "${cloud_endpoint}" "${cloud_api_key}" "${cloud_secret_key}" zones)"; cloud_zone_id="$(v2k_interactive_select_tsv "Cloud zone" "${cloud_choices}" "" "${yes}" 1)"; }
     [[ -n "${cloud_service_offering_id}" ]] || { cloud_choices="$(v2k_interactive_cloud_choices "${cloud_endpoint}" "${cloud_api_key}" "${cloud_secret_key}" service-offerings)"; cloud_service_offering_id="$(v2k_interactive_select_tsv "Cloud service offering" "${cloud_choices}" "" "${yes}" 1)"; }

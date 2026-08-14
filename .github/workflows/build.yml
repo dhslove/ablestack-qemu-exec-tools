@@ -512,6 +512,10 @@ jobs:
             exit 2
           fi
 
+      - name: Verify V2K Cloud service-offering CPU speed handling
+        shell: bash
+        run: bash tests/v2k_cloud_offering_cpu_speed_smoke.sh
+
       - name: Build V2K RPM (separate path)
         run: |
           set -e

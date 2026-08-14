@@ -204,7 +204,7 @@ ABLESTACK Cloud target options:
   --cloud-project-id <id>
   --cloud-name <name>
   --cloud-display-name <name>
-  --cloud-cpu-speed <MHz>                   Default: 1000
+  --cloud-cpu-speed <MHz>                   Optional; predefined offering speed is preserved
 
 Cleanup policy:
   --no-cleanup                              Skip cleanup (default: cleanup runs)
@@ -273,7 +273,7 @@ ABLESTACK Cloud options:
   --cloud-project-id <id>
   --cloud-name <name>
   --cloud-display-name <name>
-  --cloud-cpu-speed <MHz>                   Default: 1000
+  --cloud-cpu-speed <MHz>                   Optional; predefined offering speed is preserved
 
 Examples:
   ablestack_v2k wizard --cred-file ./govc.env --cloud-cred-file ./cloud.env
@@ -313,7 +313,7 @@ ABLESTACK Cloud target options:
   --cloud-project-id <id>
   --cloud-name <name>
   --cloud-display-name <name>
-  --cloud-cpu-speed <MHz>                   Default: 1000
+  --cloud-cpu-speed <MHz>                   Optional; predefined offering speed is preserved
 
 Notes:
   - If only --cred-file is provided, init auto-generates workdir/vddk.cred.
@@ -436,7 +436,7 @@ ABLESTACK Cloud target options:
   --cloud-project-id <id>
   --cloud-name <name>
   --cloud-display-name <name>
-  --cloud-cpu-speed <MHz>                   Default: 1000
+  --cloud-cpu-speed <MHz>                   Optional; predefined offering speed is preserved
 
 Notes:
   - Current libvirt XML generation uses VM inventory values for CPU/memory and source MAC plus auto-detected host bridge.
