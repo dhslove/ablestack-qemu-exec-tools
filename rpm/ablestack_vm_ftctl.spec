@@ -59,6 +59,8 @@ install -m 0644 etc/ablestack-vm-ftctl-cluster.conf %{buildroot}/etc/ablestack/a
 install -d %{buildroot}/etc/ablestack/ftctl-cluster.d/hosts
 install -d %{buildroot}/usr/lib/udev/rules.d
 install -m 0644 etc/10-ablestack-ftctl-nbd.rules %{buildroot}/usr/lib/udev/rules.d/10-ablestack-ftctl-nbd.rules
+install -d %{buildroot}/etc/modprobe.d
+install -m 0644 etc/ablestack-ftctl-nbd.conf %{buildroot}/etc/modprobe.d/ablestack-ftctl-nbd.conf
 
 install -d %{buildroot}%{_unitdir}
 install -m 0644 lib/ftctl/systemd/ablestack-vm-ftctl.service %{buildroot}%{_unitdir}/ablestack-vm-ftctl.service
@@ -76,6 +78,25 @@ if [ -x /usr/local/bin/ablestack_vm_ftctl_firewalld ]; then
 fi
 if command -v udevadm >/dev/null 2>&1; then
   udevadm control --reload-rules >/dev/null 2>&1 || true
+fi
+if command -v modprobe >/dev/null 2>&1; then
+  current_max="$(cat /sys/module/nbd/parameters/nbds_max 2>/dev/null || echo 0)"
+  case "${current_max}" in (*[!0-9]*|'') current_max=0;; esac
+  if [ "${current_max}" -lt 32 ]; then
+    active_nbd="$(find /sys/class/block -maxdepth 2 -path '/sys/class/block/nbd*/pid' -type f -exec sh -c 'test -s "$1" && echo active' sh {} \; 2>/dev/null | head -n 1)"
+    if [ -z "${active_nbd}" ]; then
+      modprobe -r nbd >/dev/null 2>&1 || true
+      modprobe nbd nbds_max=32 max_part=16 >/dev/null 2>&1 || true
+    else
+      echo "WARNING: active NBD devices prevented immediate FTCTL NBD capacity reload; reboot or reload nbd after transfers finish." >&2
+    fi
+  else
+    modprobe nbd nbds_max=32 max_part=16 >/dev/null 2>&1 || true
+  fi
+fi
+if command -v udevadm >/dev/null 2>&1; then
+  udevadm trigger --subsystem-match=block --sysname-match='nbd*' >/dev/null 2>&1 || true
+  udevadm settle >/dev/null 2>&1 || true
 fi
 missing_tools=""
 for tool in virsh qemu-img socat nc ping firewall-cmd; do
@@ -113,6 +134,7 @@ fi
 %dir /etc/ablestack/ftctl-cluster.d
 %dir /etc/ablestack/ftctl-cluster.d/hosts
 /usr/lib/udev/rules.d/10-ablestack-ftctl-nbd.rules
+%config(noreplace) /etc/modprobe.d/ablestack-ftctl-nbd.conf
 %{_unitdir}/ablestack-vm-ftctl.service
 %{_unitdir}/ablestack-vm-ftctl.timer
 %{_unitdir}/ablestack-vm-ftctl-dr@.service

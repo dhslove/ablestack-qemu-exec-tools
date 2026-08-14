@@ -3215,6 +3215,7 @@ ftctl_dr_runtime_emit_state_json() {
   local latest_completed_transfer_payload_bytes latest_completed_changed_extent_count latest_completed_duration_ms
   local latest_completed_throughput_bps latest_completed_baseline_generation latest_completed_cycle_token latest_completed_cycle_metrics_path
   local nbd_teardown_state nbd_quarantined_device_count nbd_teardown_error_code nbd_teardown_error_message
+  local nbd_capacity_json="" nbd_capacity_configured="" nbd_capacity_ready="" nbd_capacity_error_code=""
   local latest_completed_nbd_teardown_state latest_completed_nbd_teardown_started_at_ms
   local latest_completed_nbd_teardown_completed_at_ms latest_completed_nbd_teardown_duration_ms
   local latest_completed_nbd_source_device_count latest_completed_nbd_target_device_count
@@ -3841,6 +3842,15 @@ PY
   replication_direction="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "replication_direction")"
   reverse_direction="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "reverse_direction")"
   provider_pair="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "provider_pair")"
+  if [[ -z "${provider_pair}" && "${profile_exists}" == "true" ]]; then
+    provider_pair="$(ftctl_dr_scheduler_profile_provider "${profile_path}" source)_TO_$(ftctl_dr_scheduler_profile_provider "${profile_path}" target)"
+  fi
+  if [[ "${provider_pair}" == "VMWARE_TO_ABLESTACK" || "${provider_pair}" == "VMWARE_TO_KVM" ]]; then
+    nbd_capacity_json="$(ftctl_vmware_mover_nbd_capacity_json)"
+    nbd_capacity_configured="$(ftctl_dr_runtime_json_text_value "${nbd_capacity_json}" "configured")"
+    nbd_capacity_ready="$(ftctl_dr_runtime_json_text_value "${nbd_capacity_json}" "ready")"
+    nbd_capacity_error_code="$(ftctl_dr_runtime_json_text_value "${nbd_capacity_json}" "errorCode")"
+  fi
   reverse_profile_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "reverse_profile_path")"
   reverse_restore_points_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "reverse_restore_points_path")"
   reprotect_worker_pid="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "reprotect_worker_pid")"
@@ -4022,6 +4032,12 @@ PY
   ftctl_dr_runtime_json_number_field "nbd_quarantined_device_count" "${nbd_quarantined_device_count}"
   ftctl_dr_runtime_json_string_field "nbd_teardown_error_code" "${nbd_teardown_error_code}"
   ftctl_dr_runtime_json_string_field "nbd_teardown_error_message" "${nbd_teardown_error_message}"
+  if [[ -n "${nbd_capacity_json}" ]]; then
+    printf ',"nbd_capacity":%s' "${nbd_capacity_json}"
+    ftctl_dr_runtime_json_boolean_field "nbd_capacity_configured" "${nbd_capacity_configured}" || return $?
+    ftctl_dr_runtime_json_boolean_field "nbd_capacity_ready" "${nbd_capacity_ready}" || return $?
+    ftctl_dr_runtime_json_string_field "nbd_capacity_error_code" "${nbd_capacity_error_code}"
+  fi
   ftctl_dr_runtime_json_string_field "replication_activity" "${replication_activity}"
   ftctl_dr_runtime_json_string_field "protection_state" "${protection_state}"
   ftctl_dr_runtime_json_string_field "active_worker_run_uuid" "${active_worker_run_uuid}"
@@ -4334,6 +4350,7 @@ ftctl_dr_runtime_require_run() {
 ftctl_dr_runtime_plan_apply() {
   local plan="${1-}" profile_file="${2-}" role="${3-}" dry_run="${4-0}" json="${5-0}"
   local profile_plan direction now status_path capable error_code details_json vmware_capable
+  local source_provider target_provider nbd_capacity_json="" nbd_capacity_configured=""
 
   ftctl_dr_runtime_require_plan "${plan}" || return 2
   ftctl_dr_runtime_validate_profile_file "${profile_file}" || {
@@ -4359,6 +4376,16 @@ ftctl_dr_runtime_plan_apply() {
       capable="false"
       error_code="$(ftctl_dr_runtime_json_text_value "${details_json}" "error_code")"
       [[ -n "${error_code}" ]] || error_code="DR_VMWARE_PREFLIGHT_FAILED"
+    fi
+  fi
+  source_provider="$(ftctl_dr_scheduler_profile_provider "${profile_file}" source)"
+  target_provider="$(ftctl_dr_scheduler_profile_provider "${profile_file}" target)"
+  if [[ "${source_provider}" == "VMWARE" && ( "${target_provider}" == "ABLESTACK" || "${target_provider}" == "KVM" ) ]]; then
+    nbd_capacity_json="$(ftctl_vmware_mover_nbd_capacity_json)"
+    nbd_capacity_configured="$(ftctl_dr_runtime_json_text_value "${nbd_capacity_json}" "configured")"
+    if [[ "${nbd_capacity_configured}" != "true" ]]; then
+      capable="false"
+      error_code="DR_NBD_CAPACITY_INVALID"
     fi
   fi
 
@@ -4404,6 +4431,7 @@ ftctl_dr_runtime_plan_apply() {
       "$([[ "${dry_run}" == "1" ]] && printf true || printf false)"
     [[ -n "${error_code}" ]] && ftctl_dr_runtime_json_string_field "error_code" "${error_code}"
     [[ -n "${details_json}" ]] && printf ',"details":%s' "${details_json}"
+    [[ -n "${nbd_capacity_json}" ]] && printf ',"nbd_capacity":%s' "${nbd_capacity_json}"
     printf ',"exit_code":0}\n'
   else
     if [[ -n "${error_code}" ]]; then

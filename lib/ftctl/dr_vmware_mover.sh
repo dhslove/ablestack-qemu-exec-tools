@@ -416,6 +416,54 @@ ftctl_vmware_mover_free_nbd() {
   return 1
 }
 
+ftctl_vmware_mover_nbd_capacity_json() {
+  local start="${FTCTL_DR_NBD_DEVICE_START}" end="${FTCTL_DR_NBD_DEVICE_END}"
+  local module_max=0 expected=0 present=0 free=0 quarantined=0 idx dev configured=false ready=false error_code=""
+  [[ "${start}" =~ ^[0-9]+$ ]] || start=16
+  [[ "${end}" =~ ^[0-9]+$ ]] || end=31
+  (( start <= end )) || { start=16; end=31; }
+  expected=$((end - start + 1))
+  modprobe nbd "nbds_max=${FTCTL_DR_NBD_MODULE_MAX_DEVICES}" \
+    "max_part=${FTCTL_DR_NBD_MODULE_MAX_PARTITIONS}" >/dev/null 2>&1 || true
+  module_max="$(cat /sys/module/nbd/parameters/nbds_max 2>/dev/null || printf '0')"
+  [[ "${module_max}" =~ ^[0-9]+$ ]] || module_max=0
+  for ((idx = start; idx <= end; idx++)); do
+    dev="/dev/nbd${idx}"
+    [[ -b "${dev}" ]] || continue
+    present=$((present + 1))
+    if ftctl_vmware_mover_nbd_is_quarantined "${dev}"; then
+      quarantined=$((quarantined + 1))
+    elif ftctl_vmware_mover_nbd_is_stable_free "${dev}"; then
+      free=$((free + 1))
+    fi
+  done
+  if (( module_max >= end + 1 && present == expected )); then
+    configured=true
+    if (( free > 0 )); then
+      ready=true
+    else
+      error_code="DR_RESOURCE_BUSY"
+    fi
+  else
+    error_code="DR_NBD_CAPACITY_INVALID"
+  fi
+  printf '{"schemaVersion":1,"reservedRangeOnly":true,"deviceStart":%s,"deviceEnd":%s,"moduleMaxDevices":%s,"expectedDeviceCount":%s,"presentDeviceCount":%s,"freeDeviceCount":%s,"quarantinedDeviceCount":%s,"configured":%s,"ready":%s,"errorCode":"%s"}\n' \
+    "${start}" "${end}" "${module_max}" "${expected}" "${present}" "${free}" "${quarantined}" \
+    "${configured}" "${ready}" "$(ftctl__json_escape "${error_code}")"
+}
+
+ftctl_vmware_mover_require_nbd_capacity() {
+  local capacity_json configured ready error_code
+  capacity_json="$(ftctl_vmware_mover_nbd_capacity_json)"
+  configured="$(JSON_TEXT="${capacity_json}" python3 -c 'import json,os; print(str(bool(json.loads(os.environ["JSON_TEXT"]).get("configured"))).lower())')"
+  ready="$(JSON_TEXT="${capacity_json}" python3 -c 'import json,os; print(str(bool(json.loads(os.environ["JSON_TEXT"]).get("ready"))).lower())')"
+  error_code="$(JSON_TEXT="${capacity_json}" python3 -c 'import json,os; print(json.loads(os.environ["JSON_TEXT"]).get("errorCode") or "")')"
+  [[ "${configured}" == "true" ]] || ftctl_vmware_mover_die 98 \
+    "${error_code:-DR_NBD_CAPACITY_INVALID}: reserved NBD devices ${FTCTL_DR_NBD_DEVICE_START}-${FTCTL_DR_NBD_DEVICE_END} are not installed"
+  [[ "${ready}" == "true" ]] || ftctl_vmware_mover_die 97 \
+    "${error_code:-DR_RESOURCE_BUSY}: reserved NBD devices are temporarily busy"
+}
+
 ftctl_vmware_mover_now_ms() {
   local value
   value="$(date +%s%3N 2>/dev/null || true)"
@@ -938,6 +986,7 @@ ftctl_vmware_mover_patch_disk() {
   FTCTL_DR_NBD_TEARDOWN_ERROR_MESSAGE=""
 
   [[ -s "${areas_path}" ]] || ftctl_vmware_mover_die 84 "DR_CBT_EXTENT_INVALID: changed-area payload is missing for ${label}"
+  ftctl_vmware_mover_require_nbd_capacity
   work_dir="$(mktemp -d -t ftctl.vmware.patch.XXXXXX)"
   socket_path="${work_dir}/vddk.sock"
   safe_label="$(ftctl_vmware_mover_safe_label "${label}")"

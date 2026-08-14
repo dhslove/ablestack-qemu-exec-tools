@@ -38,3 +38,31 @@ Future VMDK to qcow2 and qcow2 to qcow2 drivers shall implement the same return 
 - Deployed hosts: `10.10.32.1/2/3`, `10.10.22.1/2/3`
 - Post-deployment checks: Mold Agent active, FTCTL timer active, slot limit,
   retryable NBD, and bandwidth markers present; no recent slot owner remained.
+
+## Reserved NBD capacity and retry identity addendum (2026-08-14)
+
+VMware to ABLESTACK replication exclusively owns `/dev/nbd16` through
+`/dev/nbd31`. The RPM installs `/etc/modprobe.d/ablestack-ftctl-nbd.conf` with
+`nbds_max=32 max_part=16`; package installation reloads an undersized module
+only when no NBD PID is active. It never falls back to `/dev/nbd0` through
+`/dev/nbd15`, which remain available to v2k and other host tools.
+
+`ftctl_vmware_mover_nbd_capacity_json` publishes the configured range, actual
+module capacity, present/free/quarantined counts, and an explicit error code.
+`dr-plan-apply --dry-run` rejects a permanently undersized host, while each
+changed-data patch rechecks that the reserved range is both configured and has
+free capacity before opening VDDK/NBD endpoints.
+
+Return code 97 is a retryable wait, not a new replication cycle. The scheduler
+persists `pending_resource_sequence`, cycle type, owner run, and retry attempt,
+then reuses the same sequence with exponential backoff from 15 to 300 seconds.
+The pending identity is cleared only after success or a non-retryable terminal
+failure.
+
+| Area | AS-IS | TO-BE |
+|---|---|---|
+| Kernel NBD capacity | Runtime `modprobe` cannot enlarge an already loaded 16-device module | RPM owns a permanent 32-device module contract and verifies the actual range |
+| Device selection | Reserved range exists in configuration but may be absent | Only nbd16-31 are eligible; missing devices fail preflight |
+| Resource retry | Every rc=97 retry can advance the cycle sequence | One waiting operation retains one cycle sequence and run identity |
+| Retry cadence | Fixed 15-second retries amplify fleet contention | Bounded exponential backoff, 15-300 seconds |
+| Existing success path | VMware mover writes RBD through librbd | Unchanged; target VM execution continues through Cloud-managed krbd |

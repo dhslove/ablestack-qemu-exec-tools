@@ -20,6 +20,14 @@ source "${ROOT}/lib/ftctl/dr_scheduler.sh"
 [[ "$(ftctl_dr_scheduler_slot_class full-reseed)" == "full-seed" ]]
 [[ "$(ftctl_dr_scheduler_slot_class incremental)" == "incremental" ]]
 [[ "$(ftctl_dr_scheduler_initial_jitter plan-a /dev/null 300)" =~ ^[0-9]+$ ]]
+[[ "$(ftctl_dr_scheduler_resource_retry_delay 1)" == "15" ]]
+[[ "$(ftctl_dr_scheduler_resource_retry_delay 2)" == "30" ]]
+[[ "$(ftctl_dr_scheduler_resource_retry_delay 8)" == "300" ]]
+
+grep -q '^options nbd nbds_max=32 max_part=16$' "${ROOT}/etc/ablestack-ftctl-nbd.conf"
+grep -q 'FTCTL_DR_NBD_DEVICE_START="16"' "${ROOT}/etc/ablestack-vm-ftctl.conf"
+grep -q 'FTCTL_DR_NBD_DEVICE_END="31"' "${ROOT}/etc/ablestack-vm-ftctl.conf"
+! grep -qE 'FTCTL_DR_NBD_DEVICE_(START|END)="([0-9]|1[0-5])"' "${ROOT}/etc/ablestack-vm-ftctl.conf"
 
 ftctl_dr_scheduler_slot_acquire plan-a /dev/null full-seed 210
 set +e
