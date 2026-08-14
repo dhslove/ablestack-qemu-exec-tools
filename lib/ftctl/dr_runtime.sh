@@ -3846,7 +3846,7 @@ PY
     provider_pair="$(ftctl_dr_scheduler_profile_provider "${profile_path}" source)_TO_$(ftctl_dr_scheduler_profile_provider "${profile_path}" target)"
   fi
   if [[ "${provider_pair}" == "VMWARE_TO_ABLESTACK" || "${provider_pair}" == "VMWARE_TO_KVM" ]]; then
-    nbd_capacity_json="$(ftctl_vmware_mover_nbd_capacity_json)"
+    nbd_capacity_json="$(ftctl_dr_nbd_capacity_json)"
     nbd_capacity_configured="$(ftctl_dr_runtime_json_text_value "${nbd_capacity_json}" "configured")"
     nbd_capacity_ready="$(ftctl_dr_runtime_json_text_value "${nbd_capacity_json}" "ready")"
     nbd_capacity_error_code="$(ftctl_dr_runtime_json_text_value "${nbd_capacity_json}" "errorCode")"

@@ -22,6 +22,10 @@ if [[ -f "${FTCTL_DR_VMWARE_MOVER_LIB_DIR}/dr_vddk.sh" ]]; then
   # shellcheck source=/dev/null
   source "${FTCTL_DR_VMWARE_MOVER_LIB_DIR}/dr_vddk.sh"
 fi
+if [[ -f "${FTCTL_DR_VMWARE_MOVER_LIB_DIR}/dr_nbd.sh" ]]; then
+  # shellcheck source=/dev/null
+  source "${FTCTL_DR_VMWARE_MOVER_LIB_DIR}/dr_nbd.sh"
+fi
 
 FTCTL_DR_VMWARE_MOVER_LOG_DIR="${FTCTL_DR_VMWARE_MOVER_LOG_DIR:-/run/ablestack-vm-ftctl/dr-runtime/mover}"
 FTCTL_DR_VMWARE_NBDKIT_READY_TIMEOUT="${FTCTL_DR_VMWARE_NBDKIT_READY_TIMEOUT:-20}"
@@ -416,45 +420,9 @@ ftctl_vmware_mover_free_nbd() {
   return 1
 }
 
-ftctl_vmware_mover_nbd_capacity_json() {
-  local start="${FTCTL_DR_NBD_DEVICE_START}" end="${FTCTL_DR_NBD_DEVICE_END}"
-  local module_max=0 expected=0 present=0 free=0 quarantined=0 idx dev configured=false ready=false error_code=""
-  [[ "${start}" =~ ^[0-9]+$ ]] || start=16
-  [[ "${end}" =~ ^[0-9]+$ ]] || end=31
-  (( start <= end )) || { start=16; end=31; }
-  expected=$((end - start + 1))
-  modprobe nbd "nbds_max=${FTCTL_DR_NBD_MODULE_MAX_DEVICES}" \
-    "max_part=${FTCTL_DR_NBD_MODULE_MAX_PARTITIONS}" >/dev/null 2>&1 || true
-  module_max="$(cat /sys/module/nbd/parameters/nbds_max 2>/dev/null || printf '0')"
-  [[ "${module_max}" =~ ^[0-9]+$ ]] || module_max=0
-  for ((idx = start; idx <= end; idx++)); do
-    dev="/dev/nbd${idx}"
-    [[ -b "${dev}" ]] || continue
-    present=$((present + 1))
-    if ftctl_vmware_mover_nbd_is_quarantined "${dev}"; then
-      quarantined=$((quarantined + 1))
-    elif ftctl_vmware_mover_nbd_is_stable_free "${dev}"; then
-      free=$((free + 1))
-    fi
-  done
-  if (( module_max >= end + 1 && present == expected )); then
-    configured=true
-    if (( free > 0 )); then
-      ready=true
-    else
-      error_code="DR_RESOURCE_BUSY"
-    fi
-  else
-    error_code="DR_NBD_CAPACITY_INVALID"
-  fi
-  printf '{"schemaVersion":1,"reservedRangeOnly":true,"deviceStart":%s,"deviceEnd":%s,"moduleMaxDevices":%s,"expectedDeviceCount":%s,"presentDeviceCount":%s,"freeDeviceCount":%s,"quarantinedDeviceCount":%s,"configured":%s,"ready":%s,"errorCode":"%s"}\n' \
-    "${start}" "${end}" "${module_max}" "${expected}" "${present}" "${free}" "${quarantined}" \
-    "${configured}" "${ready}" "${error_code}"
-}
-
 ftctl_vmware_mover_require_nbd_capacity() {
   local capacity_json configured ready error_code
-  capacity_json="$(ftctl_vmware_mover_nbd_capacity_json)"
+  capacity_json="$(ftctl_dr_nbd_capacity_json)"
   configured="$(JSON_TEXT="${capacity_json}" python3 -c 'import json,os; print(str(bool(json.loads(os.environ["JSON_TEXT"]).get("configured"))).lower())')"
   ready="$(JSON_TEXT="${capacity_json}" python3 -c 'import json,os; print(str(bool(json.loads(os.environ["JSON_TEXT"]).get("ready"))).lower())')"
   error_code="$(JSON_TEXT="${capacity_json}" python3 -c 'import json,os; print(json.loads(os.environ["JSON_TEXT"]).get("errorCode") or "")')"

@@ -66,3 +66,22 @@ failure.
 | Resource retry | Every rc=97 retry can advance the cycle sequence | One waiting operation retains one cycle sequence and run identity |
 | Retry cadence | Fixed 15-second retries amplify fleet contention | Bounded exponential backoff, 15-300 seconds |
 | Existing success path | VMware mover writes RBD through librbd | Unchanged; target VM execution continues through Cloud-managed krbd |
+
+## Shared capacity projection addendum (2026-08-14)
+
+NBD capacity is implemented in `dr_nbd.sh`, which is loaded by both the
+standalone VMware mover and the main `ablestack_vm_ftctl` command. This keeps
+data-path admission and `dr-status` projection on the same implementation and
+prevents Cloud group preflight from treating a healthy host as
+`DR_NBD_CAPACITY_STATUS_UNAVAILABLE`.
+
+The fleet smoke test loads the shared module independently and validates its
+structured invalid-capacity response. A deployed `dr-status --json` must
+publish `nbd_capacity.configured`, `ready`, reserved range, and device counts
+without shell warnings before protection-group actions are enabled.
+
+| Area | AS-IS | TO-BE |
+|---|---|---|
+| Capacity implementation | Mover-private function unavailable to `dr-status` | Shared `dr_nbd.sh` contract loaded by both paths |
+| Cloud preflight | Healthy host can appear as status unavailable | Live capacity JSON is returned and evaluated consistently |
+| Regression coverage | Mover execution validates capacity only | Shared module and status projection are build and deployment gates |

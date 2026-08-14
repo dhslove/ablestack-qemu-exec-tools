@@ -174,6 +174,7 @@ ftctl_load_libs() {
     dr_vmware.sh
     dr_kvm_vmware.sh
     dr_scheduler.sh
+    dr_nbd.sh
     guestprep.sh
     dr_runtime.sh
     verify.sh
@@ -222,6 +223,8 @@ ftctl_load_libs() {
   source "${FTCTL_LIB_BASE}/ftctl/dr_kvm_vmware.sh"
   # shellcheck source=/dev/null
   source "${FTCTL_LIB_BASE}/ftctl/dr_scheduler.sh"
+  # shellcheck source=/dev/null
+  source "${FTCTL_LIB_BASE}/ftctl/dr_nbd.sh"
   # shellcheck source=/dev/null
   source "${FTCTL_LIB_BASE}/ftctl/guestprep.sh"
   # shellcheck source=/dev/null
