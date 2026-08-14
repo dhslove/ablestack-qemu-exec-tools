@@ -449,7 +449,7 @@ ftctl_vmware_mover_nbd_capacity_json() {
   fi
   printf '{"schemaVersion":1,"reservedRangeOnly":true,"deviceStart":%s,"deviceEnd":%s,"moduleMaxDevices":%s,"expectedDeviceCount":%s,"presentDeviceCount":%s,"freeDeviceCount":%s,"quarantinedDeviceCount":%s,"configured":%s,"ready":%s,"errorCode":"%s"}\n' \
     "${start}" "${end}" "${module_max}" "${expected}" "${present}" "${free}" "${quarantined}" \
-    "${configured}" "${ready}" "$(ftctl__json_escape "${error_code}")"
+    "${configured}" "${ready}" "${error_code}"
 }
 
 ftctl_vmware_mover_require_nbd_capacity() {
