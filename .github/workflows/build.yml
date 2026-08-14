@@ -418,7 +418,7 @@ jobs:
             --allowerasing ca-certificates curl-minimal || true
 
           dnf -y --disablerepo="*" --enablerepo="${REPO_PREFIX}-*" install \
-            make rpm-build tar git dnf-plugins-core createrepo_c
+            make rpm-build tar git jq dnf-plugins-core createrepo_c
 
       - name: Configure Rocky ${{ matrix.host_os_minor }} build repos + enable EPEL (build-time only)
         run: |
@@ -511,6 +511,10 @@ jobs:
             echo "[ERR] Versioned WinPE filename mismatch: expected=${EXPECTED_NAME} actual=$(basename "${WINPE_ISOS[0]}")" >&2
             exit 2
           fi
+
+      - name: Verify V2K Cloud service-offering CPU speed handling
+        shell: bash
+        run: bash tests/v2k_cloud_offering_cpu_speed_smoke.sh
 
       - name: Build V2K RPM (separate path)
         run: |
