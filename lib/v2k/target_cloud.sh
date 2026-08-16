@@ -258,7 +258,7 @@ v2k_cloud_target_required_config_json() {
       project_id: (.target.cloud.project_id // ""),
       name: (.target.cloud.name // .target.libvirt.name // .source.vm.name // ""),
       display_name: (.target.cloud.display_name // .target.cloud.name // .target.libvirt.name // .source.vm.name // ""),
-      cpu_speed: ((.target.cloud.cpu_speed // "1000") | tostring)
+      cpu_speed: ((.target.cloud.cpu_speed // "") | tostring)
     }
   ' "${manifest}"
 }
@@ -291,10 +291,15 @@ v2k_cloud_target_validate_config() {
       )
     )
     and (.storage_id | length) > 0
-    and ((.cpu_speed // "1000") | tostring | test("^[0-9]+$"))
-    and (((.cpu_speed // "1000") | tonumber) > 0)
+    and (
+      ((.cpu_speed // "") | tostring | length) == 0
+      or (
+        ((.cpu_speed // "") | tostring | test("^[0-9]+$"))
+        and (((.cpu_speed // "0") | tonumber) > 0)
+      )
+    )
   ' <<<"${cfg}" >/dev/null || {
-    echo "Cloud target requires zone_id, service_offering_id, network_ids, storage_id, and a positive numeric cpu_speed." >&2
+    echo "Cloud target requires zone_id, service_offering_id, network_ids, storage_id, and an optional positive numeric cpu_speed." >&2
     return 2
   }
   [[ "${network_count}" -gt 0 ]] || {
@@ -342,6 +347,27 @@ v2k_cloud_target_optional_owner_params() {
     + (if (.domain_id | length) > 0 then {domainid:.domain_id} else {} end)
     + (if (.project_id | length) > 0 then {projectid:.project_id} else {} end)
   '
+}
+
+v2k_cloud_target_service_offering_json() {
+  local endpoint="$1" api_key="$2" secret_key="$3" service_offering_id="$4"
+  local params response offering
+
+  [[ -n "${service_offering_id}" ]] || return 2
+  params="$(jq -nc --arg id "${service_offering_id}" '{id:$id,issystem:false}')"
+  response="$(v2k_cloud_api_get \
+    "${endpoint}" "${api_key}" "${secret_key}" \
+    "listServiceOfferings" "${params}")" || return $?
+  offering="$(jq -c --arg id "${service_offering_id}" '
+    ((.listserviceofferingsresponse.serviceoffering // [])
+      | map(select((.id // "") == $id))
+      | first) // empty
+  ' <<<"${response}")"
+  [[ -n "${offering}" ]] || {
+    echo "Cloud service offering was not found: ${service_offering_id}" >&2
+    return 2
+  }
+  printf '%s' "${offering}"
 }
 
 v2k_cloud_target_prepare_disk_controller_plan() {
@@ -504,13 +530,15 @@ v2k_cloud_target_apply_disk_controller_override() {
 }
 
 v2k_cloud_target_source_deploy_params_json() {
-  local manifest="$1"
+  local manifest="$1" offering_json="${2:-}"
+  [[ -n "${offering_json}" ]] || offering_json='{}'
+  offering_json="$(jq -c 'if type == "object" then . else {} end' <<<"${offering_json}")" || return 2
   if jq -e '.runtime.source_validation.status == "passed"' "${manifest}" >/dev/null 2>&1 \
     && ! v2k_cloud_target_disk_controller_plan_is_valid "${manifest}"; then
     echo "Cloud deployment requires a validated disk-controller plan." >&2
     return 44
   fi
-  jq -c '
+  jq -c --argjson offering "${offering_json}" '
     def controller($raw):
       ($raw // "" | tostring | ascii_downcase) as $s
       | if ($s | test("virtio")) then "virtio"
@@ -524,7 +552,8 @@ v2k_cloud_target_source_deploy_params_json() {
     | (($vm.memory_mb // 0) | tonumber? // 0) as $memory_mb
     | (((.disks[0].size_bytes // 0) | tonumber? // 0)) as $root_size_bytes
     | (if $root_size_bytes > 0 then ((($root_size_bytes + 1073741823) / 1073741824) | floor) else 0 end) as $root_size_gib
-    | ((.target.cloud.cpu_speed // "1000") | tostring) as $cpu_speed
+    | ((.target.cloud.cpu_speed // "") | tostring) as $cpu_speed
+    | ((($offering.cpuspeed // 0) | tonumber?) // 0) as $offering_cpu_speed
     | (($vm.firmware // "") | tostring | ascii_downcase) as $firmware
     | (($vm.secure_boot // false) == true) as $secure_boot
     | ((.runtime.bootstrap_fallback.bus // "") | tostring | ascii_downcase) as $fallback_bus
@@ -549,7 +578,7 @@ v2k_cloud_target_source_deploy_params_json() {
       ) as $data_controller
     | {}
       + (if $cpu > 0 then {"details[0].cpuNumber": ($cpu | floor | tostring)} else {} end)
-      + {"details[0].cpuSpeed": $cpu_speed}
+      + (if $offering_cpu_speed <= 0 and ($cpu_speed | length) > 0 then {"details[0].cpuSpeed": $cpu_speed} else {} end)
       + {"details[0].io.policy": "io_uring"}
       + {"details[0].iothreads": "true"}
       + (if $memory_mb > 0 then {"details[0].memory": ($memory_mb | floor | tostring)} else {} end)
@@ -954,17 +983,51 @@ v2k_cloud_target_import_volume_from_job() {
     '{id:$id,job_id:$job_id,job:$job,reused_submitted_job:true}'
 }
 
+v2k_cloud_target_cpu_speed_override_rejected() {
+  local error_text="${1:-}"
+  grep -Eiq \
+    'cpu[[:space:]]*speed.*not customi[sz]able|cpuSpeed.*static service offering|cpuNumber or cpuSpeed or memory should not be specified for static service offering' \
+    <<<"${error_text}"
+}
+
 v2k_cloud_target_deploy_vm_for_volume() {
   local endpoint="$1" api_key="$2" secret_key="$3" cfg="$4" root_volume_id="$5" start_vm="$6" source_params="${7:-}"
   local manifest="${8:-}"
-  local params response job_id job vm_id
+  local params response job_id job vm_id error_file first_error retry_params
   params="$(v2k_cloud_target_deploy_params_json \
     "${cfg}" "${root_volume_id}" "${start_vm}" "${source_params}")"
   [[ -n "${root_volume_id}" ]] || {
     echo "Cloud deployVirtualMachineForVolume requires a root volume id." >&2
     return 2
   }
-  response="$(v2k_cloud_api_get "${endpoint}" "${api_key}" "${secret_key}" "deployVirtualMachineForVolume" "${params}")" || return $?
+  error_file="$(mktemp "${TMPDIR:-/tmp}/v2k-cloud-deploy.XXXXXX")"
+  if response="$(v2k_cloud_api_get \
+      "${endpoint}" "${api_key}" "${secret_key}" \
+      "deployVirtualMachineForVolume" "${params}" 2>"${error_file}")"; then
+    rm -f "${error_file}"
+  else
+    first_error="$(cat "${error_file}")"
+    if jq -e 'has("details[0].cpuSpeed")' <<<"${params}" >/dev/null 2>&1 \
+        && v2k_cloud_target_cpu_speed_override_rejected "${first_error}"; then
+      echo "Cloud service offering rejected the optional CPU-speed override; retrying without details[0].cpuSpeed." >&2
+      retry_params="$(jq -c 'del(."details[0].cpuSpeed")' <<<"${params}")"
+      if response="$(v2k_cloud_api_get \
+          "${endpoint}" "${api_key}" "${secret_key}" \
+          "deployVirtualMachineForVolume" "${retry_params}" 2>"${error_file}")"; then
+        params="${retry_params}"
+        rm -f "${error_file}"
+      else
+        [[ -n "${first_error}" ]] && printf '%s\n' "${first_error}" >&2
+        cat "${error_file}" >&2
+        rm -f "${error_file}"
+        return 1
+      fi
+    else
+      [[ -n "${first_error}" ]] && printf '%s\n' "${first_error}" >&2
+      rm -f "${error_file}"
+      return 1
+    fi
+  fi
   job_id="$(printf '%s' "${response}" | v2k_cloud_response_job_id)"
   [[ -n "${job_id}" ]] || {
     echo "Cloud deployVirtualMachineForVolume did not return an async job id." >&2
@@ -1263,6 +1326,7 @@ v2k_cloud_target_cutover() {
   local disk_offering_id owner_params root_import root_volume_id deploy vm_id data_volumes_json jobs_json
   local import_result attach_result start_result result_json disk_name source_deploy_params root_volume_result root_volume_json root_volume_update_job root_volume_converted
   local nic_verification checkpoint checkpoint_state
+  local service_offering_json="{}" offering_cpu_speed=""
   local issues_json="[]" inspection_required=false started=false
   local pool_json pool_path import_volume_id disk_offering_json
 
@@ -1278,7 +1342,19 @@ v2k_cloud_target_cutover() {
   storage_id="$(jq -r '.storage_id // ""' <<<"${cfg}")"
   disk_offering_id="$(jq -r '.disk_offering_id // ""' <<<"${cfg}")"
   owner_params="$(v2k_cloud_target_optional_owner_params "${cfg}")"
-  source_deploy_params="$(v2k_cloud_target_source_deploy_params_json "${manifest}")" || return $?
+  if service_offering_json="$(v2k_cloud_target_service_offering_json \
+      "${endpoint}" "${api_key}" "${secret_key}" \
+      "$(jq -r '.service_offering_id // ""' <<<"${cfg}")")"; then
+    offering_cpu_speed="$(jq -r '((.cpuspeed // 0) | tonumber?) // 0' <<<"${service_offering_json}")"
+    if [[ "${offering_cpu_speed}" =~ ^[0-9]+$ && "${offering_cpu_speed}" -gt 0 ]]; then
+      echo "Cloud service offering defines CPU speed ${offering_cpu_speed} MHz; using the offering value without an override." >&2
+    fi
+  else
+    echo "Cloud service offering metadata is unavailable; continuing without making CPU speed a hard dependency." >&2
+    service_offering_json='{}'
+  fi
+  source_deploy_params="$(v2k_cloud_target_source_deploy_params_json \
+    "${manifest}" "${service_offering_json}")" || return $?
   disk_count="$(jq -r '.disks | length' "${manifest}")"
   [[ "${disk_count}" -gt 0 ]] || {
     echo "Cloud target cutover requires at least one migrated disk." >&2
