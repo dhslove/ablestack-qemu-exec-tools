@@ -9504,8 +9504,15 @@ selftest_case_dr_full_resync_request_is_one_shot() {
 
   ftctl_state_set_path "${status_path}" \
     "run=scheduler-owner-run" \
+    "scheduler_session_uuid=scheduler-session" \
+    "scheduler_lease_epoch=7" \
     "latest_completed_producer_run_uuid=${run}" \
+    "latest_completed_checkpoint_sequence=42" \
     "latest_completed_requested_mode=FULL_RESEED" \
+    "latest_completed_effective_mode=FULL_RESEED" \
+    "latest_completed_cycle_token=${plan}:42" \
+    "data_commit_state=LOCAL_DURABLE" \
+    "target_durable=true" \
     "latest_completed_target_durable_at=2026-07-31T00:00:02Z"
   ftctl_dr_scheduler_project_requested_cycle_run "${plan}" "${run}" "${status_path}" \
     "READY" "full-resync-completed" "100" "" ""
@@ -9515,6 +9522,40 @@ selftest_case_dr_full_resync_request_is_one_shot() {
     "completed request producer identity"
   selftest_assert_eq "$(ftctl_state_read_kv "${run_path}" latest_completed_requested_mode)" "FULL_RESEED" \
     "completed request mode"
+  selftest_assert_eq "$(ftctl_state_read_kv "${run_path}" terminal_authoritative)" "true" \
+    "completed request terminal authority"
+  selftest_assert_file_contains "$(ftctl_dr_runtime_run_journal_path "${plan}" "${run}" terminal)" \
+    "terminal_source=ENGINE_TERMINAL"
+  ftctl_dr_scheduler_control_set "${plan}" "run" "next-incremental" "scheduler-next-run" "false" >/dev/null
+  selftest_assert_contains "$(ftctl_dr_runtime_status "${plan}" "${run}" 0 20 1)" \
+    '"control_request_run_uuid":"run-full-resync-request"' \
+    "operation request owner survives the next incremental cycle"
+}
+
+selftest_case_dr_requested_cycle_terminal_repair_matrix() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR repairs durable one-disk, two-disk, and Windows requested cycles"
+  local variant plan run run_path output terminal_path
+  for variant in linux-one-disk linux-two-disk windows-two-disk; do
+    plan="plan-terminal-repair-${variant}"
+    run="run-terminal-repair-${variant}"
+    ftctl_dr_runtime_ensure_plan_dirs "${plan}"
+    run_path="$(ftctl_dr_runtime_run_path "${plan}" "${run}")"
+    terminal_path="$(ftctl_dr_runtime_run_journal_path "${plan}" "${run}" terminal)"
+    ftctl_state_write_kv_all "${run_path}" \
+      "plan=${plan}" "run=${run}" "action=dr-sync-start" \
+      "state=READY" "step=full-resync-completed" "progress=100" \
+      "control_request_run_uuid=${run}" "requested_cycle_owner_run=${run}" \
+      "requested_cycle_state=COMPLETED" "latest_completed_checkpoint_sequence=9" \
+      "latest_completed_requested_mode=FULL_RESEED" "latest_completed_effective_mode=FULL_RESEED" \
+      "latest_completed_cycle_token=${plan}:9" "data_commit_state=LOCAL_DURABLE" \
+      "target_durable=true" "guest_family=$([[ "${variant}" == windows-* ]] && printf WINDOWS || printf LINUX)" \
+      "target_disk_count=$([[ "${variant}" == *two-disk ]] && printf 2 || printf 1)"
+    output="$(ftctl_dr_runtime_status "${plan}" "${run}" 0 20 1)"
+    selftest_assert_file_contains "${terminal_path}" "terminal_authoritative=true"
+    selftest_assert_contains "${output}" '"terminal_source":"ENGINE_TERMINAL"' "${variant} terminal source"
+    selftest_assert_contains "${output}" '"terminal_authoritative":true' "${variant} terminal authority"
+  done
 }
 
 selftest_case_dr_transition_preflight_is_read_only() {
@@ -10178,6 +10219,7 @@ selftest_main() {
   selftest_case_dr_scheduler_systemd_launch_contract
   selftest_case_dr_vmware_canonical_profile_preserves_committed_baseline
   selftest_case_dr_full_resync_request_is_one_shot
+  selftest_case_dr_requested_cycle_terminal_repair_matrix
   selftest_case_dr_runtime_planned_failover_promotes_latest_checkpoint
   selftest_case_dr_runtime_cloud_cutover_commit_is_idempotent
   selftest_case_dr_runtime_cloud_cutover_commit_v2_is_durable

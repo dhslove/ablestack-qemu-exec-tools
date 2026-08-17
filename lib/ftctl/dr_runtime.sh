@@ -3530,7 +3530,15 @@ ftctl_dr_runtime_emit_state_json() {
   scheduler_immediate_cycle_owner_run="$(ftctl_state_read_kv "$(ftctl_dr_scheduler_sequence_path "${plan}")" "immediate_cycle_owner_run" 2>/dev/null || true)"
   [[ -z "${scheduler_immediate_cycle_owner_run}" ]] || immediate_cycle_owner_run="${scheduler_immediate_cycle_owner_run}"
   scheduler_control_request_run_uuid="$(ftctl_dr_scheduler_control_value "${plan}" "owner_run")"
-  [[ -z "${scheduler_control_request_run_uuid}" ]] || control_request_run_uuid="${scheduler_control_request_run_uuid}"
+  if [[ -z "${run}" ]]; then
+    [[ -z "${scheduler_control_request_run_uuid}" ]] || control_request_run_uuid="${scheduler_control_request_run_uuid}"
+  else
+    # An operation-scoped status keeps the immutable request owner even after
+    # the plan scheduler accepts a later incremental cycle.
+    [[ -n "${control_request_run_uuid}" ]] \
+      || control_request_run_uuid="$(ftctl_dr_runtime_state_get_from_path "${state_path}" requested_cycle_owner_run)"
+    [[ -n "${control_request_run_uuid}" ]] || control_request_run_uuid="${run}"
+  fi
   if [[ -z "${run}" ]]; then
     transfer_owner_run_uuid="${control_request_run_uuid:-${immediate_cycle_owner_run:-${active_worker_run_uuid}}}"
     progress_journal_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "transfer_progress_path")"
@@ -6369,7 +6377,7 @@ ftctl_dr_runtime_capabilities() {
       first="0"
       printf '"%s"' "$(ftctl__json_escape "${command}")"
     done
-    printf '],"supported_features":["async-run","status-projection","status-scope-v2","target-materialized-notify","target-materialized-idempotent","target-materialization-manifest-v2","target-resource-ownership-generation-v1","hardware-contract-projection","control-protocol-v2","control-protocol-v3","control-protocol-v4","dr-scheduler-singleton-v1","dr-scheduler-self-owner-repair-v1","dr-scheduler-systemd-unit-v1","dr-sync-recover-v1","dr-local-reconcile-fence-v1","dr-checkpoint-producer-v1","dr-nbd-deterministic-drain-v1","dr-nbd-cleanup-recovery-v1","dr-plan-authority-snapshot-v1","dr-failover-authority-snapshot-v1","dr-completed-cycle-evidence-v2","dr-failover-abort-v1","dr-failover-cutover-reverse-baseline-v1","dr-transition-preflight-v1","dr-transition-preflight-v2","dr-reverse-preflight-v2","dr-reverse-evidence-publication-v1","dr-reverse-rbd-snapshot-readonly-v1","dr-terminal-causality-v1","dr-failback-resume-terminal-v1","dr-worker-journal-v1","dr-live-transfer-progress-v1","dr-runtime-reconciliation-v1","dr-release-tombstone-v1","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","guest-preparation-v1","guest-preparation-v2","test-domain-lifecycle-v1","test-artifact-lifecycle-v2","cloud-managed-test-vm-v1","cutover-ready-v1","cutover-manifest-v2","cutover-preflight-v1","cloud-cutover-commit-v1","cloud-cutover-commit-envelope-v2","cloud-cutover-commit-journal-v2","cloud-cutover-commit-status-v1","cloud-failback-lifecycle-v1","dr-failback-commit-journal-v1","dr-failback-commit-journal-v2","dr-failback-commit-envelope-v1","dr-failback-commit-journal-v3","dr-failback-late-ack-reconcile-v1","dr-failback-rollback-fence-v1"]}\n'
+    printf '],"supported_features":["async-run","status-projection","status-scope-v2","target-materialized-notify","target-materialized-idempotent","target-materialization-manifest-v2","target-resource-ownership-generation-v1","hardware-contract-projection","control-protocol-v2","control-protocol-v3","control-protocol-v4","dr-scheduler-singleton-v1","dr-scheduler-self-owner-repair-v1","dr-scheduler-systemd-unit-v1","dr-sync-recover-v1","dr-local-reconcile-fence-v1","dr-checkpoint-producer-v1","dr-nbd-deterministic-drain-v1","dr-nbd-cleanup-recovery-v1","dr-plan-authority-snapshot-v1","dr-failover-authority-snapshot-v1","dr-completed-cycle-evidence-v2","dr-failover-abort-v1","dr-failover-cutover-reverse-baseline-v1","dr-transition-preflight-v1","dr-transition-preflight-v2","dr-reverse-preflight-v2","dr-reverse-evidence-publication-v1","dr-reverse-rbd-snapshot-readonly-v1","dr-terminal-causality-v1","dr-requested-cycle-terminal-v1","dr-failback-resume-terminal-v1","dr-worker-journal-v1","dr-live-transfer-progress-v1","dr-runtime-reconciliation-v1","dr-release-tombstone-v1","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","guest-preparation-v1","guest-preparation-v2","test-domain-lifecycle-v1","test-artifact-lifecycle-v2","cloud-managed-test-vm-v1","cutover-ready-v1","cutover-manifest-v2","cutover-preflight-v1","cloud-cutover-commit-v1","cloud-cutover-commit-envelope-v2","cloud-cutover-commit-journal-v2","cloud-cutover-commit-status-v1","cloud-failback-lifecycle-v1","dr-failback-commit-journal-v1","dr-failback-commit-journal-v2","dr-failback-commit-envelope-v1","dr-failback-commit-journal-v3","dr-failback-late-ack-reconcile-v1","dr-failback-rollback-fence-v1"]}\n'
     return 0
   fi
 
@@ -6377,6 +6385,56 @@ ftctl_dr_runtime_capabilities() {
   for command in "${commands[@]}"; do
     printf '  %s\n' "${command}"
   done
+}
+
+ftctl_dr_runtime_repair_requested_cycle_terminal() {
+  local plan="${1-}" run="${2-}" path="${3-}"
+  local state step progress owner requested_state mode commit_state durable sequence token
+  local terminal_path nonce generation now
+
+  [[ -n "${plan}" && -n "${run}" && -f "${path}" ]] || return 0
+  terminal_path="$(ftctl_dr_runtime_run_journal_path "${plan}" "${run}" terminal)"
+  [[ ! -f "${terminal_path}" ]] || return 0
+  state="$(ftctl_dr_runtime_state_get_from_path "${path}" state)"
+  step="$(ftctl_dr_runtime_state_get_from_path "${path}" step)"
+  progress="$(ftctl_dr_runtime_state_get_from_path "${path}" progress)"
+  owner="$(ftctl_dr_runtime_state_get_from_path "${path}" control_request_run_uuid)"
+  [[ -n "${owner}" ]] || owner="$(ftctl_dr_runtime_state_get_from_path "${path}" requested_cycle_owner_run)"
+  requested_state="$(ftctl_dr_runtime_state_get_from_path "${path}" requested_cycle_state)"
+  mode="$(ftctl_dr_runtime_state_get_from_path "${path}" latest_completed_effective_mode)"
+  [[ -n "${mode}" ]] || mode="$(ftctl_dr_runtime_state_get_from_path "${path}" latest_completed_requested_mode)"
+  commit_state="$(ftctl_dr_runtime_state_get_from_path "${path}" data_commit_state)"
+  durable="$(ftctl_dr_runtime_state_get_from_path "${path}" target_durable)"
+  sequence="$(ftctl_dr_runtime_state_get_from_path "${path}" latest_completed_checkpoint_sequence)"
+  token="$(ftctl_dr_runtime_state_get_from_path "${path}" latest_completed_cycle_token)"
+  [[ "${state}" == "READY" && "${step}" == "full-resync-completed" && "${progress}" == "100" \
+        && "${owner}" == "${run}" && "${requested_state:-COMPLETED}" == "COMPLETED" \
+        && ( "${mode}" == "FULL_RESEED" || "${mode}" == "FULL_SEED" ) \
+        && ( "${commit_state}" == "LOCAL_DURABLE" || "${commit_state}" == "COMMITTED" || "${commit_state}" == "DURABLE" ) \
+        && "${durable}" == "true" && "${sequence}" =~ ^[1-9][0-9]*$ && -n "${token}" ]] || return 0
+
+  nonce="$(ftctl_dr_runtime_state_get_from_path "${path}" scheduler_session_uuid)"
+  generation="$(ftctl_dr_runtime_state_get_from_path "${path}" scheduler_lease_epoch)"
+  [[ -n "${nonce}" ]] || nonce="status-repair:${plan}"
+  [[ "${generation}" =~ ^[0-9]+$ ]] || generation="0"
+  now="$(ftctl_now_iso8601)"
+  ftctl_dr_runtime_terminal_journal_write "${plan}" "${run}" "${nonce}" "${generation}" \
+    "SUCCEEDED" "0" "" "${now}" || return $?
+  ftctl_dr_runtime_path_set "${path}" \
+    "control_request_run_uuid=${run}" \
+    "requested_cycle_state=COMPLETED" \
+    "worker_state=TERMINAL_PUBLISHED" \
+    "worker_exit_code=0" \
+    "transfer_activity_state=IDLE" \
+    "terminal_source=ENGINE_TERMINAL" \
+    "terminal_version=1" \
+    "terminal_authoritative=true" \
+    "runtime_endpoints_drained=true" \
+    "terminal_publication_pending=false" \
+    "terminal_repaired_at=${now}" \
+    "updated_at=${now}"
+  ftctl_log_event "dr-runtime" "dr.requested-cycle.terminal-repair" "ok" "" "" \
+    "plan=${plan} run=${run} sequence=${sequence}"
 }
 
 ftctl_dr_runtime_status() {
@@ -6408,6 +6466,9 @@ ftctl_dr_runtime_status() {
   fi
 
   [[ -n "${run}" && ! -f "$(ftctl_dr_runtime_run_path "${plan}" "${run}")" ]] && result="run_not_found"
+  if [[ -n "${run}" && "${result}" != "run_not_found" ]]; then
+    ftctl_dr_runtime_repair_requested_cycle_terminal "${plan}" "${run}" "${path}" || true
+  fi
   if [[ -z "${run}" ]]; then
     # The durable failback sidecar can reach COMPLETED just after a forward
     # cycle publishes status. Rebuild plan authority at read time as well so

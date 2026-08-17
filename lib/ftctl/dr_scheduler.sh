@@ -695,11 +695,32 @@ ftctl_dr_scheduler_control_value() {
 
 ftctl_dr_scheduler_project_requested_cycle_run() {
   local plan="${1-}" owner_run="${2-}" status_path="${3-}" state="${4-}" step="${5-}" progress="${6-}"
-  local error_code="${7-}" error_message="${8-}" run_path now
+  local error_code="${7-}" error_message="${8-}" run_path now terminal="false"
+  local terminal_state="" terminal_exit_code="0" launch_nonce generation
 
   [[ -n "${plan}" && -n "${owner_run}" && -n "${status_path}" && -f "${status_path}" ]] || return 2
   run_path="$(ftctl_dr_runtime_run_path "${plan}" "${owner_run}")"
   now="$(ftctl_now_iso8601)"
+  if [[ "${state}" == "READY" && "${step}" == "full-resync-completed" \
+        && "${progress}" == "100" && -z "${error_code}" ]]; then
+    terminal="true"
+    terminal_state="SUCCEEDED"
+  elif [[ "${state}" == "ERROR" || "${state}" == "FAILED" ]]; then
+    terminal="true"
+    terminal_state="FAILED"
+    terminal_exit_code="1"
+  fi
+  if [[ "${terminal}" == "true" ]]; then
+    launch_nonce="$(ftctl_dr_runtime_state_get_from_path "${status_path}" scheduler_session_uuid)"
+    generation="$(ftctl_dr_runtime_state_get_from_path "${status_path}" scheduler_lease_epoch)"
+    [[ -n "${launch_nonce}" ]] || launch_nonce="scheduler:${plan}"
+    [[ "${generation}" =~ ^[0-9]+$ ]] || generation="0"
+    # Publish the durable terminal owner before the scheduler can advance to
+    # another cycle. dr-status --run then remains stable across that race.
+    ftctl_dr_runtime_terminal_journal_write "${plan}" "${owner_run}" \
+      "${launch_nonce}" "${generation}" "${terminal_state}" \
+      "${terminal_exit_code}" "${error_code}" "${now}" || return $?
+  fi
   if command -v ftctl_dr_runtime_atomic_copy >/dev/null 2>&1; then
     ftctl_dr_runtime_atomic_copy "${status_path}" "${run_path}" "0644" || return $?
   else
@@ -714,11 +735,26 @@ ftctl_dr_scheduler_project_requested_cycle_run() {
     "step=${step}" \
     "progress=${progress}" \
     "accepted=true" \
+    "control_request_run_uuid=${owner_run}" \
     "requested_cycle_mode=FULL_RESEED" \
     "requested_cycle_owner_run=${owner_run}" \
+    "requested_cycle_state=$([[ "${terminal}" == "true" ]] && printf COMPLETED || printf RUNNING)" \
     "error_code=${error_code}" \
     "error_message=${error_message}" \
     "updated_at=${now}"
+  if [[ "${terminal}" == "true" ]]; then
+    ftctl_state_set_path "${run_path}" \
+      "worker_state=TERMINAL_PUBLISHED" \
+      "worker_exit_code=${terminal_exit_code}" \
+      "transfer_activity_state=IDLE" \
+      "terminal_source=ENGINE_TERMINAL" \
+      "terminal_version=1" \
+      "terminal_authoritative=true" \
+      "runtime_endpoints_drained=true" \
+      "terminal_publication_pending=false" \
+      "terminal_publication_pending_since=" \
+      "updated_at=${now}" || return $?
+  fi
 }
 
 ftctl_dr_scheduler_request_cycle() {
