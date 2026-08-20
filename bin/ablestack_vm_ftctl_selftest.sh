@@ -310,6 +310,7 @@ selftest_run_lint() {
   local files=(
     "bin/ablestack_vm_ftctl.sh"
     "bin/ablestack_vm_ftctl_selftest.sh"
+    "bin/ablestack_vm_ftctl_dr_rolling_reload.sh"
     "lib/ftctl/common.sh"
     "lib/ftctl/config.sh"
     "lib/ftctl/logging.sh"
@@ -9535,7 +9536,7 @@ selftest_case_dr_full_resync_request_is_one_shot() {
 selftest_case_dr_requested_cycle_terminal_repair_matrix() {
   selftest_reset_env
   selftest_info "FTCTL_DR repairs durable one-disk, two-disk, and Windows requested cycles"
-  local variant plan run run_path output terminal_path
+  local variant plan run run_path output terminal_path sequence_path
   for variant in linux-one-disk linux-two-disk windows-two-disk; do
     plan="plan-terminal-repair-${variant}"
     run="run-terminal-repair-${variant}"
@@ -9551,12 +9552,70 @@ selftest_case_dr_requested_cycle_terminal_repair_matrix() {
       "latest_completed_cycle_token=${plan}:9" "data_commit_state=LOCAL_DURABLE" \
       "target_durable=true" "guest_family=$([[ "${variant}" == windows-* ]] && printf WINDOWS || printf LINUX)" \
       "target_disk_count=$([[ "${variant}" == *two-disk ]] && printf 2 || printf 1)"
+    if [[ "${variant}" == "linux-two-disk" ]]; then
+      ftctl_dr_runtime_path_set "${run_path}" "requested_cycle_state=PENDING"
+      sequence_path="$(ftctl_dr_scheduler_sequence_path "${plan}")"
+      mkdir -p "$(dirname "${sequence_path}")"
+      ftctl_state_write_kv_all "${sequence_path}" \
+        "requested_cycle_owner_run=${run}" \
+        "requested_cycle_sequence=9" \
+        "requested_cycle_state=COMPLETED"
+    fi
     output="$(ftctl_dr_runtime_status "${plan}" "${run}" 0 20 1)"
     selftest_assert_file_contains "${terminal_path}" "terminal_authoritative=true"
     selftest_assert_contains "${output}" '"terminal_source":"ENGINE_TERMINAL"' "${variant} terminal source"
     selftest_assert_contains "${output}" '"terminal_authoritative":true' "${variant} terminal authority"
   done
+
+  plan="plan-terminal-repair-mismatch"
+  run="run-terminal-repair-mismatch"
+  ftctl_dr_runtime_ensure_plan_dirs "${plan}"
+  run_path="$(ftctl_dr_runtime_run_path "${plan}" "${run}")"
+  terminal_path="$(ftctl_dr_runtime_run_journal_path "${plan}" "${run}" terminal)"
+  sequence_path="$(ftctl_dr_scheduler_sequence_path "${plan}")"
+  mkdir -p "$(dirname "${sequence_path}")"
+  ftctl_state_write_kv_all "${run_path}" \
+    "plan=${plan}" "run=${run}" "state=READY" "step=full-resync-completed" "progress=100" \
+    "control_request_run_uuid=${run}" "requested_cycle_state=PENDING" \
+    "latest_completed_checkpoint_sequence=9" "latest_completed_effective_mode=FULL_RESEED" \
+    "latest_completed_cycle_token=${plan}:9" "data_commit_state=LOCAL_DURABLE" "target_durable=true"
+  ftctl_state_write_kv_all "${sequence_path}" \
+    "requested_cycle_owner_run=another-run" "requested_cycle_sequence=9" "requested_cycle_state=COMPLETED"
+  ftctl_dr_runtime_status "${plan}" "${run}" 0 20 1 >/dev/null
+  [[ ! -f "${terminal_path}" ]] || selftest_fail "mismatched scheduler owner must not repair terminal journal"
 }
+
+selftest_case_dr_requested_cycle_terminal_barrier_retries() (
+  selftest_reset_env
+  selftest_info "FTCTL_DR terminal publication is a required barrier before requested Cycle completion"
+  local plan="plan-terminal-barrier" run="run-terminal-barrier" status_path sequence_path attempts=0
+  ftctl_dr_runtime_ensure_plan_dirs "${plan}"
+  status_path="$(ftctl_dr_runtime_status_path "${plan}")"
+  sequence_path="$(ftctl_dr_scheduler_sequence_path "${plan}")"
+  mkdir -p "$(dirname "${sequence_path}")"
+  ftctl_state_write_kv_all "${status_path}" \
+    "plan=${plan}" "run=${run}" "state=READY" "step=full-resync-completed" "progress=100" \
+    "latest_completed_checkpoint_sequence=12" "latest_completed_requested_mode=FULL_RESEED" \
+    "latest_completed_effective_mode=FULL_RESEED" "latest_completed_cycle_token=${plan}:12" \
+    "data_commit_state=LOCAL_DURABLE" "target_durable=true"
+  cp -f "${status_path}" "$(ftctl_dr_runtime_run_path "${plan}" "${run}")"
+  ftctl_state_write_kv_all "${sequence_path}" \
+    "requested_cycle_owner_run=${run}" "requested_cycle_sequence=12" "requested_cycle_state=RUNNING"
+  ftctl_dr_scheduler_project_requested_cycle_run() {
+    attempts=$((attempts + 1))
+    [[ "${attempts}" -gt 1 ]] || return 1
+    ftctl_dr_runtime_terminal_journal_write "${plan}" "${run}" "barrier-test" "1" \
+      "SUCCEEDED" "0" "" "$(ftctl_now_iso8601)"
+    ftctl_dr_runtime_path_set "$(ftctl_dr_runtime_run_path "${plan}" "${run}")" \
+      "terminal_authoritative=true" "terminal_publication_pending=false"
+  }
+  sleep() { :; }
+  ftctl_dr_scheduler_publish_requested_cycle_terminal "${plan}" "${run}" "${status_path}" "${sequence_path}" 12
+  selftest_assert_eq "$(ftctl_state_read_kv "${sequence_path}" requested_cycle_state)" "COMPLETED" \
+    "requested Cycle completes only after terminal publication"
+  selftest_assert_eq "$(ftctl_state_read_kv "${status_path}" terminal_publication_pending)" "false" \
+    "terminal publication pending flag clears"
+)
 
 selftest_case_dr_transition_preflight_is_read_only() {
   selftest_reset_env
@@ -10220,6 +10279,7 @@ selftest_main() {
   selftest_case_dr_vmware_canonical_profile_preserves_committed_baseline
   selftest_case_dr_full_resync_request_is_one_shot
   selftest_case_dr_requested_cycle_terminal_repair_matrix
+  selftest_case_dr_requested_cycle_terminal_barrier_retries
   selftest_case_dr_runtime_planned_failover_promotes_latest_checkpoint
   selftest_case_dr_runtime_cloud_cutover_commit_is_idempotent
   selftest_case_dr_runtime_cloud_cutover_commit_v2_is_durable

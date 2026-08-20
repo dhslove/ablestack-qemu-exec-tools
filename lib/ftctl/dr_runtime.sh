@@ -6389,7 +6389,8 @@ ftctl_dr_runtime_capabilities() {
 
 ftctl_dr_runtime_repair_requested_cycle_terminal() {
   local plan="${1-}" run="${2-}" path="${3-}"
-  local state step progress owner requested_state mode commit_state durable sequence token
+  local state step progress owner requested_state mode commit_state durable sequence token expected_token
+  local scheduler_path scheduler_owner scheduler_state scheduler_sequence run_requested_sequence
   local terminal_path nonce generation now
 
   [[ -n "${plan}" && -n "${run}" && -f "${path}" ]] || return 0
@@ -6407,11 +6408,25 @@ ftctl_dr_runtime_repair_requested_cycle_terminal() {
   durable="$(ftctl_dr_runtime_state_get_from_path "${path}" target_durable)"
   sequence="$(ftctl_dr_runtime_state_get_from_path "${path}" latest_completed_checkpoint_sequence)"
   token="$(ftctl_dr_runtime_state_get_from_path "${path}" latest_completed_cycle_token)"
+  run_requested_sequence="$(ftctl_dr_runtime_state_get_from_path "${path}" requested_cycle_sequence)"
+  expected_token="${plan}:${sequence}"
+  if [[ "${requested_state}" != "COMPLETED" ]]; then
+    scheduler_path="$(ftctl_dr_runtime_plan_dir "${plan}")/scheduler/sequence.state"
+    [[ -f "${scheduler_path}" ]] || return 0
+    scheduler_owner="$(ftctl_dr_runtime_state_get_from_path "${scheduler_path}" requested_cycle_owner_run)"
+    scheduler_state="$(ftctl_dr_runtime_state_get_from_path "${scheduler_path}" requested_cycle_state)"
+    scheduler_sequence="$(ftctl_dr_runtime_state_get_from_path "${scheduler_path}" requested_cycle_sequence)"
+    [[ "${scheduler_owner}" == "${run}" && "${scheduler_state}" == "COMPLETED" \
+          && "${scheduler_sequence}" =~ ^[1-9][0-9]*$ && "${scheduler_sequence}" == "${sequence}" ]] || return 0
+    requested_state="COMPLETED"
+  fi
   [[ "${state}" == "READY" && "${step}" == "full-resync-completed" && "${progress}" == "100" \
-        && "${owner}" == "${run}" && "${requested_state:-COMPLETED}" == "COMPLETED" \
+        && "${owner}" == "${run}" && "${requested_state}" == "COMPLETED" \
         && ( "${mode}" == "FULL_RESEED" || "${mode}" == "FULL_SEED" ) \
         && ( "${commit_state}" == "LOCAL_DURABLE" || "${commit_state}" == "COMMITTED" || "${commit_state}" == "DURABLE" ) \
-        && "${durable}" == "true" && "${sequence}" =~ ^[1-9][0-9]*$ && -n "${token}" ]] || return 0
+        && "${durable}" == "true" && "${sequence}" =~ ^[1-9][0-9]*$ \
+        && "${token}" == "${expected_token}" \
+        && ( -z "${run_requested_sequence}" || "${run_requested_sequence}" == "${sequence}" ) ]] || return 0
 
   nonce="$(ftctl_dr_runtime_state_get_from_path "${path}" scheduler_session_uuid)"
   generation="$(ftctl_dr_runtime_state_get_from_path "${path}" scheduler_lease_epoch)"

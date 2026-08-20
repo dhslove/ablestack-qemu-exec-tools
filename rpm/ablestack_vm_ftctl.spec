@@ -46,6 +46,7 @@ install -d %{buildroot}/usr/local/bin
 install -m 0755 bin/ablestack_vm_ftctl.sh %{buildroot}/usr/local/bin/ablestack_vm_ftctl
 install -m 0755 bin/ablestack_vm_ftctl_selftest.sh %{buildroot}/usr/local/bin/ablestack_vm_ftctl_selftest
 install -m 0755 bin/ablestack_vm_ftctl_firewalld.sh %{buildroot}/usr/local/bin/ablestack_vm_ftctl_firewalld
+install -m 0755 bin/ablestack_vm_ftctl_dr_rolling_reload.sh %{buildroot}/usr/local/bin/ablestack_vm_ftctl_dr_rolling_reload
 
 install -d %{buildroot}/usr/local/lib/ablestack-qemu-exec-tools/ftctl
 cp -a lib/ftctl/* %{buildroot}/usr/local/lib/ablestack-qemu-exec-tools/ftctl/
@@ -128,6 +129,7 @@ fi
 /usr/local/bin/ablestack_vm_ftctl
 /usr/local/bin/ablestack_vm_ftctl_selftest
 /usr/local/bin/ablestack_vm_ftctl_firewalld
+/usr/local/bin/ablestack_vm_ftctl_dr_rolling_reload
 /usr/local/lib/ablestack-qemu-exec-tools/ftctl/
 %config(noreplace) /etc/ablestack/ablestack-vm-ftctl.conf
 %config(noreplace) /etc/ablestack/ablestack-vm-ftctl-cluster.conf

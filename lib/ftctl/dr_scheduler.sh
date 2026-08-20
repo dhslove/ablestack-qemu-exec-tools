@@ -757,6 +757,46 @@ ftctl_dr_scheduler_project_requested_cycle_run() {
   fi
 }
 
+ftctl_dr_scheduler_publish_requested_cycle_terminal() {
+  local plan="${1-}" owner_run="${2-}" status_path="${3-}" sequence_path="${4-}" sequence="${5-}"
+  local retry_sec="${FTCTL_DR_TERMINAL_PUBLISH_RETRY_SEC:-2}" now command
+
+  [[ "${retry_sec}" =~ ^[1-9][0-9]*$ ]] || retry_sec=2
+  while true; do
+    now="$(ftctl_now_iso8601)"
+    ftctl_state_set_path "${sequence_path}" \
+      "requested_cycle_state=TERMINALIZING" \
+      "requested_cycle_sequence=${sequence}" \
+      "requested_cycle_error=" \
+      "requested_cycle_terminalizing_at=${now}" || true
+    ftctl_dr_runtime_path_set "${status_path}" \
+      "cycle_state=TERMINALIZING" \
+      "replication_activity=IDLE" \
+      "terminal_publication_pending=true" \
+      "updated_at=${now}" || true
+    if ftctl_dr_scheduler_project_requested_cycle_run "${plan}" "${owner_run}" "${status_path}" \
+        "READY" "full-resync-completed" "100" "" ""; then
+      now="$(ftctl_now_iso8601)"
+      if ftctl_state_set_path "${sequence_path}" \
+          "requested_cycle_state=COMPLETED" \
+          "requested_cycle_error=" \
+          "requested_cycle_completed_at=${now}"; then
+        ftctl_dr_runtime_path_set "${status_path}" \
+          "cycle_state=IDLE" \
+          "replication_activity=IDLE" \
+          "terminal_publication_pending=false" \
+          "updated_at=${now}" || true
+        return 0
+      fi
+    fi
+    ftctl_log_event "dr-runtime" "dr.scheduler.terminal-publish" "retry" "DR_TERMINAL_PUBLICATION_PENDING" "" \
+      "plan=${plan} run=${owner_run} sequence=${sequence} retry_after=${retry_sec}"
+    command="$(ftctl_dr_scheduler_control_command "${plan}")"
+    [[ "${command}" != "stop" ]] || return 1
+    sleep "${retry_sec}"
+  done
+}
+
 ftctl_dr_scheduler_request_cycle() {
   local plan="${1-}" owner_run="${2-}" requested_mode="${3-}" run_path="${4-}" status_path="${5-}" force_immediate="${6-true}"
   local sequence_path generation now normalized_mode
@@ -1330,6 +1370,7 @@ ftctl_dr_scheduler_worker() {
   local session lease_epoch authority_sequence start_ticks owner_lock_path
   local initial_jitter cycle_jitter bandwidth_limit_mbps resource_retry_sec resource_retry_attempt resource_retry_delay
   local pending_resource_sequence pending_resource_cycle_type pending_resource_run pending_resource_request_bound
+  local scheduler_code_path scheduler_code_sha256 scheduler_started_at
 
   [[ -n "${plan}" && -n "${run}" && -f "${profile_file}" && -f "${state_path}" ]] || return 2
   ftctl_ensure_dir "$(ftctl_dr_scheduler_dir "${plan}")" "0755"
@@ -1368,6 +1409,9 @@ ftctl_dr_scheduler_worker() {
   [[ "${bandwidth_limit_mbps}" =~ ^[0-9]+$ ]] || bandwidth_limit_mbps=0
   resource_retry_sec="${FTCTL_DR_RESOURCE_RETRY_SEC}"
   [[ "${resource_retry_sec}" =~ ^[1-9][0-9]*$ ]] || resource_retry_sec=15
+  scheduler_code_path="${BASH_SOURCE[0]}"
+  scheduler_code_sha256="$(sha256sum "${scheduler_code_path}" 2>/dev/null | awk '{print $1}')"
+  scheduler_started_at="$(ftctl_now_iso8601)"
 
   printf '%s\n' "$$" > "${pid_path}"
   control_generation="$(ftctl_dr_scheduler_control_generation "${plan}")"
@@ -1395,6 +1439,9 @@ ftctl_dr_scheduler_worker() {
     "active_worker_run_uuid=${run}" \
     "active_worker_pid=$$" \
     "active_worker_start_ticks=${start_ticks}" \
+    "scheduler_code_path=${scheduler_code_path}" \
+    "scheduler_code_sha256=${scheduler_code_sha256}" \
+    "scheduler_started_at=${scheduler_started_at}" \
     "worker_heartbeat_at=${now}" \
     "owner_matched=true" \
     "restore_points_path=${restore_points_path}" \
@@ -1921,12 +1968,18 @@ ftctl_dr_scheduler_worker() {
     ftctl_log_event "dr-runtime" "dr.scheduler.cycle" "ok" "" "" \
       "plan=${plan} run=${cycle_run} sequence=${sequence} type=${cycle_type} checkpoint=${checkpoint_path} rpo=${rpo}"
     if [[ "${cycle_request_bound}" == "true" ]]; then
-      ftctl_state_set_path "${sequence_path}" \
-        "requested_cycle_state=COMPLETED" \
-        "requested_cycle_error=" \
-        "requested_cycle_completed_at=${now}" || true
-      ftctl_dr_scheduler_project_requested_cycle_run "${plan}" "${cycle_run}" "${status_path}" \
-        "READY" "full-resync-completed" "100" "" "" || true
+      if ! ftctl_dr_scheduler_publish_requested_cycle_terminal "${plan}" "${cycle_run}" \
+          "${status_path}" "${sequence_path}" "${sequence}"; then
+        ftctl_dr_scheduler_update_state "${state_path}" "${status_path}" \
+          "state=READY" \
+          "step=result-finalizing" \
+          "progress=100" \
+          "cycle_state=TERMINALIZING" \
+          "replication_activity=IDLE" \
+          "terminal_publication_pending=true" \
+          "updated_at=$(ftctl_now_iso8601)" || true
+        break
+      fi
     fi
 
     if [[ "${max_cycles}" =~ ^[1-9][0-9]*$ && "${sequence}" -ge "${max_cycles}" ]]; then
