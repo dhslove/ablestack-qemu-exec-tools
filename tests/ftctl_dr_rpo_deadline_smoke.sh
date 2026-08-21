@@ -29,6 +29,31 @@ expected=$((durable_epoch + 300 - 40 - 4))
 actual="$(ftctl_dr_scheduler_next_deadline_epoch "${durable_at}" 300 40 4)"
 [[ "${actual}" == "${expected}" ]]
 
+# Control and heartbeat work inside the wait loop must not accumulate into the
+# RPO interval. Model two seconds of wall-clock progress per loop with no real
+# sleeping and verify that a three-second wait exits after two probes.
+clock_path="${TMP}/clock"
+probe_path="${TMP}/probes"
+printf '100\n' > "${clock_path}"
+printf '0\n' > "${probe_path}"
+ftctl_dr_scheduler_now_epoch() {
+  local value
+  value="$(cat "${clock_path}")"
+  printf '%s\n' $((value + 2)) > "${clock_path}"
+  printf '%s\n' "${value}"
+}
+ftctl_dr_scheduler_control_command() {
+  local probes
+  probes="$(cat "${probe_path}")"
+  printf '%s\n' $((probes + 1)) > "${probe_path}"
+  printf 'run\n'
+}
+ftctl_dr_scheduler_control_generation() { printf '7\n'; }
+ftctl_dr_scheduler_active_worker_valid() { return 1; }
+sleep() { :; }
+ftctl_dr_scheduler_sleep_or_stop plan 3 7
+[[ "$(cat "${probe_path}")" == "1" ]]
+
 checkpoint="${TMP}/checkpoint.json"
 printf '{"state":"READY"}\n' > "${checkpoint}"
 ftctl_dr_scheduler_append_restore_point "${restore_points}" plan run 9 incremental driver manifest "${checkpoint}" 47

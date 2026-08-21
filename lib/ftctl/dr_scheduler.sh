@@ -1322,9 +1322,12 @@ ftctl_dr_scheduler_run_cycle() {
 
 ftctl_dr_scheduler_sleep_or_stop() {
   local plan="${1-}" interval="${2-}" expected_generation="${3-}"
-  local slept=0 command generation session epoch run pid start_ticks
+  local deadline_epoch now_epoch command generation session epoch run pid start_ticks
   [[ "${interval}" =~ ^[0-9]+$ ]] || interval="0"
-  while (( slept < interval )); do
+  deadline_epoch=$(( $(ftctl_dr_scheduler_now_epoch) + interval ))
+  while true; do
+    now_epoch="$(ftctl_dr_scheduler_now_epoch)"
+    (( now_epoch < deadline_epoch )) || break
     command="$(ftctl_dr_scheduler_control_command "${plan}")"
     generation="$(ftctl_dr_scheduler_control_generation "${plan}")"
     [[ "${command}" != "stop" && "${command}" != "pause" ]] || return 1
@@ -1340,9 +1343,12 @@ ftctl_dr_scheduler_sleep_or_stop() {
       ftctl_dr_scheduler_write_heartbeat "${plan}" "${session}" "${epoch}" "${run}" "${pid}" "${start_ticks}" || true
     fi
     sleep 1
-    slept=$((slept + 1))
   done
   return 0
+}
+
+ftctl_dr_scheduler_now_epoch() {
+  date +%s
 }
 
 ftctl_dr_scheduler_last_sequence() {

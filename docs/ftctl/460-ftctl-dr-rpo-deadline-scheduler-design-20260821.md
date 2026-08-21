@@ -11,6 +11,7 @@
 - 스냅샷, CBT 조회, admission 대기, 전송 및 durable commit 시간이 RPO 예산에 포함되지 않았다.
 - 세 VM 동시 보호에서 durable 완료 간격은 340~345초였다.
 - 현재 상태는 다시 낮은 RPO로 갱신되지만 완료 직전에는 목표 RPO를 반복적으로 초과할 수 있었다.
+- 1차 deadline 구현 후에도 `sleep_or_stop()`이 실제 경과시간이 아니라 1초 반복 횟수를 사용했다. 각 반복의 제어 파일 확인과 heartbeat I/O가 누적되어 283초 대기가 실제로는 약 323초가 되었고, 계산된 `scheduler_next_run_at`보다 약 40초 늦게 Cycle이 시작되었다.
 
 ## 3. Deadline 계약
 
@@ -21,6 +22,8 @@ start_advance = execution_budget + bounded_jitter
 next_cycle_start = durable_deadline - start_advance
 sleep = max(0, next_cycle_start - now)
 ```
+
+대기 루프는 `sleep` 호출 횟수를 세지 않고, 시작 시 계산한 절대 epoch와 현재 epoch를 매 반복 비교한다. 제어 명령 확인과 heartbeat 기록 시간은 대기 예산을 추가로 소비하지 않으며, `scheduler_next_run_at`은 실제 wake-up barrier와 같은 deadline을 나타낸다.
 
 표본이 없으면 `clamp(targetRpo / 5, 30, targetRpo / 2)`를 초기 예산으로 사용한다. P95는 mover 전송시간이 아니라 Cycle lock/admission, snapshot, CBT, copy, commit, terminal publication을 포함한 scheduler 벽시계 시간이다. 실행 예산은 최소 15초, 최대 RPO의 1/2로 제한한다.
 
@@ -50,11 +53,12 @@ FTCTL 상태에 다음 값을 항상 제공한다.
 ## 6. 검증
 
 1. 계산 단위 테스트: 표본 없음, P95, clamp, jitter, 이미 지난 deadline.
-2. 상태 테스트: 목표 RPO, sequence alias, 다음 실행 시각이 JSON에 항상 존재.
-3. 1/2 disk Linux와 Windows 동시 3계획, 연속 10 Cycle.
-4. 각 durable 간격이 `target RPO + 명시적 판정 grace` 이내인지 확인.
-5. 변경 VM은 CBT incremental bytes > 0, 미변경 VM은 NO_CHANGE 허용.
-6. 기존 Full Seed, NBD 범위, RBD locator와 terminal journal 회귀 확인.
+2. 대기 회귀 테스트: 제어/heartbeat 처리시간이 있어도 반복 횟수가 아니라 절대 epoch에 도달하면 종료.
+3. 상태 테스트: 목표 RPO, sequence alias, 다음 실행 시각이 JSON에 항상 존재.
+4. 1/2 disk Linux와 Windows 동시 3계획, 연속 10 Cycle.
+5. 각 durable 간격이 `target RPO + 명시적 판정 grace` 이내인지 확인.
+6. 변경 VM은 CBT incremental bytes > 0, 미변경 VM은 NO_CHANGE 허용.
+7. 기존 Full Seed, NBD 범위, RBD locator와 terminal journal 회귀 확인.
 
 ## 7. AS-IS / TO-BE
 
@@ -64,5 +68,6 @@ FTCTL 상태에 다음 값을 항상 제공한다.
 | 실행시간 | RPO 외부 비용 | P95 실행 예산으로 선반영 |
 | jitter | interval에 가산 | deadline 안에서 시작을 앞당김 |
 | 다음 실행 | 상태에서 누락 | `scheduler_next_run_at` 제공 |
+| scheduler 대기 | 반복 횟수에 I/O 시간이 누적 | 절대 epoch deadline까지 대기 |
 | 최신 sequence | checkpoint 명칭만 제공 | cycle alias도 제공 |
 | 데이터 경로 | 검증된 VDDK/NBD/librbd | 변경 없음 |
