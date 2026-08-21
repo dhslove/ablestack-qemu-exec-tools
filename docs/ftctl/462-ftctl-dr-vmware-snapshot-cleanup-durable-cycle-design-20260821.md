@@ -106,3 +106,25 @@ completed and the cycle journal reaches `LOCAL_DURABLE`. This final barrier is
 required for `NO_CHANGE`, full-seed, incremental, and multi-disk cycles alike;
 therefore a stale source-open failure cannot survive a successful durable cycle
 even when no per-disk CBT patch function was invoked.
+
+## 9. Test Release Verification
+
+- Source commit: `4900bd78ad3dae46b3bf5ca2318de4bf367f7eb8`
+- GitHub Actions run: `32469879056`
+- RPM: `ablestack_vm_ftctl-0.9.5-1.noarch.rpm`
+- RPM SHA256: `651a2508ae0bd69d1aee4d9add9b0adb68a2013d897792daedd5094e7c014cc2`
+- Installed mover SHA256 on all six compute hosts:
+  `5262a2862cc3c93375d63d336892f01a0d14d60874a309f71244149961534fe6`
+
+The package was installed on `10.10.32.1/2/3` with `aspkg` and on
+`10.10.22.1/2/3` with native `rpm`. All FTCTL timers remained active. The
+Rocky, Windows, and Ubuntu plans then completed automatic cycles 1932, 2827,
+and 1806 respectively. Every cycle was `LOCAL_DURABLE`, `READY`, and
+incrementally verified; Ubuntu transferred 1,769,472 bytes by CBT while Rocky
+and Windows correctly reported `NO_CHANGE`.
+
+For all three plans, `vmware-source-open.json` is now `ready=true` with an
+empty error code and the message `VMware source cycle completed`.
+`vmware-source-snapshot.json` is `CLEANED` with no active snapshot reference,
+and a direct vCenter `snapshot.tree` query returns no snapshots for the three
+source VMs.
