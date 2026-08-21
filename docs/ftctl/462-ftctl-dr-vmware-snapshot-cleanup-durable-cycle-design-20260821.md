@@ -186,3 +186,43 @@ and must never be used for a vCenter inventory lookup.
 - Existing reverse maps whose current path is already valid remain unchanged
   apart from resolution evidence.
 - Forward VMware-to-RBD and RBD source snapshot tests continue to pass.
+
+## 11. Failback Retry Snapshot Ownership
+
+### 11.1 Incident
+
+An Ubuntu reverse transfer completed and committed reverse baseline generation
+`1860` with RBD snapshot `ftctl-dr-3ace95d3-1859-0`. The later Cloud lifecycle
+gate rolled back because vCenter temporarily returned HTTP 503. A new UI
+Failback Run reused checkpoint sequence `1859`, attempted to create the same
+RBD snapshot name, and failed with `File exists` before transfer.
+
+The retained snapshot was not stale garbage. It was the current
+`LOCAL_DURABLE` reverse baseline and therefore could not be deleted to make the
+retry pass.
+
+### 11.2 Contract
+
+| Area | AS-IS | TO-BE |
+|---|---|---|
+| Reverse snapshot identity | `(plan, checkpoint, disk)` | `(plan, checkpoint, Run owner, disk)` |
+| New lifecycle retry | collides with a durable snapshot from the prior Run | creates an independent run-scoped delta snapshot |
+| Same-Run retry | `File exists` is terminal | uncommitted run-owned residue is removed and recreated under the plan lock |
+| Baseline safety | collision handling is undefined | a snapshot equal to the current baseline is never removed |
+| Forward path | potentially coupled to reverse naming | unchanged VMware-to-RBD CBT path |
+
+The generated name is deterministic for a Run so process-level retries are
+idempotent, while a new Cloud Run receives a different name even when the
+cutover checkpoint sequence is unchanged. Snapshot cleanup still removes only
+the rows recorded as created by the current attempt. The committed baseline is
+advanced atomically only after the reverse writer reaches durable completion.
+
+### 11.3 Verification
+
+- Two Run UUIDs at the same checkpoint generate different snapshot names.
+- A same-Run uncommitted snapshot is removed and recreated before reading live
+  KVM data.
+- A snapshot that is also the current durable baseline is rejected and is not
+  removed.
+- Existing reverse baseline selection, current VMware backing resolution, and
+  the forward VMware-to-RBD success path remain unchanged.

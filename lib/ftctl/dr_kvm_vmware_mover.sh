@@ -84,6 +84,27 @@ ftctl_kvm_vmware_load_previous_snapshot() {
   printf '%s\n' "${snapshot}"
 }
 
+ftctl_kvm_vmware_run_snapshot_name() {
+  local disk_index="${1-}" run_token
+  run_token="$(printf '%s' "${FTCTL_DR_RUN_UUID:-run}" | tr -c '[:alnum:]' '-' | cut -c1-12)"
+  printf 'ftctl-dr-%s-%s-%s-%s\n' \
+    "${FTCTL_DR_PLAN_UUID:0:8}" "${FTCTL_DR_CHECKPOINT_SEQUENCE}" "${run_token}" "${disk_index}"
+}
+
+ftctl_kvm_vmware_prepare_run_snapshot() {
+  local pool="${1-}" image="${2-}" previous_snapshot="${3-}" new_snapshot="${4-}"
+  local snapshot_ref="${pool}/${image}@${new_snapshot}"
+
+  [[ -n "${pool}" && -n "${image}" && -n "${new_snapshot}" ]] || return 86
+  if rbd snap info "${snapshot_ref}" >/dev/null 2>&1; then
+    # The plan lock prevents a concurrent owner. An existing run-scoped name is
+    # residue from an interrupted attempt and must be refreshed from live data.
+    [[ "${new_snapshot}" != "${previous_snapshot}" ]] || return 87
+    rbd snap rm "${snapshot_ref}" >/dev/null 2>&1 || return 86
+  fi
+  rbd snap create "${snapshot_ref}" || return 86
+}
+
 ftctl_kvm_vmware_start_writer() {
   local endpoint="${1-}" username="${2-}" password_file="${3-}" tls_verify="${4-}" thumbprint="${5-}" libdir="${6-}"
   local vm_ref="${7-}" vmdk="${8-}" socket_path="${9-}" log_path="${10-}" transports
@@ -308,8 +329,15 @@ main() {
         && ftctl_kvm_vmware_die "${rc}" "DR_REVERSE_BASELINE_REQUIRED: disk=${index} state=${baseline_file_state}"
       ftctl_kvm_vmware_die "${rc}" "DR_REVERSE_BASELINE_INVALID: disk=${index} state=${baseline_file_state}"
     fi
-    new_snapshot="ftctl-dr-${FTCTL_DR_PLAN_UUID:0:8}-${FTCTL_DR_CHECKPOINT_SEQUENCE}-${index}"
-    rbd snap create "${pool}/${image}@${new_snapshot}" || ftctl_kvm_vmware_die 86 "DR_REVERSE_SNAPSHOT_CREATE_FAILED: ${pool}/${image}"
+    new_snapshot="$(ftctl_kvm_vmware_run_snapshot_name "${index}")"
+    rc=0
+    ftctl_kvm_vmware_prepare_run_snapshot \
+      "${pool}" "${image}" "${previous_snapshot}" "${new_snapshot}" || rc=$?
+    if [[ "${rc}" != "0" ]]; then
+      [[ "${rc}" == "87" ]] \
+        && ftctl_kvm_vmware_die 87 "DR_REVERSE_SNAPSHOT_BASELINE_CONFLICT: ${pool}/${image}@${new_snapshot}"
+      ftctl_kvm_vmware_die 86 "DR_REVERSE_SNAPSHOT_CREATE_FAILED: ${pool}/${image}@${new_snapshot}"
+    fi
     row="$(jq -c --arg old "${previous_snapshot}" --arg new "${new_snapshot}" '. + {previousSnapshot:$old,newSnapshot:$new}' <<< "${row}")"
     jq --argjson row "${row}" '. + [$row]' "${rows_path}" > "${rows_path}.tmp" && mv -f "${rows_path}.tmp" "${rows_path}"
   done < <(jq -c '.disks[]' "${map_path}")

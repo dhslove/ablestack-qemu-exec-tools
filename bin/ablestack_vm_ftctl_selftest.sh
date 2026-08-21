@@ -140,6 +140,13 @@ selftest_assert_eq() {
   [[ "${got}" == "${expect}" ]] || selftest_fail "${msg}: got='${got}' expect='${expect}'"
 }
 
+selftest_assert_not_eq() {
+  local got="${1-}"
+  local unexpected="${2-}"
+  local msg="${3-assert_not_eq failed}"
+  [[ "${got}" != "${unexpected}" ]] || selftest_fail "${msg}: value='${got}'"
+}
+
 selftest_assert_file_contains() {
   local path="${1-}"
   local needle="${2-}"
@@ -9927,6 +9934,54 @@ selftest_case_dr_kvm_vmware_initial_seed_accepts_missing_baseline() {
   selftest_assert_eq "${out}" "baseline-1" "incremental reverse sync loads the durable snapshot"
 }
 
+selftest_case_dr_kvm_vmware_run_scoped_snapshot_retry() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR reverse snapshots are run scoped and interrupted attempts are idempotent"
+
+  local call_log="${SELFTEST_ROOT}/reverse-run-snapshot.log"
+  local first second rc=0
+  first="$( (
+    # shellcheck source=/dev/null
+    source "${LIB_BASE}/ftctl/dr_kvm_vmware_mover.sh"
+    FTCTL_DR_PLAN_UUID="plan-12345678"
+    FTCTL_DR_CHECKPOINT_SEQUENCE="1859"
+    FTCTL_DR_RUN_UUID="run-alpha-123456"
+    ftctl_kvm_vmware_run_snapshot_name 0
+  ) )"
+  second="$( (
+    # shellcheck source=/dev/null
+    source "${LIB_BASE}/ftctl/dr_kvm_vmware_mover.sh"
+    FTCTL_DR_PLAN_UUID="plan-12345678"
+    FTCTL_DR_CHECKPOINT_SEQUENCE="1859"
+    FTCTL_DR_RUN_UUID="run-beta-123456"
+    ftctl_kvm_vmware_run_snapshot_name 0
+  ) )"
+  selftest_assert_not_eq "${first}" "${second}" "different Runs do not collide at the same checkpoint"
+  selftest_assert_contains "${first}" "run-alpha-12" "snapshot name contains the Run owner token"
+
+  (
+    # shellcheck source=/dev/null
+    source "${LIB_BASE}/ftctl/dr_kvm_vmware_mover.sh"
+    rbd() {
+      printf '%s\n' "$*" >> "${call_log}"
+      return 0
+    }
+    ftctl_kvm_vmware_prepare_run_snapshot "rbd" "vm-disk" "baseline-snapshot" "${first}"
+  )
+  selftest_assert_file_contains "${call_log}" "snap info rbd/vm-disk@${first}"
+  selftest_assert_file_contains "${call_log}" "snap rm rbd/vm-disk@${first}"
+  selftest_assert_file_contains "${call_log}" "snap create rbd/vm-disk@${first}"
+
+  rc=0
+  (
+    # shellcheck source=/dev/null
+    source "${LIB_BASE}/ftctl/dr_kvm_vmware_mover.sh"
+    rbd() { return 0; }
+    ftctl_kvm_vmware_prepare_run_snapshot "rbd" "vm-disk" "${first}" "${first}"
+  ) >/dev/null 2>&1 || rc=$?
+  selftest_assert_eq "${rc}" "87" "a durable baseline snapshot is never removed as retry residue"
+}
+
 selftest_case_dr_kvm_vmware_reverse_preflight_clears_return_trap() {
   selftest_reset_env
   selftest_info "FTCTL_DR reverse preflight clears its RETURN trap after temporary map cleanup"
@@ -10356,6 +10411,7 @@ selftest_main() {
   selftest_case_dr_failback_commit_pending_is_not_authoritative_terminal
   selftest_case_dr_kvm_vmware_reverses_forward_profile_roles
   selftest_case_dr_kvm_vmware_initial_seed_accepts_missing_baseline
+  selftest_case_dr_kvm_vmware_run_scoped_snapshot_retry
   selftest_case_dr_kvm_vmware_reverse_preflight_clears_return_trap
   selftest_case_dr_kvm_vmware_snapshot_attach_is_read_only
   selftest_case_dr_failback_terminal_publication_grace
