@@ -77,3 +77,21 @@ maintenance state and last durable recovery point are independent facts.
 - Cloud projects a latest completed cycle supplied only through the explicit
   latest-cycle sequence alias.
 - Existing VMware to RBD transfer and CBT patch paths are unchanged.
+
+## 8. vCenter Certificate Rollover Recovery
+
+A recovered vCenter can present a new certificate while an existing DR profile
+still contains a thumbprint previously obtained with
+`thumbprintSource=backend-auto`. Snapshot creation and CBT query can succeed,
+but VDDK rejects the data-plane open with an SSL thumbprint mismatch and may
+surface it as `VixDiskLib_Open: Unknown error`.
+
+FTCTL refreshes the endpoint thumbprint before each source open only when the
+configured source is `backend-auto`. An operator-supplied `runtime` thumbprint
+remains pinned and is never replaced implicitly. If automatic refresh is
+temporarily unavailable, the previous automatically obtained value remains the
+fallback for that attempt.
+
+Source-open evidence records `backend-auto-refreshed` when the endpoint
+certificate changed. The scheduler can then resume the durable CBT baseline
+after snapshot cleanup without forcing a full seed.

@@ -988,6 +988,9 @@ ftctl_vmware_mover_patch_disk() {
   endpoint="$(ftctl_vmware_mover_normalize_vcenter_server "${endpoint}")"
   if [[ "${tls_verify}" != "true" ]]; then
     thumbprint="$(ftctl_vmware_mover_resolve_thumbprint "${endpoint}" "${tls_verify}" "${thumbprint}" || true)"
+    if [[ "${FTCTL_DR_VMWARE_CONFIGURED_THUMBPRINT_SOURCE:-}" == "backend-auto" ]]; then
+      FTCTL_DR_VMWARE_SOURCE_OPEN_THUMBPRINT_SOURCE="backend-auto-refreshed"
+    fi
     [[ -n "${thumbprint}" ]] || ftctl_vmware_mover_die 77 "DR_VMWARE_VDDK_THUMBPRINT_UNRESOLVED: thumbprint is missing for ${label}"
   fi
   local nbdkit_args=(--exit-with-parent --foreground --unix "${socket_path}" -r vddk
@@ -1243,17 +1246,30 @@ ftctl_vmware_mover_resolve_thumbprint() {
     FTCTL_DR_VMWARE_SOURCE_OPEN_THUMBPRINT_SOURCE="tls-verify"
     return 0
   }
-  if [[ -n "${configured}" ]]; then
+  if [[ -n "${configured}" && "${FTCTL_DR_VMWARE_CONFIGURED_THUMBPRINT_SOURCE:-}" != "backend-auto" ]]; then
     FTCTL_DR_VMWARE_SOURCE_OPEN_THUMBPRINT_PRESENT="true"
     FTCTL_DR_VMWARE_SOURCE_OPEN_THUMBPRINT_SOURCE="runtime"
     printf '%s\n' "${configured}"
     return 0
   fi
   fetched="$(ftctl_vmware_mover_fetch_vcenter_thumbprint "${endpoint}" || true)"
-  [[ -n "${fetched}" ]] || return 1
-  FTCTL_DR_VMWARE_SOURCE_OPEN_THUMBPRINT_PRESENT="true"
-  FTCTL_DR_VMWARE_SOURCE_OPEN_THUMBPRINT_SOURCE="host-auto"
-  printf '%s\n' "${fetched}"
+  if [[ -n "${fetched}" ]]; then
+    FTCTL_DR_VMWARE_SOURCE_OPEN_THUMBPRINT_PRESENT="true"
+    if [[ -n "${configured}" && "${fetched}" != "${configured}" ]]; then
+      FTCTL_DR_VMWARE_SOURCE_OPEN_THUMBPRINT_SOURCE="backend-auto-refreshed"
+    else
+      FTCTL_DR_VMWARE_SOURCE_OPEN_THUMBPRINT_SOURCE="host-auto"
+    fi
+    printf '%s\n' "${fetched}"
+    return 0
+  fi
+  if [[ -n "${configured}" ]]; then
+    FTCTL_DR_VMWARE_SOURCE_OPEN_THUMBPRINT_PRESENT="true"
+    FTCTL_DR_VMWARE_SOURCE_OPEN_THUMBPRINT_SOURCE="backend-auto-fallback"
+    printf '%s\n' "${configured}"
+    return 0
+  fi
+  return 1
 }
 
 ftctl_vmware_mover_govc_url() {
@@ -1557,6 +1573,9 @@ ftctl_vmware_mover_convert_disk() {
   transports="${FTCTL_DR_VMWARE_VDDK_TRANSPORTS:-nbd:nbdssl}"
   if [[ "${tls_verify}" != "true" ]]; then
     thumbprint="$(ftctl_vmware_mover_resolve_thumbprint "${endpoint}" "${tls_verify}" "${thumbprint}" || true)"
+    if [[ "${FTCTL_DR_VMWARE_CONFIGURED_THUMBPRINT_SOURCE:-}" == "backend-auto" ]]; then
+      FTCTL_DR_VMWARE_SOURCE_OPEN_THUMBPRINT_SOURCE="backend-auto-refreshed"
+    fi
     if [[ -z "${thumbprint}" ]]; then
       ftctl_vmware_mover_source_open_die 77 "DR_VMWARE_VDDK_THUMBPRINT_UNRESOLVED" \
         "VDDK requires the vCenter thumbprint when TLS verification is disabled for ${label}" \
@@ -2175,7 +2194,7 @@ PY
 
 main() {
   local disk_map="${FTCTL_DR_DISK_MAP:-}" target_disk_map="${FTCTL_DR_TARGET_DISK_MAP:-}" credentials_file="${FTCTL_DR_CREDENTIALS_FILE:-}"
-  local endpoint username password tls_verify thumbprint libdir password_file rows row count i
+  local endpoint username password tls_verify thumbprint thumbprint_source libdir password_file rows row count i
   local govc_bin source_vm_ref_for_snapshot snapshot_name snapshot_ref snapshot_created="false" mover_rc=0
   local cycle_type requested_mode effective_mode_request mode_decision reseed_reason
   local metrics_path results_path result_tmp query_path patch_metrics_path journal_path commit_rc mode_state_path guard_rc cbt_evidence_path
@@ -2200,6 +2219,8 @@ main() {
   password="$(ftctl_vmware_mover_json_value "${credentials_file}" '.credentials.source.auth.password // .credentials.source.password' '')"
   tls_verify="$(ftctl_vmware_mover_json_value "${credentials_file}" '.credentials.source.tlsVerify' 'false')"
   thumbprint="$(ftctl_vmware_mover_json_value "${credentials_file}" '.credentials.source.thumbprint // .credentials.source.tlsThumbprint' '')"
+  thumbprint_source="$(ftctl_vmware_mover_json_value "${credentials_file}" '.credentials.source.thumbprintSource' '')"
+  FTCTL_DR_VMWARE_CONFIGURED_THUMBPRINT_SOURCE="${thumbprint_source}"
   if command -v ftctl_dr_vddk_resolve_libdir >/dev/null 2>&1; then
     libdir="$(ftctl_dr_vddk_resolve_libdir "${credentials_file}" 2>/dev/null || true)"
   else
