@@ -106,6 +106,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          tests/ftctl_dr_release_tombstone_smoke.sh
           make ftctl-rpm
 
       - name: Create FTCTL RPM repo

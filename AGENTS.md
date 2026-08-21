@@ -13,6 +13,15 @@
 - Cloud UI deployment must preserve server-side webapp directories (`WEB-INF`, and `META-INF` if present) and update only static UI assets from the built dist output, such as `index.html`, `assets/`, `css/`, `js/`, `locales/`, and related static configuration files.
 - Before and after Cloud UI deployment, verify `/usr/share/cloudstack-management/webapp/WEB-INF` still exists, `/client/` returns HTTP 200 from the management server, and the active bundle contains the expected FTCTL UI markers.
 
+## Validated DR Path Regression Gate
+
+- Previously validated DR paths are immutable behavioral contracts. A change to shared runtime status, profile parsing, scheduler, Agent answer, or Cloud projection code must not be treated as isolated to the feature that motivated the change.
+- Any change to `dr_runtime.sh`, `dr_scheduler.sh`, the FTCTL DR JSON schema, or profile lifecycle must run the release tombstone regression: profile-present status, successful release, profile deletion, profile-missing `dr-status`, runtime status reconstruction from the tombstone, and process-restart status.
+- `set -u` must never make an optional status field fatal. Every field emitted by `dr-status` requires an explicit default before conditional profile or runtime reads.
+- A successful release must preserve VM, storage, network, and authority while converging to `RELEASED / UNPROTECTED / STOPPED`; Cloud must converge to `UNPROTECTED / DISABLED` without direct DB repair.
+- The FTCTL branch release workflow must fail before RPM creation when the release tombstone regression fails. Do not bypass this gate for test deployment.
+- Shared DR changes must run the baseline action contract suite for sync, pause/resume, release, test failover/cleanup, failover, and failback before deployment. Record any intentional contract change in the paired Cloud and qemu design documents first.
+
 ## Active Dual-Cluster DR Test Environment (2026-08-13)
 
 - The currently reachable SSH port for both the `10.10.22.*` and `10.10.32.*` test clusters is `22`. Live TCP and authenticated SSH checks on 2026-08-13 showed `10.10.22.1`, `.2`, `.3`, and `.10` accepting port `22` and refusing the former port `10022`.

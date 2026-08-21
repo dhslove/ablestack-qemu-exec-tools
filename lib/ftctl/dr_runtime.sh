@@ -3200,7 +3200,7 @@ ftctl_dr_runtime_emit_state_json() {
   local scheduler_unit_main_pid scheduler_cgroup scheduler_recovery_state scheduler_recovery_trigger scheduler_recovered_at
   local transition_state transition_action transition_quiesced_at checkpoint_lease_state checkpoint_lease_path
   local retryable retry_after_sec lock_file holder_pid holder_command holder_age_sec
-  local checkpoint_sequence restore_points_path dynamic_rpo policy_target_rpo_seconds
+  local checkpoint_sequence restore_points_path dynamic_rpo policy_target_rpo_seconds=""
   local scheduler_next_run_at scheduler_execution_budget_seconds scheduler_cycle_wall_duration_seconds
   local current_checkpoint_sequence current_checkpoint_cycle_type current_checkpoint_requested_mode current_checkpoint_effective_mode
   local current_checkpoint_mode_decision_code current_checkpoint_automatic_reseed current_checkpoint_invalid_baseline_disk_count
@@ -5119,6 +5119,56 @@ PY
     "plan=${plan} run=${run} active_side=${authority_side^^} generation=${authority_generation:-}"
 }
 
+ftctl_dr_runtime_restore_release_status() {
+  local plan="${1-}" tombstone_path status_path contract plan_uuid run state step protection_state
+  local active_side authority_generation scheduler_state released_at
+
+  tombstone_path="$(ftctl_dr_runtime_release_tombstone_path "${plan}")"
+  status_path="$(ftctl_dr_runtime_status_path "${plan}")"
+  [[ -f "${tombstone_path}" ]] || return 1
+
+  contract="$(jq -r '.contract_version // empty' "${tombstone_path}" 2>/dev/null || true)"
+  plan_uuid="$(jq -r '.plan_uuid // empty' "${tombstone_path}" 2>/dev/null || true)"
+  run="$(jq -r '.run_uuid // empty' "${tombstone_path}" 2>/dev/null || true)"
+  state="$(jq -r '.state // empty' "${tombstone_path}" 2>/dev/null || true)"
+  step="$(jq -r '.step // empty' "${tombstone_path}" 2>/dev/null || true)"
+  protection_state="$(jq -r '.protection_state // empty' "${tombstone_path}" 2>/dev/null || true)"
+  [[ "${contract}" == "dr-release-tombstone-v1" && "${plan_uuid}" == "${plan}" \
+        && "${state}" == "RELEASED" && "${step}" == "release-completed" \
+        && "${protection_state}" == "UNPROTECTED" ]] || return 1
+
+  active_side="$(jq -r '.active_side // "SOURCE"' "${tombstone_path}" 2>/dev/null || true)"
+  authority_generation="$(jq -r '.authority_generation // empty' "${tombstone_path}" 2>/dev/null || true)"
+  scheduler_state="$(jq -r '.scheduler_state // "STOPPED"' "${tombstone_path}" 2>/dev/null || true)"
+  released_at="$(jq -r '.released_at // empty' "${tombstone_path}" 2>/dev/null || true)"
+
+  ftctl_dr_runtime_write_state "${status_path}" "${plan}" "${run}" "dr-release" \
+    "RELEASED" "release-completed" "100" "${run}" "" || return 1
+  ftctl_dr_runtime_path_set "${status_path}" \
+    "active_side=${active_side^^}" \
+    "cloud_authority_generation=${authority_generation}" \
+    "scheduler_state=${scheduler_state^^}" \
+    "scheduler_desired_state=STOPPED" \
+    "control_state=STOPPED" \
+    "cycle_state=IDLE" \
+    "worker_state=IDLE" \
+    "protection_state=UNPROTECTED" \
+    "release_state=RELEASED" \
+    "profile_removed=true" \
+    "runtime_removed=false" \
+    "vm_mutated=false" \
+    "storage_mutated=false" \
+    "network_mutated=false" \
+    "released_at=${released_at}" \
+    "accepted=true" \
+    "retryable=false" \
+    "error_code=" \
+    "error_message=" \
+    "updated_at=${released_at:-$(ftctl_now_iso8601)}" || return 1
+  ftctl_log_event "dr-runtime" "dr.release.status-restored" "ok" "" "" \
+    "plan=${plan} run=${run} tombstone=${tombstone_path}"
+}
+
 ftctl_dr_runtime_target_materialized() {
   local plan="${1-}" run="${2-}" target_vm_id="${3-}" target_external_ref="${4-}" target_vm_name="${5-}" target_network_id="${6-}"
   local target_volume_map_json="${7-}" target_ready_rpo_seconds="${8-}" materialization_spec_json="${9-}"
@@ -6471,6 +6521,11 @@ ftctl_dr_runtime_status() {
   if [[ -n "${run}" && -f "$(ftctl_dr_runtime_run_path "${plan}" "${run}")" ]]; then
     path="$(ftctl_dr_runtime_run_path "${plan}" "${run}")"
   else
+    path="$(ftctl_dr_runtime_status_path "${plan}")"
+  fi
+
+  if [[ ! -f "${path}" && -z "${run}" ]]; then
+    ftctl_dr_runtime_restore_release_status "${plan}" || true
     path="$(ftctl_dr_runtime_status_path "${plan}")"
   fi
 

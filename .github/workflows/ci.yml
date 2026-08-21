@@ -21,6 +21,10 @@ jobs:
           echo "Running CI build (basic validation)"
           make all
 
+      - name: FTCTL release tombstone regression gate
+        run: |
+          tests/ftctl_dr_release_tombstone_smoke.sh
+
       - name: ISO package manager selection smoke
         run: |
           tests/iso_pkg_manager_selection_smoke.sh
