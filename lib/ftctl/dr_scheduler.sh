@@ -1440,9 +1440,10 @@ ftctl_dr_scheduler_worker() {
   local cycle_run cycle_request_mode cycle_request_owner cycle_request_state cycle_request_bound sequence_path transfer_progress_path
   local session lease_epoch authority_sequence start_ticks owner_lock_path
   local initial_jitter cycle_jitter bandwidth_limit_mbps resource_retry_sec resource_retry_attempt resource_retry_delay
-  local source_retry_attempt source_retry_delay source_outage_since
+  local source_retry_attempt source_retry_delay source_outage_since cleanup_retry_attempt cleanup_retry_delay
   local pending_resource_sequence pending_resource_cycle_type pending_resource_run pending_resource_request_bound
   local pending_source_sequence pending_source_cycle_type pending_source_run pending_source_request_bound
+  local pending_cleanup_sequence pending_cleanup_cycle_type pending_cleanup_run pending_cleanup_request_bound
   local pending_reseed_sequence pending_reseed_cycle_type pending_reseed_run pending_reseed_request_bound
   local pending_reseed_reason pending_reseed_attempt automatic_reseed_guard_generation current_baseline_generation
   local scheduler_code_path scheduler_code_sha256 scheduler_started_at
@@ -1626,6 +1627,12 @@ ftctl_dr_scheduler_worker() {
     pending_source_request_bound="$(ftctl_state_read_kv "${sequence_path}" "pending_source_request_bound" 2>/dev/null || true)"
     source_retry_attempt="$(ftctl_state_read_kv "${sequence_path}" "source_retry_attempt" 2>/dev/null || true)"
     [[ "${source_retry_attempt}" =~ ^[0-9]+$ ]] || source_retry_attempt=0
+    pending_cleanup_sequence="$(ftctl_state_read_kv "${sequence_path}" "pending_cleanup_sequence" 2>/dev/null || true)"
+    pending_cleanup_cycle_type="$(ftctl_state_read_kv "${sequence_path}" "pending_cleanup_cycle_type" 2>/dev/null || true)"
+    pending_cleanup_run="$(ftctl_state_read_kv "${sequence_path}" "pending_cleanup_run" 2>/dev/null || true)"
+    pending_cleanup_request_bound="$(ftctl_state_read_kv "${sequence_path}" "pending_cleanup_request_bound" 2>/dev/null || true)"
+    cleanup_retry_attempt="$(ftctl_state_read_kv "${sequence_path}" "cleanup_retry_attempt" 2>/dev/null || true)"
+    [[ "${cleanup_retry_attempt}" =~ ^[0-9]+$ ]] || cleanup_retry_attempt=0
     pending_reseed_sequence="$(ftctl_state_read_kv "${sequence_path}" "pending_reseed_sequence" 2>/dev/null || true)"
     pending_reseed_cycle_type="$(ftctl_state_read_kv "${sequence_path}" "pending_reseed_cycle_type" 2>/dev/null || true)"
     pending_reseed_run="$(ftctl_state_read_kv "${sequence_path}" "pending_reseed_run" 2>/dev/null || true)"
@@ -1637,6 +1644,8 @@ ftctl_dr_scheduler_worker() {
     [[ "${automatic_reseed_guard_generation}" =~ ^[0-9]+$ ]] || automatic_reseed_guard_generation=""
     if [[ "${pending_reseed_sequence}" =~ ^[1-9][0-9]*$ ]]; then
       next_sequence="${pending_reseed_sequence}"
+    elif [[ "${pending_cleanup_sequence}" =~ ^[1-9][0-9]*$ ]]; then
+      next_sequence="${pending_cleanup_sequence}"
     elif [[ "${pending_source_sequence}" =~ ^[1-9][0-9]*$ ]]; then
       next_sequence="${pending_source_sequence}"
     elif [[ "${pending_resource_sequence}" =~ ^[1-9][0-9]*$ ]]; then
@@ -1653,6 +1662,10 @@ ftctl_dr_scheduler_worker() {
       cycle_type="${pending_reseed_cycle_type}"
       [[ -n "${pending_reseed_run}" ]] && cycle_run="${pending_reseed_run}"
       cycle_request_bound="${pending_reseed_request_bound:-false}"
+    elif [[ "${pending_cleanup_sequence}" =~ ^[1-9][0-9]*$ && -n "${pending_cleanup_cycle_type}" ]]; then
+      cycle_type="${pending_cleanup_cycle_type}"
+      [[ -n "${pending_cleanup_run}" ]] && cycle_run="${pending_cleanup_run}"
+      cycle_request_bound="${pending_cleanup_request_bound:-false}"
     elif [[ "${pending_source_sequence}" =~ ^[1-9][0-9]*$ && -n "${pending_source_cycle_type}" ]]; then
       cycle_type="${pending_source_cycle_type}"
       [[ -n "${pending_source_run}" ]] && cycle_run="${pending_source_run}"
@@ -1698,7 +1711,8 @@ ftctl_dr_scheduler_worker() {
       continue
     fi
     sequence="${next_sequence}"
-    if [[ "${pending_resource_sequence}" == "${sequence}" || "${pending_source_sequence}" == "${sequence}" || "${pending_reseed_sequence}" == "${sequence}" ]]; then
+    if [[ "${pending_resource_sequence}" == "${sequence}" || "${pending_source_sequence}" == "${sequence}" \
+        || "${pending_cleanup_sequence}" == "${sequence}" || "${pending_reseed_sequence}" == "${sequence}" ]]; then
       authority_sequence="$(ftctl_dr_scheduler_next_authority_sequence "${plan}")"
     else
       authority_sequence="$(ftctl_dr_scheduler_record_plan_sequence "${plan}" "${sequence}")"
@@ -1842,6 +1856,46 @@ ftctl_dr_scheduler_worker() {
         ftctl_dr_scheduler_sleep_or_stop "${plan}" "${source_retry_delay}" "${control_generation}" || true
         continue
       fi
+      if [[ "${rc}" == "99" ]]; then
+        now="$(ftctl_now_iso8601)"
+        cleanup_retry_attempt=$((cleanup_retry_attempt + 1))
+        cleanup_retry_delay="$(ftctl_dr_scheduler_source_retry_delay "${plan}" "${cleanup_retry_attempt}")"
+        ftctl_state_set_path "${sequence_path}" \
+          "pending_cleanup_sequence=${sequence}" \
+          "pending_cleanup_cycle_type=${cycle_type}" \
+          "pending_cleanup_run=${cycle_run}" \
+          "pending_cleanup_request_bound=${cycle_request_bound}" \
+          "cleanup_retry_attempt=${cleanup_retry_attempt}" \
+          "cleanup_retry_after_sec=${cleanup_retry_delay}" \
+          "cleanup_retry_updated_at=${now}" || true
+        if [[ "${cycle_request_bound}" == "true" ]]; then
+          ftctl_state_set_path "${sequence_path}" \
+            "requested_cycle_state=PENDING" \
+            "requested_cycle_sequence=${sequence}" \
+            "requested_cycle_started_at=${now}" || true
+        fi
+        ftctl_dr_scheduler_update_state "${state_path}" "${status_path}" \
+          "state=$([[ "${sequence}" -gt 1 ]] && printf READY || printf SYNCING)" \
+          "step=waiting-source-snapshot-cleanup" \
+          "scheduler_state=RUNNING" \
+          "scheduler_health=WAITING_CLEANUP" \
+          "scheduler_recovery_state=PENDING" \
+          "cycle_state=WAITING_CLEANUP" \
+          "replication_activity=WAITING_CLEANUP" \
+          "protection_state=DEGRADED" \
+          "current_checkpoint_state=WAITING_CLEANUP" \
+          "failure_class=SOURCE_SNAPSHOT_CLEANUP" \
+          "retryable=true" \
+          "retry_after_sec=${cleanup_retry_delay}" \
+          "next_retry_at=$(ftctl_dr_scheduler_iso_from_epoch $(( $(date +%s) + cleanup_retry_delay )))" \
+          "error_code=DR_VMWARE_SNAPSHOT_CLEANUP_PENDING" \
+          "error_message=The previous durable VMware source snapshot is awaiting cleanup" \
+          "updated_at=${now}" || true
+        ftctl_log_event "dr-runtime" "dr.scheduler.snapshot-cleanup" "wait" "" "99" \
+          "plan=${plan} run=${cycle_run} sequence=${sequence} retry_attempt=${cleanup_retry_attempt} retry_after=${cleanup_retry_delay}"
+        ftctl_dr_scheduler_sleep_or_stop "${plan}" "${cleanup_retry_delay}" "${control_generation}" || true
+        continue
+      fi
       if [[ "${rc}" == "85" && "${cycle_type}" == "incremental" ]]; then
         now="$(ftctl_now_iso8601)"
         current_baseline_generation="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "latest_completed_baseline_generation" 2>/dev/null || true)"
@@ -1920,6 +1974,7 @@ ftctl_dr_scheduler_worker() {
         96) error_code="DR_NBD_TARGET_FLUSH_FAILED" ;;
         97) error_code="DR_RESOURCE_BUSY" ;;
         98) error_code="DR_SOURCE_SITE_UNAVAILABLE" ;;
+        99) error_code="DR_VMWARE_SNAPSHOT_CLEANUP_PENDING" ;;
         66) error_code="DR_UNSUPPORTED_DIRECTION" ;;
         *) error_code="DR_REPLICATION_CYCLE_FAILED" ;;
       esac
@@ -2017,6 +2072,13 @@ ftctl_dr_scheduler_worker() {
         "source_retry_attempt=0" \
         "source_retry_after_sec=" \
         "source_retry_updated_at=" \
+        "pending_cleanup_sequence=" \
+        "pending_cleanup_cycle_type=" \
+        "pending_cleanup_run=" \
+        "pending_cleanup_request_bound=" \
+        "cleanup_retry_attempt=0" \
+        "cleanup_retry_after_sec=" \
+        "cleanup_retry_updated_at=" \
         "pending_reseed_sequence=" \
         "pending_reseed_cycle_type=" \
         "pending_reseed_run=" \
@@ -2083,6 +2145,13 @@ ftctl_dr_scheduler_worker() {
       "source_retry_attempt=0" \
       "source_retry_after_sec=" \
       "source_retry_updated_at=" \
+      "pending_cleanup_sequence=" \
+      "pending_cleanup_cycle_type=" \
+      "pending_cleanup_run=" \
+      "pending_cleanup_request_bound=" \
+      "cleanup_retry_attempt=0" \
+      "cleanup_retry_after_sec=" \
+      "cleanup_retry_updated_at=" \
       "pending_reseed_sequence=" \
       "pending_reseed_cycle_type=" \
       "pending_reseed_run=" \

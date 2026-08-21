@@ -1465,17 +1465,18 @@ PY
 }
 
 ftctl_vmware_mover_write_source_snapshot_status() {
-  local path="${FTCTL_DR_SOURCE_SNAPSHOT_STATUS_PATH:-}" ready="${1-}" error_code="${2-}" message="${3-}" vm_ref="${4-}" snapshot_name="${5-}" snapshot_ref="${6-}" created="${7-}" cleanup_required="${8-}" resolve_method="${9-}" lifecycle_state="${10-}" last_snapshot_ref="${11-}"
+  local path="${FTCTL_DR_SOURCE_SNAPSHOT_STATUS_PATH:-}" ready="${1-}" error_code="${2-}" message="${3-}" vm_ref="${4-}" snapshot_name="${5-}" snapshot_ref="${6-}" created="${7-}" cleanup_required="${8-}" resolve_method="${9-}" lifecycle_state="${10-}" last_snapshot_ref="${11-}" last_snapshot_name="${12-}"
   [[ -n "${last_snapshot_ref}" ]] || last_snapshot_ref="${snapshot_ref}"
+  [[ -n "${last_snapshot_name}" ]] || last_snapshot_name="${snapshot_name}"
   [[ -n "${path}" ]] || return 0
   mkdir -p "$(dirname "${path}")"
-  python3 - "${path}" "${ready}" "${error_code}" "${message}" "${vm_ref}" "${snapshot_name}" "${snapshot_ref}" "${created}" "${cleanup_required}" "${resolve_method}" "${lifecycle_state}" "${last_snapshot_ref}" <<'PY'
+  python3 - "${path}" "${ready}" "${error_code}" "${message}" "${vm_ref}" "${snapshot_name}" "${snapshot_ref}" "${created}" "${cleanup_required}" "${resolve_method}" "${lifecycle_state}" "${last_snapshot_ref}" "${last_snapshot_name}" <<'PY'
 import json
 import os
 import sys
 import time
 
-path, ready, error_code, message, vm_ref, snapshot_name, snapshot_ref, created, cleanup_required, resolve_method, lifecycle_state, last_snapshot_ref = sys.argv[1:13]
+path, ready, error_code, message, vm_ref, snapshot_name, snapshot_ref, created, cleanup_required, resolve_method, lifecycle_state, last_snapshot_ref, last_snapshot_name = sys.argv[1:14]
 now_ms = int(time.time() * 1000)
 previous = {}
 try:
@@ -1493,8 +1494,10 @@ if lifecycle_state in ("CREATING", "ACTIVE") and (not created_at_ms or previous.
     created_at_ms = now_ms
 if not last_snapshot_ref:
     last_snapshot_ref = str(previous.get("lastSnapshotRef") or "")
+if not last_snapshot_name:
+    last_snapshot_name = str(previous.get("lastSnapshotName") or "")
 if not snapshot_name:
-    snapshot_name = str(previous.get("lastSnapshotName") or "")
+    snapshot_name = last_snapshot_name
 data = {
     "checked": True,
     "ready": str(ready).lower() == "true",
@@ -1510,7 +1513,7 @@ data = {
     "activeSnapshotRefPresent": active,
     "activeSnapshotRef": snapshot_ref if active else "",
     "lastSnapshotRef": last_snapshot_ref,
-    "lastSnapshotName": snapshot_name,
+    "lastSnapshotName": last_snapshot_name,
     "resolveMethod": resolve_method,
     "createdAtEpochMs": created_at_ms,
     "checkedAtEpochMs": now_ms,
@@ -1690,6 +1693,59 @@ ftctl_vmware_mover_snapshot_ref_from_object_collect() {
   ftctl_vmware_mover_snapshot_ref_from_tree "$@"
 }
 
+ftctl_vmware_mover_snapshot_name_from_tree() {
+  local json_path="${1-}" snapshot_ref="${2-}"
+  [[ -s "${json_path}" && -n "${snapshot_ref}" ]] || return 1
+  python3 - "${json_path}" "${snapshot_ref}" <<'PY'
+import json
+import sys
+
+path, expected_ref = sys.argv[1:3]
+try:
+    with open(path, "r", encoding="utf-8") as fh:
+        data = json.load(fh)
+except (OSError, UnicodeError, json.JSONDecodeError):
+    sys.exit(1)
+
+def scalar(value):
+    return "" if value is None or isinstance(value, (dict, list)) else str(value)
+
+def ref_value(value):
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        for key in ("Value", "value", "MoRef", "moRef", "moid", "id"):
+            result = scalar(value.get(key))
+            if result:
+                return result
+    return ""
+
+def walk(value):
+    if isinstance(value, dict):
+        node_ref = ref_value(value.get("Snapshot") or value.get("snapshot"))
+        if node_ref == expected_ref:
+            name = scalar(value.get("Name") or value.get("name"))
+            if name:
+                return name
+        for child in value.values():
+            result = walk(child)
+            if result:
+                return result
+    elif isinstance(value, list):
+        for child in value:
+            result = walk(child)
+            if result:
+                return result
+    return ""
+
+result = walk(data)
+if result:
+    print(result)
+    sys.exit(0)
+sys.exit(1)
+PY
+}
+
 ftctl_vmware_mover_resolve_run_snapshot_ref() {
   local govc_bin="${1-}" endpoint="${2-}" username="${3-}" password_file="${4-}" tls_verify="${5-}" source_vm_ref="${6-}" snapshot_name="${7-}"
   local object_collect_json snapshot_tree snapshot_ref
@@ -1732,18 +1788,57 @@ ftctl_vmware_mover_resolve_run_snapshot_ref() {
   return 1
 }
 
+ftctl_vmware_mover_resolve_snapshot_name_by_ref() {
+  local govc_bin="${1-}" endpoint="${2-}" username="${3-}" password_file="${4-}" tls_verify="${5-}" source_vm_ref="${6-}" snapshot_ref="${7-}"
+  local object_collect_json snapshot_tree snapshot_name
+
+  FTCTL_DR_VMWARE_LAST_SNAPSHOT_NAME=""
+  [[ -x "${govc_bin}" && -n "${source_vm_ref}" && -n "${snapshot_ref}" && -s "${password_file}" ]] || return 1
+
+  object_collect_json="$(mktemp -p "${FTCTL_DR_VMWARE_MOVER_LOG_DIR}" vmware-snapshot-object-collect.XXXXXX.json)"
+  if GOVC_URL="$(ftctl_vmware_mover_govc_url "${endpoint}")" \
+    GOVC_USERNAME="${username}" \
+    GOVC_PASSWORD="$(cat "${password_file}")" \
+    GOVC_INSECURE="$([[ "${tls_verify}" == "true" ]] && printf 'false' || printf 'true')" \
+      "${govc_bin}" object.collect -json "${source_vm_ref}" snapshot.rootSnapshotList > "${object_collect_json}" 2>/dev/null; then
+    snapshot_name="$(ftctl_vmware_mover_snapshot_name_from_tree "${object_collect_json}" "${snapshot_ref}" || true)"
+    if [[ -n "${snapshot_name}" ]]; then
+      FTCTL_DR_VMWARE_LAST_SNAPSHOT_NAME="${snapshot_name}"
+      rm -f "${object_collect_json}"
+      return 0
+    fi
+  fi
+  rm -f "${object_collect_json}"
+
+  snapshot_tree="$(mktemp -p "${FTCTL_DR_VMWARE_MOVER_LOG_DIR}" vmware-snapshot-tree.XXXXXX.json)"
+  if GOVC_URL="$(ftctl_vmware_mover_govc_url "${endpoint}")" \
+    GOVC_USERNAME="${username}" \
+    GOVC_PASSWORD="$(cat "${password_file}")" \
+    GOVC_INSECURE="$([[ "${tls_verify}" == "true" ]] && printf 'false' || printf 'true')" \
+      "${govc_bin}" snapshot.tree -vm "${source_vm_ref}" -json > "${snapshot_tree}" 2>/dev/null; then
+    snapshot_name="$(ftctl_vmware_mover_snapshot_name_from_tree "${snapshot_tree}" "${snapshot_ref}" || true)"
+    if [[ -n "${snapshot_name}" ]]; then
+      FTCTL_DR_VMWARE_LAST_SNAPSHOT_NAME="${snapshot_name}"
+      rm -f "${snapshot_tree}"
+      return 0
+    fi
+  fi
+  rm -f "${snapshot_tree}"
+  return 1
+}
+
 ftctl_vmware_mover_create_run_snapshot() {
   local govc_bin="${1-}" endpoint="${2-}" username="${3-}" password_file="${4-}" tls_verify="${5-}" source_vm_ref="${6-}" snapshot_name="${7-}"
-  local snapshot_error
+  local snapshot_error pending_cleanup_rc=0
   [[ -x "${govc_bin}" ]] || return 73
   [[ -n "${source_vm_ref}" && -n "${snapshot_name}" ]] || return 73
   mkdir -p "${FTCTL_DR_VMWARE_MOVER_LOG_DIR}"
   if [[ -n "${FTCTL_DR_SOURCE_SNAPSHOT_STATUS_PATH:-}" && -f "${FTCTL_DR_SOURCE_SNAPSHOT_STATUS_PATH}" ]] \
     && jq -e '.cleanupRequired == true and (.lifecycleState == "CLEANUP_FAILED" or .lifecycleState == "CLEANUP_PENDING")' \
       "${FTCTL_DR_SOURCE_SNAPSHOT_STATUS_PATH}" >/dev/null 2>&1; then
-    ftctl_vmware_mover_write_source_snapshot_status false "DR_VMWARE_SNAPSHOT_CLEANUP_PENDING" \
-      "Previous VMware source snapshot cleanup is not complete" "${source_vm_ref}" "${snapshot_name}" "" false true "" "CLEANUP_FAILED" ""
-    return 82
+    ftctl_vmware_mover_cleanup_pending_snapshot "${govc_bin}" "${endpoint}" "${username}" \
+      "${password_file}" "${tls_verify}" || pending_cleanup_rc=$?
+    [[ "${pending_cleanup_rc}" == "0" ]] || return "${pending_cleanup_rc}"
   fi
   snapshot_error="$(mktemp -p "${FTCTL_DR_VMWARE_MOVER_LOG_DIR}" vmware-snapshot-create.XXXXXX.log)"
   if ! GOVC_URL="$(ftctl_vmware_mover_govc_url "${endpoint}")" \
@@ -1784,20 +1879,59 @@ ftctl_vmware_mover_create_run_snapshot() {
 }
 
 ftctl_vmware_mover_remove_run_snapshot() {
-  local govc_bin="${1-}" endpoint="${2-}" username="${3-}" password_file="${4-}" tls_verify="${5-}" source_vm_ref="${6-}" snapshot_name="${7-}"
-  [[ -x "${govc_bin}" && -n "${source_vm_ref}" && -n "${snapshot_name}" ]] || return 0
+  local govc_bin="${1-}" endpoint="${2-}" username="${3-}" password_file="${4-}" tls_verify="${5-}" source_vm_ref="${6-}" snapshot_name="${7-}" snapshot_ref="${8-}"
+  local verified_name="${snapshot_name}"
+  [[ -x "${govc_bin}" && -n "${source_vm_ref}" ]] || return 0
   [[ -s "${password_file}" ]] || return 0
+  FTCTL_DR_VMWARE_REMOVED_SNAPSHOT_NAME=""
+  if [[ -n "${snapshot_ref}" ]]; then
+    if ! ftctl_vmware_mover_resolve_snapshot_name_by_ref "${govc_bin}" "${endpoint}" "${username}" \
+        "${password_file}" "${tls_verify}" "${source_vm_ref}" "${snapshot_ref}"; then
+      return 0
+    fi
+    verified_name="${FTCTL_DR_VMWARE_LAST_SNAPSHOT_NAME}"
+  fi
+  [[ -n "${verified_name}" ]] || return 0
+  FTCTL_DR_VMWARE_REMOVED_SNAPSHOT_NAME="${verified_name}"
   if ! GOVC_URL="$(ftctl_vmware_mover_govc_url "${endpoint}")" \
     GOVC_USERNAME="${username}" \
     GOVC_PASSWORD="$(cat "${password_file}")" \
     GOVC_INSECURE="$([[ "${tls_verify}" == "true" ]] && printf 'false' || printf 'true')" \
-      timeout "${FTCTL_DR_VMWARE_SNAPSHOT_CLEANUP_TIMEOUT:-60}" "${govc_bin}" snapshot.remove -vm "${source_vm_ref}" "${snapshot_name}" >/dev/null 2>&1; then
+      timeout "${FTCTL_DR_VMWARE_SNAPSHOT_CLEANUP_TIMEOUT:-60}" "${govc_bin}" snapshot.remove -vm "${source_vm_ref}" "${verified_name}" >/dev/null 2>&1; then
     return 1
   fi
-  if ftctl_vmware_mover_resolve_run_snapshot_ref "${govc_bin}" "${endpoint}" "${username}" "${password_file}" "${tls_verify}" "${source_vm_ref}" "${snapshot_name}"; then
+  if [[ -n "${snapshot_ref}" ]] && ftctl_vmware_mover_resolve_snapshot_name_by_ref \
+      "${govc_bin}" "${endpoint}" "${username}" "${password_file}" "${tls_verify}" "${source_vm_ref}" "${snapshot_ref}"; then
+    return 1
+  fi
+  if [[ -z "${snapshot_ref}" ]] && ftctl_vmware_mover_resolve_run_snapshot_ref \
+      "${govc_bin}" "${endpoint}" "${username}" "${password_file}" "${tls_verify}" "${source_vm_ref}" "${verified_name}"; then
     return 1
   fi
   return 0
+}
+
+ftctl_vmware_mover_cleanup_pending_snapshot() {
+  local govc_bin="${1-}" endpoint="${2-}" username="${3-}" password_file="${4-}" tls_verify="${5-}"
+  local status_path="${FTCTL_DR_SOURCE_SNAPSHOT_STATUS_PATH:-}" source_vm_ref snapshot_name snapshot_ref
+  [[ -s "${status_path}" ]] || return 0
+  jq -e '.cleanupRequired == true' "${status_path}" >/dev/null 2>&1 || return 0
+  source_vm_ref="$(jq -r '.vmRef // ""' "${status_path}" 2>/dev/null || true)"
+  snapshot_name="$(jq -r '.lastSnapshotName // .snapshotName // ""' "${status_path}" 2>/dev/null || true)"
+  snapshot_ref="$(jq -r '.lastSnapshotRef // .snapshotRef // ""' "${status_path}" 2>/dev/null || true)"
+  if ftctl_vmware_mover_remove_run_snapshot "${govc_bin}" "${endpoint}" "${username}" "${password_file}" \
+      "${tls_verify}" "${source_vm_ref}" "${snapshot_name}" "${snapshot_ref}"; then
+    [[ -n "${FTCTL_DR_VMWARE_REMOVED_SNAPSHOT_NAME:-}" ]] \
+      && snapshot_name="${FTCTL_DR_VMWARE_REMOVED_SNAPSHOT_NAME}"
+    ftctl_vmware_mover_write_source_snapshot_status true "" \
+      "Previous VMware source snapshot cleanup completed" "${source_vm_ref}" "" "" true false \
+      "snapshot-ref" "CLEANED" "${snapshot_ref}" "${snapshot_name}"
+    return 0
+  fi
+  ftctl_vmware_mover_write_source_snapshot_status false "DR_VMWARE_SNAPSHOT_CLEANUP_PENDING" \
+    "Previous VMware source snapshot cleanup is not complete" "${source_vm_ref}" "" "${snapshot_ref}" true true \
+    "snapshot-ref" "CLEANUP_FAILED" "${snapshot_ref}" "${snapshot_name}"
+  return 99
 }
 
 ftctl_vmware_mover_cleanup() {
@@ -1814,7 +1948,7 @@ ftctl_vmware_mover_cleanup() {
       "${FTCTL_DR_VMWARE_PASSWORD_FILE:-}" \
       "${FTCTL_DR_VMWARE_TLS_VERIFY_EFFECTIVE:-false}" \
       "${FTCTL_DR_VMWARE_SOURCE_VM_REF_EFFECTIVE:-}" \
-      "${FTCTL_DR_VMWARE_RUN_SNAPSHOT_NAME:-}"; then
+      "${FTCTL_DR_VMWARE_RUN_SNAPSHOT_NAME:-}" "${last_ref}"; then
       ftctl_vmware_mover_write_source_snapshot_status true "" \
         "VMware source snapshot cleanup completed" \
         "${FTCTL_DR_VMWARE_SOURCE_VM_REF_EFFECTIVE:-}" "${FTCTL_DR_VMWARE_RUN_SNAPSHOT_NAME:-}" "" true false \
@@ -1829,6 +1963,13 @@ ftctl_vmware_mover_cleanup() {
   fi
   rm -f "${FTCTL_DR_VMWARE_PASSWORD_FILE:-}"
   return "${cleanup_rc}"
+}
+
+ftctl_vmware_mover_on_exit() {
+  local original_rc=$?
+  trap - EXIT
+  ftctl_vmware_mover_cleanup || true
+  exit "${original_rc}"
 }
 
 ftctl_vmware_mover_commit_cycle_metrics() {
@@ -2007,7 +2148,7 @@ main() {
   FTCTL_DR_VMWARE_USERNAME_EFFECTIVE="${username}"
   FTCTL_DR_VMWARE_TLS_VERIFY_EFFECTIVE="${tls_verify}"
   FTCTL_DR_VMWARE_RUN_SNAPSHOT_CREATED="false"
-  trap 'ftctl_vmware_mover_cleanup' EXIT
+  trap 'ftctl_vmware_mover_on_exit' EXIT
 
   rows="$(ftctl_vmware_mover_disk_plan "${disk_map}" "${target_disk_map}")"
   count="$(jq 'length' <<< "${rows}")"
