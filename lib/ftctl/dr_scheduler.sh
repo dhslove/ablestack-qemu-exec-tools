@@ -1443,6 +1443,8 @@ ftctl_dr_scheduler_worker() {
   local source_retry_attempt source_retry_delay source_outage_since
   local pending_resource_sequence pending_resource_cycle_type pending_resource_run pending_resource_request_bound
   local pending_source_sequence pending_source_cycle_type pending_source_run pending_source_request_bound
+  local pending_reseed_sequence pending_reseed_cycle_type pending_reseed_run pending_reseed_request_bound
+  local pending_reseed_reason pending_reseed_attempt automatic_reseed_guard_generation current_baseline_generation
   local scheduler_code_path scheduler_code_sha256 scheduler_started_at
 
   [[ -n "${plan}" && -n "${run}" && -f "${profile_file}" && -f "${state_path}" ]] || return 2
@@ -1624,7 +1626,18 @@ ftctl_dr_scheduler_worker() {
     pending_source_request_bound="$(ftctl_state_read_kv "${sequence_path}" "pending_source_request_bound" 2>/dev/null || true)"
     source_retry_attempt="$(ftctl_state_read_kv "${sequence_path}" "source_retry_attempt" 2>/dev/null || true)"
     [[ "${source_retry_attempt}" =~ ^[0-9]+$ ]] || source_retry_attempt=0
-    if [[ "${pending_source_sequence}" =~ ^[1-9][0-9]*$ ]]; then
+    pending_reseed_sequence="$(ftctl_state_read_kv "${sequence_path}" "pending_reseed_sequence" 2>/dev/null || true)"
+    pending_reseed_cycle_type="$(ftctl_state_read_kv "${sequence_path}" "pending_reseed_cycle_type" 2>/dev/null || true)"
+    pending_reseed_run="$(ftctl_state_read_kv "${sequence_path}" "pending_reseed_run" 2>/dev/null || true)"
+    pending_reseed_request_bound="$(ftctl_state_read_kv "${sequence_path}" "pending_reseed_request_bound" 2>/dev/null || true)"
+    pending_reseed_reason="$(ftctl_state_read_kv "${sequence_path}" "pending_reseed_reason" 2>/dev/null || true)"
+    pending_reseed_attempt="$(ftctl_state_read_kv "${sequence_path}" "pending_reseed_attempt" 2>/dev/null || true)"
+    [[ "${pending_reseed_attempt}" =~ ^[0-9]+$ ]] || pending_reseed_attempt=0
+    automatic_reseed_guard_generation="$(ftctl_state_read_kv "${sequence_path}" "automatic_reseed_guard_generation" 2>/dev/null || true)"
+    [[ "${automatic_reseed_guard_generation}" =~ ^[0-9]+$ ]] || automatic_reseed_guard_generation=""
+    if [[ "${pending_reseed_sequence}" =~ ^[1-9][0-9]*$ ]]; then
+      next_sequence="${pending_reseed_sequence}"
+    elif [[ "${pending_source_sequence}" =~ ^[1-9][0-9]*$ ]]; then
       next_sequence="${pending_source_sequence}"
     elif [[ "${pending_resource_sequence}" =~ ^[1-9][0-9]*$ ]]; then
       next_sequence="${pending_resource_sequence}"
@@ -1636,7 +1649,11 @@ ftctl_dr_scheduler_worker() {
     cycle_request_state="$(ftctl_state_read_kv "${sequence_path}" "requested_cycle_state" 2>/dev/null || true)"
     cycle_request_mode="$(ftctl_state_read_kv "${sequence_path}" "requested_cycle_mode" 2>/dev/null || true)"
     cycle_request_owner="$(ftctl_state_read_kv "${sequence_path}" "requested_cycle_owner_run" 2>/dev/null || true)"
-    if [[ "${pending_source_sequence}" =~ ^[1-9][0-9]*$ && -n "${pending_source_cycle_type}" ]]; then
+    if [[ "${pending_reseed_sequence}" =~ ^[1-9][0-9]*$ && -n "${pending_reseed_cycle_type}" ]]; then
+      cycle_type="${pending_reseed_cycle_type}"
+      [[ -n "${pending_reseed_run}" ]] && cycle_run="${pending_reseed_run}"
+      cycle_request_bound="${pending_reseed_request_bound:-false}"
+    elif [[ "${pending_source_sequence}" =~ ^[1-9][0-9]*$ && -n "${pending_source_cycle_type}" ]]; then
       cycle_type="${pending_source_cycle_type}"
       [[ -n "${pending_source_run}" ]] && cycle_run="${pending_source_run}"
       cycle_request_bound="${pending_source_request_bound:-false}"
@@ -1681,7 +1698,7 @@ ftctl_dr_scheduler_worker() {
       continue
     fi
     sequence="${next_sequence}"
-    if [[ "${pending_resource_sequence}" == "${sequence}" || "${pending_source_sequence}" == "${sequence}" ]]; then
+    if [[ "${pending_resource_sequence}" == "${sequence}" || "${pending_source_sequence}" == "${sequence}" || "${pending_reseed_sequence}" == "${sequence}" ]]; then
       authority_sequence="$(ftctl_dr_scheduler_next_authority_sequence "${plan}")"
     else
       authority_sequence="$(ftctl_dr_scheduler_record_plan_sequence "${plan}" "${sequence}")"
@@ -1741,6 +1758,7 @@ ftctl_dr_scheduler_worker() {
     rc=0
     output="$(FTCTL_DR_TRANSFER_PROGRESS_PATH="${transfer_progress_path}" \
       FTCTL_DR_BANDWIDTH_LIMIT_MBPS="${bandwidth_limit_mbps}" \
+      FTCTL_DR_AUTOMATIC_RESEED_REASON="$([[ "${pending_reseed_sequence}" == "${sequence}" ]] && printf '%s' "${pending_reseed_reason}")" \
       ftctl_dr_scheduler_run_cycle "${plan}" "${cycle_run}" "${profile_file}" "${sequence}" "${cycle_type}")" || rc=$?
     ftctl_dr_scheduler_slot_release 203
     ftctl_dr_scheduler_lock_release "${plan}" "cycle" 202
@@ -1823,6 +1841,53 @@ ftctl_dr_scheduler_worker() {
           "plan=${plan} run=${cycle_run} sequence=${sequence} retry_attempt=${source_retry_attempt} retry_after=${source_retry_delay}"
         ftctl_dr_scheduler_sleep_or_stop "${plan}" "${source_retry_delay}" "${control_generation}" || true
         continue
+      fi
+      if [[ "${rc}" == "85" && "${cycle_type}" == "incremental" ]]; then
+        now="$(ftctl_now_iso8601)"
+        current_baseline_generation="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "latest_completed_baseline_generation" 2>/dev/null || true)"
+        [[ "${current_baseline_generation}" =~ ^[0-9]+$ ]] || current_baseline_generation=0
+        pending_reseed_attempt=$((pending_reseed_attempt + 1))
+        if [[ -z "${automatic_reseed_guard_generation}" || "${automatic_reseed_guard_generation}" != "${current_baseline_generation}" ]]; then
+          ftctl_state_set_path "${sequence_path}" \
+            "pending_reseed_sequence=${sequence}" \
+            "pending_reseed_cycle_type=full-reseed" \
+            "pending_reseed_run=${cycle_run}" \
+            "pending_reseed_request_bound=${cycle_request_bound}" \
+            "pending_reseed_reason=SOURCE_CBT_EPOCH_RESET" \
+            "pending_reseed_attempt=${pending_reseed_attempt}" \
+            "automatic_reseed_guard_generation=${current_baseline_generation}" \
+            "pending_source_sequence=" \
+            "pending_source_cycle_type=" \
+            "pending_source_run=" \
+            "pending_source_request_bound=" \
+            "source_retry_attempt=0" || true
+          ftctl_dr_scheduler_update_state "${state_path}" "${status_path}" \
+            "state=RESEEDING" \
+            "step=source-cbt-baseline-rebuild" \
+            "scheduler_state=RUNNING" \
+            "scheduler_health=RECOVERING_BASELINE" \
+            "scheduler_recovery_state=RUNNING" \
+            "cycle_state=WAITING_RESEED" \
+            "replication_activity=RESEEDING" \
+            "protection_state=DEGRADED" \
+            "current_checkpoint_state=WAITING_RESEED" \
+            "current_checkpoint_mode_decision_code=SOURCE_CBT_EPOCH_RESET" \
+            "current_checkpoint_automatic_reseed=true" \
+            "baseline_state=REBUILDING" \
+            "reseed_reason=SOURCE_CBT_EPOCH_RESET" \
+            "retryable=true" \
+            "retry_after_sec=1" \
+            "error_code=DR_CBT_RESEED_REQUIRED" \
+            "error_message=The previous VMware CBT epoch is no longer valid; one controlled baseline rebuild is starting" \
+            "updated_at=${now}" || true
+          ftctl_log_event "dr-runtime" "dr.scheduler.baseline" "reseed" "" "85" \
+            "plan=${plan} run=${cycle_run} sequence=${sequence} reason=SOURCE_CBT_EPOCH_RESET attempt=${pending_reseed_attempt}"
+          ftctl_dr_scheduler_sleep_or_stop "${plan}" 1 "${control_generation}" || true
+          continue
+        fi
+        ftctl_log_event "dr-runtime" "dr.scheduler.baseline" "reseed-blocked" "" "90" \
+          "plan=${plan} run=${cycle_run} sequence=${sequence} reason=SOURCE_CBT_EPOCH_RESET baseline_generation=${current_baseline_generation}"
+        rc=90
       fi
       case "${rc}" in
         65) error_code="DR_VMWARE_MOVER_UNAVAILABLE" ;;
@@ -1951,7 +2016,13 @@ ftctl_dr_scheduler_worker() {
         "pending_source_request_bound=" \
         "source_retry_attempt=0" \
         "source_retry_after_sec=" \
-        "source_retry_updated_at=" || true
+        "source_retry_updated_at=" \
+        "pending_reseed_sequence=" \
+        "pending_reseed_cycle_type=" \
+        "pending_reseed_run=" \
+        "pending_reseed_request_bound=" \
+        "pending_reseed_reason=" \
+        "pending_reseed_attempt=0" || true
       rm -f "${pid_path}" 2>/dev/null || true
       ftctl_dr_scheduler_mark_lease_stopped "${plan}" "${session}" "${lease_epoch}" "${run}" "$$" "${start_ticks}"
       flock -u 205 2>/dev/null || true
@@ -2011,7 +2082,14 @@ ftctl_dr_scheduler_worker() {
       "pending_source_request_bound=" \
       "source_retry_attempt=0" \
       "source_retry_after_sec=" \
-      "source_retry_updated_at=" || true
+      "source_retry_updated_at=" \
+      "pending_reseed_sequence=" \
+      "pending_reseed_cycle_type=" \
+      "pending_reseed_run=" \
+      "pending_reseed_request_bound=" \
+      "pending_reseed_reason=" \
+      "pending_reseed_attempt=0" \
+      "automatic_reseed_guard_generation=" || true
     now="$(ftctl_now_iso8601)"
     authority_sequence="$(ftctl_dr_scheduler_next_authority_sequence "${plan}")"
     ftctl_dr_scheduler_update_state "${state_path}" "${status_path}" \

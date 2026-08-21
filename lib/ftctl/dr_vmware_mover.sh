@@ -330,7 +330,7 @@ PY
 ftctl_vmware_mover_query_cbt() {
   local endpoint="${1-}" username="${2-}" password_file="${3-}" tls_verify="${4-}" libdir="${5-}"
   local vm_ref="${6-}" snapshot_name="${7-}" disk_id="${8-}" previous_change_id="${9-}" output_path="${10-}"
-  local verify_current="${11-false}" device_key="${12-}" python_bin helper
+  local verify_current="${11-false}" device_key="${12-}" python_bin helper current_probe_path
   python_bin="$(ftctl_vmware_mover_resolve_cbt_python "${libdir}" || true)"
   helper="${FTCTL_DR_VMWARE_CBT_QUERY_HELPER:-${FTCTL_DR_VMWARE_MOVER_LIB_DIR}/dr_vmware_changed_areas.py}"
   [[ -n "${python_bin}" ]] || ftctl_vmware_mover_die 82 "DR_CBT_QUERY_FAILED: pyVmomi runtime was not found"
@@ -345,6 +345,23 @@ ftctl_vmware_mover_query_cbt() {
   VCENTER_PASS="$(cat "${password_file}")" \
   VCENTER_INSECURE="$([[ "${tls_verify}" == "true" ]] && printf 0 || printf 1)" \
     "${python_bin}" "${helper}" "${helper_args[@]}" > "${output_path}"; then
+    if [[ "${verify_current}" != "true" && -n "${previous_change_id}" && "${previous_change_id}" != "null" && "${previous_change_id}" != "*" ]]; then
+      current_probe_path="${output_path}.current"
+      if VCENTER_HOST="$(ftctl_vmware_mover_govc_url "${endpoint}")" \
+      VCENTER_USER="${username}" \
+      VCENTER_PASS="$(cat "${password_file}")" \
+      VCENTER_INSECURE="$([[ "${tls_verify}" == "true" ]] && printf 0 || printf 1)" \
+        "${python_bin}" "${helper}" "${helper_args[@]}" --verify-current \
+          > "${current_probe_path}" \
+          && jq -e '.activation_verified == true and .new_change_id != null and .new_change_id != ""' \
+            "${current_probe_path}" >/dev/null 2>&1; then
+        rm -f "${current_probe_path}"
+        ftctl_vmware_mover_publish_cbt_failure "DR_CBT_BASELINE_INVALID" \
+          "The previous VMware CBT changeId is outside the current CBT epoch for ${disk_id}" "${disk_id}" || true
+        ftctl_vmware_mover_die 85 "DR_CBT_RESEED_REQUIRED: previous VMware CBT changeId is outside the current CBT epoch for ${disk_id}"
+      fi
+      rm -f "${current_probe_path}"
+    fi
     ftctl_vmware_mover_publish_cbt_failure "DR_VMWARE_CBT_QUERY_FAILED" \
       "QueryChangedDiskAreas failed for ${disk_id}" "${disk_id}" || true
     ftctl_vmware_mover_die 82 "DR_CBT_QUERY_FAILED: QueryChangedDiskAreas failed for ${disk_id}"
@@ -2009,6 +2026,11 @@ main() {
   effective_mode_request="$(jq -er '.effectiveMode' <<< "${mode_decision}")" ||
     ftctl_vmware_mover_die 83 "DR_CBT_BASELINE_INVALID: effective mode is unavailable"
   reseed_reason="$(jq -r '.reseedReason // ""' <<< "${mode_decision}")"
+  if [[ "${requested_mode}" == "FULL_RESEED" && -n "${FTCTL_DR_AUTOMATIC_RESEED_REASON:-}" ]]; then
+    mode_decision="$(jq -c --arg reason "${FTCTL_DR_AUTOMATIC_RESEED_REASON}" \
+      '.automaticReseed=true | .decisionCode=$reason | .reseedReason=$reason' <<< "${mode_decision}")"
+    reseed_reason="${FTCTL_DR_AUTOMATIC_RESEED_REASON}"
+  fi
   [[ "${effective_mode_request}" != "BLOCKED" ]] ||
     ftctl_vmware_mover_die 91 "DR_CBT_BASELINE_NOT_DURABLE: ${reseed_reason:-baseline is not locally durable}"
   mode_state_path="${FTCTL_DR_MODE_DECISION_STATE_PATH:-$(dirname "${disk_map}")/mode-decision.json}"

@@ -48,5 +48,45 @@ set -e
 grep -q 'pending_source_sequence=${sequence}' "${ROOT}/lib/ftctl/dr_scheduler.sh"
 grep -q 'state=WAITING_SOURCE' "${ROOT}/lib/ftctl/dr_scheduler.sh"
 grep -q 'source_outage_since=' "${ROOT}/lib/ftctl/dr_scheduler.sh"
+grep -q 'pending_reseed_sequence=${sequence}' "${ROOT}/lib/ftctl/dr_scheduler.sh"
+grep -q 'SOURCE_CBT_EPOCH_RESET' "${ROOT}/lib/ftctl/dr_scheduler.sh"
+grep -q 'automatic_reseed_guard_generation=${current_baseline_generation}' "${ROOT}/lib/ftctl/dr_scheduler.sh"
+grep -q 'dr.scheduler.baseline.*reseed-blocked' "${ROOT}/lib/ftctl/dr_scheduler.sh"
+grep -q 'DR_CBT_RESEED_REQUIRED: previous VMware CBT changeId is outside the current CBT epoch' \
+  "${ROOT}/lib/ftctl/dr_vmware_mover.sh"
+grep -q 'FTCTL_DR_AUTOMATIC_RESEED_REASON' "${ROOT}/lib/ftctl/dr_vmware_mover.sh"
+
+cat > "${TMP}/cbt-python" <<'EOF'
+#!/usr/bin/env bash
+if printf '%s\n' "$@" | grep -qx -- '--verify-current'; then
+  printf '%s\n' '{"activation_verified":true,"new_change_id":"current-epoch-change-id"}'
+  exit 0
+fi
+echo 'QueryChangedDiskAreas failed: vim.fault.FileFault' >&2
+exit 1
+EOF
+chmod +x "${TMP}/cbt-python"
+printf '# mock helper\n' > "${TMP}/helper.py"
+FTCTL_DR_VMWARE_CBT_PYTHON="${TMP}/cbt-python"
+FTCTL_DR_VMWARE_CBT_QUERY_HELPER="${TMP}/helper.py"
+set +e
+(
+  ftctl_vmware_mover_query_cbt '10.10.21.10' 'administrator' "${TMP}/password" false '' \
+    'vm-1' 'snapshot-1' 'scsi0:0' 'stale-change-id' "${TMP}/cbt-query.json" false '2000'
+) >/dev/null 2>&1
+rc=$?
+set -e
+[[ "${rc}" == '85' ]]
+
+python3 - "${ROOT}/lib/ftctl/dr_scheduler.sh" <<'PY'
+import pathlib
+import sys
+
+source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+assert 'rc=90' in source
+terminal = source.index('return "${rc}"', source.index('dr.scheduler.baseline" "reseed-blocked'))
+success = source.index('automatic_reseed_guard_generation=', terminal)
+assert terminal < success
+PY
 
 echo 'ftctl DR source outage recovery smoke: PASS'

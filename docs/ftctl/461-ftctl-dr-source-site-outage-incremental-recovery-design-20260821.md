@@ -46,3 +46,49 @@ WAITING_SOURCE -> source restored -> CBT_INCREMENTAL/NO_CHANGE -> READY
 5. 실환경에서 vCenter 연속 정상 확인 뒤 자동 RECOVER_SYNC 제출
 6. 복구 첫 durable Cycle이 `CBT_INCREMENTAL` 또는 `NO_CHANGE`이며 Full Reseed가 아님을 확인
 
+## 6. 전원 장애로 CBT epoch가 변경된 경우
+
+원본 사이트 연결 복구와 CBT 기준선 유효성은 별개의 조건이다. vCenter와 VM이
+정상이어도 강제 전원 장애 뒤 과거 changeId가 현재 CBT epoch에서 더 이상 조회되지
+않을 수 있다. 이때 과거 changeId의 `QueryChangedDiskAreas`는 `FileFault`를 반환하지만,
+같은 임시 스냅샷의 현재 changeId 조회는 성공한다.
+
+```text
+WAITING_SOURCE
+  -> old changeId query fails
+  -> current changeId preflight succeeds
+  -> DR_CBT_RESEED_REQUIRED / SOURCE_CBT_EPOCH_RESET
+  -> same sequence, same owner Run, one controlled FULL_RESEED
+  -> LOCAL_DURABLE
+  -> next scheduled cycle CBT_INCREMENTAL or NO_CHANGE
+```
+
+- 현재 changeId preflight까지 실패하면 기준선 문제가 아니라 VMware 파일 또는
+  datastore 장애일 수 있으므로 자동 재시드를 수행하지 않는다.
+- 자동 재시드는 동일 sequence에서 한 번만 허용한다. 재시드 자체가 실패하면
+  terminal 오류로 종결해 무한 전체 복사를 방지한다.
+- 시퀀스 상태에는 자동 재시드를 시도한 `baselineGeneration`을 가드로 보존한다.
+  프로세스 또는 systemd가 재시작돼도 같은 generation으로는 자동 재시드를 다시
+  수행하지 않으며 `DR_CBT_RESEED_LOOP_DETECTED`로 종결한다. 새 기준선이 durable
+  commit된 경우에만 가드를 해제한다.
+- 재시드 commit 전까지 마지막 정상 증분 기준선과 대상 디스크를 유효한 복구
+  기준으로 유지한다.
+- 성공 체크포인트에는 `automaticReseed=true`,
+  `modeDecisionCode=SOURCE_CBT_EPOCH_RESET`을 기록한다.
+- 다음 durable 주기가 `CBT_INCREMENTAL` 또는 `NO_CHANGE`로 완료돼야 자동 증분
+  복구 완료로 판정한다.
+
+## 7. 2026-08-21 실환경 preflight
+
+- 과거 changeId 조회: `vim.fault.FileFault`
+- 같은 VM, 같은 디스크, 새 임시 스냅샷의 현재 changeId 조회: 성공
+- 전체 50 GiB coverage: 1 page, 0 changed area, activation verified
+- 판정: vCenter 연결 및 CBT 기능 정상, 과거 CBT epoch만 무효
+
+| 항목 | AS-IS | TO-BE |
+|---|---|---|
+| 과거 changeId 무효 | `DR_CBT_QUERY_FAILED`, systemd 반복 재시작 | 현재 epoch preflight 후 `DR_CBT_RESEED_REQUIRED` |
+| 복구 Cycle | 매 재시작마다 새 실패 sequence | 동일 sequence에서 1회 제한 자동 재시드 |
+| 재시드 실패 후 재시작 | 동일 기준선 전체 복사 반복 가능 | generation 가드로 반복 차단, 운영자 복구 요구 |
+| 기준선 | 과거 durable 기준선만 계속 재시도 | 재시드 commit 전까지 보존, 성공 시 원자 교체 |
+| 이후 보호 | `ERROR/DEAD` | 다음 RPO 주기부터 증분 또는 무변경 |
