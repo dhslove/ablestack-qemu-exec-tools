@@ -39,4 +39,7 @@ assert payload["error_code"] == ""
 assert payload["thumbprintSource"] == "backend-auto-refreshed"
 PY
 
+grep -Fq 'ftctl_vmware_mover_write_source_open_status true "" "VMware source cycle completed"' \
+  "${ROOT}/lib/ftctl/dr_vmware_mover.sh"
+
 echo 'FTCTL VMware thumbprint refresh smoke: PASS'

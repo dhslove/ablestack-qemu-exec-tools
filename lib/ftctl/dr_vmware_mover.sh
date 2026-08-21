@@ -2412,6 +2412,8 @@ main() {
     "$(jq -r '.effectiveMode // ""' "${metrics_path}")" ||
       ftctl_vmware_mover_die 88 "DR_CBT_LOCAL_COMMIT_FAILED: mode decision state commit failed"
   ftctl_vmware_mover_write_cycle_journal "${journal_path}" "LOCAL_DURABLE" "NONE" "" "" "${results_path}" "${mode_decision}"
+  ftctl_vmware_mover_write_source_open_status true "" "VMware source cycle completed" \
+    "${source_vm_ref}" "${source_snapshot_ref}" "${source_vmdk}"
   rm -f "${results_path}" "${cbt_evidence_path}"
 }
 

@@ -100,3 +100,9 @@ After an incremental VDDK source opens successfully, FTCTL rewrites
 `vmware-source-open.json` as a successful observation. This prevents a durable
 incremental cycle from coexisting with stale source-open failure evidence left
 by an earlier vCenter outage or certificate rollover.
+
+The mover repeats that successful evidence write only after all disks have
+completed and the cycle journal reaches `LOCAL_DURABLE`. This final barrier is
+required for `NO_CHANGE`, full-seed, incremental, and multi-disk cycles alike;
+therefore a stale source-open failure cannot survive a successful durable cycle
+even when no per-disk CBT patch function was invoked.
