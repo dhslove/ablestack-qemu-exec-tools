@@ -9427,6 +9427,7 @@ JSON
 
 selftest_case_dr_scheduler_systemd_launch_contract() {
   local plan="plan-systemd-owned" run="run-systemd-owned" plan_dir profile state status launch unit rc
+  local failback_run="run-failback-completed" failback_dir
   selftest_reset_env
   plan_dir="${SELFTEST_ROOT}/run/dr-runtime/plans/${plan}"
   profile="${plan_dir}/profile.json"
@@ -9461,6 +9462,35 @@ JSON
   ftctl_dr_runtime_path_set "${status}" "state=FAILED_OVER" "active_side=TARGET" "control_state=RUNNING"
   ftctl_dr_scheduler_recover "${plan}" "${run}" "${profile}" "${state}" "${status}" "SELFTEST" || rc=$?
   selftest_assert_eq "${rc}" "41" "TARGET authority suppresses scheduler recovery"
+
+  failback_dir="${plan_dir}/failbacks"
+  mkdir -p "${failback_dir}" "${plan_dir}/failovers"
+  cat > "${plan_dir}/failovers/active.json" <<JSON
+{"state":"FAILED_OVER","activeSide":"TARGET","cloudAuthorityGeneration":7,"runUuid":"run-failover-old","completedAt":"2026-08-22T00:10:00+09:00"}
+JSON
+  cat > "${failback_dir}/active.json" <<JSON
+{"state":"COMPLETED","activeSide":"SOURCE","engineAckState":"ACKNOWLEDGED","commitOutcome":"ACKNOWLEDGED","sourcePowerState":"POWERED_ON","targetPowerState":"POWERED_OFF","cloudAuthorityGeneration":7,"postFailbackCheckpointSequence":9,"runUuid":"${failback_run}","completedAt":"2026-08-22T00:20:00+09:00"}
+JSON
+  ftctl_state_write_kv_all "${failback_dir}/${failback_run}.commit.state" \
+    "plan=${plan}" "run=${failback_run}" "phase=COMPLETED" "outcome=ACKNOWLEDGED" \
+    "source_power_state=POWERED_ON" "target_power_state=POWERED_OFF" \
+    "authority_generation=7" "checkpoint_sequence=8"
+  ftctl_dr_runtime_converge_completed_failback_authority "${plan}" "${state}" "${status}"
+  selftest_assert_file_contains "${status}" "state=READY"
+  selftest_assert_file_contains "${status}" "active_side=SOURCE"
+  selftest_assert_file_contains "${status}" "target_promotion_state=STANDBY"
+  selftest_assert_file_contains "${status}" "post_failback_checkpoint_sequence=9"
+
+  # A newer target authority must not be rewritten by an older failback.
+  cat > "${plan_dir}/failovers/active.json" <<JSON
+{"state":"FAILED_OVER","activeSide":"TARGET","cloudAuthorityGeneration":8,"runUuid":"run-failover-new","completedAt":"2026-08-22T00:30:00+09:00"}
+JSON
+  ftctl_dr_runtime_path_set "${status}" "state=FAILED_OVER" "active_side=TARGET" "control_state=RUNNING"
+  rc=0
+  ftctl_dr_runtime_converge_completed_failback_authority "${plan}" "${state}" "${status}" || rc=$?
+  selftest_assert_eq "${rc}" "2" "newer TARGET authority blocks failback convergence"
+  selftest_assert_file_contains "${status}" "active_side=TARGET"
+  rm -f "${plan_dir}/failovers/active.json"
 
   rc=0
   ftctl_dr_runtime_path_set "${status}" "state=READY" "active_side=SOURCE" "control_state=PAUSED"

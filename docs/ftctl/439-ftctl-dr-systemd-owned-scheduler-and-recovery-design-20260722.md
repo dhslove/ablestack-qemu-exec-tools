@@ -425,3 +425,46 @@ Failback rollback은 일반 scheduler recovery보다 우선한다. rollback prep
 `STOPPED/IDLE` ACK를 확보하기 전에는 TARGET VM lifecycle 복구나 자동 scheduler
 recovery를 실행하지 않는다. 상세 control protocol, commit journal, 2단계 abort
 계약은 문서 215를 따른다.
+
+## 17. 패키지 교체 후 Failback 권한 수렴 보강 (2026-08-22)
+
+### 17.1 오류 원인
+
+RPM 교체 과정에서 Plan별 scheduler unit이 안전하게 정지되었지만, 일부 Plan의
+`status.state`는 이전 Failover Run이 기록한 `TARGET/FAILED_OVER` 권한을 계속
+보유했다. 이후 Failback session과 commit journal은 `SOURCE/COMPLETED`로 정상
+종결되었음에도 `dr-sync-recover`가 단일 status 파일만 판정해
+`DR_RECOVERY_SUPPRESSED_TARGET`으로 복구를 거부했다.
+
+### 17.2 권한 판정 계약
+
+Scheduler recovery 전에 다음 조건을 모두 만족하는 Failback만 현재 SOURCE 권한으로
+수렴한다.
+
+1. `failbacks/active.json`이 `COMPLETED`, `SOURCE`, `ACKNOWLEDGED`이다.
+2. source/target 전원 상태가 각각 `POWERED_ON`/`POWERED_OFF`이다.
+3. 같은 Run의 commit journal이 `COMPLETED/ACKNOWLEDGED`이고 Plan, Run, authority
+   generation, checkpoint가 session과 일치한다.
+4. post-Failback checkpoint가 commit checkpoint 이상이다.
+5. 더 높은 generation 또는 더 늦은 완료 시각의 TARGET Failover 권한이 없다.
+
+조건이 성립하면 stale status와 recovery Run을 `SOURCE/READY`, target
+`POWERED_OFF/STANDBY`로 원자 수렴한 뒤 기존 systemd scheduler recovery를 수행한다.
+조건이 하나라도 어긋나거나 최신 권한이 TARGET이면 기존
+`DR_RECOVERY_SUPPRESSED_TARGET` 차단을 유지한다.
+
+### 17.3 AS-IS / TO-BE
+
+| 항목 | AS-IS | TO-BE |
+|---|---|---|
+| 복구 권한 원천 | 단일 `status.state` | 완료 Failback session + commit journal + 최신 Failover 비교 |
+| RPM 교체 후 stale TARGET | 복구 영구 차단 | 검증된 SOURCE 권한으로 수렴 후 복구 |
+| 실제 TARGET 운영 | 상태 파일 기준 차단 | 더 최신 TARGET 권한을 확인해 동일하게 차단 |
+| 회귀 검증 | TARGET 차단만 검증 | stale TARGET 복구와 newer TARGET 차단을 함께 검증 |
+
+### 17.4 운영 재테스트 규칙
+
+상태 변경은 Cloud UI의 `복제 서비스 복구`로만 시작한다. API, DB, host CLI와
+FTCTL 직접 명령은 상태 변경에 사용하지 않으며, 조회와 증거 수집에만 사용한다.
+PASS는 UI Run 성공, systemd scheduler 활성, 다음 durable 증분/무변경 Cycle 완료,
+Cloud Plan `READY/SOURCE`가 모두 일치할 때만 선언한다.

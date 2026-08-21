@@ -301,8 +301,16 @@ ftctl_dr_scheduler_recover_nbd_quarantine() {
 
 ftctl_dr_scheduler_recover() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" state_path="${4-}" status_path="${5-}" trigger="${6-MANUAL}"
-  local state active_side control_state transition_state
+  local state active_side control_state transition_state authority_rc=0
   [[ -f "${profile_file}" && -f "${status_path}" ]] || return 2
+  # Package replacement or process death can leave status.state owned by an
+  # older failover Run. Reconcile only from a newer, fully acknowledged
+  # failback journal; a genuine TARGET authority remains suppressed below.
+  if declare -F ftctl_dr_runtime_converge_completed_failback_authority >/dev/null 2>&1; then
+    ftctl_dr_runtime_converge_completed_failback_authority \
+      "${plan}" "${state_path}" "${status_path}" || authority_rc=$?
+    [[ "${authority_rc}" != "2" ]] || return 41
+  fi
   state="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "state")"
   active_side="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "active_side")"
   control_state="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "control_state")"

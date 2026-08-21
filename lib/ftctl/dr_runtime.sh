@@ -914,6 +914,113 @@ ftctl_dr_runtime_overlay_failback_plan_authority() {
   ftctl_dr_runtime_path_set "${status_path}" "${updates[@]}"
 }
 
+# Repair a plan status that still projects an older TARGET-side failover after a
+# newer, durably acknowledged failback completed. This is intentionally stricter
+# than the read-side overlay because it is allowed to reopen the SOURCE scheduler.
+ftctl_dr_runtime_converge_completed_failback_authority() {
+  local plan="${1-}" state_path="${2-}" status_path="${3-}"
+  local plan_dir active_path failover_path commit_path run_uuid
+  local state active_side engine_ack commit_outcome source_power target_power
+  local failback_generation failover_generation failback_completed_at failover_completed_at
+  local commit_plan commit_run commit_phase commit_state commit_source_power commit_target_power
+  local commit_generation commit_checkpoint post_sequence current_state current_side now
+  local authority_order
+
+  [[ -n "${plan}" && -f "${state_path}" && -f "${status_path}" ]] || return 1
+  plan_dir="$(dirname "${status_path}")"
+  active_path="${plan_dir}/failbacks/active.json"
+  [[ -s "${active_path}" ]] || return 1
+
+  state="$(jq -r '.state // empty' "${active_path}" 2>/dev/null || true)"
+  active_side="$(jq -r '.activeSide // empty' "${active_path}" 2>/dev/null || true)"
+  engine_ack="$(jq -r '.engineAckState // empty' "${active_path}" 2>/dev/null || true)"
+  commit_outcome="$(jq -r '.commitOutcome // empty' "${active_path}" 2>/dev/null || true)"
+  source_power="$(jq -r '.sourcePowerState // empty' "${active_path}" 2>/dev/null || true)"
+  target_power="$(jq -r '.targetPowerState // empty' "${active_path}" 2>/dev/null || true)"
+  run_uuid="$(jq -r '.runUuid // empty' "${active_path}" 2>/dev/null || true)"
+  failback_generation="$(jq -r '.cloudAuthorityGeneration // empty' "${active_path}" 2>/dev/null || true)"
+  failback_completed_at="$(jq -r '.completedAt // empty' "${active_path}" 2>/dev/null || true)"
+  post_sequence="$(jq -r '.postFailbackCheckpointSequence // empty' "${active_path}" 2>/dev/null || true)"
+  [[ "${state}" == "COMPLETED" && "${active_side}" == "SOURCE" \
+        && "${engine_ack}" == "ACKNOWLEDGED" && "${commit_outcome}" == "ACKNOWLEDGED" \
+        && "${source_power}" == "POWERED_ON" && "${target_power}" == "POWERED_OFF" \
+        && -n "${run_uuid}" && "${failback_generation}" =~ ^[1-9][0-9]*$ \
+        && "${post_sequence}" =~ ^[1-9][0-9]*$ && -n "${failback_completed_at}" ]] || return 1
+
+  commit_path="$(ftctl_dr_runtime_failback_commit_state_path "${plan}" "${run_uuid}")"
+  [[ -f "${commit_path}" ]] || return 1
+  commit_plan="$(ftctl_state_read_kv "${commit_path}" plan 2>/dev/null || true)"
+  commit_run="$(ftctl_state_read_kv "${commit_path}" run 2>/dev/null || true)"
+  commit_phase="$(ftctl_state_read_kv "${commit_path}" phase 2>/dev/null || true)"
+  commit_state="$(ftctl_state_read_kv "${commit_path}" outcome 2>/dev/null || true)"
+  commit_source_power="$(ftctl_state_read_kv "${commit_path}" source_power_state 2>/dev/null || true)"
+  commit_target_power="$(ftctl_state_read_kv "${commit_path}" target_power_state 2>/dev/null || true)"
+  commit_generation="$(ftctl_state_read_kv "${commit_path}" authority_generation 2>/dev/null || true)"
+  commit_checkpoint="$(ftctl_state_read_kv "${commit_path}" checkpoint_sequence 2>/dev/null || true)"
+  [[ "${commit_plan}" == "${plan}" && "${commit_run}" == "${run_uuid}" \
+        && "${commit_phase}" == "COMPLETED" && "${commit_state}" == "ACKNOWLEDGED" \
+        && "${commit_source_power}" == "POWERED_ON" && "${commit_target_power}" == "POWERED_OFF" \
+        && "${commit_generation}" == "${failback_generation}" \
+        && "${commit_checkpoint}" =~ ^[1-9][0-9]*$ \
+        && "${post_sequence}" -ge "${commit_checkpoint}" ]] || return 1
+
+  # A later TARGET authority must always win. Equal generations are ordered by
+  # the durable completion timestamps because failover and failback may share
+  # one Cloud authority generation during a round trip.
+  failover_path="${plan_dir}/failovers/active.json"
+  if [[ -s "${failover_path}" \
+        && "$(jq -r '.state // empty' "${failover_path}" 2>/dev/null || true)" == "FAILED_OVER" \
+        && "$(jq -r '.activeSide // empty' "${failover_path}" 2>/dev/null || true)" == "TARGET" ]]; then
+    failover_generation="$(jq -r '.cloudAuthorityGeneration // empty' "${failover_path}" 2>/dev/null || true)"
+    failover_completed_at="$(jq -r '.completedAt // empty' "${failover_path}" 2>/dev/null || true)"
+    authority_order="$(python3 - "${failback_generation}" "${failback_completed_at}" \
+      "${failover_generation}" "${failover_completed_at}" <<'PY'
+import datetime
+import sys
+
+fb_generation, fb_at, fo_generation, fo_at = sys.argv[1:5]
+
+def generation(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+def timestamp(value):
+    try:
+        return datetime.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return 0.0
+
+fb_key = (generation(fb_generation), timestamp(fb_at))
+fo_key = (generation(fo_generation), timestamp(fo_at))
+print("SOURCE" if fb_key > fo_key else "TARGET")
+PY
+)"
+    [[ "${authority_order}" == "SOURCE" ]] || return 2
+  fi
+
+  current_state="$(ftctl_dr_runtime_state_get_from_path "${status_path}" state)"
+  current_side="$(ftctl_dr_runtime_state_get_from_path "${status_path}" active_side)"
+  [[ "${current_state}" == "FAILED_OVER" || "${current_side}" == "TARGET" ]] || return 0
+  now="$(ftctl_now_iso8601)"
+  local -a updates=(
+    "state=READY" "step=target-checkpoint-ready" "progress=100"
+    "active_side=SOURCE" "source_power_state=POWERED_ON" "source_promotion_state=PROMOTED"
+    "target_power_state=POWERED_OFF" "target_promotion_state=STANDBY"
+    "failback_phase=COMPLETED" "cloud_lifecycle_state=COMPLETED"
+    "engine_ack_state=ACKNOWLEDGED" "failback_commit_outcome=ACKNOWLEDGED"
+    "post_failback_checkpoint_sequence=${post_sequence}"
+    "resume_checkpoint_completed_sequence=${post_sequence}"
+    "terminal_authoritative=true" "retryable=false" "error_code=" "error_message="
+    "updated_at=${now}"
+  )
+  ftctl_dr_runtime_path_set "${state_path}" "${updates[@]}" || return 1
+  ftctl_dr_runtime_path_set "${status_path}" "${updates[@]}" || return 1
+  ftctl_log_event "dr-runtime" "dr.failback.authority.converged" "ok" "" "" \
+    "plan=${plan} run=${run_uuid} generation=${failback_generation} checkpoint=${post_sequence}"
+}
+
 ftctl_dr_runtime_apply_target_authority_terminal_state() {
   local state_path="${1-}" now="${2-$(ftctl_now_iso8601)}"
   [[ -n "${state_path}" && -f "${state_path}" ]] || return 1
