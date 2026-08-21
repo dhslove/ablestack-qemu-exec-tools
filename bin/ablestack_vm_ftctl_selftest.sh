@@ -8095,7 +8095,7 @@ failover_restore_point_sequence=43
 manifest_sha256=${manifest}
 target_vm_id=${target_vm_id}
 target_external_ref=${target_external_ref}
-source_fence_state=ACKNOWLEDGED
+source_fence_state=REQUESTED
 source_power_state=UNKNOWN
 active_side=SOURCE
 target_power_state=POWERED_OFF
@@ -8125,8 +8125,8 @@ payload = {
     "manifestSha256": manifest,
     "planUuid": plan,
     "runUuid": run,
-    "sourceFenceState": "ACKNOWLEDGED",
-    "sourcePowerState": "UNKNOWN",
+    "sourceFenceState": "VERIFIED",
+    "sourcePowerState": "POWERED_OFF",
     "targetExternalRef": target_external_ref,
     "targetPowerState": "POWERED_ON",
     "targetVmId": int(target_vm_id),
@@ -8143,10 +8143,12 @@ PY
     --commit-attempt-id "${attempt}" --commit-envelope-sha256 "${envelope_sha}" \
     --target-vm-id "${target_vm_id}" --target-external-ref "${target_external_ref}" \
     --target-power-state POWERED_ON --boot-validation-state POWER_STATE_VALIDATED \
-    --source-fence-state ACKNOWLEDGED --source-power-state UNKNOWN --json)"
+    --source-fence-state VERIFIED --source-power-state POWERED_OFF --json)"
   selftest_assert_contains "${out}" '"state":"FAILED_OVER"' "V2 cutover commit state"
   selftest_assert_file_contains "${journal_path}" 'phase=ACKNOWLEDGED'
   selftest_assert_file_contains "${journal_path}" "commit_envelope_sha256=${envelope_sha}"
+  selftest_assert_file_contains "${run_path}" 'source_fence_state=VERIFIED'
+  selftest_assert_file_contains "${run_path}" 'source_power_state=POWERED_OFF'
 
   out="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-cutover-commit-status \
     --config "${SELFTEST_CONFIG}" --plan "${plan}" --run "${run}" \
@@ -8162,7 +8164,7 @@ PY
     --commit-attempt-id "${attempt}" --commit-envelope-sha256 "${envelope_sha}" \
     --target-vm-id "${target_vm_id}" --target-external-ref "${target_external_ref}" \
     --target-power-state POWERED_ON --boot-validation-state POWER_STATE_VALIDATED \
-    --source-fence-state ACKNOWLEDGED --source-power-state UNKNOWN --json)"
+    --source-fence-state VERIFIED --source-power-state POWERED_OFF --json)"
   selftest_assert_contains "${out}" '"state":"FAILED_OVER"' "V2 cutover replay is idempotent"
 
   set +e

@@ -384,3 +384,38 @@ commit을 실행한다. 전체 Failover worker, data transfer, VM lifecycle은 �
 - ACK 유실 후 status만으로 수렴한다.
 - 기존 V1 성공 동작을 회귀시키지 않는다.
 - 현재 실패 Run을 data transfer 없이 TARGET authority로 복구할 수 있다.
+
+## 16. Cloud-verified planned source-isolation promotion (2026-08-21)
+
+Planned VMware Failover begins with provisional FTCTL evidence because FTCTL
+does not own vCenter VM lifecycle:
+
+```text
+source_fence_state=REQUESTED
+source_power_state=UNKNOWN
+```
+
+Cloud owns the source power action. After vCenter confirms that the source VM
+is off, the V2 commit envelope supplies:
+
+```text
+source_fence_state=VERIFIED
+source_power_state=POWERED_OFF
+```
+
+FTCTL accepts only this monotonic evidence promotion. `REQUESTED|UNKNOWN` may
+become `ACKNOWLEDGED|VERIFIED`, and power `UNKNOWN` may become
+`POWERED_OFF|UNREACHABLE`. An authoritative value changing to a conflicting or
+weaker value is still rejected with `DR_CUTOVER_POWER_STATE_INVALID`.
+
+The barrier order is source isolation, Cloud target promotion, durable FTCTL
+commit acknowledgement, then authority projection. A failed commit never
+changes active authority to TARGET. Existing VMware transfer, CBT, RBD write,
+guest preparation, and target materialization logic is unchanged.
+
+| Area | AS-IS | TO-BE |
+|---|---|---|
+| Provisional evidence | Exact equality rejects Cloud's stronger verified evidence | Safe monotonic promotion is accepted |
+| Conflicting evidence | Rejected | Still rejected |
+| Authority | Could be projected before ACK by Cloud | Changes only after durable commit ACK |
+| Regression | ACKNOWLEDGED/UNKNOWN fixture only | REQUESTED/UNKNOWN to VERIFIED/POWERED_OFF fixture and replay |

@@ -5462,11 +5462,21 @@ ftctl_dr_runtime_cutover_commit() {
         "DR_CUTOVER_TARGET_IDENTITY_MISMATCH" "Cloud target identity does not match FTCTL materialization" 79
       return 79
     fi
-    if [[ -n "${current_source_fence}" && "${current_source_fence}" != "${source_fence_state}" \
-          || -n "${current_source_power}" && "${current_source_power}" != "${source_power_state}" ]]; then
-      [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_error_json "dr-cutover-commit" "${plan}" "${run}" \
-        "DR_CUTOVER_POWER_STATE_INVALID" "Cloud source isolation evidence does not match FTCTL runtime" 79
-      return 79
+    if [[ -n "${current_source_fence}" && "${current_source_fence}" != "${source_fence_state}" ]]; then
+      if [[ "${current_source_fence}" != "REQUESTED" && "${current_source_fence}" != "UNKNOWN" \
+            || "${source_fence_state}" != "ACKNOWLEDGED" && "${source_fence_state}" != "VERIFIED" ]]; then
+        [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_error_json "dr-cutover-commit" "${plan}" "${run}" \
+          "DR_CUTOVER_POWER_STATE_INVALID" "Cloud source isolation evidence conflicts with FTCTL runtime" 79
+        return 79
+      fi
+    fi
+    if [[ -n "${current_source_power}" && "${current_source_power}" != "${source_power_state}" ]]; then
+      if [[ "${current_source_power}" != "UNKNOWN" \
+            || "${source_power_state}" != "POWERED_OFF" && "${source_power_state}" != "UNREACHABLE" ]]; then
+        [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_error_json "dr-cutover-commit" "${plan}" "${run}" \
+          "DR_CUTOVER_POWER_STATE_INVALID" "Cloud source power evidence conflicts with FTCTL runtime" 79
+        return 79
+      fi
     fi
     if [[ -f "${commit_path}" ]]; then
       journal_attempt="$(ftctl_state_read_kv "${commit_path}" "commit_attempt_id" 2>/dev/null || true)"
@@ -5510,6 +5520,8 @@ ftctl_dr_runtime_cutover_commit() {
     "target_power_state=POWERED_ON" \
     "target_promotion_state=PROMOTED" \
     "boot_validation_state=${boot_validation_state}" \
+    "source_fence_state=${source_fence_state}" \
+    "source_power_state=${source_power_state}" \
     "cloud_cutover_session_id=${cloud_session_id:-${session_id}}" \
     "cloud_authority_generation=${authority_generation}" \
     "cutover_commit_contract_version=${contract_version}" \
