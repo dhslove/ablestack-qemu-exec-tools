@@ -18,7 +18,7 @@ printf '%s\n' "\$*" >> '${TMP}/govc.calls'
 case "\$1 \$2" in
   'object.collect -json')
     if [[ -f '${TMP}/snapshot-present' ]]; then
-      printf '%s\n' '{"Name":"durable-cycle-snapshot","Snapshot":{"Value":"snapshot-42"}}'
+      printf '%s\n' '{"Name":"durable-cycle-snapshot","Snapshot":{"Value":"snapshot-42"},"childSnapshotList":[{"Name":"durable-cycle-snapshot","Snapshot":{"Value":"snapshot-43"}}]}'
     else
       printf '%s\n' '{}'
     fi
@@ -31,7 +31,8 @@ case "\$1 \$2" in
     fi
     ;;
   'snapshot.remove -vm')
-    [[ "\${4-}" == 'durable-cycle-snapshot' ]]
+    [[ "\${4-}" == '-r=true' ]]
+    [[ "\${5-}" == 'snapshot-42' ]]
     rm -f '${TMP}/snapshot-present'
     ;;
   *) exit 1 ;;
@@ -51,7 +52,16 @@ ftctl_vmware_mover_cleanup_pending_snapshot "${TMP}/govc" '10.10.21.10' 'adminis
 jq -e '.cleanupRequired == false and .lifecycleState == "CLEANED"
   and .lastSnapshotRef == "snapshot-42"
   and .lastSnapshotName == "durable-cycle-snapshot"' "${FTCTL_DR_SOURCE_SNAPSHOT_STATUS_PATH}" >/dev/null
-grep -q 'snapshot.remove -vm vm-1 durable-cycle-snapshot' "${TMP}/govc.calls"
+grep -q 'snapshot.remove -vm vm-1 -r=true snapshot-42' "${TMP}/govc.calls"
+
+cat > "${TMP}/foreign-subtree.json" <<'EOF'
+{"Name":"durable-cycle-snapshot","Snapshot":{"Value":"snapshot-42"},"childSnapshotList":[{"Name":"operator-snapshot","Snapshot":{"Value":"snapshot-99"}}]}
+EOF
+if ftctl_vmware_mover_snapshot_subtree_is_owned "${TMP}/foreign-subtree.json" \
+    'snapshot-42' 'durable-cycle-snapshot'; then
+  echo 'foreign snapshot descendant was incorrectly accepted' >&2
+  exit 1
+fi
 
 # A missing object is an idempotently completed cleanup.
 python3 - "${FTCTL_DR_SOURCE_SNAPSHOT_STATUS_PATH}" <<'PY'

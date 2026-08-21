@@ -20,7 +20,7 @@ blocked subsequent incremental cycles as `DR_CBT_QUERY_FAILED`.
 | Area | AS-IS | TO-BE |
 |---|---|---|
 | Snapshot identity | name can be replaced while ref is retained | immutable `(vmRef, snapshotRef, snapshotName, cycle)` |
-| Removal | remove by caller-provided name | resolve by MoRef first, then remove the verified name |
+| Removal | remove by caller-provided name | validate ownership and remove by MoRef, including owned retry descendants |
 | Durable cycle | EXIT cleanup can replace exit 0 with exit 1 | `LOCAL_DURABLE` remains successful; cleanup is a separate barrier |
 | Cleanup retry | next sequence is created and fails terminally | same sequence and owner Run wait in `WAITING_CLEANUP` |
 | Error code | cleanup pending is reported as CBT query failure | `DR_VMWARE_SNAPSHOT_CLEANUP_PENDING`, retryable |
@@ -35,7 +35,8 @@ transfer -> metadata commit -> LOCAL_DURABLE
 
 next scheduled cycle
   -> cleanupRequired
-  -> resolve immutable snapshot name by snapshotRef
+  -> resolve immutable snapshot subtree by snapshotRef
+  -> verify every descendant belongs to the same FTCTL run prefix
   -> cleanup succeeds -> continue same cycle
   -> cleanup still fails -> WAITING_CLEANUP, same sequence, backoff
 ```
@@ -68,6 +69,8 @@ maintenance state and last durable recovery point are independent facts.
 ## 7. Verification
 
 - Mismatched stored name/ref resolves and removes the object selected by ref.
+- Duplicate retry names are removed by MoRef only when the full subtree is FTCTL-owned.
+- A foreign descendant blocks recursive cleanup and remains retryable.
 - Missing snapshot is treated as idempotently cleaned.
 - Cleanup failure preserves the original mover return code after durable commit.
 - rc 99 remains retryable and reuses the same sequence.

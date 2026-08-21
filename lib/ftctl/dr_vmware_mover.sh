@@ -1746,6 +1746,64 @@ sys.exit(1)
 PY
 }
 
+ftctl_vmware_mover_snapshot_subtree_is_owned() {
+  local json_path="${1-}" snapshot_ref="${2-}" snapshot_name="${3-}"
+  [[ -s "${json_path}" && -n "${snapshot_ref}" && -n "${snapshot_name}" ]] || return 1
+  python3 - "${json_path}" "${snapshot_ref}" "${snapshot_name}" <<'PY'
+import json
+import re
+import sys
+
+path, expected_ref, expected_name = sys.argv[1:4]
+try:
+    with open(path, "r", encoding="utf-8") as fh:
+        data = json.load(fh)
+except (OSError, UnicodeError, json.JSONDecodeError):
+    sys.exit(1)
+
+prefix = re.sub(r"-cycle-[0-9]+$", "-cycle-", expected_name)
+
+def ref_value(value):
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        for key in ("Value", "value", "MoRef", "moRef", "moid", "id"):
+            result = value.get(key)
+            if result is not None and not isinstance(result, (dict, list)):
+                return str(result)
+    return ""
+
+def find(value):
+    if isinstance(value, dict):
+        if ref_value(value.get("Snapshot") or value.get("snapshot")) == expected_ref:
+            return value
+        for child in value.values():
+            result = find(child)
+            if result is not None:
+                return result
+    elif isinstance(value, list):
+        for child in value:
+            result = find(child)
+            if result is not None:
+                return result
+    return None
+
+def owned(value):
+    if isinstance(value, dict):
+        if "Snapshot" in value or "snapshot" in value:
+            name = str(value.get("Name") or value.get("name") or "")
+            if not name or not (name == expected_name or name.startswith(prefix)):
+                return False
+        return all(owned(child) for child in value.values())
+    if isinstance(value, list):
+        return all(owned(child) for child in value)
+    return True
+
+node = find(data)
+sys.exit(0 if node is not None and owned(node) else 1)
+PY
+}
+
 ftctl_vmware_mover_resolve_run_snapshot_ref() {
   local govc_bin="${1-}" endpoint="${2-}" username="${3-}" password_file="${4-}" tls_verify="${5-}" source_vm_ref="${6-}" snapshot_name="${7-}"
   local object_collect_json snapshot_tree snapshot_ref
@@ -1880,7 +1938,7 @@ ftctl_vmware_mover_create_run_snapshot() {
 
 ftctl_vmware_mover_remove_run_snapshot() {
   local govc_bin="${1-}" endpoint="${2-}" username="${3-}" password_file="${4-}" tls_verify="${5-}" source_vm_ref="${6-}" snapshot_name="${7-}" snapshot_ref="${8-}"
-  local verified_name="${snapshot_name}"
+  local verified_name="${snapshot_name}" remove_selector="${snapshot_name}" remove_children="false" object_collect_json
   [[ -x "${govc_bin}" && -n "${source_vm_ref}" ]] || return 0
   [[ -s "${password_file}" ]] || return 0
   FTCTL_DR_VMWARE_REMOVED_SNAPSHOT_NAME=""
@@ -1890,6 +1948,19 @@ ftctl_vmware_mover_remove_run_snapshot() {
       return 0
     fi
     verified_name="${FTCTL_DR_VMWARE_LAST_SNAPSHOT_NAME}"
+    object_collect_json="$(mktemp -p "${FTCTL_DR_VMWARE_MOVER_LOG_DIR}" vmware-snapshot-owned.XXXXXX.json)"
+    if ! GOVC_URL="$(ftctl_vmware_mover_govc_url "${endpoint}")" \
+      GOVC_USERNAME="${username}" \
+      GOVC_PASSWORD="$(cat "${password_file}")" \
+      GOVC_INSECURE="$([[ "${tls_verify}" == "true" ]] && printf 'false' || printf 'true')" \
+        "${govc_bin}" object.collect -json "${source_vm_ref}" snapshot.rootSnapshotList > "${object_collect_json}" 2>/dev/null \
+        || ! ftctl_vmware_mover_snapshot_subtree_is_owned "${object_collect_json}" "${snapshot_ref}" "${verified_name}"; then
+      rm -f "${object_collect_json}"
+      return 1
+    fi
+    rm -f "${object_collect_json}"
+    remove_selector="${snapshot_ref}"
+    remove_children="true"
   fi
   [[ -n "${verified_name}" ]] || return 0
   FTCTL_DR_VMWARE_REMOVED_SNAPSHOT_NAME="${verified_name}"
@@ -1897,7 +1968,8 @@ ftctl_vmware_mover_remove_run_snapshot() {
     GOVC_USERNAME="${username}" \
     GOVC_PASSWORD="$(cat "${password_file}")" \
     GOVC_INSECURE="$([[ "${tls_verify}" == "true" ]] && printf 'false' || printf 'true')" \
-      timeout "${FTCTL_DR_VMWARE_SNAPSHOT_CLEANUP_TIMEOUT:-60}" "${govc_bin}" snapshot.remove -vm "${source_vm_ref}" "${verified_name}" >/dev/null 2>&1; then
+      timeout "${FTCTL_DR_VMWARE_SNAPSHOT_CLEANUP_TIMEOUT:-60}" "${govc_bin}" snapshot.remove \
+        -vm "${source_vm_ref}" "-r=${remove_children}" "${remove_selector}" >/dev/null 2>&1; then
     return 1
   fi
   if [[ -n "${snapshot_ref}" ]] && ftctl_vmware_mover_resolve_snapshot_name_by_ref \
