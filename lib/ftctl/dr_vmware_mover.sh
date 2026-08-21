@@ -1011,6 +1011,8 @@ ftctl_vmware_mover_patch_disk() {
     ftctl_vmware_mover_cleanup_nbdkit "${pid}" "${work_dir}"
     ftctl_vmware_mover_classify_source_open_failure "${label}" "${nbdkit_log}" "${qemu_info_log}" "${source_vm_ref}" "${source_snapshot_ref}" "${source_vmdk}"
   }
+  ftctl_vmware_mover_write_source_open_status true "" "VDDK source open succeeded" \
+    "${source_vm_ref}" "${source_snapshot_ref}" "${source_vmdk}"
 
   mkdir -p "$(dirname "${lock_file}")"
   exec 9>"${lock_file}"

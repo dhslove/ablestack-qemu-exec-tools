@@ -95,3 +95,8 @@ fallback for that attempt.
 Source-open evidence records `backend-auto-refreshed` when the endpoint
 certificate changed. The scheduler can then resume the durable CBT baseline
 after snapshot cleanup without forcing a full seed.
+
+After an incremental VDDK source opens successfully, FTCTL rewrites
+`vmware-source-open.json` as a successful observation. This prevents a durable
+incremental cycle from coexisting with stale source-open failure evidence left
+by an earlier vCenter outage or certificate rollover.
