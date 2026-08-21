@@ -15,6 +15,8 @@ source "${ROOT}/lib/ftctl/dr_vmware_mover.sh"
 
 ftctl_vmware_mover_is_source_transport_failure 'dial tcp 10.10.21.10:443: connect: no route to host'
 ftctl_vmware_mover_is_source_transport_failure 'connection timed out'
+ftctl_vmware_mover_is_source_transport_failure 'POST "/sdk": 503 Service Unavailable'
+ftctl_vmware_mover_is_source_transport_failure 'no healthy upstream'
 if ftctl_vmware_mover_is_source_transport_failure 'VixDiskLib_ConnectEx: One of the parameters was invalid'; then
   echo 'invalid VDDK parameters must not be classified as a source outage' >&2
   exit 1
@@ -41,6 +43,19 @@ FTCTL_DR_VMWARE_MOVER_LOG_DIR="${TMP}/logs"
 set +e
 ftctl_vmware_mover_create_run_snapshot "${TMP}/govc" '10.10.21.10' 'administrator' \
   "${TMP}/password" false 'vm-1' 'ftctl-test-snapshot'
+rc=$?
+set -e
+[[ "${rc}" == '98' ]]
+
+cat > "${TMP}/govc" <<'EOF'
+#!/usr/bin/env bash
+echo 'POST "/sdk": 503 Service Unavailable' >&2
+exit 1
+EOF
+chmod +x "${TMP}/govc"
+set +e
+ftctl_vmware_mover_create_run_snapshot "${TMP}/govc" '10.10.21.10' 'administrator' \
+  "${TMP}/password" false 'vm-1' 'ftctl-test-snapshot-503'
 rc=$?
 set -e
 [[ "${rc}" == '98' ]]

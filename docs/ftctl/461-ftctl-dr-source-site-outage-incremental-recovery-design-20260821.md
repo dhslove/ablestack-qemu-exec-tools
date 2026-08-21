@@ -7,6 +7,7 @@ VMware 원본 사이트가 전원 또는 네트워크 장애로 일시 중단되
 ## 2. 확인된 장애
 
 - vCenter `10.10.21.10:443` 단절은 `no route to host`였지만 기존 mover가 `DR_VMWARE_VDDK_CONNECT_INVALID`로 분류했다.
+- 전원 복구 중 vCenter reverse proxy는 `/ui`와 VAPI를 제공하면서도 SOAP SDK `/sdk`에 `503 Service Unavailable`과 `no healthy upstream`을 반환했다. 이 문자열도 기존 transport 분류에서 빠져 snapshot.create 실패가 VDDK 인자 오류로 잘못 종결됐다.
 - Scheduler는 종료 코드 73을 terminal 오류로 처리하고 systemd 재시작 제한에 도달해 `ERROR/DEAD/RECOVERY_FAILED`가 됐다.
 - 마지막 durable Cycle은 유지됐고 실패 Cycle은 전송 또는 commit 전이므로 기준선 자체는 손상되지 않았다.
 - vCenter 복구 후 사이트 헬스는 정상으로 돌아왔지만 Scheduler 자동 복구 설정과 ERROR 상태 eligibility가 복구를 막았다.
@@ -22,7 +23,7 @@ VMware 원본 사이트가 전원 또는 네트워크 장애로 일시 중단되
 | backoff | systemd 빠른 재시작 | 15~300초 지수 backoff와 제한된 jitter |
 | 복구 완료 | 과거 오류 필드 잔존 가능 | 성공 commit과 함께 대기/오류 필드 원자적 정리 |
 
-통신 오류 분류는 route, timeout, connection refused/reset, DNS 및 network unreachable에만 적용한다. VDDK parameter invalid, 인증 실패, 디스크 lock, CBT 오류는 기존 terminal 진단 경로를 유지한다.
+통신 오류 분류는 route, timeout, connection refused/reset, DNS, network unreachable 및 vCenter SDK의 HTTP 503/upstream unavailable에만 적용한다. VDDK parameter invalid, 인증 실패, 디스크 lock, CBT 오류는 기존 terminal 진단 경로를 유지한다.
 
 ## 4. 상태 및 재시도
 
@@ -39,8 +40,8 @@ WAITING_SOURCE -> source restored -> CBT_INCREMENTAL/NO_CHANGE -> READY
 
 ## 5. 검증
 
-1. transport 문자열과 VDDK 인자 오류 분류 단위 테스트
-2. snapshot.create 단절 rc 98 검증
+1. transport 문자열, SDK 503와 VDDK 인자 오류 분류 단위 테스트
+2. snapshot.create 단절 및 SDK 503의 rc 98 검증
 3. backoff 증가 및 최대 300초 제한 검증
 4. 같은 sequence 재사용과 성공 후 메타데이터 정리 검증
 5. 실환경에서 vCenter 연속 정상 확인 뒤 자동 RECOVER_SYNC 제출
@@ -84,6 +85,11 @@ WAITING_SOURCE
 - 같은 VM, 같은 디스크, 새 임시 스냅샷의 현재 changeId 조회: 성공
 - 전체 50 GiB coverage: 1 page, 0 changed area, activation verified
 - 판정: vCenter 연결 및 CBT 기능 정상, 과거 CBT epoch만 무효
+
+전원 복구 이후 추가 점검에서는 `/ui` HTTP 200, VAPI 인증 응답과 달리 SOAP
+SDK `/sdk`가 HTTP 503을 반환했다. 이 상태에서는 CBT epoch 검증보다 앞선
+snapshot.create 자체가 불가능하다. 따라서 rc 73 terminal 오류가 아니라 rc 98
+`WAITING_SOURCE`로 같은 sequence와 마지막 durable 기준선을 보존해야 한다.
 
 | 항목 | AS-IS | TO-BE |
 |---|---|---|

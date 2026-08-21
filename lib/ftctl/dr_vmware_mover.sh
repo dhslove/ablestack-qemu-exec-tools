@@ -62,7 +62,7 @@ FTCTL_DR_VMWARE_SOURCE_OPEN_THUMBPRINT_SOURCE=""
 ftctl_vmware_mover_is_source_transport_failure() {
   local message="${1-}"
   grep -Eiq \
-    'no route to host|connection refused|connection reset|connection timed out|i/o timeout|context deadline exceeded|temporary failure in name resolution|name or service not known|no such host|network is unreachable|server closed idle connection' \
+    'no route to host|connection refused|connection reset|connection timed out|i/o timeout|context deadline exceeded|temporary failure in name resolution|name or service not known|no such host|network is unreachable|server closed idle connection|503[[:space:]]+service unavailable|no healthy upstream|upstream connect error' \
     <<< "${message}"
 }
 
