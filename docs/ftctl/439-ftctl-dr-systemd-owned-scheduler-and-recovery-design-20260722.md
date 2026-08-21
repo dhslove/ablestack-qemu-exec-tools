@@ -10,6 +10,10 @@
 - 선행 설계:
   - [436-ftctl-dr-plan-scheduler-singleton-lease-and-generation-design-20260720.md](436-ftctl-dr-plan-scheduler-singleton-lease-and-generation-design-20260720.md)
   - [437-ftctl-dr-operation-and-protection-status-envelope-design-20260721.md](437-ftctl-dr-operation-and-protection-status-envelope-design-20260721.md)
+  - [461-ftctl-dr-source-site-outage-incremental-recovery-design-20260821.md](461-ftctl-dr-source-site-outage-incremental-recovery-design-20260821.md)
+
+> 2026-08-21 보강: 원본 사이트 단절은 systemd terminal 재시작 오류가 아니라
+> `WAITING_SOURCE` retryable 상태로 유지한다. 상세 계약과 구현 검증은 문서 461을 따른다.
 
 ## 1. 목적
 

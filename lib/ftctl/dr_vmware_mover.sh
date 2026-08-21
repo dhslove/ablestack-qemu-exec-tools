@@ -59,6 +59,13 @@ FTCTL_DR_VMWARE_SOURCE_OPEN_TLS_VERIFY=""
 FTCTL_DR_VMWARE_SOURCE_OPEN_THUMBPRINT_PRESENT=""
 FTCTL_DR_VMWARE_SOURCE_OPEN_THUMBPRINT_SOURCE=""
 
+ftctl_vmware_mover_is_source_transport_failure() {
+  local message="${1-}"
+  grep -Eiq \
+    'no route to host|connection refused|connection reset|connection timed out|i/o timeout|context deadline exceeded|temporary failure in name resolution|name or service not known|no such host|network is unreachable|server closed idle connection' \
+    <<< "${message}"
+}
+
 ftctl_vmware_mover_die() {
   local rc="${1:-65}"
   shift || true
@@ -1289,6 +1296,9 @@ ftctl_vmware_mover_source_open_die() {
 ftctl_vmware_mover_classify_source_open_failure() {
   local label="${1-}" nbdkit_log="${2-}" qemu_log="${3-}" vm_ref="${4-}" snapshot_ref="${5-}" source_vmdk="${6-}" combined
   combined="$(cat "${nbdkit_log}" "${qemu_log}" 2>/dev/null || true)"
+  if ftctl_vmware_mover_is_source_transport_failure "${combined}"; then
+    ftctl_vmware_mover_source_open_die 98 "DR_SOURCE_SITE_UNAVAILABLE" "VMware source site is temporarily unreachable for ${label}" "${vm_ref}" "${snapshot_ref}" "${source_vmdk}"
+  fi
   if grep -qi 'DiskLib error 16392\|Failed to lock the file' <<< "${combined}"; then
     ftctl_vmware_mover_source_open_die 75 "DR_VMWARE_VDDK_SOURCE_LOCKED" "source VMDK is locked; create/use a run snapshot for ${label}" "${vm_ref}" "${snapshot_ref}" "${source_vmdk}"
   fi
@@ -1707,8 +1717,10 @@ ftctl_vmware_mover_resolve_run_snapshot_ref() {
 
 ftctl_vmware_mover_create_run_snapshot() {
   local govc_bin="${1-}" endpoint="${2-}" username="${3-}" password_file="${4-}" tls_verify="${5-}" source_vm_ref="${6-}" snapshot_name="${7-}"
+  local snapshot_error
   [[ -x "${govc_bin}" ]] || return 73
   [[ -n "${source_vm_ref}" && -n "${snapshot_name}" ]] || return 73
+  mkdir -p "${FTCTL_DR_VMWARE_MOVER_LOG_DIR}"
   if [[ -n "${FTCTL_DR_SOURCE_SNAPSHOT_STATUS_PATH:-}" && -f "${FTCTL_DR_SOURCE_SNAPSHOT_STATUS_PATH}" ]] \
     && jq -e '.cleanupRequired == true and (.lifecycleState == "CLEANUP_FAILED" or .lifecycleState == "CLEANUP_PENDING")' \
       "${FTCTL_DR_SOURCE_SNAPSHOT_STATUS_PATH}" >/dev/null 2>&1; then
@@ -1716,15 +1728,24 @@ ftctl_vmware_mover_create_run_snapshot() {
       "Previous VMware source snapshot cleanup is not complete" "${source_vm_ref}" "${snapshot_name}" "" false true "" "CLEANUP_FAILED" ""
     return 82
   fi
+  snapshot_error="$(mktemp -p "${FTCTL_DR_VMWARE_MOVER_LOG_DIR}" vmware-snapshot-create.XXXXXX.log)"
   if ! GOVC_URL="$(ftctl_vmware_mover_govc_url "${endpoint}")" \
     GOVC_USERNAME="${username}" \
     GOVC_PASSWORD="$(cat "${password_file}")" \
     GOVC_INSECURE="$([[ "${tls_verify}" == "true" ]] && printf 'false' || printf 'true')" \
-      "${govc_bin}" snapshot.create -vm "${source_vm_ref}" -m=false -q=false "${snapshot_name}" >/dev/null; then
+      "${govc_bin}" snapshot.create -vm "${source_vm_ref}" -m=false -q=false "${snapshot_name}" >/dev/null 2>"${snapshot_error}"; then
+    if ftctl_vmware_mover_is_source_transport_failure "$(cat "${snapshot_error}" 2>/dev/null || true)"; then
+      ftctl_vmware_mover_write_source_snapshot_status false "DR_SOURCE_SITE_UNAVAILABLE" \
+        "VMware source site is temporarily unreachable" "${source_vm_ref}" "${snapshot_name}" "" false false ""
+      rm -f "${snapshot_error}"
+      return 98
+    fi
     ftctl_vmware_mover_write_source_snapshot_status false "DR_VMWARE_VDDK_CONNECT_INVALID" \
       "Failed to create VMware source snapshot" "${source_vm_ref}" "${snapshot_name}" "" false false ""
+    rm -f "${snapshot_error}"
     return 73
   fi
+  rm -f "${snapshot_error}"
 
   FTCTL_DR_VMWARE_GOVC_BIN_EFFECTIVE="${govc_bin}"
   FTCTL_DR_VMWARE_SOURCE_VM_REF_EFFECTIVE="${source_vm_ref}"
@@ -2016,6 +2037,9 @@ main() {
     if [[ "${mover_rc}" != "0" ]]; then
       if [[ "${mover_rc}" == "81" ]]; then
         ftctl_vmware_mover_die 81 "DR_VMWARE_SNAPSHOT_REF_UNRESOLVED: VMware source snapshot was created but its MoRef could not be resolved"
+      fi
+      if [[ "${mover_rc}" == "98" ]]; then
+        ftctl_vmware_mover_die 98 "DR_SOURCE_SITE_UNAVAILABLE: VMware source site is temporarily unreachable"
       fi
       ftctl_vmware_mover_die "${mover_rc:-73}" "DR_VMWARE_VDDK_CONNECT_INVALID: failed to create VMware source snapshot"
     fi
