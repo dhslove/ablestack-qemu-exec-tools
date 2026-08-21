@@ -2757,6 +2757,7 @@ ftctl_dr_runtime_failback_worker() {
       86) error_code="DR_REVERSE_SNAPSHOT_OPEN_FAILED" ;;
       87) error_code="DR_REVERSE_WRITER_FAILED" ;;
       88) error_code="DR_REVERSE_DURABILITY_VERIFY_FAILED" ;;
+      90) error_code="DR_REVERSE_TARGET_BACKING_UNRESOLVED" ;;
       66) error_code="DR_UNSUPPORTED_DIRECTION" ;;
       47) error_code="DR_FAILBACK_REQUIRES_TARGET_ACTIVE" ;;
       *) error_code="DR_FAILBACK_REVERSE_SYNC_FAILED" ;;

@@ -128,3 +128,61 @@ empty error code and the message `VMware source cycle completed`.
 `vmware-source-snapshot.json` is `CLEANED` with no active snapshot reference,
 and a direct vCenter `snapshot.tree` query returns no snapshots for the three
 source VMs.
+
+## 10. Reverse Writer Current-Backing Resolution
+
+### 10.1 Incident
+
+After a successful forward failover, the Ubuntu failback attempted to open
+`utest1-000004.vmdk`. That path was the forward replication snapshot leaf
+captured in the original plan. Snapshot cleanup had already consolidated the
+VM back to `utest1.vmdk`, which was the backing currently attached to virtual
+disk key `2000`. VDDK rejected the stale leaf and FTCTL surfaced
+`DR_REVERSE_SNAPSHOT_OPEN_FAILED`.
+
+The DR plan remains the durable identity and placement contract, but a VMware
+snapshot leaf is not a durable target locator. The stable locator for reverse
+writes is the target VM MoRef plus virtual disk device key. The VMDK backing
+path is execution-time inventory derived from that pair.
+
+### 10.2 Required Contract
+
+Before reverse preflight succeeds and again immediately before the reverse
+writer starts, FTCTL must:
+
+1. query the target VM through vCenter using the registered site credential;
+2. match every reverse disk to the current VM device graph by device key;
+3. validate that the current disk capacity matches the committed plan size;
+4. replace only the generated runtime map's `targetVmdkPath` atomically;
+5. reject missing, duplicate, or size-mismatched matches with
+   `DR_REVERSE_TARGET_BACKING_UNRESOLVED` before creating an RBD delta snapshot
+   or opening a VDDK writer.
+
+The Cloud plan mapping and the forward VMware-to-RBD source contract are not
+rewritten. This preserves the proven forward path while making reverse writes
+safe across VMware snapshot create, delete, and consolidation cycles.
+
+Because the durable plan remains in the original `VMWARE_TO_KVM` direction,
+the reverse writer must take its VMware VM MoRef from the generated reverse
+disk map before consulting the plan target. The plan target is the KVM replica
+and must never be used for a vCenter inventory lookup.
+
+### 10.3 AS-IS / TO-BE
+
+| Area | AS-IS | TO-BE |
+|---|---|---|
+| VMware reverse target locator | Plan-time VMDK leaf path | VM MoRef + device key, resolved to current backing at execution time |
+| Snapshot cleanup effect | A removed leaf can remain in the reverse map | Current device graph replaces stale runtime path atomically |
+| Preflight | Tool availability and target power only | Current backing identity and capacity are also mandatory |
+| Failure timing | VDDK writer fails after the reverse delta snapshot is created | Resolution failure blocks before the writer and data mutation |
+| Forward success path | Shared mapping logic can be disturbed by a reverse fix | VMware-to-RBD mover and committed CBT baseline remain unchanged |
+
+### 10.4 Regression Tests
+
+- A stale `*-000004.vmdk` path with matching device key resolves to the current
+  base backing and preserves size.
+- An unknown key plus a stale path fails with exit code `90` and does not start
+  the writer.
+- Existing reverse maps whose current path is already valid remain unchanged
+  apart from resolution evidence.
+- Forward VMware-to-RBD and RBD source snapshot tests continue to pass.

@@ -112,6 +112,11 @@ for index, disk in enumerate(disks):
         disk.get("sourcePath") if reverse_from_target else disk.get("targetVmdkPath"),
         disk.get("sourceDiskRef") if reverse_from_target else disk.get("targetPath"),
     )
+    target_disk_key = first(
+        target_obj.get("sourceDiskKey"), target_obj.get("deviceKey"),
+        disk.get("sourceDiskKey"),
+        disk.get("device") if str(disk.get("device") or "").isdigit() else "",
+    )
     size = disk.get("sizeBytes") or source_obj.get("sizeBytes") or target_obj.get("sizeBytes") or 0
     identity = "|".join((pool, image, target_vmdk, str(size)))
     rows.append({
@@ -122,6 +127,8 @@ for index, disk in enumerate(disks):
         "sourceVolumeUuid": first(source_obj.get("volumeUuid"), source_obj.get("uuid")),
         "sourceUri": f"rbd:{pool}/{image}" if pool and image else source_path,
         "targetVmdkPath": target_vmdk,
+        "targetDiskKey": target_disk_key,
+        "targetDiskLabel": first(target_obj.get("label"), disk.get("label")),
         "targetVmRef": first(target.get("externalRef"), target.get("vmId"), target.get("id"), disk.get("targetVmRef")),
         "virtualBytes": int(size or 0),
         "diskIdentityHash": "sha256:" + hashlib.sha256(identity.encode("utf-8")).hexdigest(),
@@ -149,6 +156,168 @@ with open(tmp, "w", encoding="utf-8") as handle:
     os.fsync(handle.fileno())
 os.replace(tmp, output_path)
 PY
+}
+
+ftctl_dr_kvm_vmware_refresh_target_backings() {
+  local profile_file="${1-}" map_path="${2-}" credentials_file="${3-}" rc=0
+  [[ -f "${profile_file}" && -f "${map_path}" && -f "${credentials_file}" ]] || return 90
+  python3 - "${profile_file}" "${map_path}" "${credentials_file}" <<'PY' || rc=$?
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+from urllib.parse import urlparse, urlunparse
+
+profile_path, map_path, credentials_path = sys.argv[1:4]
+
+def load(path):
+    with open(path, "r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+def obj(value):
+    return value if isinstance(value, dict) else {}
+
+def first(*values):
+    for value in values:
+        if value is None or isinstance(value, (dict, list)):
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
+
+def boolish(value):
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+def normalize_url(value):
+    text = first(value)
+    if "://" not in text:
+        text = "https://" + text
+    parsed = urlparse(text)
+    path = parsed.path or "/sdk"
+    if path.rstrip("/") in ("", "/rest", "/ui"):
+        path = "/sdk"
+    return urlunparse((parsed.scheme, parsed.netloc, path, "", "", ""))
+
+def find_vcenter_credential(payload):
+    credentials = obj(payload.get("credentials"))
+    candidates = [credentials.get("source"), credentials.get("target"), payload.get("source"), payload.get("target")]
+    for candidate in candidates:
+        candidate = obj(candidate)
+        kind = first(candidate.get("type"), candidate.get("provider")).upper()
+        if "VCENTER" in kind or "VMWARE" in kind:
+            return candidate
+    return {}
+
+def resolve_govc(credential):
+    candidates = [os.environ.get("FTCTL_DR_VMWARE_GOVC_BIN"), credential.get("govcPath"), credential.get("govcBin")]
+    libdir = first(credential.get("vddkLibdir"), credential.get("libdir"))
+    if libdir:
+        compat_root = os.path.dirname(os.path.abspath(libdir))
+        candidates.extend((os.path.join(compat_root, "bin", "govc"), os.path.join(os.path.dirname(compat_root), "bin", "govc")))
+    version = first(credential.get("vddkVersion"), credential.get("version")).replace(".", "")
+    if version:
+        candidates.append(f"/usr/share/ablestack/v2k/compat/vsphere{'80' if version == '8' else version}/bin/govc")
+    candidates.extend((shutil.which("govc"), "/usr/local/bin/govc", "/usr/bin/govc"))
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return ""
+
+def collect_devices(vm_info):
+    machines = vm_info.get("virtualMachines") or vm_info.get("VirtualMachines") or []
+    vm = machines[0] if isinstance(machines, list) and machines else vm_info
+    return obj(obj(obj(vm).get("config")).get("hardware")).get("device") or []
+
+profile = load(profile_path)
+disk_map = load(map_path)
+runtime_credentials = load(credentials_path)
+credential = find_vcenter_credential(runtime_credentials)
+auth = obj(credential.get("auth"))
+target = obj(profile.get("target"))
+endpoint = normalize_url(first(credential.get("endpoint"), target.get("endpoint")))
+username = first(credential.get("principal"), credential.get("username"), auth.get("username"), auth.get("user"))
+password = first(auth.get("password"), credential.get("password"))
+govc = resolve_govc(credential)
+map_disks = disk_map.get("disks") or []
+map_vm_ref = first(obj(map_disks[0]).get("targetVmRef")) if map_disks else ""
+vm_ref = first(map_vm_ref, disk_map.get("targetVmRef"), target.get("externalRef"))
+if not endpoint or not username or not password or not govc or not vm_ref:
+    raise SystemExit("DR_REVERSE_TARGET_BACKING_UNRESOLVED: vCenter lookup contract is incomplete")
+
+env = os.environ.copy()
+env.update({
+    "GOVC_URL": endpoint,
+    "GOVC_USERNAME": username,
+    "GOVC_PASSWORD": password,
+    "GOVC_INSECURE": "false" if boolish(credential.get("tlsVerify")) else "true",
+})
+proc = subprocess.run([govc, "vm.info", "-json", vm_ref], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+if proc.returncode != 0:
+    raise SystemExit("DR_REVERSE_TARGET_BACKING_UNRESOLVED: " + (proc.stderr.strip() or "govc vm.info failed"))
+try:
+    vm_info = json.loads(proc.stdout or "{}")
+except json.JSONDecodeError as exc:
+    raise SystemExit(f"DR_REVERSE_TARGET_BACKING_UNRESOLVED: invalid govc JSON: {exc}")
+
+devices = []
+for device in collect_devices(vm_info):
+    if not isinstance(device, dict):
+        continue
+    backing = obj(device.get("backing") or device.get("Backing"))
+    path = first(backing.get("fileName"), backing.get("FileName"))
+    if not path:
+        continue
+    info = obj(device.get("deviceInfo") or device.get("DeviceInfo"))
+    devices.append({
+        "key": first(device.get("key"), device.get("Key")),
+        "label": first(info.get("label"), info.get("Label")),
+        "path": path,
+        "capacity": int(device.get("capacityInBytes") or device.get("CapacityInBytes") or 0),
+    })
+
+resolved = []
+used_keys = set()
+for index, row in enumerate(disk_map.get("disks") or []):
+    key = first(row.get("targetDiskKey"), row.get("device") if str(row.get("device") or "").isdigit() else "")
+    label = first(row.get("targetDiskLabel"))
+    old_path = first(row.get("targetVmdkPath"))
+    matches = [item for item in devices if item["key"] == key] if key else []
+    if not key and not matches and old_path:
+        matches = [item for item in devices if item["path"] == old_path]
+    if not key and not matches and label:
+        matches = [item for item in devices if item["label"] == label]
+    if len(matches) != 1 or matches[0]["key"] in used_keys:
+        raise SystemExit(f"DR_REVERSE_TARGET_BACKING_UNRESOLVED: disk {index} key={key or '-'} path={old_path or '-'}")
+    match = matches[0]
+    expected_size = int(row.get("virtualBytes") or 0)
+    if expected_size and match["capacity"] and expected_size != match["capacity"]:
+        raise SystemExit(f"DR_REVERSE_TARGET_BACKING_UNRESOLVED: disk {index} capacity mismatch")
+    used_keys.add(match["key"])
+    updated = dict(row)
+    updated["targetDiskKey"] = match["key"]
+    updated["targetDiskLabel"] = match["label"]
+    updated["targetVmdkPath"] = match["path"]
+    updated["targetBackingResolution"] = "vcenter-current-device-graph"
+    resolved.append(updated)
+
+if not resolved or len(resolved) != len(disk_map.get("disks") or []):
+    raise SystemExit("DR_REVERSE_TARGET_BACKING_UNRESOLVED: disk count mismatch")
+disk_map["disks"] = resolved
+disk_map["targetBackingResolvedAtEpochMs"] = int(time.time() * 1000)
+tmp = map_path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as handle:
+    json.dump(disk_map, handle, sort_keys=True, separators=(",", ":"))
+    handle.write("\n")
+    handle.flush()
+    os.fsync(handle.fileno())
+os.replace(tmp, map_path)
+PY
+  [[ "${rc}" == "0" ]] || return 90
 }
 
 ftctl_dr_kvm_vmware_baseline_state() {
@@ -371,7 +540,7 @@ ftctl_dr_kvm_vmware_cycle_type() {
 ftctl_dr_kvm_vmware_reverse_preflight() {
   local plan="${1-}" profile_file="${2-}" operation_intent="${3-FAILBACK_FINAL}" requested_mode="${4-AUTO}" json="${5-0}"
   local map_path decision rc=0 baseline_state effective_mode decision_code initial_seed source_disk_count estimated_virtual_bytes
-  local source_domain source_domain_probe_state="READY" source_disk_probe_state="READY" target_writer_probe_state="READY" error_code="" ready=true
+  local source_domain source_domain_probe_state="READY" source_disk_probe_state="READY" target_writer_probe_state="READY" target_backing_probe_state="NOT_CHECKED" error_code="" ready=true credentials_file
   [[ -n "${plan}" && -f "${profile_file}" ]] || return 2
   map_path="$(mktemp "${TMPDIR:-/tmp}/ftctl-reverse-map.XXXXXX.json")"
   # RETURN traps survive into the caller unless they clear themselves.
@@ -379,6 +548,16 @@ ftctl_dr_kvm_vmware_reverse_preflight() {
   ftctl_dr_kvm_vmware_canonicalize_profile "${profile_file}" "${map_path}" || {
     rc=67; error_code="DR_REVERSE_DISK_MAP_INVALID"; ready=false
   }
+  credentials_file="$(ftctl_dr_runtime_credential_path "${plan}" 2>/dev/null || true)"
+  if [[ "${rc}" == "0" ]]; then
+    if ftctl_dr_kvm_vmware_refresh_target_backings "${profile_file}" "${map_path}" "${credentials_file}"; then
+      target_backing_probe_state="READY"
+    else
+      rc=90; error_code="DR_REVERSE_TARGET_BACKING_UNRESOLVED"; ready=false
+      target_writer_probe_state="NOT_READY"
+      target_backing_probe_state="NOT_READY"
+    fi
+  fi
   if [[ "${rc}" == "0" ]]; then
     decision="$(ftctl_dr_kvm_vmware_mode_decision "${plan}" "${operation_intent}" "${requested_mode}")" || rc=$?
     IFS=$'\t' read -r baseline_state effective_mode decision_code initial_seed <<< "${decision}"
@@ -428,11 +607,11 @@ ftctl_dr_kvm_vmware_reverse_preflight() {
     fi
   done
   if [[ "${json}" == "1" ]]; then
-    printf '{"command":"dr-reverse-preflight","schema_version":2,"contract_version":"dr-reverse-preflight-v2","result":"%s","ready":%s,"status_evidence_contract_version":1,"status_evidence_publication_ready":true,"status_evidence_error_code":"","plan_uuid":"%s","operation_intent":"%s","requested_mode":"%s","effective_mode":"%s","mode_decision_code":"%s","initial_seed_required":%s,"baseline_file_state":"%s","source_domain_probe_state":"%s","source_disk_probe_state":"%s","source_disk_count":%s,"target_writer_probe_state":"%s","estimated_virtual_bytes":%s,"error_code":"%s","exit_code":%s}\n' \
+    printf '{"command":"dr-reverse-preflight","schema_version":2,"contract_version":"dr-reverse-preflight-v2","result":"%s","ready":%s,"status_evidence_contract_version":1,"status_evidence_publication_ready":true,"status_evidence_error_code":"","plan_uuid":"%s","operation_intent":"%s","requested_mode":"%s","effective_mode":"%s","mode_decision_code":"%s","initial_seed_required":%s,"baseline_file_state":"%s","source_domain_probe_state":"%s","source_disk_probe_state":"%s","source_disk_count":%s,"target_writer_probe_state":"%s","target_backing_probe_state":"%s","estimated_virtual_bytes":%s,"error_code":"%s","exit_code":%s}\n' \
       "$( [[ "${ready}" == "true" ]] && printf ok || printf error )" "${ready}" "$(ftctl__json_escape "${plan}")" \
       "$(ftctl__json_escape "${operation_intent}")" "$(ftctl__json_escape "${requested_mode}")" "$(ftctl__json_escape "${effective_mode}")" \
       "$(ftctl__json_escape "${decision_code}")" "${initial_seed:-false}" "$(ftctl__json_escape "${baseline_state}")" \
-      "$(ftctl__json_escape "${source_domain_probe_state}")" "$(ftctl__json_escape "${source_disk_probe_state}")" "${source_disk_count:-0}" "$(ftctl__json_escape "${target_writer_probe_state}")" \
+      "$(ftctl__json_escape "${source_domain_probe_state}")" "$(ftctl__json_escape "${source_disk_probe_state}")" "${source_disk_count:-0}" "$(ftctl__json_escape "${target_writer_probe_state}")" "$(ftctl__json_escape "${target_backing_probe_state}")" \
       "${estimated_virtual_bytes:-0}" "$(ftctl__json_escape "${error_code}")" "${rc}"
   else
     printf 'ready=%s baseline=%s requested=%s effective=%s decision=%s source_disks=%s writer=%s\n' \
@@ -499,10 +678,11 @@ ftctl_dr_kvm_vmware_replication_cycle() {
   ftctl_ensure_dir "${root}" "0755"
   ftctl_ensure_dir "${cycle_dir}" "0755"
   ftctl_dr_kvm_vmware_canonicalize_profile "${profile_file}" "${map_path}" || return 67
+  credentials_file="$(ftctl_dr_runtime_credential_path "${plan}" 2>/dev/null || true)"
+  ftctl_dr_kvm_vmware_refresh_target_backings "${profile_file}" "${map_path}" "${credentials_file}" || return 90
   effective="$(ftctl_dr_kvm_vmware_cycle_type "${plan}" "${requested}")" || return $?
   mover="$(ftctl_dr_kvm_vmware_effective_mover 2>/dev/null || true)"
   [[ -n "${mover}" ]] || return 65
-  credentials_file="$(ftctl_dr_runtime_credential_path "${plan}" 2>/dev/null || true)"
   FTCTL_DR_PLAN_UUID="${plan}" \
   FTCTL_DR_RUN_UUID="${run}" \
   FTCTL_DR_CHECKPOINT_SEQUENCE="${sequence}" \

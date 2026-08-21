@@ -9943,6 +9943,7 @@ selftest_case_dr_kvm_vmware_reverse_preflight_clears_return_trap() {
     ftctl_dr_kvm_vmware_mode_decision() {
       printf 'MISSING_EXPECTED\tFULL_REVERSE_SEED\tINITIAL_REVERSE_BASELINE_MISSING\ttrue\n'
     }
+    ftctl_dr_kvm_vmware_refresh_target_backings() { return 0; }
     rbd() { return 0; }
     virsh() {
       case "${1-}" in
@@ -10079,6 +10080,7 @@ selftest_case_dr_kvm_vmware_reverse_preflight_requires_live_domain() {
     ftctl_dr_kvm_vmware_mode_decision() {
       printf 'MISSING_EXPECTED\tFULL_REVERSE_SEED\tINITIAL_REVERSE_BASELINE_MISSING\ttrue\n'
     }
+    ftctl_dr_kvm_vmware_refresh_target_backings() { return 0; }
     virsh() { return 1; }
     rbd() { return 0; }
     command() { return 0; }
@@ -10096,6 +10098,7 @@ selftest_case_dr_kvm_vmware_reverse_preflight_requires_live_domain() {
     ftctl_dr_kvm_vmware_mode_decision() {
       printf 'MISSING_EXPECTED\tFULL_REVERSE_SEED\tINITIAL_REVERSE_BASELINE_MISSING\ttrue\n'
     }
+    ftctl_dr_kvm_vmware_refresh_target_backings() { return 0; }
     virsh() {
       case "${1-}" in
         dominfo) return 0 ;;
@@ -10139,6 +10142,49 @@ JSON
     ftctl_kvm_vmware_write_password_file "${password_file}"
   )
   selftest_assert_file_contains "${password_file}" 'vcenter-password'
+  rm -rf "${tmp}"
+}
+
+selftest_case_dr_kvm_vmware_refreshes_stale_target_backing() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR resolves the current VMware backing by stable device key before reverse writes"
+
+  local tmp profile map_path credentials compat govc_bin rc=0
+  tmp="$(mktemp -d)"
+  profile="${tmp}/reverse-profile.json"
+  map_path="${tmp}/disk-map.json"
+  credentials="${tmp}/credentials.json"
+  compat="${tmp}/compat/vsphere80"
+  govc_bin="${compat}/bin/govc"
+  mkdir -p "${compat}/bin" "${compat}/vddk"
+  cat > "${profile}" <<'JSON'
+{"direction":"VMWARE_TO_KVM","source":{"provider":"VMWARE","externalRef":"vm-5027"},"target":{"provider":"ABLESTACK","externalRef":"kvm-target-uuid"}}
+JSON
+  cat > "${map_path}" <<'JSON'
+{"targetVmRef":"vm-5027","disks":[{"device":"2000","targetDiskKey":"2000","targetVmdkPath":"[ds] utest1/utest1-000004.vmdk","targetVmRef":"vm-5027","virtualBytes":107374182400}]}
+JSON
+  cat > "${credentials}" <<JSON
+{"credentials":{"source":{"type":"VCENTER","endpoint":"10.10.21.10","principal":"administrator@example.local","tlsVerify":false,"vddkLibdir":"${compat}/vddk","auth":{"password":"secret"}}}}
+JSON
+  cat > "${govc_bin}" <<'SH'
+#!/usr/bin/env bash
+cat <<'JSON'
+{"virtualMachines":[{"config":{"hardware":{"device":[{"key":2000,"capacityInBytes":107374182400,"deviceInfo":{"label":"Hard disk 1"},"backing":{"fileName":"[ds] utest1/utest1.vmdk"}}]}}}]}
+JSON
+SH
+  chmod +x "${govc_bin}"
+
+  ftctl_dr_kvm_vmware_refresh_target_backings "${profile}" "${map_path}" "${credentials}" || rc=$?
+  selftest_assert_eq "${rc}" "0" "current VMware backing resolution succeeds"
+  jq -e '.disks[0].targetVmdkPath == "[ds] utest1/utest1.vmdk"
+    and .disks[0].targetBackingResolution == "vcenter-current-device-graph"' "${map_path}" >/dev/null \
+    || selftest_fail "current VMware backing was not persisted"
+
+  jq '.disks[0].targetDiskKey="2999" | .disks[0].targetVmdkPath="[ds] stale/missing.vmdk"' \
+    "${map_path}" > "${map_path}.tmp" && mv -f "${map_path}.tmp" "${map_path}"
+  rc=0
+  ftctl_dr_kvm_vmware_refresh_target_backings "${profile}" "${map_path}" "${credentials}" >/dev/null 2>&1 || rc=$?
+  selftest_assert_eq "${rc}" "90" "unresolved VMware backing blocks the reverse writer"
   rm -rf "${tmp}"
 }
 
@@ -10316,6 +10362,7 @@ selftest_main() {
   selftest_case_dr_failback_live_worker_journal_is_read_only
   selftest_case_dr_kvm_vmware_reverse_preflight_requires_live_domain
   selftest_case_dr_kvm_vmware_canonicalizes_cloud_rbd_volume_identity
+  selftest_case_dr_kvm_vmware_refreshes_stale_target_backing
   selftest_case_events_json
   selftest_info "all checks passed"
 }
