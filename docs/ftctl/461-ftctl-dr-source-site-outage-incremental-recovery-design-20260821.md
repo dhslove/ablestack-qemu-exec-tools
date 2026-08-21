@@ -98,3 +98,27 @@ snapshot.create 자체가 불가능하다. 따라서 rc 73 terminal 오류가 �
 | 재시드 실패 후 재시작 | 동일 기준선 전체 복사 반복 가능 | generation 가드로 반복 차단, 운영자 복구 요구 |
 | 기준선 | 과거 durable 기준선만 계속 재시도 | 재시드 commit 전까지 보존, 성공 시 원자 교체 |
 | 이후 보호 | `ERROR/DEAD` | 다음 RPO 주기부터 증분 또는 무변경 |
+
+## 8. 2026-08-21 테스트 배포 및 대기 경로 검증
+
+- 소스 커밋: `926a98da9b3e06973c564a49b1f5a9fbfba1c7dc`
+- GitHub Actions Run: `32458925978`
+- RPM: `ablestack_vm_ftctl-0.9.5-1.noarch`
+- RPM SHA256: `8605b85169ed17c6bbf257c593689aa85f703c2995437c92398fc1e2ac4cb446`
+- 설치 mover SHA256: `0cffb6987835adaa6796c309898181ece8bd90bb3b3faf5ff3a34f570ed25d13`
+
+32번 클러스터의 3개 호스트에는 `aspkg`, 22번 클러스터의 3개 호스트에는
+네이티브 `rpm`으로 동일 아티팩트를 설치했다. 모든 호스트에서 timer active,
+SDK 503와 `no healthy upstream` transport 분류 PASS, VDDK parameter invalid의
+비-transport 분류 PASS를 확인했다.
+
+32번의 기존 장기 scheduler는 패키지 교체 전에 시작돼 구버전 mover를 메모리에
+유지하고 있었다. 중단된 VDDK/NBD worker가 실제 전송 없이 남아 있음을 확인한 뒤
+계획별 systemd unit만 rolling restart했다. 세 계획은 각각 기존 sequence
+`1916`, `1790`, `2811`을 유지하면서 `WAITING_SOURCE`, `retryable=true`로
+네 차례 이상 재시도했고, 백오프는 약 40초에서 130초대로 증가했다. 새 Cycle 또는
+새 Run은 생성되지 않았으며 잔류 nbdkit 프로세스도 정리됐다.
+
+22번 호스트에는 실행 중 DR scheduler와 VDDK/NBD 전송 프로세스가 없어 패키지
+설치 후 별도 rolling restart를 수행하지 않았다. 이후 생성 또는 재개되는 scheduler는
+설치된 새 코드를 처음부터 사용한다.
