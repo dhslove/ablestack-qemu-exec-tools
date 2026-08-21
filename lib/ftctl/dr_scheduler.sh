@@ -111,6 +111,48 @@ ftctl_dr_scheduler_initial_jitter() {
   printf '%s\n' $((hash % (configured + 1)))
 }
 
+ftctl_dr_scheduler_execution_budget_seconds() {
+  local restore_points_path="${1-}" target_rpo_seconds="${2-300}"
+  [[ "${target_rpo_seconds}" =~ ^[1-9][0-9]*$ ]] || target_rpo_seconds=300
+  python3 - "${restore_points_path}" "${target_rpo_seconds}" <<'PY'
+import json
+import math
+import os
+import sys
+
+path = sys.argv[1]
+rpo = max(1, int(sys.argv[2]))
+samples = []
+if path and os.path.exists(path):
+    with open(path, "r", encoding="utf-8") as fh:
+        for line in fh:
+            try:
+                value = json.loads(line).get("schedulerDurationSeconds")
+            except (TypeError, ValueError):
+                continue
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                samples.append(value)
+samples = sorted(samples[-10:])
+if samples:
+    index = max(0, math.ceil(len(samples) * 0.95) - 1)
+    budget = samples[index]
+else:
+    budget = max(30, rpo // 5)
+budget = max(15, min(budget, max(15, rpo // 2)))
+print(budget)
+PY
+}
+
+ftctl_dr_scheduler_next_deadline_epoch() {
+  local durable_at="${1-}" target_rpo_seconds="${2-}" execution_budget_seconds="${3-}" jitter_seconds="${4-0}"
+  local durable_epoch
+  [[ "${target_rpo_seconds}" =~ ^[1-9][0-9]*$ ]] || return 65
+  [[ "${execution_budget_seconds}" =~ ^[0-9]+$ ]] || return 65
+  [[ "${jitter_seconds}" =~ ^[0-9]+$ ]] || jitter_seconds=0
+  durable_epoch="$(ftctl_iso_to_epoch "${durable_at}")" || return 65
+  printf '%s\n' $((durable_epoch + target_rpo_seconds - execution_budget_seconds - jitter_seconds))
+}
+
 ftctl_dr_scheduler_dir() {
   local plan="${1-}"
   printf '%s/scheduler\n' "$(ftctl_dr_runtime_plan_dir "${plan}")"
@@ -1162,14 +1204,14 @@ PY
 }
 
 ftctl_dr_scheduler_append_restore_point() {
-  local restore_points_path="${1-}" plan="${2-}" run="${3-}" sequence="${4-}" cycle_type="${5-}" driver="${6-}" manifest_path="${7-}" checkpoint_path="${8-}"
+  local restore_points_path="${1-}" plan="${2-}" run="${3-}" sequence="${4-}" cycle_type="${5-}" driver="${6-}" manifest_path="${7-}" checkpoint_path="${8-}" scheduler_duration_seconds="${9-}"
   ftctl_ensure_dir "$(dirname "${restore_points_path}")" "0755"
-  python3 - "${restore_points_path}" "${plan}" "${run}" "${sequence}" "${cycle_type}" "${driver}" "${manifest_path}" "${checkpoint_path}" "$(ftctl_now_iso8601)" <<'PY'
+  python3 - "${restore_points_path}" "${plan}" "${run}" "${sequence}" "${cycle_type}" "${driver}" "${manifest_path}" "${checkpoint_path}" "$(ftctl_now_iso8601)" "${scheduler_duration_seconds}" <<'PY'
 import json
 import os
 import sys
 
-restore_path, plan, run, sequence, cycle_type, driver, manifest_path, checkpoint_path, now = sys.argv[1:10]
+restore_path, plan, run, sequence, cycle_type, driver, manifest_path, checkpoint_path, now, scheduler_duration = sys.argv[1:11]
 checkpoint = {}
 if os.path.exists(checkpoint_path):
     with open(checkpoint_path, "r", encoding="utf-8") as fh:
@@ -1190,6 +1232,8 @@ record = {
     "state": checkpoint.get("state"),
     "recordedAt": now,
 }
+if scheduler_duration.isdigit():
+    record["schedulerDurationSeconds"] = int(scheduler_duration)
 metrics = checkpoint.get("cycleMetrics") or {}
 if metrics:
     record["cycleMetrics"] = metrics
@@ -1365,7 +1409,8 @@ ftctl_dr_scheduler_worker() {
   local incremental_verified metrics_estimated virtual_bytes changed_bytes source_read_bytes target_written_bytes transfer_payload_bytes changed_extent_count duration_ms throughput_bps baseline_generation cycle_token cycle_metrics_path
   local nbd_teardown_state nbd_teardown_started_at_ms nbd_teardown_completed_at_ms nbd_teardown_duration_ms
   local nbd_source_device_count nbd_target_device_count nbd_quarantined_device_count nbd_teardown_error_code nbd_teardown_error_message
-  local cycle_started_epoch next_cycle_epoch next_cycle_at wait_seconds control_generation next_sequence
+  local cycle_started_epoch cycle_completed_epoch cycle_wall_duration_seconds
+  local next_cycle_epoch next_cycle_at wait_seconds control_generation next_sequence execution_budget_seconds max_jitter_seconds
   local cycle_run cycle_request_mode cycle_request_owner cycle_request_state cycle_request_bound sequence_path transfer_progress_path
   local session lease_epoch authority_sequence start_ticks owner_lock_path
   local initial_jitter cycle_jitter bandwidth_limit_mbps resource_retry_sec resource_retry_attempt resource_retry_delay
@@ -1612,6 +1657,8 @@ ftctl_dr_scheduler_worker() {
       "step=${cycle_type}-transfer" \
       "progress=40" \
       "scheduler_state=RUNNING" \
+      "next_cycle_at=" \
+      "next_cycle_wait_seconds=" \
       "control_generation=${control_generation}" \
       "control_ack_generation=${control_generation}" \
       "control_state=RUNNING" \
@@ -1854,7 +1901,10 @@ ftctl_dr_scheduler_worker() {
     nbd_quarantined_device_count="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "nbdQuarantinedDeviceCount" integer || true)"
     nbd_teardown_error_code="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "nbdTeardownErrorCode" || true)"
     nbd_teardown_error_message="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "nbdTeardownErrorMessage" || true)"
-    ftctl_dr_scheduler_append_restore_point "${restore_points_path}" "${plan}" "${cycle_run}" "${sequence}" "${cycle_type}" "${driver}" "${manifest_path}" "${checkpoint_path}" || return $?
+    cycle_completed_epoch="$(date +%s)"
+    cycle_wall_duration_seconds=$((cycle_completed_epoch - cycle_started_epoch))
+    (( cycle_wall_duration_seconds < 0 )) && cycle_wall_duration_seconds=0
+    ftctl_dr_scheduler_append_restore_point "${restore_points_path}" "${plan}" "${cycle_run}" "${sequence}" "${cycle_type}" "${driver}" "${manifest_path}" "${checkpoint_path}" "${cycle_wall_duration_seconds}" || return $?
     ftctl_dr_scheduler_mark_resume_checkpoint_completed "${plan}" "${sequence}" || true
     ftctl_state_set_path "${sequence_path}" \
       "pending_resource_sequence=" \
@@ -1932,6 +1982,7 @@ ftctl_dr_scheduler_worker() {
       "latest_completed_transfer_payload_bytes=${transfer_payload_bytes}" \
       "latest_completed_changed_extent_count=${changed_extent_count}" \
       "latest_completed_duration_ms=${duration_ms}" \
+      "latest_completed_cycle_wall_duration_seconds=${cycle_wall_duration_seconds}" \
       "latest_completed_throughput_bps=${throughput_bps}" \
       "latest_completed_baseline_generation=${baseline_generation}" \
       "latest_completed_cycle_token=${cycle_token}" \
@@ -1995,7 +2046,19 @@ ftctl_dr_scheduler_worker() {
 
     cycle_jitter="$(ftctl_dr_scheduler_initial_jitter "${plan}" "${profile_file}" "${interval}" "${sequence}")"
     [[ "${cycle_jitter}" =~ ^[0-9]+$ ]] || cycle_jitter=0
-    next_cycle_epoch=$((cycle_started_epoch + interval + cycle_jitter))
+    execution_budget_seconds="$(ftctl_dr_scheduler_execution_budget_seconds "${restore_points_path}" "${interval}")"
+    [[ "${execution_budget_seconds}" =~ ^[0-9]+$ ]] || execution_budget_seconds=$((interval / 5))
+    max_jitter_seconds=$((interval - execution_budget_seconds - 1))
+    (( max_jitter_seconds < 0 )) && max_jitter_seconds=0
+    (( cycle_jitter > max_jitter_seconds )) && cycle_jitter="${max_jitter_seconds}"
+    if ! next_cycle_epoch="$(ftctl_dr_scheduler_next_deadline_epoch "${target_at}" "${interval}" "${execution_budget_seconds}" "${cycle_jitter}")"; then
+      ftctl_dr_scheduler_update_state "${state_path}" "${status_path}" \
+        "scheduler_health=ERROR" \
+        "error_code=DR_RPO_DEADLINE_INVALID" \
+        "error_message=Unable to calculate the next durable RPO deadline" \
+        "updated_at=$(ftctl_now_iso8601)" || true
+      return 65
+    fi
     wait_seconds=$((next_cycle_epoch - $(date +%s)))
     (( wait_seconds < 0 )) && wait_seconds=0
     next_cycle_at="$(ftctl_dr_scheduler_iso_from_epoch "${next_cycle_epoch}" 2>/dev/null || true)"
@@ -2003,6 +2066,8 @@ ftctl_dr_scheduler_worker() {
       "next_cycle_at=${next_cycle_at}" \
       "next_cycle_wait_seconds=${wait_seconds}" \
       "cycle_jitter_seconds=${cycle_jitter}" \
+      "scheduler_execution_budget_seconds=${execution_budget_seconds}" \
+      "scheduler_cycle_wall_duration_seconds=${cycle_wall_duration_seconds}" \
       "updated_at=$(ftctl_now_iso8601)" || true
     ftctl_dr_scheduler_sleep_or_stop "${plan}" "${wait_seconds}" "${control_generation}" || true
   done
