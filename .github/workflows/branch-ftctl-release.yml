@@ -100,7 +100,7 @@ jobs:
           dnf clean all
           dnf -y --disablerepo="*" --enablerepo="rocky-vault-9.6-*" makecache
           dnf -y --disablerepo="*" --enablerepo="rocky-vault-9.6-*" install \
-            make rpm-build tar git dnf-plugins-core createrepo_c systemd-rpm-macros systemd
+            make rpm-build tar git jq dnf-plugins-core createrepo_c systemd-rpm-macros systemd
 
       - name: Build FTCTL RPM
         shell: bash
