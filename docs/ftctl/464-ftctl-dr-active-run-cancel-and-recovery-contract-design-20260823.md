@@ -50,6 +50,17 @@ DR UI의 `실행 취소`가 Cloud DB 상태만 바꾸거나, 진행 중인 전�
 새 control generation을 `run`으로 전환하고 systemd scheduler를 다시 시작한다. 재개 Cycle은
 중단된 시퀀스의 Full Reseed이며, 완료 후에만 `READY`와 새 durable baseline을 기록한다.
 
+운영자가 명시적으로 취소한 상태는 장애 복구 컨트롤러의 자동 재시작 대상이 아니다. Cloud는
+이 상태 조합을 자동 `RECOVER_SYNC` 제출에서 제외하고 UI의 `동기화 복구` 명령으로만
+`dr-sync-recover`를 호출한다. 소스 사이트 장애나 전송 경로 장애의 자동 복구 계약은 유지한다.
+
+FTCTL 로컬 reconcile도 동일한 계약을 따른다. 취소가 먼저 기록한
+`scheduler/control.state command=stop`은 plan `status.state`보다 우선하는 내구성 보류 상태다.
+systemd 종료와 status 투영 사이에 타이머가 실행되더라도 로컬 reconcile은 scheduler를 시작하지
+않는다. 취소 종결 상태에는 `scheduler_desired_state=STOPPED`도 함께 기록한다. 운영자가 UI에서
+`동기화 복구`를 실행해 control generation을 `command=run`으로 전환한 경우에만 같은 시퀀스의
+Full Reseed를 다시 시작한다.
+
 ### 3.4 Cloud 종결
 
 Cloud는 `FtctlDrCancelAnswer.accepted=true`만으로 Run을 즉시 `CANCELED` 처리하지 않는다.
@@ -73,6 +84,9 @@ FTCTL JSON 응답의 `state=CANCELED`, `terminal_authoritative=true`,
 4. 취소 후 `dr-sync-recover`가 같은 시퀀스를 Full Reseed로 재수행
 5. 복구 완료 후 다음 CBT incremental Cycle 성공
 6. 기존 sync, pause/resume, release, test failover/cleanup, failover/failback 계약 유지
+7. 운영자 취소 후 자동 복구 평가 주기를 지나도 scheduler가 `STOPPED`로 유지
+8. UI `동기화 복구` 후에만 같은 시퀀스 Full Reseed 재시작
+9. systemd 종료와 status 투영 사이에 로컬 reconcile이 실행돼도 `command=stop` 보류 유지
 
 ## 5. AS-IS / TO-BE
 
@@ -81,6 +95,8 @@ FTCTL JSON 응답의 `state=CANCELED`, `terminal_authoritative=true`,
 | 취소 반응 | 전송 완료 뒤 STOP ACK | scheduler cgroup 선점 종료 |
 | FTCTL 상태 | `CANCELED / COPYING` 충돌 | drain 확인 뒤 terminal `CANCELED` |
 | Cloud 상태 | 요청 수락을 terminal로 오인 가능 | terminal 증거 확인 전 `CANCEL_REQUESTED` |
+| 자동 복구 | 운영자 취소도 장애로 보고 재시작 | 취소 보류는 제외하고 UI 복구만 허용 |
+| 로컬 reconcile | 지연된 status의 `RUNNING`을 보고 재시작 | 내구성 control의 `stop`을 우선해 재시작 금지 |
 | 대상 기준선 | 부분 덮어쓰기 여부 미표시 | baseline 무효와 Full Reseed 필요 명시 |
 | 복구 | STOPPED 상태에서 거절 | 취소 복구 계약일 때만 제한적으로 재시작 |
 | 성공 경로 | 전송 코드와 제어 코드가 결합 | 검증된 전송은 유지하고 제어 경계만 보강 |

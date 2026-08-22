@@ -353,20 +353,27 @@ ftctl_dr_scheduler_recover() {
 
 ftctl_dr_scheduler_reconcile_plan() {
   local plan="${1-}" profile_file status_path state active_side control_state transition_state run state_path
+  local control_command scheduler_desired_state
   profile_file="$(ftctl_dr_runtime_profile_path "${plan}")"
   status_path="$(ftctl_dr_runtime_status_path "${plan}")"
   [[ -f "${profile_file}" && -f "${status_path}" ]] || return 0
   if ftctl_dr_scheduler_active_worker_valid "${plan}" ""; then
     return 0
   fi
+  # The durable scheduler control file is authoritative during operator stop
+  # and cancel. Plan status projection can lag while systemd is stopping.
+  control_command="$(ftctl_dr_scheduler_control_command "${plan}")"
+  [[ "${control_command}" != "stop" ]] || return 0
   state="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "state")"
   active_side="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "active_side")"
   control_state="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "control_state")"
+  scheduler_desired_state="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "scheduler_desired_state")"
   transition_state="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "transition_state")"
   [[ "${state}" == "READY" || "${state}" == "SYNCING" ||
     "$(ftctl_dr_runtime_state_get_from_path "${status_path}" "nbd_teardown_state")" == "QUARANTINED" ]] || return 0
   [[ "${active_side^^}" != "TARGET" ]] || return 0
   [[ "${control_state}" == "RUNNING" ]] || return 0
+  [[ "${scheduler_desired_state}" != "STOPPED" ]] || return 0
   case "${transition_state}" in
     ""|IDLE|COMPLETED|SUCCEEDED) ;;
     *) return 0 ;;
@@ -1074,6 +1081,7 @@ ftctl_dr_scheduler_cancel_active_transfer() {
   ftctl_dr_scheduler_update_state "${run_path}" "${status_path}" \
     "scheduler_state=STOPPED" \
     "scheduler_health=STOPPED" \
+    "scheduler_desired_state=STOPPED" \
     "scheduler_recovery_state=$([[ "${transfer_active}" == "true" ]] && printf REQUIRED || printf NONE)" \
     "baseline_state=$([[ "${transfer_active}" == "true" ]] && printf INVALID || ftctl_dr_runtime_state_get_from_path "${status_path}" baseline_state)" \
     "reseed_reason=$([[ "${transfer_active}" == "true" ]] && printf OPERATOR_CANCELED_TRANSFER || ftctl_dr_runtime_state_get_from_path "${status_path}" reseed_reason)" \
