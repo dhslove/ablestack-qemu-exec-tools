@@ -339,13 +339,17 @@ VMware에서 ABLESTACK으로 보호된 Windows 계획은 테스트 부팅 정책
 - Windows 프로필에 `POWER_STATE_VALIDATED`가 전달되면
   `DR_FAILBACK_WINDOWS_GUEST_HEARTBEAT_REQUIRED`로 거부한다.
 - 비 Windows 및 기존 프로필은 현재 power-state 호환 경로를 유지한다.
-- `guestCompatibility.state`의 초기값은 `VALIDATION_REQUIRED`이며 Cloud의 실제
-  vCenter guest identity 검증 결과와 분리한다.
+- VMware 원본 VM을 그대로 복구 대상으로 사용하는 검증된
+  `VMWARE -> ABLESTACK -> VMWARE` 경로는 디스크/컨트롤러 계보가 보존되므로
+  `guestCompatibility.state=ORIGINAL_VMWARE_COMPATIBILITY_PRESERVED`를 유지한다.
+- 그 외 경로만 `VALIDATION_REQUIRED`로 시작한다. 이 호환성 상태는 전송 경로의
+  사전 조건이며, 실제 Windows 정상 부팅 증거인 vCenter guest heartbeat와는
+  별개의 계약이다.
 
 ### 15.3 회귀 게이트
 
-Self-test는 Windows 역방향 프로필 + power-only commit 거부와
-Windows 역방향 프로필 + guest-heartbeat commit 성공을 모두 포함한다. 기존
+Self-test는 VMware 원본 계보의 호환성 보존, Windows 역방향 프로필 + power-only
+commit 거부와 Windows 역방향 프로필 + guest-heartbeat commit 성공을 모두 포함한다. 기존
 Failback commit envelope, scheduler resume, post-failback incremental 테스트는
 그대로 통과해야 한다.
 
@@ -354,6 +358,6 @@ Failback commit envelope, scheduler resume, post-failback incremental 테스트�
 | 영역 | AS-IS | TO-BE |
 | --- | --- | --- |
 | Windows commit | 전원 ON만으로 허용 가능 | vCenter guest heartbeat 필수 |
-| Compatibility | provider lineage로 보존 상태 합성 | 실제 검증 전 `VALIDATION_REQUIRED` |
+| Compatibility | VMware 원본 계보 보존 | 성공 경로는 보존, 기타 경로만 `VALIDATION_REQUIRED` |
 | FTCTL 방어 | guest family와 무관하게 power-only 허용 | Windows 프로필 power-only 거부 |
 | 데이터 경로 | 검증된 증분 writer | 변경 없음 |

@@ -9920,7 +9920,7 @@ selftest_case_dr_kvm_vmware_reverses_forward_profile_roles() {
 {
   "planUuid":"plan-forward-profile",
   "direction":"VMWARE_TO_KVM",
-  "source":{"provider":"VMWARE","externalRef":"vm-6429"},
+  "source":{"provider":"VMWARE","externalRef":"vm-6429","hardware":{"guestId":"windows2022srvNext_64Guest"}},
   "target":{"provider":"ABLESTACK","externalRef":"target-vm","instanceName":"i-2-266-VM"},
   "mapping":{"disks":[{
     "sizeBytes":1048576,
@@ -9938,6 +9938,8 @@ JSON
   selftest_assert_file_contains "${reverse_profile}" '"replicationDirection":"KVM_TO_VMWARE"'
   selftest_assert_file_contains "${reverse_profile}" '"providerPair":"ABLESTACK_TO_VMWARE"'
   selftest_assert_file_contains "${reverse_profile}" '"routeContractVersion":2'
+  selftest_assert_file_contains "${reverse_profile}" '"state":"ORIGINAL_VMWARE_COMPATIBILITY_PRESERVED"'
+  selftest_assert_file_contains "${reverse_profile}" '"bootValidationRequired":true'
 
   ftctl_dr_kvm_vmware_canonicalize_profile "${reverse_profile}" "${map_path}"
   selftest_assert_file_contains "${map_path}" '"direction":"KVM_TO_VMWARE"'
