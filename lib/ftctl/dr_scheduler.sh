@@ -21,6 +21,7 @@ FTCTL_DR_SCHEDULER_DISABLE="${FTCTL_DR_SCHEDULER_DISABLE:-0}"
 FTCTL_DR_CONTROL_ACK_TIMEOUT_SEC="${FTCTL_DR_CONTROL_ACK_TIMEOUT_SEC:-600}"
 FTCTL_DR_TRANSITION_LOCK_TIMEOUT_SEC="${FTCTL_DR_TRANSITION_LOCK_TIMEOUT_SEC:-5}"
 FTCTL_DR_SCHEDULER_HEARTBEAT_TIMEOUT_SEC="${FTCTL_DR_SCHEDULER_HEARTBEAT_TIMEOUT_SEC:-30}"
+FTCTL_DR_CANCEL_STOP_TIMEOUT_SEC="${FTCTL_DR_CANCEL_STOP_TIMEOUT_SEC:-20}"
 FTCTL_DR_FULL_SEED_MAX_CONCURRENT="${FTCTL_DR_FULL_SEED_MAX_CONCURRENT:-2}"
 FTCTL_DR_INCREMENTAL_MAX_CONCURRENT="${FTCTL_DR_INCREMENTAL_MAX_CONCURRENT:-4}"
 FTCTL_DR_RESOURCE_RETRY_SEC="${FTCTL_DR_RESOURCE_RETRY_SEC:-15}"
@@ -316,7 +317,19 @@ ftctl_dr_scheduler_recover() {
   control_state="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "control_state")"
   transition_state="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "transition_state")"
   [[ "${active_side^^}" != "TARGET" && "${state}" != "FAILED_OVER" ]] || return 41
-  [[ "${control_state}" != "PAUSED" && "${control_state}" != "STOPPED" ]] || return 42
+  if [[ "${control_state}" == "STOPPED" ]]; then
+    [[ "$(ftctl_dr_runtime_state_get_from_path "${status_path}" scheduler_recovery_state)" == "REQUIRED" \
+      && "$(ftctl_dr_runtime_state_get_from_path "${status_path}" reseed_reason)" == "OPERATOR_CANCELED_TRANSFER" ]] || return 42
+    ftctl_dr_scheduler_control_set "${plan}" "run" "cancel-recovery" "${run}" "false" >/dev/null || return $?
+    ftctl_state_set_path "$(ftctl_dr_scheduler_sequence_path "${plan}")" \
+      "pending_reseed_run=${run}" \
+      "pending_reseed_request_bound=true" \
+      "requested_cycle_owner_run=${run}" \
+      "requested_cycle_mode=FULL_RESEED" \
+      "requested_cycle_state=PENDING" || return $?
+    control_state="RUNNING"
+  fi
+  [[ "${control_state}" != "PAUSED" ]] || return 42
   case "${transition_state}" in
     ""|IDLE|COMPLETED|SUCCEEDED) ;;
     *) return 43 ;;
@@ -1004,6 +1017,76 @@ ftctl_dr_scheduler_request_and_wait() {
   ftctl_dr_scheduler_wait_for_ack "${plan}" "${generation}" "${expected_state}" \
     "${FTCTL_DR_CONTROL_ACK_TIMEOUT_SEC}" "${owner_run}" "${session}" \
     "${lease_epoch}" "${worker_pid}" "${worker_start_ticks}" || return $?
+  printf '%s\n' "${generation}"
+}
+
+ftctl_dr_scheduler_cancel_active_transfer() {
+  local plan="${1-}" owner_run="${2-}" run_path="${3-}" status_path="${4-}"
+  local generation session lease_epoch worker_pid worker_start_ticks unit deadline active_state now
+  local sequence_path sequence transfer_active="false"
+
+  session="$(ftctl_dr_scheduler_active_value "${plan}" "scheduler_session_uuid")"
+  lease_epoch="$(ftctl_dr_scheduler_active_value "${plan}" "lease_epoch")"
+  worker_pid="$(ftctl_dr_scheduler_active_value "${plan}" "pid")"
+  worker_start_ticks="$(ftctl_dr_scheduler_active_value "${plan}" "start_ticks")"
+  generation="$(ftctl_dr_scheduler_control_set "${plan}" "stop" "dr-cancel" "${owner_run}" "false")" || return $?
+
+  case "$(ftctl_dr_runtime_state_get_from_path "${status_path}" transfer_activity_state)" in
+    COPYING|CONNECTING|FLUSHING|VERIFYING) transfer_active="true" ;;
+  esac
+  [[ "$(ftctl_dr_runtime_state_get_from_path "${status_path}" cycle_state)" != "RUNNING" ]] || transfer_active="true"
+
+  if ftctl_dr_scheduler_systemd_available "${plan}" && ftctl_dr_scheduler_has_live_worker "${plan}"; then
+    unit="$(ftctl_dr_scheduler_unit_name "${plan}")"
+    systemctl stop --no-block "${unit}" >/dev/null 2>&1 || return 69
+    deadline=$(( $(date +%s) + FTCTL_DR_CANCEL_STOP_TIMEOUT_SEC ))
+    while (( $(date +%s) <= deadline )); do
+      active_state="$(systemctl show "${unit}" -p ActiveState --value 2>/dev/null || true)"
+      [[ "${active_state}" == "inactive" || "${active_state}" == "failed" ]] && break
+      sleep 1
+    done
+    active_state="$(systemctl show "${unit}" -p ActiveState --value 2>/dev/null || true)"
+    [[ "${active_state}" == "inactive" || "${active_state}" == "failed" ]] || return 21
+    ftctl_dr_scheduler_mark_lease_stopped "${plan}" "${session}" "${lease_epoch}" \
+      "${owner_run}" "${worker_pid}" "${worker_start_ticks}"
+    ftctl_dr_scheduler_control_ack "${plan}" "${generation}" "STOPPED" "IDLE" "${owner_run}" \
+      "${session}" "${lease_epoch}" "${worker_pid}" "${worker_start_ticks}"
+  else
+    ftctl_dr_scheduler_wait_for_ack "${plan}" "${generation}" "STOPPED" \
+      "${FTCTL_DR_CANCEL_STOP_TIMEOUT_SEC}" "${owner_run}" "${session}" \
+      "${lease_epoch}" "${worker_pid}" "${worker_start_ticks}" || return $?
+  fi
+
+  now="$(ftctl_now_iso8601)"
+  if [[ "${transfer_active}" == "true" ]]; then
+    sequence_path="$(ftctl_dr_scheduler_sequence_path "${plan}")"
+    sequence="$(ftctl_state_read_kv "${sequence_path}" plan_cycle_sequence 2>/dev/null || true)"
+    [[ "${sequence}" =~ ^[1-9][0-9]*$ ]] || sequence="$(ftctl_dr_runtime_state_get_from_path "${status_path}" plan_cycle_sequence)"
+    ftctl_state_set_path "${sequence_path}" \
+      "pending_reseed_sequence=${sequence}" \
+      "pending_reseed_cycle_type=full-reseed" \
+      "pending_reseed_run=" \
+      "pending_reseed_request_bound=false" \
+      "pending_reseed_reason=OPERATOR_CANCELED_TRANSFER" \
+      "requested_cycle_state=CANCELED" \
+      "requested_cycle_completed_at=${now}" || return $?
+  fi
+  ftctl_dr_scheduler_update_state "${run_path}" "${status_path}" \
+    "scheduler_state=STOPPED" \
+    "scheduler_health=STOPPED" \
+    "scheduler_recovery_state=$([[ "${transfer_active}" == "true" ]] && printf REQUIRED || printf NONE)" \
+    "baseline_state=$([[ "${transfer_active}" == "true" ]] && printf INVALID || ftctl_dr_runtime_state_get_from_path "${status_path}" baseline_state)" \
+    "reseed_reason=$([[ "${transfer_active}" == "true" ]] && printf OPERATOR_CANCELED_TRANSFER || ftctl_dr_runtime_state_get_from_path "${status_path}" reseed_reason)" \
+    "current_checkpoint_state=$([[ "${transfer_active}" == "true" ]] && printf CANCELED || ftctl_dr_runtime_state_get_from_path "${status_path}" current_checkpoint_state)" \
+    "control_protocol_version=${FTCTL_DR_CONTROL_PROTOCOL_VERSION}" \
+    "control_generation=${generation}" \
+    "control_ack_generation=${generation}" \
+    "control_state=STOPPED" \
+    "cycle_state=IDLE" \
+    "replication_activity=STOPPED" \
+    "transfer_activity_state=CANCELED" \
+    "runtime_endpoints_drained=true" \
+    "updated_at=${now}" || return $?
   printf '%s\n' "${generation}"
 }
 
@@ -2421,7 +2504,12 @@ ftctl_dr_scheduler_control_action() {
     ftctl_dr_scheduler_ensure_running "${plan}" "$(ftctl_dr_runtime_state_get_from_path "${run_path}" run)" \
       "${profile_file}" "${run_path}" "${status_path}" || return $?
   fi
-  generation="$(ftctl_dr_scheduler_request_and_wait "${plan}" "${command}" "${expected_state}" "${action}" "$(ftctl_dr_runtime_state_get_from_path "${run_path}" run)" "false")" || return $?
+  if [[ "${action}" == "dr-cancel" ]]; then
+    generation="$(ftctl_dr_scheduler_cancel_active_transfer "${plan}" \
+      "$(ftctl_dr_runtime_state_get_from_path "${run_path}" run)" "${run_path}" "${status_path}")" || return $?
+  else
+    generation="$(ftctl_dr_scheduler_request_and_wait "${plan}" "${command}" "${expected_state}" "${action}" "$(ftctl_dr_runtime_state_get_from_path "${run_path}" run)" "false")" || return $?
+  fi
   now="$(ftctl_now_iso8601)"
   case "${command}" in
     pause)

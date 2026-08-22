@@ -6724,24 +6724,53 @@ ftctl_dr_runtime_status() {
 
 ftctl_dr_runtime_cancel() {
   local plan="${1-}" run="${2-}" force="${3-0}" json="${4-0}"
-  local run_path status_path
+  local run_path status_path rc=0 now
 
   ftctl_dr_runtime_require_plan "${plan}" || return 2
   ftctl_dr_runtime_require_run "${run}" || return 2
   ftctl_dr_runtime_ensure_plan_dirs "${plan}"
   run_path="$(ftctl_dr_runtime_run_path "${plan}" "${run}")"
   status_path="$(ftctl_dr_runtime_status_path "${plan}")"
-  ftctl_dr_runtime_write_state "${run_path}" "${plan}" "${run}" "dr-cancel" "CANCELED" "canceled" "100" "${run}" ""
+  now="$(ftctl_now_iso8601)"
+  ftctl_dr_runtime_path_set "${run_path}" \
+    "plan=${plan}" "run=${run}" "action=dr-cancel" \
+    "state=CANCEL_REQUESTED" "step=cancel-requested" "progress=99" \
+    "accepted=true" "control_request_run_uuid=${run}" \
+    "terminal_authoritative=false" "runtime_endpoints_drained=false" \
+    "updated_at=${now}"
   if command -v ftctl_dr_scheduler_control_action >/dev/null 2>&1; then
-    ftctl_dr_scheduler_control_action "dr-cancel" "${plan}" "${run_path}" "${status_path}" || true
+    ftctl_dr_scheduler_control_action "dr-cancel" "${plan}" "${run_path}" "${status_path}" || rc=$?
   fi
+  if [[ "${rc}" != "0" ]]; then
+    ftctl_dr_runtime_path_set "${run_path}" \
+      "state=CANCEL_REQUESTED" "step=cancel-drain-pending" "progress=99" \
+      "accepted=false" "retryable=true" "retry_after_sec=5" \
+      "error_code=DR_CANCEL_DRAIN_PENDING" \
+      "error_message=Scheduler or transfer endpoints have not stopped yet" \
+      "terminal_authoritative=false" "runtime_endpoints_drained=false" \
+      "updated_at=$(ftctl_now_iso8601)" || true
+    cp -f "${run_path}" "${status_path}" 2>/dev/null || true
+    if [[ "${json}" == "1" ]]; then
+      printf '{"command":"dr-cancel","result":"pending","accepted":false,"retryable":true,"plan_uuid":"%s","run_uuid":"%s","error_code":"DR_CANCEL_DRAIN_PENDING","exit_code":%s}\n' \
+        "$(ftctl__json_escape "${plan}")" "$(ftctl__json_escape "${run}")" "${rc}"
+    fi
+    return "${rc}"
+  fi
+  ftctl_dr_runtime_path_set "${run_path}" \
+    "state=CANCELED" "step=canceled" "progress=100" \
+    "accepted=true" "retryable=false" "retry_after_sec=" \
+    "error_code=" "error_message=" \
+    "transfer_activity_state=CANCELED" \
+    "terminal_source=ENGINE_TERMINAL" "terminal_version=1" \
+    "terminal_authoritative=true" "runtime_endpoints_drained=true" \
+    "updated_at=$(ftctl_now_iso8601)"
   cp -f "${run_path}" "${status_path}"
   chmod 0644 "${status_path}" 2>/dev/null || true
   ftctl_log_event "dr-runtime" "dr.cancel" "ok" "" "" \
     "plan=${plan} run=${run} force=${force}"
 
   if [[ "${json}" == "1" ]]; then
-    printf '{"command":"dr-cancel","result":"canceled","accepted":true,"plan_uuid":"%s","run_uuid":"%s","error_code":"","exit_code":0}\n' \
+    printf '{"command":"dr-cancel","result":"canceled","accepted":true,"plan_uuid":"%s","run_uuid":"%s","state":"CANCELED","terminal_authoritative":true,"runtime_endpoints_drained":true,"transfer_activity_state":"CANCELED","error_code":"","exit_code":0}\n' \
       "$(ftctl__json_escape "${plan}")" \
       "$(ftctl__json_escape "${run}")"
   else
