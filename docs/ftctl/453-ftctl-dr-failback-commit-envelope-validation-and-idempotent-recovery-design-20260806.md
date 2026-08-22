@@ -320,3 +320,40 @@ Cloud preflight는 세 capability가 모두 있을 때만 Failback lifecycle tra
 - status가 미제출과 불명확 결과를 구분한다.
 - Cloud/FTCTL hash가 동일하다.
 - 현재 Run이 reverse copy 재실행 없이 SOURCE authority로 수렴한다.
+
+## 15. Windows 정상 부팅 권한 전환 게이트 (2026-08-22)
+
+### 15.1 문제
+
+VMware에서 ABLESTACK으로 보호된 Windows 계획은 테스트 부팅 정책이
+`POWER_STATE_ONLY`인 경우가 있다. 이 값을 페일백에도 재사용하면 vCenter에서
+원본 VM이 `poweredOn`인 사실만으로 source authority를 확정할 수 있다. 또한
+역방향 프로필의 `ORIGINAL_VMWARE_COMPATIBILITY_PRESERVED`는 실제 부팅 검증 결과가
+아니라 원본 provider lineage에서 합성한 값이므로 성공 증거로 사용할 수 없다.
+
+### 15.2 계약
+
+- 성공한 KVM-to-VMware 전송, CBT 기준선, VDDK writer 경로는 변경하지 않는다.
+- 역방향 프로필의 원본 VMware `guestId`가 Windows이면
+  `GUEST_HEARTBEAT_VALIDATED`만 authority commit 증거로 허용한다.
+- Windows 프로필에 `POWER_STATE_VALIDATED`가 전달되면
+  `DR_FAILBACK_WINDOWS_GUEST_HEARTBEAT_REQUIRED`로 거부한다.
+- 비 Windows 및 기존 프로필은 현재 power-state 호환 경로를 유지한다.
+- `guestCompatibility.state`의 초기값은 `VALIDATION_REQUIRED`이며 Cloud의 실제
+  vCenter guest identity 검증 결과와 분리한다.
+
+### 15.3 회귀 게이트
+
+Self-test는 Windows 역방향 프로필 + power-only commit 거부와
+Windows 역방향 프로필 + guest-heartbeat commit 성공을 모두 포함한다. 기존
+Failback commit envelope, scheduler resume, post-failback incremental 테스트는
+그대로 통과해야 한다.
+
+### 15.4 AS-IS / TO-BE
+
+| 영역 | AS-IS | TO-BE |
+| --- | --- | --- |
+| Windows commit | 전원 ON만으로 허용 가능 | vCenter guest heartbeat 필수 |
+| Compatibility | provider lineage로 보존 상태 합성 | 실제 검증 전 `VALIDATION_REQUIRED` |
+| FTCTL 방어 | guest family와 무관하게 power-only 허용 | Windows 프로필 power-only 거부 |
+| 데이터 경로 | 검증된 증분 writer | 변경 없음 |

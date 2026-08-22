@@ -1343,11 +1343,8 @@ reverse["request"] = request
 mapping[disk_key] = reversed_disks
 reverse["mapping"] = mapping
 original_source_provider = first_str(source.get("provider")).upper()
-original_target_provider = first_str(target.get("provider")).upper()
 reverse["guestCompatibility"] = {
-    "state": "ORIGINAL_VMWARE_COMPATIBILITY_PRESERVED"
-        if original_source_provider == "VMWARE" and original_target_provider == "ABLESTACK"
-        else "REQUIRES_VALIDATION",
+    "state": "VALIDATION_REQUIRED",
     "sourceLineage": original_source_provider,
     "targetProvider": first_str(reverse.get("target", {}).get("provider")).upper(),
     "bootValidationRequired": True,
@@ -6068,6 +6065,16 @@ print(hashlib.sha256(canonical.encode("utf-8")).hexdigest())
 PY
 }
 
+ftctl_dr_runtime_profile_is_windows_guest() {
+  local profile_file="${1-}" field guest_id=""
+  [[ -n "${profile_file}" && -f "${profile_file}" ]] || return 1
+  for field in target.hardware.guestId target.vm.guestId source.hardware.guestId source.vm.guestId; do
+    guest_id="$(ftctl_dr_runtime_profile_value "${profile_file}" "${field}" 2>/dev/null || true)"
+    [[ -n "${guest_id}" ]] && break
+  done
+  [[ "$(tr '[:upper:]' '[:lower:]' <<< "${guest_id}")" == *windows* ]]
+}
+
 ftctl_dr_runtime_failback_commit() {
   local plan="${1-}" run="${2-}" session_id="${3-}" checkpoint_sequence="${4-}"
   local authority_generation="${5-}" target_power_state="${6-}" source_power_state="${7-}"
@@ -6078,7 +6085,7 @@ ftctl_dr_runtime_failback_commit() {
   local contract_version="${13-}" baseline_generation="${14-}" evidence_run="${15-}"
   local commit_attempt_id="${16-}" commit_envelope_sha256="${17-}"
   local run_path status_path session_path active_path commit_path state current_session current_checkpoint now rc=0
-  local commit_phase control_generation control_ack_generation calculated_envelope_sha256
+  local commit_phase control_generation control_ack_generation calculated_envelope_sha256 reverse_profile_path
 
   ftctl_dr_runtime_require_plan "${plan}" || return 2
   ftctl_dr_runtime_require_run "${run}" || return 2
@@ -6117,6 +6124,14 @@ ftctl_dr_runtime_failback_commit() {
       "DR_FAILBACK_SOURCE_NOT_RUNNING" "Cloud source must be POWERED_ON before source authority commit" 78
     return 78
   }
+  reverse_profile_path="$(ftctl_dr_runtime_reverse_profile_path "${plan}" "${run}" "failback")"
+  if ftctl_dr_runtime_profile_is_windows_guest "${reverse_profile_path}" \
+        && [[ "${boot_validation_state}" != "GUEST_HEARTBEAT_VALIDATED" ]]; then
+    [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_error_json "dr-failback-commit" "${plan}" "${run}" \
+      "DR_FAILBACK_WINDOWS_GUEST_HEARTBEAT_REQUIRED" \
+      "Windows failback requires vCenter guest heartbeat validation" 78
+    return 78
+  fi
   case "${boot_validation_state}" in
     POWER_STATE_VALIDATED|GUEST_HEARTBEAT_VALIDATED) ;;
     *)
