@@ -6689,6 +6689,12 @@ ftctl_dr_runtime_status() {
     ftctl_dr_runtime_repair_requested_cycle_terminal "${plan}" "${run}" "${path}" || true
   fi
   if [[ -z "${run}" ]]; then
+    # A completed failback may be newer than a TARGET-side status snapshot.
+    # Apply the strict journal/generation/timestamp guard before the overlay so
+    # read repair can persist SOURCE authority without overwriting a later
+    # failover.
+    ftctl_dr_runtime_converge_completed_failback_authority \
+      "${plan}" "${path}" "${path}" || true
     # The durable failback sidecar can reach COMPLETED just after a forward
     # cycle publishes status. Rebuild plan authority at read time as well so
     # Cloud never loses the sticky failback completion contract to that race.

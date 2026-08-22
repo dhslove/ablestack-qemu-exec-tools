@@ -114,3 +114,29 @@ Sticky lifecycle authority also needs a sticky reverse-evidence owner. The
 completed Failback Run UUID precedence, legacy session fallback, and regression
 test are defined in
 `458-ftctl-dr-completed-failback-reverse-evidence-retention-design-20260812.md`.
+
+## 8. Strict Plan-Status Read Repair (2026-08-22)
+
+A scheduler recovery attempt can occur before `failbacks/active.json` becomes
+`COMPLETED`. If no later recovery hook runs, `status.state` may continue to
+contain the prior `FAILED_OVER / TARGET` snapshot even though the failback Run,
+commit journal, Cloud plan, VMware guest, and post-failback checkpoint are all
+successfully terminal.
+
+Plan-level `dr-status` now invokes
+`ftctl_dr_runtime_converge_completed_failback_authority()` before applying the
+lightweight sidecar overlay. The strict convergence requires the completed
+failback sidecar, acknowledged commit journal, matching authority generation,
+powered-on source, powered-off target, and a post-failback checkpoint. It also
+orders equal generations by durable completion time and refuses to rewrite a
+newer `FAILED_OVER / TARGET` authority.
+
+Run-specific status remains immutable. The read repair changes no transfer,
+snapshot, VDDK, librbd, krbd, VM power, or scheduler data path.
+
+| Area | AS-IS | TO-BE |
+|---|---|---|
+| Recovery timing | Early recovery hook can miss later failback completion | Plan status read repeats strict durable convergence |
+| TARGET protection | Lightweight overlay refuses every TARGET snapshot | Strict ordering preserves a genuinely newer failover |
+| Persistence | API response can differ from stale `status.state` | Verified SOURCE authority is atomically persisted |
+| Regression scope | Existing success paths share status publication | Data and VM execution paths remain unchanged |

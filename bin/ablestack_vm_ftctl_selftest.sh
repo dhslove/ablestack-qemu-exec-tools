@@ -9508,6 +9508,22 @@ JSON
   selftest_assert_file_contains "${status}" "target_promotion_state=STANDBY"
   selftest_assert_file_contains "${status}" "post_failback_checkpoint_sequence=9"
 
+  # Plan-level status reads must repair the same durable race even when the
+  # scheduler recovery hook already ran before failback completion.
+  ftctl_dr_runtime_path_set "${status}" \
+    "state=FAILED_OVER" "active_side=TARGET" "control_state=RUNNING"
+  local status_json
+  ftctl_dr_nbd_capacity_json() {
+    printf '{"configured":true,"ready":true,"errorCode":""}\n'
+  }
+  status_json="$(ftctl_dr_runtime_status "${plan}" "" "0" "20" "1")"
+  unset -f ftctl_dr_nbd_capacity_json
+  selftest_assert_contains "${status_json}" '"state":"READY"' \
+    "plan status read repairs completed failback state"
+  selftest_assert_contains "${status_json}" '"active_side":"SOURCE"' \
+    "plan status read repairs completed failback authority"
+  selftest_assert_file_contains "${status}" "active_side=SOURCE"
+
   # A newer target authority must not be rewritten by an older failback.
   cat > "${plan_dir}/failovers/active.json" <<JSON
 {"state":"FAILED_OVER","activeSide":"TARGET","cloudAuthorityGeneration":8,"runUuid":"run-failover-new","completedAt":"2026-08-22T00:30:00+09:00"}
@@ -9517,6 +9533,15 @@ JSON
   ftctl_dr_runtime_converge_completed_failback_authority "${plan}" "${state}" "${status}" || rc=$?
   selftest_assert_eq "${rc}" "2" "newer TARGET authority blocks failback convergence"
   selftest_assert_file_contains "${status}" "active_side=TARGET"
+  ftctl_dr_nbd_capacity_json() {
+    printf '{"configured":true,"ready":true,"errorCode":""}\n'
+  }
+  status_json="$(ftctl_dr_runtime_status "${plan}" "" "0" "20" "1")"
+  unset -f ftctl_dr_nbd_capacity_json
+  selftest_assert_contains "${status_json}" '"state":"FAILED_OVER"' \
+    "plan status read preserves newer failover state"
+  selftest_assert_contains "${status_json}" '"active_side":"TARGET"' \
+    "plan status read preserves newer target authority"
   rm -f "${plan_dir}/failovers/active.json"
 
   rc=0
