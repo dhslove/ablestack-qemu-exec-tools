@@ -38,20 +38,21 @@ scheduler_state=STOPPED
 scheduler_desired_state=STOPPED
 protection_state=UNPROTECTED
 profile_removed=true
+resource_disposition=RETAIN_OPERATIONAL_VM
 released_at=2026-08-21T00:00:00Z
 updated_at=2026-08-21T00:00:00Z
 EOF
 cat > "${PLAN_DIR}/release.json" <<EOF
-{"schema_version":1,"contract_version":"dr-release-tombstone-v1","plan_uuid":"${PLAN}","run_uuid":"${RUN}","state":"RELEASED","step":"release-completed","protection_state":"UNPROTECTED","active_side":"TARGET","authority_generation":12,"scheduler_state":"STOPPED","worker_state":"IDLE","profile_removed":true,"runtime_removed":false,"vm_mutated":false,"storage_mutated":false,"network_mutated":false,"released_at":"2026-08-21T00:00:00Z"}
+{"schema_version":1,"contract_version":"dr-release-tombstone-v1","plan_uuid":"${PLAN}","run_uuid":"${RUN}","state":"RELEASED","step":"release-completed","protection_state":"UNPROTECTED","active_side":"TARGET","authority_generation":12,"resource_disposition":"RETAIN_OPERATIONAL_VM","scheduler_state":"STOPPED","worker_state":"IDLE","profile_removed":true,"runtime_removed":false,"vm_mutated":false,"storage_mutated":false,"network_mutated":false,"released_at":"2026-08-21T00:00:00Z"}
 EOF
 
 status_json="$(bash "${ROOT}/bin/ablestack_vm_ftctl.sh" dr-status --config "${CONFIG}" --plan "${PLAN}" --json)"
-jq -e '.state == "RELEASED" and .step == "release-completed" and .protection_state == "UNPROTECTED" and .profile_exists == false and .target_rpo_seconds == 300' <<<"${status_json}" >/dev/null
+jq -e '.state == "RELEASED" and .step == "release-completed" and .protection_state == "UNPROTECTED" and .resource_disposition == "RETAIN_OPERATIONAL_VM" and .profile_exists == false and .target_rpo_seconds == 300' <<<"${status_json}" >/dev/null
 
 # Rebuild the terminal status from the tombstone after simulated runtime loss.
 rm -f "${PLAN_DIR}/status.state"
 restored_json="$(bash "${ROOT}/bin/ablestack_vm_ftctl.sh" dr-status --config "${CONFIG}" --plan "${PLAN}" --json)"
-jq -e '.state == "RELEASED" and .step == "release-completed" and .protection_state == "UNPROTECTED" and .scheduler_state == "STOPPED" and .active_side == "TARGET" and .profile_exists == false' <<<"${restored_json}" >/dev/null
+jq -e '.state == "RELEASED" and .step == "release-completed" and .protection_state == "UNPROTECTED" and .resource_disposition == "RETAIN_OPERATIONAL_VM" and .scheduler_state == "STOPPED" and .active_side == "TARGET" and .profile_exists == false' <<<"${restored_json}" >/dev/null
 [[ -f "${PLAN_DIR}/status.state" ]]
 [[ ! -f "${PLAN_DIR}/profile.json" ]]
 

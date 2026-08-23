@@ -3413,7 +3413,7 @@ ftctl_dr_runtime_emit_state_json() {
   local control_protocol_version control_generation control_ack_generation control_state cycle_state
   local scheduler_session_uuid scheduler_lease_epoch authority_sequence plan_cycle_sequence scheduler_health
   local resume_baseline_checkpoint_sequence minimum_completed_checkpoint_sequence immediate_cycle_pending immediate_cycle_owner_run scheduler_immediate_cycle_owner_run
-  local replication_activity protection_state active_worker_run_uuid active_worker_pid active_worker_start_ticks
+  local replication_activity protection_state resource_disposition active_worker_run_uuid active_worker_pid active_worker_start_ticks
   local worker_heartbeat_at control_request_run_uuid scheduler_control_request_run_uuid owner_matched
   local transfer_owner_run_uuid progress_plan_uuid progress_run_uuid progress_cycle_sequence
   local scheduler_desired_state scheduler_service_unit scheduler_unit_active_state scheduler_unit_sub_state
@@ -3550,6 +3550,7 @@ ftctl_dr_runtime_emit_state_json() {
   scheduler_health="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "scheduler_health")"
   replication_activity="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "replication_activity")"
   protection_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "protection_state")"
+  resource_disposition="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "resource_disposition")"
   active_worker_run_uuid="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "active_worker_run_uuid")"
   active_worker_pid="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "active_worker_pid")"
   active_worker_start_ticks="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "active_worker_start_ticks")"
@@ -4278,6 +4279,7 @@ PY
   fi
   ftctl_dr_runtime_json_string_field "replication_activity" "${replication_activity}"
   ftctl_dr_runtime_json_string_field "protection_state" "${protection_state}"
+  ftctl_dr_runtime_json_string_field "resource_disposition" "${resource_disposition}"
   ftctl_dr_runtime_json_string_field "active_worker_run_uuid" "${active_worker_run_uuid}"
   ftctl_dr_runtime_json_number_field "active_worker_pid" "${active_worker_pid}"
   ftctl_dr_runtime_json_number_field "active_worker_start_ticks" "${active_worker_start_ticks}"
@@ -4795,7 +4797,7 @@ ftctl_dr_runtime_action() {
   local force_immediate_cycle="${14-false}"
   local state_tuple state step progress run_path status_path external_ref rc error_code
   local target_vm_id target_external_ref checkpoint_lease_path test_sequence persisted_artifact_spec="" persisted_authority_spec=""
-  local release_authority_side="" release_authority_generation=""
+  local release_authority_side="" release_authority_generation="" release_resource_disposition="RETAIN_OPERATIONAL_VM"
 
   ftctl_dr_runtime_require_plan "${plan}" || return 2
   ftctl_dr_runtime_require_run "${run}" || return 2
@@ -4833,6 +4835,11 @@ ftctl_dr_runtime_action() {
   if [[ "${action}" == "dr-release" && -f "${status_path}" ]]; then
     release_authority_side="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "active_side")"
     release_authority_generation="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "cloud_authority_generation")"
+    if [[ -n "${profile_file}" && -f "${profile_file}" ]]; then
+      release_resource_disposition="$(jq -r '.request.resourceDisposition // "RETAIN_OPERATIONAL_VM"' "${profile_file}" 2>/dev/null || printf 'RETAIN_OPERATIONAL_VM')"
+    elif [[ -f "$(ftctl_dr_runtime_profile_path "${plan}")" ]]; then
+      release_resource_disposition="$(jq -r '.request.resourceDisposition // "RETAIN_OPERATIONAL_VM"' "$(ftctl_dr_runtime_profile_path "${plan}")" 2>/dev/null || printf 'RETAIN_OPERATIONAL_VM')"
+    fi
   fi
   ftctl_dr_runtime_write_state "${run_path}" "${plan}" "${run}" "${action}" "${state}" "${step}" "${progress}" "${external_ref}" ""
   case "${action}" in
@@ -4947,7 +4954,8 @@ ftctl_dr_runtime_action() {
       fi
       if [[ "${action}" == "dr-release" && "${rc:-0}" == "0" ]]; then
         ftctl_dr_runtime_write_release_tombstone "${plan}" "${run}" "${run_path}" "${status_path}" \
-          "${release_authority_side:-SOURCE}" "${release_authority_generation}" || return $?
+          "${release_authority_side:-SOURCE}" "${release_authority_generation}" \
+          "${release_resource_disposition}" || return $?
       fi
       ;;
     dr-test-failover|dr-test-prepare)
@@ -5285,6 +5293,7 @@ ftctl_dr_runtime_action() {
 ftctl_dr_runtime_write_release_tombstone() {
   local plan="${1-}" run="${2-}" run_path="${3-}" status_path="${4-}"
   local authority_side="${5-SOURCE}" authority_generation="${6-}"
+  local resource_disposition="${7-RETAIN_OPERATIONAL_VM}"
   local tombstone_path now
 
   tombstone_path="$(ftctl_dr_runtime_release_tombstone_path "${plan}")"
@@ -5295,6 +5304,7 @@ ftctl_dr_runtime_write_release_tombstone() {
     "scheduler_state=STOPPED" "scheduler_desired_state=STOPPED" \
     "control_state=STOPPED" "cycle_state=IDLE" "worker_state=SUCCEEDED" \
     "protection_state=UNPROTECTED" "release_state=RELEASED" \
+    "resource_disposition=${resource_disposition}" \
     "profile_removed=true" "runtime_removed=false" \
     "vm_mutated=false" "storage_mutated=false" "network_mutated=false" \
     "released_at=${now}" "accepted=true" "retryable=false" \
@@ -5302,12 +5312,12 @@ ftctl_dr_runtime_write_release_tombstone() {
   cp -f "${run_path}" "${status_path}" || return 2
   chmod 0644 "${status_path}" 2>/dev/null || true
   python3 - "${tombstone_path}" "${plan}" "${run}" "${authority_side^^}" \
-    "${authority_generation}" "${now}" <<'PY' || return 2
+    "${authority_generation}" "${now}" "${resource_disposition}" <<'PY' || return 2
 import json
 import os
 import sys
 
-path, plan, run, active_side, generation, released_at = sys.argv[1:7]
+path, plan, run, active_side, generation, released_at, resource_disposition = sys.argv[1:8]
 payload = {
     "schema_version": 1,
     "contract_version": "dr-release-tombstone-v1",
@@ -5317,6 +5327,7 @@ payload = {
     "step": "release-completed",
     "protection_state": "UNPROTECTED",
     "active_side": active_side or "SOURCE",
+    "resource_disposition": resource_disposition or "RETAIN_OPERATIONAL_VM",
     "authority_generation": int(generation) if generation.isdigit() else None,
     "scheduler_state": "STOPPED",
     "worker_state": "IDLE",
@@ -5336,12 +5347,12 @@ os.replace(tmp, path)
 PY
   rm -f "$(ftctl_dr_runtime_profile_path "${plan}")"
   ftctl_log_event "dr-runtime" "dr.release.tombstone" "ok" "" "" \
-    "plan=${plan} run=${run} active_side=${authority_side^^} generation=${authority_generation:-}"
+    "plan=${plan} run=${run} active_side=${authority_side^^} generation=${authority_generation:-} resource_disposition=${resource_disposition}"
 }
 
 ftctl_dr_runtime_restore_release_status() {
   local plan="${1-}" tombstone_path status_path contract plan_uuid run state step protection_state
-  local active_side authority_generation scheduler_state released_at
+  local active_side authority_generation scheduler_state released_at resource_disposition
 
   tombstone_path="$(ftctl_dr_runtime_release_tombstone_path "${plan}")"
   status_path="$(ftctl_dr_runtime_status_path "${plan}")"
@@ -5361,6 +5372,7 @@ ftctl_dr_runtime_restore_release_status() {
   authority_generation="$(jq -r '.authority_generation // empty' "${tombstone_path}" 2>/dev/null || true)"
   scheduler_state="$(jq -r '.scheduler_state // "STOPPED"' "${tombstone_path}" 2>/dev/null || true)"
   released_at="$(jq -r '.released_at // empty' "${tombstone_path}" 2>/dev/null || true)"
+  resource_disposition="$(jq -r '.resource_disposition // "RETAIN_OPERATIONAL_VM"' "${tombstone_path}" 2>/dev/null || true)"
 
   ftctl_dr_runtime_write_state "${status_path}" "${plan}" "${run}" "dr-release" \
     "RELEASED" "release-completed" "100" "${run}" "" || return 1
@@ -5373,6 +5385,7 @@ ftctl_dr_runtime_restore_release_status() {
     "cycle_state=IDLE" \
     "worker_state=IDLE" \
     "protection_state=UNPROTECTED" \
+    "resource_disposition=${resource_disposition}" \
     "release_state=RELEASED" \
     "profile_removed=true" \
     "runtime_removed=false" \
