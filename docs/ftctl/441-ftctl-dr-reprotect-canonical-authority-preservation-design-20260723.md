@@ -363,3 +363,25 @@ protection. A missing forward target map may not fall back to a bare
 protection resumed. Document 454 is normative for direction-scoped map roles,
 RBD sync/runtime locator separation, atomic map regeneration, and the first
 durable post-Failback forward-checkpoint gate.
+
+## 13. 2026-08-23 REPROTECT Terminal Publication Addendum
+
+A successful reverse checkpoint is not complete merely because the data worker
+returns `reprotect-ready`. Before Cloud may terminalize the accepted Run, FTCTL
+must atomically publish the Run terminal journal and project all of the
+following fields:
+
+- `worker_state=TERMINAL_PUBLISHED`
+- `terminal_source=ENGINE_TERMINAL`
+- `terminal_authoritative=true`
+- `runtime_endpoints_drained=true`
+- `control_request_run_uuid=<REPROTECT Run UUID>`
+
+The data path is unchanged. Terminal publication occurs only after the reverse
+manifest and checkpoint are durable. If an older package completed that data
+path without publishing its terminal journal, `dr-status --run` may repair only
+a `READY / reprotect-ready / 100%` Run with no error and with both durable files
+present. This read repair must not restart or repeat the reverse transfer.
+
+Regression coverage is provided by
+`tests/ftctl_dr_reprotect_terminal_smoke.sh`.

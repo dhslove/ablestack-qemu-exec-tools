@@ -3064,20 +3064,48 @@ ftctl_dr_runtime_start_failback() {
 ftctl_dr_runtime_reprotect_worker() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" run_path="${4-}" status_path="${5-}"
   local worker_profile reverse_profile now requested_at completed_at rc=0 error_code
+  local launch_nonce worker_generation worker_pid worker_start_ticks
   local sequence manifest_path checkpoint_path reverse_restore_points_path reverse_direction replication_direction provider_pair rto_actual_seconds
   local active_side current_state previous_checkpoint_sequence
 
   worker_profile="${profile_file}"
   [[ -n "${worker_profile}" && -f "${worker_profile}" ]] || worker_profile="$(ftctl_dr_runtime_profile_path "${plan}")"
+  launch_nonce="$(ftctl_dr_runtime_launch_nonce)"
+  worker_generation="$(date +%s%N)"
+  worker_pid="${BASHPID:-$$}"
+  worker_start_ticks="$(ftctl_dr_scheduler_process_start_ticks "${worker_pid}" 2>/dev/null || true)"
+  requested_at="$(ftctl_now_iso8601)"
+  ftctl_dr_runtime_worker_journal_write "${plan}" "${run}" "${launch_nonce}" "${worker_generation}" \
+    "${worker_pid}" "${worker_start_ticks}" "RUNNING" "${requested_at}" || return 70
+  ftctl_dr_runtime_path_set "${run_path}" \
+    "worker_state=RUNNING" \
+    "worker_pid=${worker_pid}" \
+    "worker_pid_alive=true" \
+    "worker_launch_nonce=${launch_nonce}" \
+    "worker_generation=${worker_generation}" \
+    "worker_started_at=${requested_at}" \
+    "worker_updated_at=${requested_at}" \
+    "terminal_publication_pending=false" \
+    "terminal_publication_pending_since=" || true
   active_side="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "active_side")"
   current_state="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "authority_state")"
   previous_checkpoint_sequence="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "checkpoint_sequence")"
   if [[ "${active_side}" != "TARGET" && "${current_state}" != "FAILED_OVER" ]]; then
+    completed_at="$(ftctl_now_iso8601)"
+    ftctl_dr_runtime_terminal_journal_write "${plan}" "${run}" "${launch_nonce}" "${worker_generation}" \
+      "FAILED" "47" "DR_REPROTECT_REQUIRES_TARGET_ACTIVE" "${completed_at}" || true
     ftctl_dr_runtime_path_set "${run_path}" \
       "state=ERROR" \
       "step=reprotect-not-eligible" \
       "progress=100" \
       "accepted=false" \
+      "worker_state=TERMINAL_PUBLISHED" \
+      "worker_pid_alive=false" \
+      "worker_exit_code=47" \
+      "terminal_source=ENGINE_TERMINAL" \
+      "terminal_version=1" \
+      "terminal_authoritative=true" \
+      "runtime_endpoints_drained=true" \
       "error_code=DR_REPROTECT_REQUIRES_TARGET_ACTIVE" \
       "error_message=Committed target authority was not available for reprotect" \
       "updated_at=$(ftctl_now_iso8601)" || true
@@ -3085,7 +3113,6 @@ ftctl_dr_runtime_reprotect_worker() {
     return 47
   fi
 
-  requested_at="$(ftctl_now_iso8601)"
   reverse_profile="$(ftctl_dr_runtime_reverse_profile_path "${plan}" "${run}" "reprotect")"
   ftctl_dr_runtime_path_set "${run_path}" \
     "state=RUNNING" \
@@ -3129,11 +3156,21 @@ ftctl_dr_runtime_reprotect_worker() {
       47) error_code="DR_REPROTECT_REQUIRES_TARGET_ACTIVE" ;;
       *) error_code="DR_REPROTECT_REVERSE_SYNC_FAILED" ;;
     esac
+    completed_at="$(ftctl_now_iso8601)"
+    ftctl_dr_runtime_terminal_journal_write "${plan}" "${run}" "${launch_nonce}" "${worker_generation}" \
+      "FAILED" "${rc}" "${error_code}" "${completed_at}" || true
     ftctl_dr_runtime_path_set "${run_path}" \
       "state=ERROR" \
       "step=reprotect-reverse-sync-failed" \
       "progress=100" \
       "accepted=false" \
+      "worker_state=TERMINAL_PUBLISHED" \
+      "worker_pid_alive=false" \
+      "worker_exit_code=${rc}" \
+      "terminal_source=ENGINE_TERMINAL" \
+      "terminal_version=1" \
+      "terminal_authoritative=true" \
+      "runtime_endpoints_drained=true" \
       "error_code=${error_code}" \
       "updated_at=$(ftctl_now_iso8601)" || true
     cp -f "${run_path}" "${status_path}" 2>/dev/null || true
@@ -3202,12 +3239,87 @@ PY
     "provider_pair=${provider_pair}" \
     "reverse_profile_path=${reverse_profile}" \
     "reverse_restore_points_path=${reverse_restore_points_path}" \
+    "control_request_run_uuid=${run}" \
+    "worker_state=SUCCEEDED" \
+    "worker_pid_alive=false" \
+    "worker_exit_code=0" \
+    "transfer_activity_state=IDLE" \
     "error_code=" \
     "updated_at=${completed_at}"
+  if ftctl_dr_runtime_terminal_journal_write "${plan}" "${run}" "${launch_nonce}" "${worker_generation}" \
+      "SUCCEEDED" "0" "" "${completed_at}"; then
+    ftctl_dr_runtime_path_set "${run_path}" \
+      "worker_state=TERMINAL_PUBLISHED" \
+      "terminal_source=ENGINE_TERMINAL" \
+      "terminal_version=1" \
+      "terminal_authoritative=true" \
+      "runtime_endpoints_drained=true" \
+      "terminal_publication_pending=false" \
+      "terminal_publication_pending_since=" \
+      "updated_at=${completed_at}" || true
+    ftctl_dr_runtime_worker_journal_write "${plan}" "${run}" "${launch_nonce}" "${worker_generation}" \
+      "${worker_pid}" "${worker_start_ticks}" "TERMINAL_PUBLISHED" "${completed_at}" || true
+  else
+    ftctl_dr_runtime_path_set "${run_path}" \
+      "worker_state=TERMINAL_PENDING" \
+      "terminal_authoritative=false" \
+      "runtime_endpoints_drained=true" \
+      "terminal_publication_pending=true" \
+      "terminal_publication_pending_since=${completed_at}" \
+      "updated_at=${completed_at}" || true
+  fi
   cp -f "${run_path}" "${status_path}" 2>/dev/null || true
   chmod 0644 "${status_path}" 2>/dev/null || true
   ftctl_log_event "dr-runtime" "dr.reprotect" "ok" "" "" \
     "plan=${plan} run=${run} restore_point=ftctl:${plan}:${sequence} active_side=TARGET"
+}
+
+ftctl_dr_runtime_repair_reprotect_terminal() {
+  local plan="${1-}" run="${2-}" path="${3-}"
+  local terminal_path action state step progress completed_at worker_state error_code
+  local manifest_path checkpoint_path nonce generation now
+
+  [[ -n "${plan}" && -n "${run}" && -f "${path}" ]] || return 0
+  terminal_path="$(ftctl_dr_runtime_run_journal_path "${plan}" "${run}" terminal)"
+  [[ ! -f "${terminal_path}" ]] || return 0
+  action="$(ftctl_dr_runtime_state_get_from_path "${path}" action)"
+  state="$(ftctl_dr_runtime_state_get_from_path "${path}" state)"
+  step="$(ftctl_dr_runtime_state_get_from_path "${path}" step)"
+  progress="$(ftctl_dr_runtime_state_get_from_path "${path}" progress)"
+  completed_at="$(ftctl_dr_runtime_state_get_from_path "${path}" reprotect_completed_at)"
+  worker_state="$(ftctl_dr_runtime_state_get_from_path "${path}" worker_state)"
+  error_code="$(ftctl_dr_runtime_state_get_from_path "${path}" error_code)"
+  manifest_path="$(ftctl_dr_runtime_state_get_from_path "${path}" reprotect_manifest_path)"
+  checkpoint_path="$(ftctl_dr_runtime_state_get_from_path "${path}" reprotect_checkpoint_path)"
+  [[ "${action}" == "dr-reprotect" && "${state}" == "READY" && "${step}" == "reprotect-ready" \
+        && "${progress}" == "100" && -n "${completed_at}" && -z "${error_code}" \
+        && ( "${worker_state}" == "SUCCEEDED" || "${worker_state}" == "TERMINAL_PENDING" \
+             || "${worker_state}" == "TERMINAL_PUBLISHED" ) \
+        && -f "${manifest_path}" && -f "${checkpoint_path}" ]] || return 0
+
+  nonce="$(ftctl_dr_runtime_state_get_from_path "${path}" worker_launch_nonce)"
+  generation="$(ftctl_dr_runtime_state_get_from_path "${path}" worker_generation)"
+  [[ -n "${nonce}" ]] || nonce="status-repair:${plan}:${run}"
+  [[ "${generation}" =~ ^[0-9]+$ ]] || generation="0"
+  now="$(ftctl_now_iso8601)"
+  ftctl_dr_runtime_terminal_journal_write "${plan}" "${run}" "${nonce}" "${generation}" \
+    "SUCCEEDED" "0" "" "${now}" || return $?
+  ftctl_dr_runtime_path_set "${path}" \
+    "control_request_run_uuid=${run}" \
+    "worker_state=TERMINAL_PUBLISHED" \
+    "worker_exit_code=0" \
+    "worker_pid_alive=false" \
+    "transfer_activity_state=IDLE" \
+    "terminal_source=ENGINE_TERMINAL" \
+    "terminal_version=1" \
+    "terminal_authoritative=true" \
+    "runtime_endpoints_drained=true" \
+    "terminal_publication_pending=false" \
+    "terminal_publication_pending_since=" \
+    "terminal_repaired_at=${now}" \
+    "updated_at=${now}"
+  ftctl_log_event "dr-runtime" "dr.reprotect.terminal-repair" "ok" "" "" \
+    "plan=${plan} run=${run}"
 }
 
 ftctl_dr_runtime_start_reprotect() {
@@ -6686,6 +6798,7 @@ ftctl_dr_runtime_status() {
 
   [[ -n "${run}" && ! -f "$(ftctl_dr_runtime_run_path "${plan}" "${run}")" ]] && result="run_not_found"
   if [[ -n "${run}" && "${result}" != "run_not_found" ]]; then
+    ftctl_dr_runtime_repair_reprotect_terminal "${plan}" "${run}" "${path}" || true
     ftctl_dr_runtime_repair_requested_cycle_terminal "${plan}" "${run}" "${path}" || true
   fi
   if [[ -z "${run}" ]]; then
