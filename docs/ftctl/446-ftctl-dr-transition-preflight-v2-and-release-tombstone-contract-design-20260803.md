@@ -168,7 +168,7 @@ Reprotect readiness:
 ```text
 active_side == TARGET
 authority_generation == expected_generation
-target_power_state == POWERED_ON
+target_power_state in {POWERED_ON, POWER_ON_DELEGATED}
 source_fence_state in {ACKNOWLEDGED, CONFIRMED, FENCED, ISOLATED, BLOCKED}
   OR source_power_state == POWERED_OFF
 active operation 없음
@@ -177,6 +177,15 @@ split-brain guard SAFE
 ```
 
 Failback은 위 조건에 더해 reverse baseline/final-delta readiness를 확인한다.
+
+`POWER_ON_DELEGATED`는 FTCTL이 VM 전원을 직접 통제하지 않고 Cloud VM
+lifecycle에 위임했다는 projection 값이다. 이 값만으로 실제 전원 켜짐을
+단정하지 않는다. Cloud transition preflight가 대상 VM의 assigned Agent에
+`CheckVirtualMachineCommand`를 보내 `PowerOn`을 확인한 경우에만 FTCTL의
+delegated projection과 결합해 transition READY로 판정한다. 따라서 재보호가
+성공하며 `POWERED_ON`을 `POWER_ON_DELEGATED`로 바꾸더라도 이후 Failback을
+잘못 차단하지 않고, Agent가 VM을 찾지 못하거나 전원이 꺼져 있으면 Cloud가
+계속 차단한다.
 
 ## 5. Read-only 불변조건
 

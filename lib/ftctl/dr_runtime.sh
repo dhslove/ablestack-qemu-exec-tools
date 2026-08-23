@@ -6628,7 +6628,8 @@ ftctl_dr_runtime_transition_preflight() {
     elif [[ -n "${expected_generation}" && "${authority_generation}" != "${expected_generation}" ]]; then
       error_code="DR_TRANSITION_PREFLIGHT_GENERATION_MISMATCH"
       message="FTCTL authority generation does not match the committed Cloud generation"
-    elif [[ "${target_power_state^^}" != "POWERED_ON" ]]; then
+    elif [[ "${target_power_state^^}" != "POWERED_ON" \
+        && "${target_power_state^^}" != "POWER_ON_DELEGATED" ]]; then
       error_code="DR_TRANSITION_PREFLIGHT_TARGET_NOT_SERVING"
       message="FTCTL target authority is not recorded as powered on"
     fi

@@ -9735,6 +9735,14 @@ selftest_case_dr_transition_preflight_is_read_only() {
   after_sha="$(sha256sum "${status_path}" | awk '{print $1}')"
   selftest_assert_eq "${after_sha}" "${before_sha}" "transition preflight does not mutate status"
 
+  ftctl_dr_runtime_path_set "${status_path}" "target_power_state=POWER_ON_DELEGATED"
+  before_sha="$(sha256sum "${status_path}" | awk '{print $1}')"
+  out="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-transition-preflight --config "${SELFTEST_CONFIG}" --plan "${plan}" --operation failback --expected-authority TARGET --authority-generation 7 --json)"
+  selftest_assert_contains "${out}" '"ready":true' "delegated Cloud power ownership is transition-ready"
+  selftest_assert_contains "${out}" '"target_power_state":"POWER_ON_DELEGATED"' "delegated power evidence is preserved"
+  after_sha="$(sha256sum "${status_path}" | awk '{print $1}')"
+  selftest_assert_eq "${after_sha}" "${before_sha}" "delegated transition preflight remains read-only"
+
   out="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-transition-preflight --config "${SELFTEST_CONFIG}" --plan "${plan}" --operation reprotect --expected-authority TARGET --authority-generation 8 --json 2>/dev/null)" || rc=$?
   selftest_assert_eq "${rc}" "79" "generation mismatch exit"
   selftest_assert_contains "${out}" '"error_code":"DR_TRANSITION_PREFLIGHT_GENERATION_MISMATCH"' "generation mismatch is typed"
