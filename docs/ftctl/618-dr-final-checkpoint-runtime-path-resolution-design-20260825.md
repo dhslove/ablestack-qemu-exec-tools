@@ -39,11 +39,17 @@ status field and scheduler helper are unavailable. Baseline action-contract,
 remote RBD, release tombstone, and reprotect terminal suites remain release
 gates.
 
+Zero is a valid `targetReadyRpoSeconds` value for an immediately durable final
+checkpoint. Evidence serialization must preserve that zero and append a fixed
+terminator so optional trailing fields cannot be removed by shell command
+substitution.
+
 ## AS-IS / TO-BE
 
 | Area | AS-IS | TO-BE |
 | --- | --- | --- |
 | Runtime path | Empty when pause status omits the field | Canonical Plan path is the final fallback |
+| Zero RPO evidence | Numeric zero becomes an empty trailing field | Zero is preserved and the evidence tuple has a terminator |
 | Cutover | Valid sequence 5 rejected against stale sequence 4 | Exact durable final checkpoint repairs the selector |
 | VM boot | UEFI target is already healthy but Run stays open | UEFI boot evidence and terminal state converge |
 | Regression scope | Temptation to weaken checkpoint validation | Validation remains strict; only path discovery changes |

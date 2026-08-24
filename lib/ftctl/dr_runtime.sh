@@ -1330,13 +1330,15 @@ for value in (
     checkpoint_path,
     str(restore_point.get("sourceCheckpointAt") or ""),
     str(restore_point.get("targetDurableAt") or ""),
-    str(restore_point.get("targetReadyRpoSeconds") or ""),
+    "" if restore_point.get("targetReadyRpoSeconds") is None else str(restore_point.get("targetReadyRpoSeconds")),
 ):
     print(value)
+print("__FTCTL_FINAL_CHECKPOINT_EVIDENCE_END__")
 PY
 )" || return 1
   mapfile -t fields <<< "${evidence}"
-  [[ "${#fields[@]}" -ge 6 && -n "${fields[0]}" ]] || return 1
+  [[ "${#fields[@]}" -ge 7 && -n "${fields[0]}" \
+      && "${fields[6]}" == "__FTCTL_FINAL_CHECKPOINT_EVIDENCE_END__" ]] || return 1
 
   ftctl_dr_runtime_path_set "${run_path}" \
     "failover_restore_point_ref=${fields[0]}" \

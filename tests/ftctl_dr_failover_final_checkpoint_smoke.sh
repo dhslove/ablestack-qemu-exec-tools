@@ -76,7 +76,7 @@ mkdir -p "${REPAIR_DIR}"
 ftctl_dr_runtime_plan_dir() { printf '%s\n' "${REPAIR_DIR}"; }
 printf '{}\n' > "${REPAIR_MANIFEST}"
 cat > "${REPAIR_CHECKPOINT}" <<EOF
-{"planUuid":"${PLAN}","runUuid":"${RUN}","sequence":5,"state":"TARGET_READY","cycleCommitState":"LOCAL_DURABLE","targetWritten":true,"writeVerified":true,"nbdTeardownState":"DRAINED","sourceCheckpointAt":"2026-08-25T00:00:01Z","targetDurableAt":"2026-08-25T00:00:02Z","targetReadyRpoSeconds":1}
+{"planUuid":"${PLAN}","runUuid":"${RUN}","sequence":5,"state":"TARGET_READY","cycleCommitState":"LOCAL_DURABLE","targetWritten":true,"writeVerified":true,"nbdTeardownState":"DRAINED","sourceCheckpointAt":"2026-08-25T00:00:01Z","targetDurableAt":"2026-08-25T00:00:02Z","targetReadyRpoSeconds":0}
 EOF
 cat > "${REPAIR_POINTS}" <<EOF
 {"planUuid":"${PLAN}","runUuid":"${RUN}","checkpointSequence":5,"checkpointRef":"${FINAL_REF}","cycleType":"failover-final","state":"TARGET_READY","manifest":"${REPAIR_MANIFEST}","checkpoint":"${REPAIR_CHECKPOINT}"}
@@ -104,6 +104,7 @@ ftctl_dr_runtime_repair_final_checkpoint_selection "${PLAN}" "${RUN}" 5 \
   "${REPAIR_RUN_PATH}" "${REPAIR_STATUS_PATH}" "${REPAIR_SESSION}" "${REPAIR_ACTIVE}"
 grep -Fxq "failover_restore_point_ref=${FINAL_REF}" "${REPAIR_RUN_PATH}"
 grep -Fxq 'failover_restore_point_sequence=5' "${REPAIR_RUN_PATH}"
+grep -Fxq 'target_ready_rpo_seconds=0' "${REPAIR_RUN_PATH}"
 /usr/bin/jq -e --arg ref "${FINAL_REF}" '.restorePoint.ref == $ref and .restorePoint.checkpointSequence == 5' \
   "${REPAIR_SESSION}" >/dev/null
 /usr/bin/jq -e --arg ref "${FINAL_REF}" '.restorePoint.ref == $ref and .restorePoint.checkpointSequence == 5' \
