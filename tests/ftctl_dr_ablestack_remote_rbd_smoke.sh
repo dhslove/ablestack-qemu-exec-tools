@@ -9,6 +9,11 @@ ftctl_ensure_dir() { mkdir -p "$1"; }
 ftctl_dr_runtime_key() { printf '%s\n' "${1//[^A-Za-z0-9._-]/_}"; }
 ftctl_dr_runtime_plan_dir() { printf '%s/runtime/%s\n' "${TMP}" "$(ftctl_dr_runtime_key "$1")"; }
 ftctl_state_write_json_file() { printf '%s\n' "$2" > "$1"; }
+ftctl_state_read_kv() {
+  local path="${1-}" key="${2-}"
+  [[ -f "${path}" ]] || return 0
+  awk -F= -v key="${key}" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "${path}"
+}
 
 # shellcheck source=../lib/ftctl/dr_ablestack.sh
 source "${ROOT}/lib/ftctl/dr_ablestack.sh"
@@ -224,8 +229,11 @@ plan_owner_artifact="${TMP}/plan-owner-artifact.json"
 checkpoint_ref="ftctl:plan-owner:source-run:12"
 cat > "${plan_owner_profile}" <<EOF
 {
+  "planUuid":"plan-owner",
   "direction":"KVM_TO_KVM",
   "workers":{"source":"source-host","coordinator":"target-host","target":"target-host"},
+  "target":{"vmId":283,"externalRef":"target-vm-uuid"},
+  "mapping":{"disks":[{"source":{"canonicalLocator":"rbd:rbd/source"},"target":{"canonicalLocator":"rbd:rbd/target"}}]},
   "request":{
     "schedulerTransitionScope":"REMOTE_SOURCE",
     "checkpointContractVersion":1,
@@ -258,6 +266,17 @@ plan_owner_session="$(ftctl_dr_runtime_test_session_path plan-owner test-run)"
 jq -e --arg ref "${checkpoint_ref}" '.restorePoint.ref == $ref
   and .restorePoint.checkpointSequence == 12
   and .request.schedulerTransitionScope == "REMOTE_SOURCE"' "${plan_owner_session}" >/dev/null
+
+failover_run_path="$(ftctl_dr_runtime_run_path plan-owner failover-run)"
+printf 'state=READY\nlast_target_durable_at=2026-08-24T00:05:00Z\n' > "${failover_run_path}"
+ftctl_dr_runtime_finalize_failover plan-owner failover-run "${plan_owner_profile}" "${checkpoint_ref}" planned \
+  "${failover_run_path}" "${plan_owner_status_path}"
+[[ "$(ftctl_dr_runtime_state_get_from_path "${failover_run_path}" state)" == "CUTOVER_READY" ]]
+[[ "$(ftctl_dr_runtime_state_get_from_path "${failover_run_path}" active_side)" == "SOURCE" ]]
+[[ "$(ftctl_dr_runtime_state_get_from_path "${failover_run_path}" target_power_state)" == "POWERED_OFF" ]]
+[[ "$(ftctl_dr_runtime_state_get_from_path "${failover_run_path}" target_vm_id)" == "283" ]]
+[[ "$(ftctl_dr_runtime_state_get_from_path "${failover_run_path}" target_external_ref)" == "target-vm-uuid" ]]
+[[ "$(ftctl_dr_runtime_state_get_from_path "${failover_run_path}" manifest_sha256)" =~ ^[0-9a-f]{64}$ ]]
 
 invalid_profile="${TMP}/invalid-plan-owner-profile.json"
 jq '.request.checkpointPlanUuid="wrong-plan"' "${plan_owner_profile}" > "${invalid_profile}"

@@ -327,3 +327,39 @@ target export and promoting the target VM.
 | Safety scope | A generic fallback could affect VMware | Fallback is explicitly limited to `KVM_TO_KVM` |
 | Data authority | Missing local metadata appears to mean missing replica data | Cloud proves the durable Cycle; target FTCTL still verifies target artifacts |
 | Test scheduler ownership | Target transition may create a duplicate local scheduler | Remote source remains the only scheduler; target performs artifact operations only |
+
+## 15. Remote KVM Production Cutover Barrier
+
+Production failover for a Plan owned by the target Cloud must not let target
+FTCTL declare `FAILED_OVER` before Cloud has isolated the remote source and
+started the Cloud-managed replica VM. This rule is limited to
+`KVM_TO_KVM` profiles whose request carries
+`schedulerTransitionScope=REMOTE_SOURCE`; local KVM and every validated
+VMware-origin path retain their existing behavior.
+
+For that scope FTCTL performs only the engine half of cutover:
+
+1. lock the controller-selected durable checkpoint;
+2. calculate a deterministic SHA-256 cutover manifest from the Plan UUID,
+   direction, checkpoint identity, target identity, and canonical disk mapping;
+3. publish `CUTOVER_READY / SOURCE / POWERED_OFF_PENDING` without claiming
+   target authority;
+4. wait for Cloud's typed `DR_CUTOVER_COMMIT_V2` envelope;
+5. publish `FAILED_OVER / TARGET` only after Cloud reports the source fence,
+   target VM power, boot validation, and matching manifest hash.
+
+The target runtime also persists `target_vm_id` and `target_external_ref` from
+the profile so the commit cannot be redirected to another replica. Planned
+failover requires `VERIFIED / POWERED_OFF`; disaster failover accepts only the
+existing explicit `ACKNOWLEDGED / UNKNOWN|UNREACHABLE` contract. Test failover
+never enters this barrier and keeps the source scheduler running.
+
+### 15.1 AS-IS / TO-BE
+
+| Area | AS-IS | TO-BE |
+| --- | --- | --- |
+| KVM target state | Target FTCTL immediately publishes `FAILED_OVER` | Remote-source KVM publishes `CUTOVER_READY` and waits for Cloud commit |
+| Manifest | KVM cutover has no commit SHA | Deterministic checkpoint and mapping manifest is persisted and cross-checked |
+| Target identity | Commit may lack target VM identity in runtime | VM ID and external reference are immutable commit inputs |
+| Authority | Engine state can precede Cloud VM lifecycle | Cloud source fence and target boot evidence precede final engine authority |
+| Regression boundary | Shared KVM behavior could change | Branch is exact `KVM_TO_KVM + REMOTE_SOURCE`; VMware and local KVM are unchanged |

@@ -2179,6 +2179,7 @@ ftctl_dr_runtime_finalize_failover() {
   local failover_manifest_path failover_checkpoint_path failover_requested_at restore_point_locked_at
   local target_promote_started_at target_power_on_at failover_completed_at rto_actual_seconds
   local last_source last_target target_rpo target_power_state target_promotion_state failover_runtime_state active_side
+  local manifest_sha256 target_vm_id target_external_ref
 
   ftctl_dr_runtime_ensure_plan_dirs "${plan}"
   session_path="$(ftctl_dr_runtime_failover_session_path "${plan}" "${run}")"
@@ -2191,6 +2192,7 @@ ftctl_dr_runtime_finalize_failover() {
 
   python3 - "${plan}" "${run}" "${profile_path}" "${restore_point}" "${mode}" "${status_path}" \
     "${restore_points_path}" "${session_path}" "${active_path}" "${selection_path}" "${now}" <<'PY' || rc=$?
+import hashlib
 import json
 import os
 import shutil
@@ -2364,11 +2366,33 @@ checkpoint_path = selected.get("checkpoint") or state.get("checkpoint_path")
 requested_at = state.get("failover_requested_at") or now
 session_id = f"{plan}:{run}"
 restore_ref = record_ref(selected)
-cutover_ready = str(profile.get("direction") or "").upper() == "VMWARE_TO_KVM"
+direction = str(profile.get("direction") or "").upper()
+remote_source_transition = (
+    direction == "KVM_TO_KVM"
+    and str(request.get("schedulerTransitionScope") or "").upper() == "REMOTE_SOURCE"
+)
+cutover_ready = direction == "VMWARE_TO_KVM" or remote_source_transition
 runtime_state = "CUTOVER_READY" if cutover_ready else "FAILED_OVER"
 active_side = "SOURCE" if cutover_ready else "TARGET"
 target_power_state = "POWERED_OFF" if cutover_ready else "POWER_ON_DELEGATED"
 target_promotion_state = "CUTOVER_READY" if cutover_ready else "PROMOTED"
+target = profile.get("target") if isinstance(profile.get("target"), dict) else {}
+target_vm_id = target.get("vmId")
+target_external_ref = target.get("externalRef") or target.get("uuid") or ""
+manifest_sha256 = str(state.get("manifest_sha256") or "")
+if remote_source_transition:
+    manifest_payload = {
+        "contractVersion": 1,
+        "planUuid": plan,
+        "direction": direction,
+        "checkpointRef": restore_ref,
+        "checkpointSequence": record_sequence(selected),
+        "targetVmId": target_vm_id,
+        "targetExternalRef": target_external_ref,
+        "mapping": profile.get("mapping") if isinstance(profile.get("mapping"), dict) else {},
+    }
+    encoded = json.dumps(manifest_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    manifest_sha256 = hashlib.sha256(encoded).hexdigest()
 session = {
     "version": 1,
     "planUuid": plan,
@@ -2397,6 +2421,9 @@ session = {
         "powerState": target_power_state,
         "lifecycleOwner": "Cloud",
     },
+    "manifestSha256": manifest_sha256 or None,
+    "targetVmId": target_vm_id,
+    "targetExternalRef": target_external_ref or None,
     "profile": {
         "direction": profile.get("direction"),
         "source": profile.get("source"),
@@ -2428,6 +2455,9 @@ with open(selection_path, "w", encoding="utf-8") as fh:
     fh.write(f"active_side={active_side}\n")
     fh.write(f"target_power_state={target_power_state}\n")
     fh.write(f"target_promotion_state={target_promotion_state}\n")
+    fh.write(f"manifest_sha256={manifest_sha256}\n")
+    fh.write(f"target_vm_id={'' if target_vm_id is None else target_vm_id}\n")
+    fh.write(f"target_external_ref={target_external_ref}\n")
     fh.write(f"last_source_checkpoint_at={source_at or ''}\n")
     fh.write(f"last_target_durable_at={target_at or ''}\n")
     fh.write(f"target_ready_rpo_seconds={target_rpo or ''}\n")
@@ -2457,6 +2487,9 @@ PY
   target_promotion_state="$(ftctl_dr_runtime_state_get_from_path "${selection_path}" "target_promotion_state")"
   failover_runtime_state="$(ftctl_dr_runtime_state_get_from_path "${selection_path}" "failover_runtime_state")"
   active_side="$(ftctl_dr_runtime_state_get_from_path "${selection_path}" "active_side")"
+  manifest_sha256="$(ftctl_dr_runtime_state_get_from_path "${selection_path}" "manifest_sha256")"
+  target_vm_id="$(ftctl_dr_runtime_state_get_from_path "${selection_path}" "target_vm_id")"
+  target_external_ref="$(ftctl_dr_runtime_state_get_from_path "${selection_path}" "target_external_ref")"
   [[ -n "${failover_runtime_state}" ]] || failover_runtime_state="FAILED_OVER"
   [[ -n "${active_side}" ]] || active_side="TARGET"
   rm -f "${selection_path}" 2>/dev/null || true
@@ -2481,6 +2514,9 @@ PY
     "active_side=${active_side}" \
     "target_power_state=${target_power_state}" \
     "target_promotion_state=${target_promotion_state}" \
+    "manifest_sha256=${manifest_sha256}" \
+    "target_vm_id=${target_vm_id}" \
+    "target_external_ref=${target_external_ref}" \
     "last_source_checkpoint_at=${last_source}" \
     "last_target_durable_at=${last_target}" \
     "target_ready_rpo_seconds=${target_rpo}" \
