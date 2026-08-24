@@ -1143,6 +1143,9 @@ ftctl_dr_runtime_default_restore_points_path() {
   if [[ -z "${restore_points_path}" ]] && command -v ftctl_dr_scheduler_restore_points_path >/dev/null 2>&1; then
     restore_points_path="$(ftctl_dr_scheduler_restore_points_path "${plan}")"
   fi
+  if [[ -z "${restore_points_path}" ]]; then
+    restore_points_path="$(ftctl_dr_runtime_plan_dir "${plan}")/restore-points.jsonl"
+  fi
   printf '%s\n' "${restore_points_path}"
 }
 

@@ -73,6 +73,7 @@ REPAIR_CHECKPOINT="${REPAIR_DIR}/checkpoint.json"
 REPAIR_SESSION="${REPAIR_DIR}/session.json"
 REPAIR_ACTIVE="${REPAIR_DIR}/active.json"
 mkdir -p "${REPAIR_DIR}"
+ftctl_dr_runtime_plan_dir() { printf '%s\n' "${REPAIR_DIR}"; }
 printf '{}\n' > "${REPAIR_MANIFEST}"
 cat > "${REPAIR_CHECKPOINT}" <<EOF
 {"planUuid":"${PLAN}","runUuid":"${RUN}","sequence":5,"state":"TARGET_READY","cycleCommitState":"LOCAL_DURABLE","targetWritten":true,"writeVerified":true,"nbdTeardownState":"DRAINED","sourceCheckpointAt":"2026-08-25T00:00:01Z","targetDurableAt":"2026-08-25T00:00:02Z","targetReadyRpoSeconds":1}
@@ -83,7 +84,7 @@ EOF
 printf '{"planUuid":"%s","runUuid":"%s","restorePoint":{"ref":"%s","checkpointSequence":4}}\n' \
   "${PLAN}" "${RUN}" "${OLD_REF}" > "${REPAIR_SESSION}"
 cp "${REPAIR_SESSION}" "${REPAIR_ACTIVE}"
-printf 'restore_points_path=%s\nfailover_restore_point_sequence=4\n' "${REPAIR_POINTS}" > "${REPAIR_RUN_PATH}"
+printf 'failover_restore_point_sequence=4\n' > "${REPAIR_RUN_PATH}"
 cp "${REPAIR_RUN_PATH}" "${REPAIR_STATUS_PATH}"
 
 ftctl_dr_runtime_path_set() {
@@ -97,7 +98,7 @@ ftctl_dr_runtime_path_set() {
     mv "${tmp}" "${path}"
   done
 }
-ftctl_dr_runtime_default_restore_points_path() { printf '%s\n' "${REPAIR_POINTS}"; }
+[[ "$(ftctl_dr_runtime_default_restore_points_path "${PLAN}" "${REPAIR_STATUS_PATH}")" == "${REPAIR_POINTS}" ]]
 
 ftctl_dr_runtime_repair_final_checkpoint_selection "${PLAN}" "${RUN}" 5 \
   "${REPAIR_RUN_PATH}" "${REPAIR_STATUS_PATH}" "${REPAIR_SESSION}" "${REPAIR_ACTIVE}"
