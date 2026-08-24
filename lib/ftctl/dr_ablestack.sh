@@ -613,6 +613,84 @@ ftctl_dr_ablestack_export_manifest_path() {
   printf '%s/target-exports.json\n' "$(ftctl_dr_runtime_plan_dir "${plan}")"
 }
 
+ftctl_dr_ablestack_export_persist_root() {
+  printf '%s\n' "${FTCTL_DR_TARGET_EXPORT_PERSIST_ROOT:-/var/lib/ablestack-vm-ftctl/dr-target-exports}"
+}
+
+ftctl_dr_ablestack_export_persist_dir() {
+  local plan="${1-}"
+  printf '%s/%s\n' "$(ftctl_dr_ablestack_export_persist_root)" "$(ftctl_dr_runtime_key "${plan}")"
+}
+
+ftctl_dr_ablestack_export_persist_profile_path() {
+  printf '%s/profile.json\n' "$(ftctl_dr_ablestack_export_persist_dir "${1-}")"
+}
+
+ftctl_dr_ablestack_export_persist_manifest_path() {
+  printf '%s/exports.json\n' "$(ftctl_dr_ablestack_export_persist_dir "${1-}")"
+}
+
+ftctl_dr_ablestack_export_persist_intent_path() {
+  printf '%s/intent.json\n' "$(ftctl_dr_ablestack_export_persist_dir "${1-}")"
+}
+
+ftctl_dr_ablestack_export_persist_intent() {
+  local plan="${1-}" run="${2-}" desired="${3-RUNNING}" profile_file="${4-}" manifest="${5-}"
+  local persist_dir persist_profile persist_manifest intent tmp redacted
+  persist_dir="$(ftctl_dr_ablestack_export_persist_dir "${plan}")"
+  persist_profile="$(ftctl_dr_ablestack_export_persist_profile_path "${plan}")"
+  persist_manifest="$(ftctl_dr_ablestack_export_persist_manifest_path "${plan}")"
+  intent="$(ftctl_dr_ablestack_export_persist_intent_path "${plan}")"
+  ftctl_ensure_dir "${persist_dir}" "0750"
+  if [[ -n "${profile_file}" && -f "${profile_file}" ]]; then
+    if command -v ftctl_dr_runtime_redacted_profile_json >/dev/null 2>&1; then
+      redacted="$(ftctl_dr_runtime_redacted_profile_json "${profile_file}")" || return $?
+      ftctl_state_write_json_file "${persist_profile}" "${redacted}"
+    else
+      cp -f "${profile_file}" "${persist_profile}"
+    fi
+    chmod 0600 "${persist_profile}" 2>/dev/null || true
+  fi
+  if [[ -n "${manifest}" && -f "${manifest}" ]]; then
+    cp -f "${manifest}" "${persist_manifest}"
+    chmod 0600 "${persist_manifest}" 2>/dev/null || true
+  fi
+  tmp="${intent}.tmp.$$"
+  python3 - "${tmp}" "${plan}" "${run}" "${desired}" <<'PY'
+import json, os, sys
+path, plan, run, desired = sys.argv[1:5]
+payload = {
+    "schemaVersion": 1,
+    "planUuid": plan,
+    "runUuid": run,
+    "desiredState": desired,
+}
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(payload, fh, sort_keys=True, separators=(",", ":"))
+    fh.write("\n")
+os.chmod(path, 0o600)
+PY
+  mv -f "${tmp}" "${intent}"
+}
+
+ftctl_dr_ablestack_export_persisted_port() {
+  local plan="${1-}" device="${2-}" manifest
+  manifest="$(ftctl_dr_ablestack_export_persist_manifest_path "${plan}")"
+  [[ -f "${manifest}" ]] || return 1
+  python3 - "${manifest}" "${device}" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as fh:
+    data = json.load(fh)
+for item in data.get("exports") or []:
+    if str(item.get("device") or "") == sys.argv[2]:
+        value = item.get("port")
+        if isinstance(value, int) and value > 0:
+            print(value)
+            raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
 ftctl_dr_ablestack_export_value() {
   local disk_map="${1-}" device="${2-}" field="${3-}"
   python3 - "${disk_map}" "${device}" "${field}" <<'PY'
@@ -628,13 +706,38 @@ for item in (data.get("transport") or {}).get("exports") or []:
 PY
 }
 
+ftctl_dr_ablestack_target_export_reachable() {
+  local host="${1-}" port="${2-}" timeout_sec="${3-2}"
+  [[ -n "${host}" && "${port}" =~ ^[1-9][0-9]*$ ]] || return 1
+  [[ "${timeout_sec}" =~ ^[1-9][0-9]*$ ]] || timeout_sec=2
+  python3 - "${host}" "${port}" "${timeout_sec}" <<'PY'
+import socket
+import sys
+
+host, port, timeout = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+try:
+    with socket.create_connection((host, port), timeout=timeout):
+        pass
+except OSError:
+    raise SystemExit(1)
+PY
+}
+
 ftctl_dr_ablestack_local_port_in_use() {
   local port="${1-}"
   ss -lnt 2>/dev/null | awk '{print $4}' | grep -Eq "(^|:)${port}$"
 }
 
 ftctl_dr_ablestack_target_export_pick_port() {
-  local plan="${1-}" device="${2-}" out_var="${3-}" preferred candidate offset
+  local plan="${1-}" device="${2-}" out_var="${3-}" preferred candidate offset persisted
+  persisted="$(ftctl_dr_ablestack_export_persisted_port "${plan}" "${device}" 2>/dev/null || true)"
+  if [[ "${persisted}" =~ ^[0-9]+$ ]]; then
+    if ! ftctl_dr_ablestack_local_port_in_use "${persisted}"; then
+      printf -v "${out_var}" '%s' "${persisted}"
+      return 0
+    fi
+    return 93
+  fi
   ftctl_blockcopy_remote_nbd_candidate_port "${plan}" "${device}" preferred
   for ((offset=0; offset<FTCTL_REMOTE_NBD_PORT_COUNT; offset++)); do
     candidate=$((FTCTL_REMOTE_NBD_PORT_BASE + ((preferred - FTCTL_REMOTE_NBD_PORT_BASE + offset) % FTCTL_REMOTE_NBD_PORT_COUNT)))
@@ -745,6 +848,7 @@ with open(tmp,"w",encoding="utf-8") as fh: json.dump(data,fh,sort_keys=True,sepa
 os.replace(tmp,sys.argv[2])
 PY
   rm -f "${records}"
+  ftctl_dr_ablestack_export_persist_intent "${plan}" "${run}" "RUNNING" "${profile_file}" "${manifest}" || return $?
   if [[ "${json}" == "1" ]]; then
     python3 - "${manifest}" <<'PY'
 import json,sys
@@ -760,6 +864,7 @@ PY
 ftctl_dr_ablestack_target_export_stop() {
   local plan="${1-}" json="${2-0}" manifest item pid_file pid stopped=0
   manifest="$(ftctl_dr_ablestack_export_manifest_path "${plan}")"
+  ftctl_dr_ablestack_export_persist_intent "${plan}" "" "STOPPED" "" "" || return $?
   if [[ -f "${manifest}" ]]; then
     while IFS= read -r item; do
       pid_file="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("pidFile", ""))' "${item}")"
@@ -782,6 +887,58 @@ PY
   else
     printf 'target exports stopped: plan=%s count=%s\n' "${plan}" "${stopped}"
   fi
+}
+
+ftctl_dr_ablestack_target_export_reconcile_all() {
+  local json="${1-0}" root intent plan run desired profile manifest rc=0 restored=0 failed=0
+  root="$(ftctl_dr_ablestack_export_persist_root)"
+  [[ -d "${root}" ]] || return 0
+  while IFS= read -r intent; do
+    desired="$(jq -r '.desiredState // "STOPPED"' "${intent}" 2>/dev/null || printf STOPPED)"
+    [[ "${desired}" == "RUNNING" ]] || continue
+    plan="$(jq -r '.planUuid // empty' "${intent}" 2>/dev/null || true)"
+    run="$(jq -r '.runUuid // "target-reconcile"' "${intent}" 2>/dev/null || true)"
+    [[ -n "${plan}" ]] || continue
+    profile="$(ftctl_dr_ablestack_export_persist_profile_path "${plan}")"
+    manifest="$(ftctl_dr_ablestack_export_manifest_path "${plan}")"
+    if [[ -f "${manifest}" ]] && python3 - "${manifest}" <<'PY'
+import json, os, signal, socket, sys
+with open(sys.argv[1], encoding="utf-8") as fh:
+    data=json.load(fh)
+items=data.get("exports") or []
+if not items:
+    raise SystemExit(1)
+for item in items:
+    pid_file=str(item.get("pidFile") or "")
+    try:
+        with open(pid_file, encoding="utf-8") as fh:
+            pid=int(fh.read().strip())
+        os.kill(pid, 0)
+        with socket.create_connection((str(item.get("host") or "127.0.0.1"), int(item.get("port"))), timeout=1):
+            pass
+    except Exception:
+        raise SystemExit(1)
+PY
+    then
+      continue
+    fi
+    rm -f "${manifest}" 2>/dev/null || true
+    if [[ -f "${profile}" ]] && ftctl_dr_ablestack_target_export_start "${plan}" "${run}" "${profile}" "0" >/dev/null; then
+      restored=$((restored + 1))
+      ftctl_log_event "dr-runtime" "dr.ablestack.target_export_reconcile" "ok" "" "" \
+        "plan=${plan} run=${run} desired=RUNNING"
+    else
+      failed=$((failed + 1))
+      rc=1
+      ftctl_log_event "dr-runtime" "dr.ablestack.target_export_reconcile" "fail" "" "DR_TARGET_EXPORT_UNAVAILABLE" \
+        "plan=${plan} run=${run} desired=RUNNING"
+    fi
+  done < <(find "${root}" -mindepth 2 -maxdepth 2 -type f -name intent.json -print 2>/dev/null | sort)
+  if [[ "${json}" == "1" ]]; then
+    printf '{"command":"dr-target-export-reconcile","result":"%s","restored":%s,"failed":%s}\n' \
+      "$([[ "${rc}" == "0" ]] && printf ok || printf partial)" "${restored}" "${failed}"
+  fi
+  return "${rc}"
 }
 
 ftctl_dr_ablestack_remote_rbd_path() {
@@ -1149,7 +1306,7 @@ ftctl_dr_ablestack_full_seed_once() {
   local requested_mode="${7-FULL_SEED}" effective_mode="${8-FULL_SEED}" reseed_reason="${9-}"
   local disk_json device source_path target_path source_format target_format size_bytes source_type target_type resolved_size target_uri
   local out="" err="" rc=0 source_at target_at source_epoch target_epoch rpo="0"
-  local remote_transport="0" remote_path="" export_name="" export_port="" vm_name=""
+  local remote_transport="0" remote_path="" export_name="" export_port="" export_host="" vm_name=""
 
   ftctl_dr_ablestack_prepare_targets "${plan}" "${run}" "${profile_file}" "${disk_map}" "${manifest_path}" "${checkpoint_path}" || return $?
   local site_agent_transport="0"
@@ -1179,7 +1336,10 @@ ftctl_dr_ablestack_full_seed_once() {
     ftctl_dr_ablestack_source_size_bytes "${device}" "${source_path}" "" resolved_size || return $?
     if [[ "${site_agent_transport}" == "1" ]]; then
       target_uri="$(ftctl_dr_ablestack_export_value "${disk_map}" "${device}" uri)"
-      [[ "${target_uri}" == nbd://* ]] || return 94
+      export_host="$(ftctl_dr_ablestack_export_value "${disk_map}" "${device}" host)"
+      export_port="$(ftctl_dr_ablestack_export_value "${disk_map}" "${device}" port)"
+      [[ "${target_uri}" == nbd://* && -n "${export_host}" && "${export_port}" =~ ^[1-9][0-9]*$ ]] || return 94
+      ftctl_dr_ablestack_target_export_reachable "${export_host}" "${export_port}" || return 100
     elif [[ "${remote_transport}" == "1" ]]; then
       ftctl_dr_ablestack_remote_rbd_path "${target_path}" remote_path || return 35
       FTCTL_PROFILE_DISK_MAP="${device}=${remote_path}"
@@ -1309,6 +1469,7 @@ ftctl_dr_ablestack_acquire_nbd_device() {
 ftctl_dr_ablestack_apply_incremental_nbd() {
   local source_spec="${1-}" previous="${2-}" current="${3-}" host="${4-}" port="${5-}" name="${6-}" diff_json="${7-}"
   local source_dev="" target_dev="" lock_file="${FTCTL_DR_NBD_LOCK:-/run/ablestack-vm-ftctl/dr-runtime/nbd.lock}" rc=0
+  ftctl_dr_ablestack_target_export_reachable "${host}" "${port}" || return 100
   exec 9>"${lock_file}"
   flock -x 9
   ftctl_dr_ablestack_acquire_nbd_device source_dev || { flock -u 9; return $?; }
@@ -1324,6 +1485,7 @@ ftctl_dr_ablestack_apply_incremental_nbd() {
   if ! nbd-client "${host}" "${port}" "${target_dev}" -N "${name}" >/dev/null; then
     qemu-nbd --disconnect "${source_dev}" >/dev/null 2>&1 || true
     flock -u 9
+    ftctl_dr_ablestack_target_export_reachable "${host}" "${port}" || return 100
     return 96
   fi
   flock -u 9
@@ -1396,14 +1558,19 @@ ftctl_dr_ablestack_site_agent_incremental_once() {
     port="$(ftctl_dr_ablestack_export_value "${disk_map}" "${device}" port)"
     name="$(ftctl_dr_ablestack_export_value "${disk_map}" "${device}" name)"
     [[ -n "${host}" && "${port}" =~ ^[0-9]+$ && -n "${name}" ]] || return 94
+    ftctl_dr_ablestack_target_export_reachable "${host}" "${port}" || return 100
     rbd snap rm "${source_spec}@${current}" >/dev/null 2>&1 || true
     rbd snap create "${source_spec}@${current}" || return $?
     diff_json="$(ftctl_dr_ablestack_checkpoint_dir "${plan}")/diff-$(ftctl_dr_runtime_key "${device}")-${sequence}.json"
     rbd diff --from-snap "${previous}" --format json "${source_spec}@${current}" > "${diff_json}" || return $?
     changed_bytes="$(python3 -c 'import json,sys; print(sum(int(x.get("length",0)) for x in json.load(open(sys.argv[1]))))' "${diff_json}")"
     total_changed_bytes="$((total_changed_bytes + changed_bytes))"
-    if ! ftctl_dr_ablestack_apply_incremental_nbd "${source_spec}" "${previous}" "${current}" "${host}" "${port}" "${name}" "${diff_json}"; then
+    local apply_rc=0
+    ftctl_dr_ablestack_apply_incremental_nbd "${source_spec}" "${previous}" "${current}" "${host}" "${port}" "${name}" "${diff_json}" || apply_rc=$?
+    if [[ "${apply_rc}" != "0" ]]; then
       rbd snap rm "${source_spec}@${current}" >/dev/null 2>&1 || true
+      rm -f "${diff_json}"
+      [[ "${apply_rc}" == "100" ]] && return 100
       return 92
     fi
     rm -f "${diff_json}"

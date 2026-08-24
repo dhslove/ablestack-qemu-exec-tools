@@ -29,6 +29,10 @@ jobs:
         run: |
           bash tests/ftctl_dr_scheduler_nbd_recovery_smoke.sh
 
+      - name: FTCTL ABLESTACK remote RBD transport smoke
+        run: |
+          bash tests/ftctl_dr_ablestack_remote_rbd_smoke.sh
+
       - name: ISO package manager selection smoke
         run: |
           tests/iso_pkg_manager_selection_smoke.sh

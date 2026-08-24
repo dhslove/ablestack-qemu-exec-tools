@@ -108,6 +108,7 @@ jobs:
           set -euo pipefail
           tests/ftctl_dr_release_tombstone_smoke.sh
           bash tests/ftctl_dr_scheduler_nbd_recovery_smoke.sh
+          bash tests/ftctl_dr_ablestack_remote_rbd_smoke.sh
           make ftctl-rpm
 
       - name: Create FTCTL RPM repo

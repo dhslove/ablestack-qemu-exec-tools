@@ -142,3 +142,46 @@ state is not `ERROR`, `FAILED`, or `REJECTED`, and `error_code` is empty. Agent
 and Cloud tests cover this distinction, target-before-source ordering, missing
 recovery-tool failure, successful scheduler relaunch, and the unchanged
 VMware-to-ABLESTACK baseline contracts.
+
+## 10. Durable Target Export Reconciliation
+
+`site-agent-nbd` is a Plan Owner controlled transport. The target Agent must
+not treat the `qemu-nbd` process created by `dr-target-export-start` as the
+durable contract. Package replacement, Agent restart, host reboot, or an
+unexpected exporter exit may remove that process while the Cloud-owned target
+RBD image remains valid.
+
+For `KVM_TO_KVM` plus `site-agent-nbd`, the target FTCTL persists a redacted,
+Plan-scoped export intent under
+`/var/lib/ablestack-vm-ftctl/dr-target-exports/<plan>/`. The intent contains the
+canonical disk map, fixed export names and ports, target RBD locators, and
+`desiredState=RUNNING`; it contains no Mold credential or API secret. Periodic
+FTCTL reconcile validates each PID and listener and recreates only missing
+Plan-owned exporters with the recorded fixed ports. It atomically replaces the
+volatile manifest only after all disks are ready.
+
+`dr-target-export-stop` first commits `desiredState=STOPPED`, then terminates
+the exporters and removes the active manifest. Release or failover therefore
+cannot race with the timer and resurrect a deliberately stopped export.
+
+The source scheduler treats an unavailable target export as a resource wait,
+not as a completed transfer and not as NBD teardown failure. It preserves the
+last durable baseline and source snapshot, publishes
+`DR_TARGET_EXPORT_UNAVAILABLE / WAITING_RESOURCE`, and retries the same pending
+Cycle with bounded exponential backoff. It must not allocate a new Cycle every
+few seconds. After target reconciliation restores the fixed endpoint, the same
+Cycle resumes and only a durable target commit may advance the baseline.
+
+This contract is limited to `site-agent-nbd`. VMware VDDK, existing remote-SSH
+NBD, shared block-copy, local RBD, and file-backed paths retain their validated
+behavior.
+
+### 10.1 AS-IS / TO-BE
+
+| Area | AS-IS | TO-BE |
+| --- | --- | --- |
+| Target exporter lifetime | Volatile `qemu-nbd` PID and `/run` manifest | Durable redacted desired-state plus periodic idempotent reconciliation |
+| Endpoint allocation | Port may be selected again after process loss | Initial fixed port is persisted and reused; collision is a typed wait |
+| Package/host restart | Export silently disappears | Reconcile recreates the Plan-owned export without recreating the VM or RBD image |
+| Source failure classification | Connection refusal can become teardown timeout and create retry cycles rapidly | `DR_TARGET_EXPORT_UNAVAILABLE`, same pending Cycle, bounded backoff |
+| Baseline safety | Repeated failed Cycles obscure the last durable point | Baseline and source snapshot advance only after target durable commit |

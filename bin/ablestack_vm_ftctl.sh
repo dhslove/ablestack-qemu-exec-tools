@@ -1090,6 +1090,7 @@ dispatch() {
       ftctl_state_print_status "${CLI_VM}" "${CLI_JSON}"
       ;;
     reconcile)
+      ftctl_dr_ablestack_target_export_reconcile_all "0" || true
       ftctl_dr_scheduler_reconcile_all "0" || true
       ftctl_orchestrator_reconcile "${CLI_VM}" "${CLI_JSON}"
       ;;

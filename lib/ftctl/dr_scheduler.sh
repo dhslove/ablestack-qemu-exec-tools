@@ -1578,6 +1578,7 @@ ftctl_dr_scheduler_worker() {
   local cycle_run cycle_request_mode cycle_request_owner cycle_request_state cycle_request_bound sequence_path transfer_progress_path
   local session lease_epoch authority_sequence start_ticks owner_lock_path
   local initial_jitter cycle_jitter bandwidth_limit_mbps resource_retry_sec resource_retry_attempt resource_retry_delay
+  local resource_error_code resource_error_message resource_step resource_component
   local source_retry_attempt source_retry_delay source_outage_since cleanup_retry_attempt cleanup_retry_delay
   local pending_resource_sequence pending_resource_cycle_type pending_resource_run pending_resource_request_bound
   local pending_source_sequence pending_source_cycle_type pending_source_run pending_source_request_bound
@@ -1915,8 +1916,18 @@ ftctl_dr_scheduler_worker() {
     ftctl_dr_scheduler_slot_release 203
     ftctl_dr_scheduler_lock_release "${plan}" "cycle" 202
     if [[ "${rc}" != "0" ]]; then
-      if [[ "${rc}" == "97" ]]; then
+      if [[ "${rc}" == "97" || "${rc}" == "100" ]]; then
         now="$(ftctl_now_iso8601)"
+        resource_error_code="DR_RESOURCE_BUSY"
+        resource_error_message="An NBD resource is temporarily unavailable"
+        resource_step="waiting-nbd-resource"
+        resource_component="nbd-resource"
+        if [[ "${rc}" == "100" ]]; then
+          resource_error_code="DR_TARGET_EXPORT_UNAVAILABLE"
+          resource_error_message="The target site export is temporarily unavailable and will be reconciled automatically"
+          resource_step="waiting-target-export"
+          resource_component="target-export"
+        fi
         resource_retry_attempt=$((resource_retry_attempt + 1))
         resource_retry_delay="$(ftctl_dr_scheduler_resource_retry_delay "${resource_retry_attempt}")"
         ftctl_state_set_path "${sequence_path}" \
@@ -1935,7 +1946,7 @@ ftctl_dr_scheduler_worker() {
         fi
         ftctl_dr_scheduler_update_state "${state_path}" "${status_path}" \
           "state=$([[ "${sequence}" -gt 1 ]] && printf READY || printf SYNCING)" \
-          "step=waiting-nbd-resource" \
+          "step=${resource_step}" \
           "scheduler_state=RUNNING" \
           "scheduler_health=WAITING_RESOURCE" \
           "cycle_state=WAITING_RESOURCE" \
@@ -1943,11 +1954,12 @@ ftctl_dr_scheduler_worker() {
           "current_checkpoint_state=WAITING_RESOURCE" \
           "retryable=true" \
           "retry_after_sec=${resource_retry_delay}" \
-          "error_code=DR_RESOURCE_BUSY" \
-          "error_message=An NBD resource is temporarily unavailable" \
+          "error_code=${resource_error_code}" \
+          "error_message=${resource_error_message}" \
+          "failed_component=${resource_component}" \
           "updated_at=${now}" || true
-        ftctl_log_event "dr-runtime" "dr.scheduler.resource" "skip" "" "97" \
-          "plan=${plan} run=${cycle_run} sequence=${sequence} retry_attempt=${resource_retry_attempt} retry_after=${resource_retry_delay}"
+        ftctl_log_event "dr-runtime" "dr.scheduler.resource" "skip" "" "${rc}" \
+          "plan=${plan} run=${cycle_run} sequence=${sequence} component=${resource_component} retry_attempt=${resource_retry_attempt} retry_after=${resource_retry_delay}"
         ftctl_dr_scheduler_sleep_or_stop "${plan}" "${resource_retry_delay}" "${control_generation}" || true
         continue
       fi
@@ -2113,6 +2125,7 @@ ftctl_dr_scheduler_worker() {
         97) error_code="DR_RESOURCE_BUSY" ;;
         98) error_code="DR_SOURCE_SITE_UNAVAILABLE" ;;
         99) error_code="DR_VMWARE_SNAPSHOT_CLEANUP_PENDING" ;;
+        100) error_code="DR_TARGET_EXPORT_UNAVAILABLE" ;;
         66) error_code="DR_UNSUPPORTED_DIRECTION" ;;
         *) error_code="DR_REPLICATION_CYCLE_FAILED" ;;
       esac

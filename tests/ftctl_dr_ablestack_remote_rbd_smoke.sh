@@ -6,6 +6,9 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "${TMP}"' EXIT
 
 ftctl_ensure_dir() { mkdir -p "$1"; }
+ftctl_dr_runtime_key() { printf '%s\n' "${1//[^A-Za-z0-9._-]/_}"; }
+ftctl_dr_runtime_plan_dir() { printf '%s/runtime/%s\n' "${TMP}" "$(ftctl_dr_runtime_key "$1")"; }
+ftctl_state_write_json_file() { printf '%s\n' "$2" > "$1"; }
 
 # shellcheck source=../lib/ftctl/dr_ablestack.sh
 source "${ROOT}/lib/ftctl/dr_ablestack.sh"
@@ -152,5 +155,55 @@ printf '{}\n' > "${rollback_manifest}"
 ftctl_dr_ablestack_target_export_abort "${rollback_records}" "${rollback_manifest}"
 ! kill -0 "${rollback_process}" 2>/dev/null
 [[ ! -e "${rollback_records}" && ! -e "${rollback_manifest}" && ! -e "${rollback_pid}" ]]
+
+FTCTL_DR_TARGET_EXPORT_PERSIST_ROOT="${TMP}/persist"
+persistent_manifest="${TMP}/persistent-exports.json"
+cat > "${persistent_manifest}" <<'EOF'
+{"schemaVersion":1,"exports":[{"device":"sda","host":"127.0.0.1","port":12032,"name":"dr-export-sda"}]}
+EOF
+ftctl_dr_ablestack_export_persist_intent plan-persist run-persist RUNNING "${site_agent_profile}" "${persistent_manifest}"
+persist_dir="$(ftctl_dr_ablestack_export_persist_dir plan-persist)"
+[[ "$(jq -r '.desiredState' "${persist_dir}/intent.json")" == "RUNNING" ]]
+[[ "$(jq -r '.runUuid' "${persist_dir}/intent.json")" == "run-persist" ]]
+[[ "$(jq -r '.exports[0].port' "${persist_dir}/exports.json")" == "12032" ]]
+
+ftctl_dr_ablestack_local_port_in_use() { return 1; }
+selected_port=""
+ftctl_dr_ablestack_target_export_pick_port plan-persist sda selected_port
+[[ "${selected_port}" == "12032" ]]
+
+listener_port_file="${TMP}/listener.port"
+python3 - "${listener_port_file}" <<'PY' &
+import socket, sys, time
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+s.listen(4)
+with open(sys.argv[1], "w", encoding="utf-8") as fh:
+    fh.write(str(s.getsockname()[1]))
+while True:
+    conn, _ = s.accept()
+    conn.close()
+PY
+listener_pid=$!
+for _ in $(seq 1 50); do [[ -s "${listener_port_file}" ]] && break; sleep 0.1; done
+listener_port="$(cat "${listener_port_file}")"
+ftctl_dr_ablestack_target_export_reachable 127.0.0.1 "${listener_port}" 1
+kill "${listener_pid}"
+wait "${listener_pid}" 2>/dev/null || true
+! ftctl_dr_ablestack_target_export_reachable 127.0.0.1 "${listener_port}" 1
+
+reconcile_marker="${TMP}/reconciled"
+ftctl_log_event() { :; }
+ftctl_dr_ablestack_target_export_start() {
+  printf '%s\t%s\t%s\n' "$1" "$2" "$3" > "${reconcile_marker}"
+}
+rm -f "$(ftctl_dr_ablestack_export_manifest_path plan-persist)"
+ftctl_dr_ablestack_target_export_reconcile_all 0
+[[ "$(cut -f1 "${reconcile_marker}")" == "plan-persist" ]]
+[[ "$(cut -f2 "${reconcile_marker}")" == "run-persist" ]]
+
+grep -q 'DR_TARGET_EXPORT_UNAVAILABLE' "${ROOT}/lib/ftctl/dr_scheduler.sh"
+grep -q 'pending_resource_sequence=${sequence}' "${ROOT}/lib/ftctl/dr_scheduler.sh"
+grep -q 'rc.*100' "${ROOT}/lib/ftctl/dr_scheduler.sh"
 
 echo "ftctl DR ABLESTACK remote RBD smoke: PASS"

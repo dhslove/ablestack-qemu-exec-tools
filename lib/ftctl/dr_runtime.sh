@@ -6684,6 +6684,7 @@ ftctl_dr_runtime_capabilities() {
     "dr-target-materialized"
     "dr-target-export-start"
     "dr-target-export-stop"
+    "dr-target-export-reconcile-v1"
     "dr-cutover-commit"
     "dr-cutover-commit-status"
     "dr-failover-abort"
