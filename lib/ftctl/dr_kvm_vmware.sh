@@ -539,7 +539,8 @@ ftctl_dr_kvm_vmware_cycle_type() {
 
 ftctl_dr_kvm_vmware_reverse_preflight() {
   local plan="${1-}" profile_file="${2-}" operation_intent="${3-FAILBACK_FINAL}" requested_mode="${4-AUTO}" json="${5-0}"
-  local map_path decision rc=0 baseline_state effective_mode decision_code initial_seed source_disk_count estimated_virtual_bytes
+  local map_path="" decision="" rc=0 baseline_state="" effective_mode="" decision_code="" initial_seed=false
+  local source_disk_count=0 estimated_virtual_bytes=0
   local source_domain source_domain_probe_state="READY" source_disk_probe_state="READY" target_writer_probe_state="READY" target_backing_probe_state="NOT_CHECKED" error_code="" ready=true credentials_file
   [[ -n "${plan}" && -f "${profile_file}" ]] || return 2
   map_path="$(mktemp "${TMPDIR:-/tmp}/ftctl-reverse-map.XXXXXX.json")"

@@ -482,3 +482,43 @@ cycles.
 | Failback preflight | Target reports empty authority and blocks Failback | Target reports `FAILED_OVER / TARGET` with the committed generation |
 | Upgrade recovery | Missing historical target baseline is ambiguous | Authority repairs with typed `FULL_SEED_REQUIRED` fallback |
 | Existing paths | Shared commit change can affect VMware | Dual projection requires remote `KVM_TO_KVM`; VMware and local KVM are unchanged |
+
+## 19. Provider-Aware Reverse Preflight Contract
+
+`dr-reverse-preflight` is a public engine contract and must dispatch by the
+profile's provider pair. It must not infer the reverse target from the current
+host or run a VMware backing resolver for an `ABLESTACK_TO_ABLESTACK` reverse
+path.
+
+For an ABLESTACK RBD Plan, the currently promoted target RBD is the reverse
+source and the original source RBD is the remote reverse destination. The
+target worker can validate only the local reverse source. Cloud and the remote
+source-site Agent validate the destination writer when the failback Run is
+accepted. The preflight response therefore uses the following rules:
+
+1. canonicalize the original Plan profile and validate every target RBD locally;
+2. report `READY / RBD_INCREMENTAL` only when the Plan-owned reverse baseline
+   state is `READY`;
+3. report `READY / FULL_RESEED` with `initial_seed_required=true` when an older
+   Plan has no safe reverse baseline;
+4. report `AGENT_VALIDATION_REQUIRED` for the remote destination writer instead
+   of failing locally;
+5. fail with `DR_REVERSE_SOURCE_STORAGE_MISSING` when a promoted target RBD is
+   absent;
+6. leave the VMware VDDK target-backing resolver and its result contract
+   unchanged.
+
+All optional fields emitted by either preflight path have explicit defaults.
+An early error must produce a typed JSON response and must never terminate due
+to Bash `set -u` expansion.
+
+### 19.1 AS-IS / TO-BE
+
+| Area | AS-IS | TO-BE |
+| --- | --- | --- |
+| CLI dispatch | Every reverse preflight invokes the KVM-to-VMware resolver | Provider pair selects the ABLESTACK RBD or VMware implementation |
+| Reverse source | Target RBD is interpreted as a VMware backing | Promoted target RBD is validated as the local reverse source |
+| Remote writer | Local worker tries to resolve the remote source-site target | Cloud/Agent validation is explicitly deferred with a typed state |
+| Missing baseline | Missing historical metadata blocks failback ambiguously | Preflight remains ready with the existing typed Full Seed fallback |
+| Error output | Early failure can expand unset status variables | Every schema field is initialized before validation |
+| VMware regression | Shared preflight changes can alter the validated path | VMware resolver logic is unchanged apart from output safety defaults |

@@ -978,13 +978,84 @@ ftctl_dr_ablestack_reverse_baseline_status() {
   prepared_sequence="$(ftctl_state_read_kv "${state_path}" checkpoint_sequence 2>/dev/null || true)"
   state="$(ftctl_state_read_kv "${state_path}" state 2>/dev/null || true)"
   disk_map="$(ftctl_state_read_kv "${state_path}" disk_map_path 2>/dev/null || true)"
-  if [[ "${prepared_run}" == "${run}" && "${prepared_sequence}" == "${checkpoint_sequence}" \
-        && "${state}" == "READY" ]] \
+  if [[ "${state}" == "READY" \
+        && ( -z "${run}" || "${prepared_run}" == "${run}" ) \
+        && ( -z "${checkpoint_sequence}" || "${prepared_sequence}" == "${checkpoint_sequence}" ) ]] \
       && ftctl_dr_ablestack_source_baselines_ready "${plan}" "${disk_map}"; then
     printf 'READY\n'
   else
     printf 'FULL_SEED_REQUIRED\n'
   fi
+}
+
+ftctl_dr_ablestack_reverse_preflight() {
+  local plan="${1-}" profile_file="${2-}" operation_intent="${3-FAILBACK_FINAL}" requested_mode="${4-AUTO}" json="${5-0}"
+  local disk_map="" disk_json target_path source_spec size_bytes
+  local rc=0 ready=true baseline_state="FULL_SEED_REQUIRED" effective_mode="FULL_RESEED"
+  local decision_code="DR_REVERSE_BASELINE_FULL_SEED_REQUIRED" initial_seed=true
+  local source_disk_probe_state="READY" source_disk_count=0 estimated_virtual_bytes=0
+  local target_writer_probe_state="AGENT_VALIDATION_REQUIRED"
+  local target_backing_probe_state="REMOTE_AGENT_VALIDATION_REQUIRED" error_code=""
+  [[ -n "${plan}" && -f "${profile_file}" ]] || return 2
+
+  disk_map="$(mktemp "${TMPDIR:-/tmp}/ftctl-ablestack-reverse-map.XXXXXX.json")"
+  trap 'rm -f -- "${disk_map:-}"; trap - RETURN' RETURN
+  if ! ftctl_dr_ablestack_canonicalize_profile "${profile_file}" "${disk_map}"; then
+    rc=67
+    ready=false
+    error_code="DR_REVERSE_DISK_MAP_INVALID"
+    source_disk_probe_state="NOT_CHECKED"
+  fi
+
+  if [[ "${rc}" == "0" ]]; then
+    source_disk_count="$(ftctl_dr_ablestack_disk_count "${disk_map}" 2>/dev/null || printf 0)"
+    [[ "${source_disk_count}" =~ ^[0-9]+$ ]] || source_disk_count=0
+    if [[ "${source_disk_count}" == "0" ]]; then
+      rc=67
+      ready=false
+      error_code="DR_REVERSE_DISK_MAP_INVALID"
+      source_disk_probe_state="NOT_READY"
+    fi
+  fi
+
+  if [[ "${rc}" == "0" ]]; then
+    while IFS= read -r disk_json; do
+      target_path="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" targetPath)"
+      size_bytes="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" sizeBytes)"
+      [[ "${size_bytes}" =~ ^[0-9]+$ ]] || size_bytes=0
+      estimated_virtual_bytes=$((estimated_virtual_bytes + size_bytes))
+      if ! ftctl_dr_ablestack_rbd_spec_from_path "${target_path}" source_spec \
+          || ! rbd info "${source_spec}" >/dev/null 2>&1; then
+        rc=82
+        ready=false
+        error_code="DR_REVERSE_SOURCE_STORAGE_MISSING"
+        source_disk_probe_state="NOT_READY"
+        break
+      fi
+    done < <(ftctl_dr_ablestack_disk_rows "${disk_map}")
+  fi
+
+  if [[ "${rc}" == "0" ]]; then
+    baseline_state="$(ftctl_dr_ablestack_reverse_baseline_status "${plan}" "" "")"
+    if [[ "${baseline_state}" == "READY" ]]; then
+      effective_mode="RBD_INCREMENTAL"
+      decision_code="DR_REVERSE_BASELINE_READY"
+      initial_seed=false
+    fi
+  fi
+
+  if [[ "${json}" == "1" ]]; then
+    printf '{"command":"dr-reverse-preflight","schema_version":2,"contract_version":"dr-reverse-preflight-v2","result":"%s","ready":%s,"status_evidence_contract_version":1,"status_evidence_publication_ready":true,"status_evidence_error_code":"","plan_uuid":"%s","operation_intent":"%s","requested_mode":"%s","effective_mode":"%s","mode_decision_code":"%s","initial_seed_required":%s,"baseline_file_state":"%s","source_domain_probe_state":"NOT_APPLICABLE","source_disk_probe_state":"%s","source_disk_count":%s,"target_writer_probe_state":"%s","target_backing_probe_state":"%s","estimated_virtual_bytes":%s,"error_code":"%s","exit_code":%s}\n' \
+      "$( [[ "${ready}" == "true" ]] && printf ok || printf error )" "${ready}" "$(ftctl__json_escape "${plan}")" \
+      "$(ftctl__json_escape "${operation_intent}")" "$(ftctl__json_escape "${requested_mode}")" "$(ftctl__json_escape "${effective_mode}")" \
+      "$(ftctl__json_escape "${decision_code}")" "${initial_seed}" "$(ftctl__json_escape "${baseline_state}")" \
+      "$(ftctl__json_escape "${source_disk_probe_state}")" "${source_disk_count}" "$(ftctl__json_escape "${target_writer_probe_state}")" \
+      "$(ftctl__json_escape "${target_backing_probe_state}")" "${estimated_virtual_bytes}" "$(ftctl__json_escape "${error_code}")" "${rc}"
+  else
+    printf 'ready=%s baseline=%s requested=%s effective=%s decision=%s source_disks=%s writer=%s\n' \
+      "${ready}" "${baseline_state}" "${requested_mode}" "${effective_mode}" "${decision_code}" "${source_disk_count}" "${target_writer_probe_state}"
+  fi
+  return "${rc}"
 }
 
 ftctl_dr_ablestack_target_export_stop() {

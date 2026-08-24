@@ -941,8 +941,15 @@ dispatch() {
         "${CLI_AUTHORITY_GENERATION}" "${CLI_JSON}"
       ;;
     dr-reverse-preflight)
-      ftctl_dr_kvm_vmware_reverse_preflight "${CLI_PLAN}" "${CLI_PROFILE_JSON}" \
-        "${CLI_OPERATION_INTENT:-FAILBACK_FINAL}" "${CLI_REQUESTED_MODE:-AUTO}" "${CLI_JSON}"
+      reverse_source_provider="$(ftctl_dr_ablestack_profile_provider "${CLI_PROFILE_JSON}" source)"
+      reverse_target_provider="$(ftctl_dr_ablestack_profile_provider "${CLI_PROFILE_JSON}" target)"
+      if [[ "${reverse_source_provider}" == "ABLESTACK" && "${reverse_target_provider}" == "ABLESTACK" ]]; then
+        ftctl_dr_ablestack_reverse_preflight "${CLI_PLAN}" "${CLI_PROFILE_JSON}" \
+          "${CLI_OPERATION_INTENT:-FAILBACK_FINAL}" "${CLI_REQUESTED_MODE:-AUTO}" "${CLI_JSON}"
+      else
+        ftctl_dr_kvm_vmware_reverse_preflight "${CLI_PLAN}" "${CLI_PROFILE_JSON}" \
+          "${CLI_OPERATION_INTENT:-FAILBACK_FINAL}" "${CLI_REQUESTED_MODE:-AUTO}" "${CLI_JSON}"
+      fi
       ;;
     dr-capabilities)
       ftctl_dr_runtime_capabilities "${CLI_JSON}"

@@ -329,6 +329,37 @@ reverse_map="$(ftctl_state_read_kv "${reverse_state}" disk_map_path)"
 [[ "$(jq -r '.disks[0].sourcePath' "${reverse_map}")" == "rbd:rbd/target-image" ]]
 [[ "$(jq -r '.disks[0].targetPath' "${reverse_map}")" == "rbd:rbd/source-image" ]]
 
+reverse_preflight="$(ftctl_dr_ablestack_reverse_preflight plan-reverse "${reverse_profile_source}" FAILBACK_FINAL AUTO 1)"
+jq -e '.ready == true
+  and .effective_mode == "RBD_INCREMENTAL"
+  and .initial_seed_required == false
+  and .baseline_file_state == "READY"
+  and .source_disk_probe_state == "READY"
+  and .source_disk_count == 1
+  and .target_writer_probe_state == "AGENT_VALIDATION_REQUIRED"
+  and .target_backing_probe_state == "REMOTE_AGENT_VALIDATION_REQUIRED"' <<< "${reverse_preflight}" >/dev/null
+
+full_seed_preflight="$(ftctl_dr_ablestack_reverse_preflight plan-without-baseline "${reverse_profile_source}" FAILBACK_FINAL AUTO 1)"
+jq -e '.ready == true
+  and .effective_mode == "FULL_RESEED"
+  and .initial_seed_required == true
+  and .baseline_file_state == "FULL_SEED_REQUIRED"' <<< "${full_seed_preflight}" >/dev/null
+
+rbd() {
+  [[ "${1-} ${2-}" != "info rbd/target-image" ]]
+}
+set +e
+missing_preflight="$(ftctl_dr_ablestack_reverse_preflight plan-missing-source "${reverse_profile_source}" FAILBACK_FINAL AUTO 1)"
+missing_rc=$?
+set -e
+[[ "${missing_rc}" == "82" ]]
+jq -e '.ready == false
+  and .error_code == "DR_REVERSE_SOURCE_STORAGE_MISSING"
+  and .source_disk_probe_state == "NOT_READY"' <<< "${missing_preflight}" >/dev/null
+
+grep -q 'reverse_source_provider=.*ftctl_dr_ablestack_profile_provider' "${ROOT}/bin/ablestack_vm_ftctl.sh"
+grep -q 'ftctl_dr_ablestack_reverse_preflight' "${ROOT}/bin/ablestack_vm_ftctl.sh"
+
 # A remote-source profile exists on both workers. Only the target-side worker
 # may suppress its local scheduler; the source-side worker remains the producer.
 role_plan="plan-role-contract"
