@@ -1296,6 +1296,34 @@ def endpoint_ref(item, endpoint, path_keys, disk_keys, vmdk_keys):
         *(value_at(item, key) for key in vmdk_keys),
     )
 
+def rbd_pool(value):
+    text = str(value or "").strip()
+    for prefix in ("rbd:", "rbd/", "/dev/rbd/"):
+        if text.startswith(prefix):
+            text = text[len(prefix):]
+            break
+    text = text.strip("/")
+    return text.split("/", 1)[0] if text else ""
+
+def canonical_rbd_ref(value, endpoint, item, prefix):
+    text = str(value or "").strip()
+    if not text or text.startswith(("rbd:", "rbd/", "/dev/rbd/")):
+        return text
+    storage_type = first_str(
+        value_at(endpoint, "storagePoolType", "poolType", "storageType"),
+        value_at(item, f"{prefix}StorageType"),
+    ).upper()
+    storage_path = first_str(
+        value_at(endpoint, "storagePath", "pathPrefix", "krbdPath"),
+        value_at(item, f"{prefix}StoragePath", f"{prefix}StorageKrbdPath"),
+    )
+    if "RBD" not in storage_type and not str(storage_path).startswith(("rbd", "/dev/rbd/")):
+        return text
+    pool = rbd_pool(storage_path)
+    if not pool:
+        return text
+    return f"rbd:{pool}/{os.path.basename(text.rstrip('/'))}"
+
 def reverse_disk(item, index):
     item = obj(item)
     source = obj(item.get("source"))
@@ -1312,6 +1340,8 @@ def reverse_disk(item, index):
         ("targetDiskRef",),
         ("targetVmdkPath",),
     )
+    old_source_ref = canonical_rbd_ref(old_source_ref, source, item, "source")
+    old_target_ref = canonical_rbd_ref(old_target_ref, target, item, "target")
     reversed_item = copy.deepcopy(item)
     reversed_item["device"] = first_str(
         value_at(item, "device", "targetDevice", "diskTarget", "unitNumber", "key"),
@@ -1363,6 +1393,9 @@ reverse["runUuid"] = run or profile.get("runUuid", "")
 reverse["direction"] = reverse_direction(profile.get("direction"))
 reverse["source"] = copy.deepcopy(target)
 reverse["target"] = copy.deepcopy(source)
+workers = copy.deepcopy(obj(profile.get("workers")))
+workers["source"], workers["target"] = workers.get("target", ""), workers.get("source", "")
+reverse["workers"] = workers
 reverse["originalDirection"] = profile.get("direction", "")
 reverse["reverseDirection"] = reverse["direction"]
 reverse_source_provider = first_str(reverse.get("source", {}).get("provider")).upper()
@@ -2893,7 +2926,7 @@ ftctl_dr_runtime_failback_worker() {
   local worker_pid heartbeat_pid=""
   local reverse_preflight_json="" reverse_source_provider="" reverse_target_provider=""
   local sequence manifest_path checkpoint_path reverse_restore_points_path reverse_direction replication_direction provider_pair rto_actual_seconds
-  local active_side current_state previous_checkpoint_sequence
+  local active_side current_state previous_checkpoint_sequence failed_component="kvm-vmware-mover"
 
   worker_profile="${profile_file}"
   [[ -n "${worker_profile}" && -f "${worker_profile}" ]] || worker_profile="$(ftctl_dr_runtime_profile_path "${plan}")"
@@ -2978,6 +3011,9 @@ ftctl_dr_runtime_failback_worker() {
     replication_direction="$(ftctl_dr_runtime_profile_value "${reverse_profile}" "direction" 2>/dev/null || true)"
     provider_pair="$(ftctl_dr_runtime_profile_value "${reverse_profile}" "providerPair" 2>/dev/null || true)"
     [[ -n "${provider_pair}" ]] || provider_pair="${replication_direction}"
+    if [[ "${provider_pair}" == "ABLESTACK_TO_ABLESTACK" ]]; then
+      failed_component="ablestack-rbd-mover"
+    fi
     reverse_direction="${provider_pair}"
     ftctl_dr_runtime_path_set "${run_path}" \
       "reverse_profile_path=${reverse_profile}" \
@@ -3026,7 +3062,7 @@ ftctl_dr_runtime_failback_worker() {
       47) error_code="DR_FAILBACK_REQUIRES_TARGET_ACTIVE" ;;
       *) error_code="DR_FAILBACK_REVERSE_SYNC_FAILED" ;;
     esac
-    error_message="Failback ${failure_phase} failed in kvm-vmware-mover (exit ${rc})"
+    error_message="Failback ${failure_phase} failed in ${failed_component} (exit ${rc})"
     ftctl_dr_runtime_terminal_journal_write "${plan}" "${run}" "${launch_nonce}" "${worker_generation}" \
       "FAILED" "${rc}" "${error_code}" "$(ftctl_now_iso8601)" || true
     ftctl_dr_runtime_path_set "${run_path}" \
@@ -3046,7 +3082,7 @@ ftctl_dr_runtime_failback_worker() {
       "driver_exit_code=${rc}" \
       "worker_updated_at=$(ftctl_now_iso8601)" \
       "failure_phase=${failure_phase}" \
-      "failed_component=kvm-vmware-mover" \
+      "failed_component=${failed_component}" \
       "target_writer_probe_state=$([[ "${failure_phase}" == "REVERSE_TRANSFER" ]] && printf FAILED || printf NOT_STARTED)" \
       "error_code=${error_code}" \
       "error_message=${error_message}" \
@@ -7037,7 +7073,7 @@ ftctl_dr_runtime_capabilities() {
       first="0"
       printf '"%s"' "$(ftctl__json_escape "${command}")"
     done
-    printf '],"supported_features":["async-run","status-projection","status-scope-v2","target-materialized-notify","target-materialized-idempotent","target-materialization-manifest-v2","target-resource-ownership-generation-v1","hardware-contract-projection","control-protocol-v2","control-protocol-v3","control-protocol-v4","dr-site-agent-rbd-transport-v1","dr-scheduler-singleton-v1","dr-scheduler-self-owner-repair-v1","dr-scheduler-systemd-unit-v1","dr-sync-recover-v1","dr-local-reconcile-fence-v1","dr-checkpoint-producer-v1","dr-nbd-deterministic-drain-v1","dr-nbd-cleanup-recovery-v1","dr-plan-authority-snapshot-v1","dr-failover-authority-snapshot-v1","dr-completed-cycle-evidence-v2","dr-failover-abort-v1","dr-failover-cutover-reverse-baseline-v1","dr-transition-preflight-v1","dr-transition-preflight-v2","dr-reverse-preflight-v2","dr-reverse-evidence-publication-v1","dr-reverse-rbd-snapshot-readonly-v1","dr-terminal-causality-v1","dr-requested-cycle-terminal-v1","dr-failback-resume-terminal-v1","dr-worker-journal-v1","dr-live-transfer-progress-v1","dr-runtime-reconciliation-v1","dr-release-tombstone-v1","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","guest-preparation-v1","guest-preparation-v2","test-domain-lifecycle-v1","test-artifact-lifecycle-v2","cloud-managed-test-vm-v1","cutover-ready-v1","cutover-manifest-v2","cutover-preflight-v1","cloud-cutover-commit-v1","cloud-cutover-commit-envelope-v2","cloud-cutover-commit-journal-v2","cloud-cutover-commit-status-v1","cloud-failback-lifecycle-v1","dr-failback-commit-journal-v1","dr-failback-commit-journal-v2","dr-failback-commit-envelope-v1","dr-failback-commit-journal-v3","dr-failback-late-ack-reconcile-v1","dr-failback-rollback-fence-v1"]}\n'
+    printf '],"supported_features":["async-run","status-projection","status-scope-v2","target-materialized-notify","target-materialized-idempotent","target-materialization-manifest-v2","target-resource-ownership-generation-v1","hardware-contract-projection","control-protocol-v2","control-protocol-v3","control-protocol-v4","dr-site-agent-rbd-transport-v1","dr-reverse-site-agent-rbd-transport-v1","dr-scheduler-singleton-v1","dr-scheduler-self-owner-repair-v1","dr-scheduler-systemd-unit-v1","dr-sync-recover-v1","dr-local-reconcile-fence-v1","dr-checkpoint-producer-v1","dr-nbd-deterministic-drain-v1","dr-nbd-cleanup-recovery-v1","dr-plan-authority-snapshot-v1","dr-failover-authority-snapshot-v1","dr-completed-cycle-evidence-v2","dr-failover-abort-v1","dr-failover-cutover-reverse-baseline-v1","dr-transition-preflight-v1","dr-transition-preflight-v2","dr-reverse-preflight-v2","dr-reverse-evidence-publication-v1","dr-reverse-rbd-snapshot-readonly-v1","dr-terminal-causality-v1","dr-requested-cycle-terminal-v1","dr-failback-resume-terminal-v1","dr-worker-journal-v1","dr-live-transfer-progress-v1","dr-runtime-reconciliation-v1","dr-release-tombstone-v1","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","guest-preparation-v1","guest-preparation-v2","test-domain-lifecycle-v1","test-artifact-lifecycle-v2","cloud-managed-test-vm-v1","cutover-ready-v1","cutover-manifest-v2","cutover-preflight-v1","cloud-cutover-commit-v1","cloud-cutover-commit-envelope-v2","cloud-cutover-commit-journal-v2","cloud-cutover-commit-status-v1","cloud-failback-lifecycle-v1","dr-failback-commit-journal-v1","dr-failback-commit-journal-v2","dr-failback-commit-envelope-v1","dr-failback-commit-journal-v3","dr-failback-late-ack-reconcile-v1","dr-failback-rollback-fence-v1"]}\n'
     return 0
   fi
 

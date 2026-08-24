@@ -522,3 +522,52 @@ to Bash `set -u` expansion.
 | Missing baseline | Missing historical metadata blocks failback ambiguously | Preflight remains ready with the existing typed Full Seed fallback |
 | Error output | Early failure can expand unset status variables | Every schema field is initialized before validation |
 | VMware regression | Shared preflight changes can alter the validated path | VMware resolver logic is unchanged apart from output safety defaults |
+
+## 20. Plan-Owned Reverse RBD Export Contract
+
+An ABLESTACK-to-ABLESTACK Failback keeps the DR Plan Owner as the only control
+authority. The Plan Owner does not hand SSH credentials to FTCTL and does not
+move Plan ownership to the original site. It asks the original site's Mold
+Agent to expose the original RBD image as a temporary, Plan-owned NBD writer
+and injects only the returned typed export endpoints into the Failback command.
+
+The ordered data-plane contract is:
+
+1. Cloud sends `TARGET_EXPORT_START` to the registered original-site worker
+   through the remote Agent broker with `request.reverseTargetExport=true`;
+2. FTCTL builds the reverse profile, canonicalizes bare ABLESTACK RBD image
+   names to `rbd:<pool>/<image>`, and exports only the reverse destination;
+3. the active target worker reads the promoted RBD locally and writes to the
+   Agent-returned NBD endpoints using the existing site-agent transport;
+4. after durable reverse data evidence, Cloud stops the active target VM;
+5. Cloud sends `TARGET_EXPORT_STOP` to the same original-site Agent and waits
+   for an acknowledgement before starting the original VM;
+6. only then may the authority and scheduler commit return to `SOURCE`.
+
+The reverse worker map swaps source and target. The temporary export role is
+`reverse-target`, so preparing an original-site writer cannot accidentally
+publish target scheduler authority. Error evidence names the provider-specific
+`ablestack-rbd-mover`; VMware Failback retains `kvm-vmware-mover`.
+
+### 20.1 Regression gates
+
+- the branch is enabled only for a remote `KVM_TO_KVM` Plan whose active side
+  is `TARGET` and whose action is `FAILBACK`;
+- VMware-to-ABLESTACK and ABLESTACK-to-VMware commands are unaffected by
+  reverse export preparation;
+- no API key, secret key, password, or SSH credential is persisted in the
+  FTCTL profile, export intent, event log, or command result;
+- the original VM cannot start while its reverse destination export is still
+  running;
+- retry reuses the Plan-scoped export and cleanup remains idempotent.
+
+### 20.2 AS-IS / TO-BE
+
+| Area | AS-IS | TO-BE |
+| --- | --- | --- |
+| Controller | Failback is accepted locally but no original-site writer is prepared | The 32-site Plan Owner prepares the 22-site writer through Agent RPC |
+| Reverse source | Bare target image name is inferred as a file | RBD source is canonical `rbd:<pool>/<image>` |
+| Reverse destination | Original RBD has no typed transport endpoint | Original Agent returns a Plan-owned NBD endpoint |
+| Power barrier | Original VM start is independent of export drain | Export stop acknowledgement precedes original VM start |
+| Diagnostics | Every failure is labeled `kvm-vmware-mover` | ABLESTACK pair reports `ablestack-rbd-mover` |
+| Existing success path | Shared reverse logic can regress VMware | Provider and action guards isolate the new RBD branch |

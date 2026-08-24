@@ -9975,7 +9975,6 @@ selftest_case_dr_kvm_vmware_reverses_forward_profile_roles() {
     "source":{"vmdkPath":"[datastore] w22-01/w22-01.vmdk"},
     "target":{"storagePath":"rbd","name":"w22-01-dr-disk-0"}
   }]}
-}
 JSON
 
   ftctl_dr_runtime_build_reverse_profile "plan-forward-profile" "run-reverse" \
@@ -9994,6 +9993,39 @@ JSON
   selftest_assert_file_contains "${map_path}" '"sourceImage":"w22-01-dr-disk-0"'
   selftest_assert_file_contains "${map_path}" 'w22-01/w22-01.vmdk'
   selftest_assert_file_contains "${map_path}" '"targetVmRef":"vm-6429"'
+}
+
+selftest_case_dr_ablestack_reverse_profile_canonicalizes_rbd_and_workers() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR canonicalizes the reverse ABLESTACK RBD route and swaps workers"
+
+  local profile="${SELFTEST_ROOT}/forward-ablestack-profile.json"
+  local reverse_profile="${SELFTEST_ROOT}/reverse-ablestack-profile.json"
+  cat > "${profile}" <<'JSON'
+{
+  "planUuid":"plan-rbd-reverse",
+  "direction":"KVM_TO_KVM",
+  "source":{"provider":"ABLESTACK","instanceName":"i-2-332-VM"},
+  "target":{"provider":"ABLESTACK","instanceName":"i-2-283-VM"},
+  "workers":{"source":"source-host","target":"target-host","coordinator":"target-host"},
+  "mapping":{"disks":[{
+    "device":"sda","sizeBytes":1048576,
+    "sourcePath":"rbd:rbd/source-image",
+    "targetPath":"target-image",
+    "targetStoragePath":"rbd","targetStorageType":"RBD",
+    "source":{"path":"rbd:rbd/source-image","storagePoolType":"RBD","storagePath":"rbd"},
+    "target":{"path":"target-image","storagePoolType":"RBD","storagePath":"rbd","format":"raw"}
+  }]}
+}
+JSON
+
+  ftctl_dr_runtime_build_reverse_profile "plan-rbd-reverse" "run-rbd-reverse" \
+    "${profile}" "${reverse_profile}" "failback"
+  selftest_assert_file_contains "${reverse_profile}" '"providerPair":"ABLESTACK_TO_ABLESTACK"'
+  selftest_assert_file_contains "${reverse_profile}" '"sourcePath":"rbd:rbd/target-image"'
+  selftest_assert_file_contains "${reverse_profile}" '"targetPath":"rbd:rbd/source-image"'
+  selftest_assert_file_contains "${reverse_profile}" '"source":"target-host"'
+  selftest_assert_file_contains "${reverse_profile}" '"target":"source-host"'
 }
 
 selftest_case_dr_kvm_vmware_initial_seed_accepts_missing_baseline() {
@@ -10515,6 +10547,7 @@ selftest_main() {
   selftest_case_dr_failback_resume_checkpoint_publishes_terminal_state
   selftest_case_dr_failback_commit_pending_is_not_authoritative_terminal
   selftest_case_dr_kvm_vmware_reverses_forward_profile_roles
+  selftest_case_dr_ablestack_reverse_profile_canonicalizes_rbd_and_workers
   selftest_case_dr_kvm_vmware_initial_seed_accepts_missing_baseline
   selftest_case_dr_kvm_vmware_run_scoped_snapshot_retry
   selftest_case_dr_kvm_vmware_reverse_preflight_clears_return_trap

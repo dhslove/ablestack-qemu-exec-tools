@@ -801,9 +801,15 @@ ftctl_dr_ablestack_target_export_resolve_profile() {
 ftctl_dr_ablestack_target_export_start() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" json="${4-0}"
   local disk_map manifest host count disk_json device target_path target_type size_bytes target_format spec uri
-  local port name pid_file current_pid unit_name out="" err="" rc=0 records ready
+  local port name pid_file current_pid unit_name out="" err="" rc=0 records ready reverse_requested reverse_profile
   [[ -n "${plan}" && -n "${run}" ]] || return 2
   ftctl_dr_ablestack_target_export_resolve_profile "${plan}" "${profile_file}" profile_file || return $?
+  reverse_requested="$(ftctl_dr_runtime_profile_value "${profile_file}" "request.reverseTargetExport" 2>/dev/null || true)"
+  if [[ "${reverse_requested,,}" == "true" || "${reverse_requested}" == "1" ]]; then
+    reverse_profile="$(ftctl_dr_ablestack_checkpoint_dir "${plan}")/target-export-reverse-$(ftctl_dr_runtime_key "${run}").json"
+    ftctl_dr_runtime_build_reverse_profile "${plan}" "${run}" "${profile_file}" "${reverse_profile}" "failback-target-export" || return $?
+    profile_file="${reverse_profile}"
+  fi
   disk_map="$(ftctl_dr_ablestack_disk_map_path "${plan}")"
   ftctl_dr_ablestack_canonicalize_profile "${profile_file}" "${disk_map}" || return $?
   host="$(ftctl_dr_ablestack_json_field "${disk_map}" transport.targetHostAddress 2>/dev/null || true)"
