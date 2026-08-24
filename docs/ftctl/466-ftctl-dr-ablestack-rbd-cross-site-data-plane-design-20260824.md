@@ -429,3 +429,56 @@ path remain unchanged.
 | Data moved | A 60 GiB replica can be rewritten for a small final delta | Only changed RBD extents are sent when a baseline exists |
 | Baseline failure | Final cutover silently follows the normal Full Seed branch | Typed `baseline_unavailable` is the only Full Seed fallback |
 | Regression scope | Shared cycle parsing could affect VMware | Change is contained in `dr_ablestack.sh` and covered by an RBD-only smoke gate |
+
+## 18. Dual-Engine Cutover Authority And Reverse Baseline
+
+A remote `KVM_TO_KVM` Plan has one Cloud Plan Owner but two FTCTL runtime
+projections. The source FTCTL owns forward replication and the final delta;
+the target FTCTL owns the promoted VM and later executes reverse replication.
+Production cutover is complete only when both projections acknowledge the same
+typed commit envelope.
+
+The target-side order is deliberately stricter than a normal target export
+stop:
+
+1. remote source FTCTL durably completes `FAILOVER_FINAL`;
+2. target FTCTL stops the Plan-owned NBD export;
+3. before the target VM is powered on, target FTCTL reverses the canonical disk
+   map and creates one per-disk RBD snapshot as the reverse incremental
+   baseline;
+4. Cloud powers on and validates the target VM;
+5. Cloud sends the same `DR_CUTOVER_COMMIT_V2` envelope to source role
+   `coordinator` and target role `target`;
+6. target FTCTL verifies the prepared baseline, suppresses its local forward
+   scheduler, and publishes `FAILED_OVER / TARGET / STOPPED`;
+7. Cloud changes Plan authority only after both acknowledgements succeed.
+
+The target export stop is idempotent. A retry reuses the same Plan, Run, and
+checkpoint identity and replaces only the matching prepared baseline. For a
+Plan that was committed by an older build and therefore has no pre-power
+baseline, target authority repair is allowed but records
+`FULL_SEED_REQUIRED`; the first reverse cycle performs the existing typed Full
+Seed fallback rather than claiming an unsafe incremental baseline.
+
+The periodic target reconcile path must not start a forward scheduler when the
+profile is exactly `KVM_TO_KVM`, `schedulerTransitionScope=REMOTE_SOURCE`, and
+the source worker differs from the coordinator. It instead keeps the local
+scheduler stopped and preserves target export or target authority state.
+Because the same profile is present on both sites, profile fields alone are
+not a sufficient local-role discriminator. Every non-dry-run Plan/action
+dispatch persists `source`, `target`, or `coordinator` in a Plan-scoped worker
+role journal. Scheduler suppression requires the journaled role to be exactly
+`target`; the remote source role always remains eligible to produce forward
+cycles.
+
+### 18.1 AS-IS / TO-BE
+
+| Area | AS-IS | TO-BE |
+| --- | --- | --- |
+| Engine commit | Only source FTCTL acknowledges cutover | Source and target acknowledge one immutable envelope |
+| Reverse baseline | Target RBD has no snapshot at promotion | Baseline is created after export drain and before VM power-on |
+| Target scheduler | Reconcile can start a duplicate forward scheduler | Remote-source profile plus persisted `target` role suppress only the target scheduler |
+| Source scheduler | Profile-only suppression can also stop the producer | Persisted `source` role keeps the remote producer eligible |
+| Failback preflight | Target reports empty authority and blocks Failback | Target reports `FAILED_OVER / TARGET` with the committed generation |
+| Upgrade recovery | Missing historical target baseline is ambiguous | Authority repairs with typed `FULL_SEED_REQUIRED` fallback |
+| Existing paths | Shared commit change can affect VMware | Dual projection requires remote `KVM_TO_KVM`; VMware and local KVM are unchanged |

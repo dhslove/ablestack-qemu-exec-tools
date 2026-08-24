@@ -6,9 +6,20 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "${TMP}"' EXIT
 
 ftctl_ensure_dir() { mkdir -p "$1"; }
+ftctl_log_event() { :; }
+ftctl__json_escape() { printf '%s' "${1-}"; }
 ftctl_dr_runtime_key() { printf '%s\n' "${1//[^A-Za-z0-9._-]/_}"; }
 ftctl_dr_runtime_plan_dir() { printf '%s/runtime/%s\n' "${TMP}" "$(ftctl_dr_runtime_key "$1")"; }
 ftctl_state_write_json_file() { printf '%s\n' "$2" > "$1"; }
+ftctl_state_write_kv_all() {
+  local path="${1-}" item
+  shift
+  mkdir -p "$(dirname "${path}")"
+  : > "${path}"
+  for item in "$@"; do
+    printf '%s\n' "${item}" >> "${path}"
+  done
+}
 ftctl_state_read_kv() {
   local path="${1-}" key="${2-}"
   [[ -f "${path}" ]] || return 0
@@ -239,6 +250,8 @@ ftctl_now_iso8601() { printf '%s\n' 2026-08-24T00:05:00Z; }
 export FTCTL_RUN_DIR="${TMP}/runtime-root"
 # shellcheck source=../lib/ftctl/dr_runtime.sh
 source "${ROOT}/lib/ftctl/dr_runtime.sh"
+# shellcheck source=../lib/ftctl/dr_scheduler.sh
+source "${ROOT}/lib/ftctl/dr_scheduler.sh"
 
 plan_owner_profile="${TMP}/plan-owner-profile.json"
 plan_owner_artifact="${TMP}/plan-owner-artifact.json"
@@ -294,6 +307,47 @@ ftctl_dr_runtime_finalize_failover plan-owner failover-run "${plan_owner_profile
 [[ "$(ftctl_dr_runtime_state_get_from_path "${failover_run_path}" target_external_ref)" == "target-vm-uuid" ]]
 [[ "$(ftctl_dr_runtime_state_get_from_path "${failover_run_path}" manifest_sha256)" =~ ^[0-9a-f]{64}$ ]]
 
+reverse_profile_source="${TMP}/reverse-baseline-source.json"
+jq '.direction="KVM_TO_KVM"
+  | .workers={"source":"source-host","coordinator":"target-host","target":"target-host"}
+  | .request={"schedulerTransitionScope":"REMOTE_SOURCE"}
+  | .target={"provider":"ABLESTACK","externalRef":"target-vm-uuid"}' \
+  "${site_agent_profile}" > "${reverse_profile_source}"
+ftctl_dr_ablestack_export_persist_intent plan-reverse run-cutover RUNNING \
+  "${reverse_profile_source}" "${persistent_manifest}"
+rbd() {
+  case "${1-} ${2-}" in
+    "snap create"|"snap rm"|"snap info") return 0 ;;
+    *) return 0 ;;
+  esac
+}
+reverse_stop="$(ftctl_dr_ablestack_target_export_stop plan-reverse 1 run-cutover 33)"
+[[ "${reverse_stop}" == *'"reverse_baseline_state":"READY"'* ]]
+[[ "$(ftctl_dr_ablestack_reverse_baseline_status plan-reverse run-cutover 33)" == "READY" ]]
+reverse_state="$(ftctl_dr_ablestack_reverse_baseline_state_path plan-reverse)"
+reverse_map="$(ftctl_state_read_kv "${reverse_state}" disk_map_path)"
+[[ "$(jq -r '.disks[0].sourcePath' "${reverse_map}")" == "rbd:rbd/target-image" ]]
+[[ "$(jq -r '.disks[0].targetPath' "${reverse_map}")" == "rbd:rbd/source-image" ]]
+
+# A remote-source profile exists on both workers. Only the target-side worker
+# may suppress its local scheduler; the source-side worker remains the producer.
+role_plan="plan-role-contract"
+role_plan_dir="$(ftctl_dr_runtime_plan_dir "${role_plan}")"
+mkdir -p "${role_plan_dir}"
+cp "${plan_owner_profile}" "${role_plan_dir}/profile.json"
+printf 'state=READY\nscheduler_health=HEALTHY\n' > "${role_plan_dir}/status.state"
+ftctl_dr_runtime_record_worker_role "${role_plan}" source
+[[ "$(ftctl_dr_runtime_local_worker_role "${role_plan}")" == "source" ]]
+ftctl_dr_scheduler_active_worker_valid() { return 0; }
+ftctl_dr_scheduler_reconcile_plan "${role_plan}"
+[[ "$(ftctl_dr_runtime_state_get_from_path "${role_plan_dir}/status.state" scheduler_health)" == "HEALTHY" ]]
+ftctl_dr_runtime_record_worker_role "${role_plan}" target
+[[ "$(ftctl_dr_runtime_local_worker_role "${role_plan}")" == "target" ]]
+ftctl_dr_scheduler_control_command() { printf 'stop\n'; }
+ftctl_dr_scheduler_systemd_available() { return 1; }
+ftctl_dr_scheduler_reconcile_plan "${role_plan}"
+[[ "$(ftctl_dr_runtime_state_get_from_path "${role_plan_dir}/status.state" scheduler_health)" == "SUPPRESSED" ]]
+
 invalid_profile="${TMP}/invalid-plan-owner-profile.json"
 jq '.request.checkpointPlanUuid="wrong-plan"' "${plan_owner_profile}" > "${invalid_profile}"
 ftctl_dr_runtime_ensure_plan_dirs invalid-plan
@@ -310,7 +364,6 @@ else
 fi
 
 reconcile_marker="${TMP}/reconciled"
-ftctl_log_event() { :; }
 ftctl_dr_ablestack_target_export_start() {
   printf '%s\t%s\t%s\n' "$1" "$2" "$3" > "${reconcile_marker}"
 }

@@ -919,8 +919,77 @@ PY
   fi
 }
 
+ftctl_dr_ablestack_reverse_baseline_state_path() {
+  local plan="${1-}"
+  printf '%s/reverse-baseline.state\n' "$(ftctl_dr_ablestack_checkpoint_dir "${plan}")"
+}
+
+ftctl_dr_ablestack_source_baselines_ready() {
+  local plan="${1-}" disk_map="${2-}" disk_json device source_path source_spec baseline snap
+  [[ -n "${plan}" && -s "${disk_map}" ]] || return 1
+  while IFS= read -r disk_json; do
+    device="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" device)"
+    source_path="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" sourcePath)"
+    ftctl_dr_ablestack_rbd_spec_from_path "${source_path}" source_spec || return 1
+    baseline="$(ftctl_dr_ablestack_baseline_path "${plan}" "${device}")"
+    [[ -s "${baseline}" ]] || return 1
+    snap="$(head -n 1 "${baseline}")"
+    [[ -n "${snap}" ]] || return 1
+    rbd snap info "${source_spec}@${snap}" >/dev/null 2>&1 || return 1
+  done < <(ftctl_dr_ablestack_disk_rows "${disk_map}")
+}
+
+ftctl_dr_ablestack_prepare_reverse_baseline() {
+  local plan="${1-}" run="${2-}" checkpoint_sequence="${3-}" profile_file state_path
+  local reverse_profile reverse_disk_map prepared_run prepared_sequence prepared_state now
+  [[ -n "${plan}" && -n "${run}" && "${checkpoint_sequence}" =~ ^[0-9]+$ ]] || return 2
+  profile_file="$(ftctl_dr_ablestack_export_persist_profile_path "${plan}")"
+  ftctl_dr_runtime_remote_source_transition "${profile_file}" || return 0
+  state_path="$(ftctl_dr_ablestack_reverse_baseline_state_path "${plan}")"
+  prepared_run="$(ftctl_state_read_kv "${state_path}" run_uuid 2>/dev/null || true)"
+  prepared_sequence="$(ftctl_state_read_kv "${state_path}" checkpoint_sequence 2>/dev/null || true)"
+  prepared_state="$(ftctl_state_read_kv "${state_path}" state 2>/dev/null || true)"
+  reverse_disk_map="$(ftctl_state_read_kv "${state_path}" disk_map_path 2>/dev/null || true)"
+  if [[ "${prepared_run}" == "${run}" && "${prepared_sequence}" == "${checkpoint_sequence}" \
+        && "${prepared_state}" == "READY" ]] \
+      && ftctl_dr_ablestack_source_baselines_ready "${plan}" "${reverse_disk_map}"; then
+    return 0
+  fi
+  reverse_profile="$(ftctl_dr_ablestack_checkpoint_dir "${plan}")/reverse-profile-$(ftctl_dr_runtime_key "${run}").json"
+  reverse_disk_map="$(ftctl_dr_ablestack_checkpoint_dir "${plan}")/reverse-disk-map-$(ftctl_dr_runtime_key "${run}").json"
+  ftctl_dr_runtime_build_reverse_profile "${plan}" "${run}" "${profile_file}" "${reverse_profile}" "failback" || return $?
+  ftctl_dr_ablestack_canonicalize_profile "${reverse_profile}" "${reverse_disk_map}" || return $?
+  ftctl_dr_ablestack_initialize_source_baselines "${plan}" "reverse-${checkpoint_sequence}" "${reverse_disk_map}" || return $?
+  ftctl_dr_ablestack_source_baselines_ready "${plan}" "${reverse_disk_map}" || return 91
+  now="$(ftctl_now_iso8601)"
+  ftctl_state_write_kv_all "${state_path}" \
+    "version=1" "plan_uuid=${plan}" "run_uuid=${run}" \
+    "checkpoint_sequence=${checkpoint_sequence}" "state=READY" \
+    "reverse_profile_path=${reverse_profile}" "disk_map_path=${reverse_disk_map}" \
+    "prepared_at=${now}" "updated_at=${now}" || return 2
+  ftctl_log_event "dr-runtime" "dr.ablestack.reverse_baseline" "ok" "" "" \
+    "plan=${plan} run=${run} checkpoint=${checkpoint_sequence} state=READY"
+}
+
+ftctl_dr_ablestack_reverse_baseline_status() {
+  local plan="${1-}" run="${2-}" checkpoint_sequence="${3-}" state_path prepared_run prepared_sequence state disk_map
+  state_path="$(ftctl_dr_ablestack_reverse_baseline_state_path "${plan}")"
+  prepared_run="$(ftctl_state_read_kv "${state_path}" run_uuid 2>/dev/null || true)"
+  prepared_sequence="$(ftctl_state_read_kv "${state_path}" checkpoint_sequence 2>/dev/null || true)"
+  state="$(ftctl_state_read_kv "${state_path}" state 2>/dev/null || true)"
+  disk_map="$(ftctl_state_read_kv "${state_path}" disk_map_path 2>/dev/null || true)"
+  if [[ "${prepared_run}" == "${run}" && "${prepared_sequence}" == "${checkpoint_sequence}" \
+        && "${state}" == "READY" ]] \
+      && ftctl_dr_ablestack_source_baselines_ready "${plan}" "${disk_map}"; then
+    printf 'READY\n'
+  else
+    printf 'FULL_SEED_REQUIRED\n'
+  fi
+}
+
 ftctl_dr_ablestack_target_export_stop() {
-  local plan="${1-}" json="${2-0}" manifest item stopped=0
+  local plan="${1-}" json="${2-0}" run="${3-}" checkpoint_sequence="${4-}" manifest item stopped=0
+  local reverse_baseline_state="NOT_REQUESTED"
   manifest="$(ftctl_dr_ablestack_export_manifest_path "${plan}")"
   ftctl_dr_ablestack_export_persist_intent "${plan}" "" "STOPPED" "" "" || return $?
   if [[ -f "${manifest}" ]]; then
@@ -935,10 +1004,14 @@ PY
 )
     rm -f "${manifest}"
   fi
+  if [[ -n "${run}" && "${checkpoint_sequence}" =~ ^[0-9]+$ ]]; then
+    ftctl_dr_ablestack_prepare_reverse_baseline "${plan}" "${run}" "${checkpoint_sequence}" || return $?
+    reverse_baseline_state="$(ftctl_dr_ablestack_reverse_baseline_status "${plan}" "${run}" "${checkpoint_sequence}")"
+  fi
   if [[ "${json}" == "1" ]]; then
-    printf '{"command":"dr-target-export-stop","result":"ok","accepted":true,"state":"STOPPED","step":"target-export-stopped","progress":100,"stopped":%s}\n' "${stopped}"
+    printf '{"command":"dr-target-export-stop","result":"ok","accepted":true,"state":"STOPPED","step":"target-export-stopped","progress":100,"stopped":%s,"reverse_baseline_state":"%s"}\n' "${stopped}" "$(ftctl__json_escape "${reverse_baseline_state}")"
   else
-    printf 'target exports stopped: plan=%s count=%s\n' "${plan}" "${stopped}"
+    printf 'target exports stopped: plan=%s count=%s reverse_baseline=%s\n' "${plan}" "${stopped}" "${reverse_baseline_state}"
   fi
 }
 

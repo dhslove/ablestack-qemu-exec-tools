@@ -396,6 +396,23 @@ ftctl_dr_scheduler_reconcile_plan() {
   profile_file="$(ftctl_dr_runtime_profile_path "${plan}")"
   status_path="$(ftctl_dr_runtime_status_path "${plan}")"
   [[ -f "${profile_file}" && -f "${status_path}" ]] || return 0
+  if ftctl_dr_runtime_remote_source_transition "${profile_file}" \
+      && [[ "$(ftctl_dr_runtime_local_worker_role "${plan}")" == "target" ]]; then
+    if [[ "$(ftctl_dr_scheduler_control_command "${plan}")" != "stop" ]]; then
+      ftctl_dr_scheduler_control_set "${plan}" "stop" "remote-source-target-suppressed" "" "false" >/dev/null || true
+    fi
+    if ftctl_dr_scheduler_systemd_available "${plan}"; then
+      systemctl stop --no-block "$(ftctl_dr_scheduler_unit_name "${plan}")" >/dev/null 2>&1 || true
+    fi
+    ftctl_dr_runtime_path_set "${status_path}" \
+      "scheduler_state=STOPPED" "scheduler_desired_state=STOPPED" \
+      "scheduler_health=SUPPRESSED" "scheduler_recovery_state=SUPPRESSED" \
+      "replication_activity=STOPPED" "scheduler_pid_alive=false" \
+      "owner_matched=false" "active_worker_run_uuid=" "active_worker_pid=" \
+      "active_worker_start_ticks=" "worker_heartbeat_at=" \
+      "control_state=STOPPED" "updated_at=$(ftctl_now_iso8601)" || true
+    return 0
+  fi
   if ftctl_dr_scheduler_active_worker_valid "${plan}" ""; then
     return 0
   fi

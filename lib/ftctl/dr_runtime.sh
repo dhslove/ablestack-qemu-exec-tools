@@ -1158,6 +1158,33 @@ ftctl_dr_runtime_remote_source_transition() {
   ' "${profile_file}" >/dev/null 2>&1
 }
 
+ftctl_dr_runtime_worker_role_path() {
+  local plan="${1-}"
+  printf '%s/worker-role.state\n' "$(ftctl_dr_runtime_plan_dir "${plan}")"
+}
+
+ftctl_dr_runtime_record_worker_role() {
+  local plan="${1-}" role="${2-}" path now
+  [[ -n "${plan}" && -n "${role}" ]] || return 0
+  role="$(printf '%s' "${role}" | tr '[:upper:]' '[:lower:]')"
+  case "${role}" in
+    source|target|coordinator) ;;
+    *) return 2 ;;
+  esac
+  ftctl_dr_runtime_ensure_plan_dirs "${plan}"
+  path="$(ftctl_dr_runtime_worker_role_path "${plan}")"
+  now="$(ftctl_now_iso8601)"
+  ftctl_state_write_kv_all "${path}" \
+    "plan=${plan}" "worker_role=${role}" "updated_at=${now}"
+}
+
+ftctl_dr_runtime_local_worker_role() {
+  local plan="${1-}" path role
+  path="$(ftctl_dr_runtime_worker_role_path "${plan}")"
+  role="$(ftctl_state_read_kv "${path}" worker_role 2>/dev/null || true)"
+  printf '%s\n' "${role,,}"
+}
+
 ftctl_dr_runtime_profile_bool_default() {
   local profile_file="${1-}" field="${2-}" default_value="${3-}"
   local value
@@ -4762,6 +4789,7 @@ ftctl_dr_runtime_plan_apply() {
 
   if [[ "${dry_run}" != "1" && "${capable}" == "true" ]]; then
     ftctl_dr_runtime_save_profile "${plan}" "${profile_file}" || return $?
+    ftctl_dr_runtime_record_worker_role "${plan}" "${role}" || return $?
     now="$(ftctl_now_iso8601)"
     status_path="$(ftctl_dr_runtime_status_path "${plan}")"
     ftctl_state_write_kv_all "${status_path}" \
@@ -4937,6 +4965,7 @@ ftctl_dr_runtime_action() {
       [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_error_json "${action}" "${plan}" "${run}" "profile_invalid" "profile JSON is missing or invalid" 2
       return 2
     }
+    [[ "${dry_run}" == "1" ]] || ftctl_dr_runtime_record_worker_role "${plan}" "${role}" || return $?
   fi
   if [[ "${action}" == "dr-test-prepare" ]]; then
     ftctl_dr_runtime_save_artifact_spec "${plan}" "${run}" "${artifact_spec_file}" || {
@@ -5764,12 +5793,117 @@ print(hashlib.sha256(canonical.encode("utf-8")).hexdigest())
 PY
 }
 
-ftctl_dr_runtime_cutover_commit() {
+ftctl_dr_runtime_cutover_commit_target_projection() {
   local plan="${1-}" run="${2-}" session_id="${3-}" checkpoint_sequence="${4-}"
   local authority_generation="${5-}" target_power_state="${6-}" boot_validation_state="${7-}" json="${8-0}"
   local contract_version="${9-}" cloud_session_id="${10-}" manifest_sha256="${11-}"
   local commit_attempt_id="${12-}" commit_envelope_sha256="${13-}" target_vm_id="${14-}"
   local target_external_ref="${15-}" source_fence_state="${16-}" source_power_state="${17-}"
+  local profile_file run_path status_path commit_path now profile_target_vm_id profile_target_external_ref
+  local journal_attempt journal_sha journal_cloud_session reverse_baseline_state unit
+
+  profile_file="$(ftctl_dr_runtime_profile_path "${plan}")"
+  ftctl_dr_runtime_remote_source_transition "${profile_file}" || {
+    [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_error_json "dr-cutover-commit" "${plan}" "${run}" \
+      "DR_CUTOVER_TARGET_ROLE_INVALID" "target authority projection requires a remote-source KVM profile" 79
+    return 79
+  }
+  profile_target_vm_id="$(ftctl_dr_runtime_profile_value "${profile_file}" "target.vmId" 2>/dev/null || true)"
+  profile_target_external_ref="$(ftctl_dr_runtime_profile_value "${profile_file}" "target.externalRef" 2>/dev/null || true)"
+  [[ -n "${profile_target_external_ref}" ]] || \
+    profile_target_external_ref="$(ftctl_dr_runtime_profile_value "${profile_file}" "target.vmUuid" 2>/dev/null || true)"
+  if [[ -n "${profile_target_vm_id}" && "${profile_target_vm_id}" != "${target_vm_id}" \
+        || -n "${profile_target_external_ref}" && "${profile_target_external_ref}" != "${target_external_ref}" ]]; then
+    [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_error_json "dr-cutover-commit" "${plan}" "${run}" \
+      "DR_CUTOVER_TARGET_IDENTITY_MISMATCH" "Cloud target identity does not match the target FTCTL profile" 79
+    return 79
+  fi
+
+  run_path="$(ftctl_dr_runtime_run_path "${plan}" "${run}")"
+  status_path="$(ftctl_dr_runtime_status_path "${plan}")"
+  ftctl_ensure_dir "$(dirname "${run_path}")" "0755"
+  if [[ ! -f "${run_path}" ]]; then
+    if [[ -f "${status_path}" ]]; then
+      cp -f "${status_path}" "${run_path}" || return 2
+    else
+      ftctl_state_write_kv_all "${run_path}" "plan=${plan}" "run=${run}" || return 2
+    fi
+  fi
+  commit_path="$(ftctl_dr_runtime_cutover_commit_state_path "${plan}" "${run}")"
+  if [[ -f "${commit_path}" ]]; then
+    journal_attempt="$(ftctl_state_read_kv "${commit_path}" "commit_attempt_id" 2>/dev/null || true)"
+    journal_sha="$(ftctl_state_read_kv "${commit_path}" "commit_envelope_sha256" 2>/dev/null || true)"
+    journal_cloud_session="$(ftctl_state_read_kv "${commit_path}" "cloud_session_id" 2>/dev/null || true)"
+    if [[ "${journal_attempt}" != "${commit_attempt_id}" || "${journal_sha}" != "${commit_envelope_sha256}" \
+          || "${journal_cloud_session}" != "${cloud_session_id}" ]]; then
+      [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_error_json "dr-cutover-commit" "${plan}" "${run}" \
+        "DR_CUTOVER_COMMIT_CONFLICT" "target cutover journal identity conflicts with this envelope" 79
+      return 79
+    fi
+  fi
+
+  reverse_baseline_state="FULL_SEED_REQUIRED"
+  if command -v ftctl_dr_ablestack_reverse_baseline_status >/dev/null 2>&1; then
+    reverse_baseline_state="$(ftctl_dr_ablestack_reverse_baseline_status "${plan}" "${run}" "${checkpoint_sequence}")"
+  fi
+  if command -v ftctl_dr_scheduler_control_set >/dev/null 2>&1; then
+    ftctl_dr_scheduler_control_set "${plan}" "stop" "cutover-target-authority" "${run}" "false" >/dev/null || return $?
+  fi
+  if command -v ftctl_dr_scheduler_systemd_available >/dev/null 2>&1 \
+      && ftctl_dr_scheduler_systemd_available "${plan}"; then
+    unit="$(ftctl_dr_scheduler_unit_name "${plan}")"
+    systemctl stop "${unit}" >/dev/null 2>&1 || true
+  fi
+
+  now="$(ftctl_now_iso8601)"
+  ftctl_dr_runtime_path_set "${run_path}" \
+    "action=dr-cutover-commit" "role=target" "plan=${plan}" "run=${run}" \
+    "state=FAILED_OVER" "step=cloud-promotion-committed" "progress=100" \
+    "active_side=TARGET" "target_vm_id=${target_vm_id}" \
+    "target_external_ref=${target_external_ref}" "target_power_state=POWERED_ON" \
+    "target_promotion_state=PROMOTED" "boot_validation_state=${boot_validation_state}" \
+    "source_fence_state=${source_fence_state}" "source_power_state=${source_power_state}" \
+    "failover_session_id=${session_id}" "cloud_cutover_session_id=${cloud_session_id}" \
+    "failover_restore_point_sequence=${checkpoint_sequence}" "checkpoint_sequence=${checkpoint_sequence}" \
+    "manifest_sha256=${manifest_sha256}" "cloud_authority_generation=${authority_generation}" \
+    "cutover_commit_contract_version=${contract_version}" \
+    "cutover_commit_attempt_id=${commit_attempt_id}" \
+    "cutover_commit_envelope_sha256=${commit_envelope_sha256}" \
+    "cutover_commit_phase=ACKNOWLEDGED" "cutover_commit_outcome=ACKNOWLEDGED" \
+    "engine_ack_state=ACKNOWLEDGED" "engine_ack_at=${now}" \
+    "reverse_baseline_state=${reverse_baseline_state}" \
+    "initial_reverse_seed_required=$([[ "${reverse_baseline_state}" == "READY" ]] && printf false || printf true)" \
+    "worker_state=SUCCEEDED" "worker_exit_code=0" "accepted=true" \
+    "terminal_authoritative=true" "retryable=false" "error_code=" "error_message=" \
+    "failover_completed_at=${now}" "updated_at=${now}" || return 2
+  ftctl_dr_runtime_apply_target_authority_terminal_state "${run_path}" "${now}" || return 2
+  ftctl_dr_runtime_publish_status "${run_path}" "${status_path}" || return 2
+  ftctl_state_write_kv_all "${commit_path}" \
+    "version=2" "projection_role=TARGET" "contract_version=${contract_version}" \
+    "plan=${plan}" "run=${run}" "engine_session_id=${session_id}" \
+    "cloud_session_id=${cloud_session_id}" "checkpoint_sequence=${checkpoint_sequence}" \
+    "manifest_sha256=${manifest_sha256}" "authority_generation=${authority_generation}" \
+    "commit_attempt_id=${commit_attempt_id}" "commit_envelope_sha256=${commit_envelope_sha256}" \
+    "target_vm_id=${target_vm_id}" "target_external_ref=${target_external_ref}" \
+    "target_power_state=${target_power_state}" "boot_validation_state=${boot_validation_state}" \
+    "source_fence_state=${source_fence_state}" "source_power_state=${source_power_state}" \
+    "reverse_baseline_state=${reverse_baseline_state}" "phase=ACKNOWLEDGED" \
+    "outcome=ACKNOWLEDGED" "acknowledged_at=${now}" "updated_at=${now}" || return 2
+  ftctl_log_event "dr-runtime" "dr.cutover.target_authority" "ok" "" "" \
+    "plan=${plan} run=${run} generation=${authority_generation} reverse_baseline=${reverse_baseline_state}"
+  if [[ "${json}" == "1" ]]; then
+    ftctl_dr_runtime_emit_state_json "dr-cutover-commit" "ok" "${plan}" "${run}" "${run_path}" "0"
+  else
+    printf 'dr-cutover-commit: plan=%s run=%s role=target state=FAILED_OVER active_side=TARGET\n' "${plan}" "${run}"
+  fi
+}
+
+ftctl_dr_runtime_cutover_commit() {
+  local plan="${1-}" run="${2-}" session_id="${3-}" checkpoint_sequence="${4-}"
+  local authority_generation="${5-}" target_power_state="${6-}" boot_validation_state="${7-}" json="${8-0}"
+  local contract_version="${9-}" cloud_session_id="${10-}" manifest_sha256="${11-}"
+  local commit_attempt_id="${12-}" commit_envelope_sha256="${13-}" target_vm_id="${14-}"
+  local target_external_ref="${15-}" source_fence_state="${16-}" source_power_state="${17-}" role="${18-}"
   local run_path status_path active_path session_path commit_path state current_session current_checkpoint current_generation now
   local current_manifest current_target_vm_id current_target_external_ref current_source_fence current_source_power
   local calculated_envelope_sha256 journal_attempt journal_sha journal_cloud_session journal_phase
@@ -5830,6 +5964,15 @@ ftctl_dr_runtime_cutover_commit() {
       return 78
       ;;
   esac
+
+  if [[ "${role,,}" == "target" ]] && ftctl_dr_runtime_remote_source_transition "$(ftctl_dr_runtime_profile_path "${plan}")"; then
+    ftctl_dr_runtime_cutover_commit_target_projection "${plan}" "${run}" "${session_id}" \
+      "${checkpoint_sequence}" "${authority_generation}" "${target_power_state}" \
+      "${boot_validation_state}" "${json}" "${contract_version}" "${cloud_session_id}" \
+      "${manifest_sha256}" "${commit_attempt_id}" "${commit_envelope_sha256}" \
+      "${target_vm_id}" "${target_external_ref}" "${source_fence_state}" "${source_power_state}"
+    return $?
+  fi
 
   run_path="$(ftctl_dr_runtime_run_path "${plan}" "${run}")"
   status_path="$(ftctl_dr_runtime_status_path "${plan}")"

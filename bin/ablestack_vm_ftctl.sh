@@ -891,18 +891,21 @@ dispatch() {
         "${CLI_MATERIALIZATION_SPEC_JSON}" "${CLI_MATERIALIZATION_SPEC_SHA256}" "${CLI_JSON}"
       ;;
     dr-target-export-start)
+      ftctl_dr_runtime_record_worker_role "${CLI_PLAN}" "${CLI_ROLE:-target}"
       ftctl_dr_ablestack_target_export_start "${CLI_PLAN}" "${CLI_RUN}" "${CLI_PROFILE_JSON}" "${CLI_JSON}"
       ;;
     dr-target-export-stop)
-      ftctl_dr_ablestack_target_export_stop "${CLI_PLAN}" "${CLI_JSON}"
+      ftctl_dr_runtime_record_worker_role "${CLI_PLAN}" "${CLI_ROLE:-target}"
+      ftctl_dr_ablestack_target_export_stop "${CLI_PLAN}" "${CLI_JSON}" "${CLI_RUN}" "${CLI_CHECKPOINT_SEQUENCE}"
       ;;
     dr-cutover-commit)
+      ftctl_dr_runtime_record_worker_role "${CLI_PLAN}" "${CLI_ROLE}"
       ftctl_dr_runtime_cutover_commit "${CLI_PLAN}" "${CLI_RUN}" "${CLI_ENGINE_SESSION_ID:-${CLI_CUTOVER_SESSION_ID}}" \
         "${CLI_CHECKPOINT_SEQUENCE}" "${CLI_AUTHORITY_GENERATION}" "${CLI_TARGET_POWER_STATE}" \
         "${CLI_BOOT_VALIDATION_STATE}" "${CLI_JSON}" "${CLI_COMMIT_CONTRACT_VERSION}" \
         "${CLI_CLOUD_SESSION_ID}" "${CLI_MANIFEST_SHA256}" "${CLI_COMMIT_ATTEMPT_ID}" \
         "${CLI_COMMIT_ENVELOPE_SHA256}" "${CLI_TARGET_VM_ID}" "${CLI_TARGET_EXTERNAL_REF}" \
-        "${CLI_SOURCE_FENCE_STATE}" "${CLI_SOURCE_POWER_STATE}"
+        "${CLI_SOURCE_FENCE_STATE}" "${CLI_SOURCE_POWER_STATE}" "${CLI_ROLE}"
       ;;
     dr-cutover-commit-status)
       ftctl_dr_runtime_cutover_commit_status "${CLI_PLAN}" "${CLI_RUN}" \
