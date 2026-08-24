@@ -114,6 +114,20 @@ ftctl_dr_ablestack_site_agent_transport_load "${site_agent_canonical}"
 [[ "$(ftctl_dr_ablestack_export_value "${site_agent_canonical}" sda uri)" == "nbd://10.10.32.2:12032/dr-export-sda" ]]
 grep -q 'ftctl_dr_ablestack_site_agent_incremental_once' "${ROOT}/lib/ftctl/dr_ablestack.sh"
 grep -q 'rbd_extent_copy.py' "${ROOT}/lib/ftctl/dr_ablestack.sh"
+[[ "$(ftctl_dr_ablestack_normalize_cycle_type incremental)" == "INCREMENTAL" ]]
+[[ "$(ftctl_dr_ablestack_normalize_cycle_type cbt-incremental)" == "CBT_INCREMENTAL" ]]
+
+checkpoint_manifest="${TMP}/checkpoint-manifest.json"
+checkpoint_path="${TMP}/checkpoint.json"
+printf '{"disks":[]}\n' > "${checkpoint_manifest}"
+ftctl_dr_ablestack_write_checkpoint "${site_agent_canonical}" "${checkpoint_manifest}" "${checkpoint_path}" \
+  TARGET_READY 2026-08-24T00:00:00Z 2026-08-24T00:00:02Z 2 \
+  CBT_INCREMENTAL CBT_INCREMENTAL true 4096 ""
+jq -e '.requestedMode == "CBT_INCREMENTAL"
+  and .effectiveMode == "CBT_INCREMENTAL"
+  and .incrementalVerified == true
+  and .changedBytes == 4096
+  and .targetWrittenBytes == 4096' "${checkpoint_path}" >/dev/null
 
 FTCTL_REMOTE_NBD_PORT_BASE=11809
 FTCTL_REMOTE_NBD_PORT_COUNT=4

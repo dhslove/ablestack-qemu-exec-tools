@@ -1032,13 +1032,15 @@ PY
 
 ftctl_dr_ablestack_write_checkpoint() {
   local disk_map="${1-}" manifest_path="${2-}" checkpoint_path="${3-}" state="${4-}" source_at="${5-}" target_at="${6-}" rpo="${7-}"
+  local requested_mode="${8-}" effective_mode="${9-}" incremental_verified="${10-}" changed_bytes="${11-}" reseed_reason="${12-}"
   ftctl_ensure_dir "$(dirname "${checkpoint_path}")" "0755"
-  python3 - "${disk_map}" "${manifest_path}" "${checkpoint_path}" "${state}" "${source_at}" "${target_at}" "${rpo}" <<'PY'
+  python3 - "${disk_map}" "${manifest_path}" "${checkpoint_path}" "${state}" "${source_at}" "${target_at}" "${rpo}" \
+    "${requested_mode}" "${effective_mode}" "${incremental_verified}" "${changed_bytes}" "${reseed_reason}" <<'PY'
 import json
 import os
 import sys
 
-disk_map_path, manifest_path, checkpoint_path, state, source_at, target_at, rpo = sys.argv[1:8]
+disk_map_path, manifest_path, checkpoint_path, state, source_at, target_at, rpo, requested_mode, effective_mode, incremental_verified, changed_bytes, reseed_reason = sys.argv[1:13]
 with open(disk_map_path, "r", encoding="utf-8") as fh:
     disk_map = json.load(fh)
 manifest = {}
@@ -1057,6 +1059,19 @@ checkpoint = {
     "runUuid": disk_map.get("runUuid", ""),
     "disks": manifest.get("disks", disk_map.get("disks", [])),
 }
+if requested_mode:
+    checkpoint["requestedMode"] = requested_mode
+if effective_mode:
+    checkpoint["effectiveMode"] = effective_mode
+if incremental_verified:
+    checkpoint["incrementalVerified"] = incremental_verified.lower() == "true"
+if str(changed_bytes).isdigit():
+    checkpoint["changedBytes"] = int(changed_bytes)
+    checkpoint["sourceReadBytes"] = int(changed_bytes)
+    checkpoint["targetWrittenBytes"] = int(changed_bytes)
+    checkpoint["transferPayloadBytes"] = int(changed_bytes)
+if reseed_reason:
+    checkpoint["reseedReason"] = reseed_reason
 tmp = checkpoint_path + ".tmp"
 with open(tmp, "w", encoding="utf-8") as fh:
     json.dump(checkpoint, fh, sort_keys=True, separators=(",", ":"))
@@ -1131,6 +1146,7 @@ ftctl_dr_ablestack_prepare_targets() {
 
 ftctl_dr_ablestack_full_seed_once() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" disk_map="${4-}" manifest_path="${5-}" checkpoint_path="${6-}"
+  local requested_mode="${7-FULL_SEED}" effective_mode="${8-FULL_SEED}" reseed_reason="${9-}"
   local disk_json device source_path target_path source_format target_format size_bytes source_type target_type resolved_size target_uri
   local out="" err="" rc=0 source_at target_at source_epoch target_epoch rpo="0"
   local remote_transport="0" remote_path="" export_name="" export_port="" vm_name=""
@@ -1195,7 +1211,9 @@ ftctl_dr_ablestack_full_seed_once() {
     rpo="$((target_epoch - source_epoch))"
   fi
   ftctl_dr_ablestack_write_manifest "${disk_map}" "${manifest_path}.records.jsonl" "${manifest_path}" "full-seed-complete" || return $?
-  ftctl_dr_ablestack_write_checkpoint "${disk_map}" "${manifest_path}" "${checkpoint_path}" "TARGET_READY" "${source_at}" "${target_at}" "${rpo}" || return $?
+  ftctl_dr_ablestack_write_checkpoint "${disk_map}" "${manifest_path}" "${checkpoint_path}" "TARGET_READY" \
+    "${source_at}" "${target_at}" "${rpo}" "${requested_mode}" "${effective_mode}" false \
+    "" "${reseed_reason}" || return $?
   if [[ "${remote_transport}" == "1" ]]; then
     if [[ "${site_agent_transport}" == "1" ]]; then
       ftctl_dr_ablestack_initialize_source_baselines "${plan}" "${run}" "${disk_map}" || return $?
@@ -1319,7 +1337,7 @@ ftctl_dr_ablestack_apply_incremental_nbd() {
 ftctl_dr_ablestack_incremental_once() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" disk_map="${4-}" manifest_path="${5-}" checkpoint_path="${6-}" sequence="${7-}"
   local disk_json device source_path target_path source_spec target_spec baseline previous current host user ssh_host ssh_port ssh_port_args identity_args
-  local out="" err="" rc=0 changed_bytes="0" started_at completed_at
+  local out="" err="" rc=0 changed_bytes="0" total_changed_bytes="0" started_at completed_at
   ftctl_dr_ablestack_canonicalize_profile "${profile_file}" "${disk_map}" || return $?
   ftctl_dr_ablestack_remote_transport_load "${disk_map}" || return 90
   ftctl_blockcopy_remote_target_host_user host user || return 2
@@ -1340,6 +1358,7 @@ ftctl_dr_ablestack_incremental_once() {
     previous="$(head -n 1 "${baseline}")"
     rbd snap create "${source_spec}@${current}" || return $?
     changed_bytes="$(rbd diff --from-snap "${previous}" --format json "${source_spec}@${current}" 2>/dev/null | python3 -c 'import json,sys; print(sum(int(x.get("length",0)) for x in json.load(sys.stdin)))' 2>/dev/null || printf '0')"
+    total_changed_bytes="$((total_changed_bytes + changed_bytes))"
     ftctl_cmd_run "${FTCTL_DR_FULL_SEED_TIMEOUT_SEC:-3600}" out err rc -- bash -lc \
       "rbd export-diff --from-snap $(printf '%q' "${previous}") $(printf '%q' "${source_spec}@${current}") - | ssh ${ssh_port_args}${identity_args}-o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC:-30} $(printf '%q' "${user}@${ssh_host}") rbd import-diff - $(printf '%q' "${target_spec}")" || true
     if [[ "${rc}" != "0" ]]; then
@@ -1355,12 +1374,13 @@ ftctl_dr_ablestack_incremental_once() {
   done < <(ftctl_dr_ablestack_disk_rows "${disk_map}")
   completed_at="$(ftctl_now_iso8601)"
   ftctl_dr_ablestack_write_manifest "${disk_map}" "${manifest_path}.records.jsonl" "${manifest_path}" "incremental-complete" || return $?
-  ftctl_dr_ablestack_write_checkpoint "${disk_map}" "${manifest_path}" "${checkpoint_path}" "TARGET_READY" "${started_at}" "${completed_at}" "0" || return $?
+  ftctl_dr_ablestack_write_checkpoint "${disk_map}" "${manifest_path}" "${checkpoint_path}" "TARGET_READY" \
+    "${started_at}" "${completed_at}" "0" CBT_INCREMENTAL CBT_INCREMENTAL true "${total_changed_bytes}" "" || return $?
 }
 
 ftctl_dr_ablestack_site_agent_incremental_once() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" disk_map="${4-}" manifest_path="${5-}" checkpoint_path="${6-}" sequence="${7-}"
-  local disk_json device source_path source_spec baseline previous current host port name diff_json changed_bytes started_at completed_at
+  local disk_json device source_path source_spec baseline previous current host port name diff_json changed_bytes total_changed_bytes="0" started_at completed_at
   ftctl_dr_ablestack_canonicalize_profile "${profile_file}" "${disk_map}" || return $?
   ftctl_dr_ablestack_site_agent_transport_load "${disk_map}" || return 90
   current="$(ftctl_dr_ablestack_snapshot_name "${plan}" "${sequence}")"
@@ -1381,6 +1401,7 @@ ftctl_dr_ablestack_site_agent_incremental_once() {
     diff_json="$(ftctl_dr_ablestack_checkpoint_dir "${plan}")/diff-$(ftctl_dr_runtime_key "${device}")-${sequence}.json"
     rbd diff --from-snap "${previous}" --format json "${source_spec}@${current}" > "${diff_json}" || return $?
     changed_bytes="$(python3 -c 'import json,sys; print(sum(int(x.get("length",0)) for x in json.load(open(sys.argv[1]))))' "${diff_json}")"
+    total_changed_bytes="$((total_changed_bytes + changed_bytes))"
     if ! ftctl_dr_ablestack_apply_incremental_nbd "${source_spec}" "${previous}" "${current}" "${host}" "${port}" "${name}" "${diff_json}"; then
       rbd snap rm "${source_spec}@${current}" >/dev/null 2>&1 || true
       return 92
@@ -1393,19 +1414,28 @@ ftctl_dr_ablestack_site_agent_incremental_once() {
   done < <(ftctl_dr_ablestack_disk_rows "${disk_map}")
   completed_at="$(ftctl_now_iso8601)"
   ftctl_dr_ablestack_write_manifest "${disk_map}" "${manifest_path}.records.jsonl" "${manifest_path}" "incremental-complete" || return $?
-  ftctl_dr_ablestack_write_checkpoint "${disk_map}" "${manifest_path}" "${checkpoint_path}" "TARGET_READY" "${started_at}" "${completed_at}" "0" || return $?
+  ftctl_dr_ablestack_write_checkpoint "${disk_map}" "${manifest_path}" "${checkpoint_path}" "TARGET_READY" \
+    "${started_at}" "${completed_at}" "0" CBT_INCREMENTAL CBT_INCREMENTAL true "${total_changed_bytes}" "" || return $?
+}
+
+ftctl_dr_ablestack_normalize_cycle_type() {
+  local cycle_type="${1-}"
+  cycle_type="${cycle_type^^}"
+  cycle_type="${cycle_type//-/_}"
+  printf '%s\n' "${cycle_type}"
 }
 
 ftctl_dr_ablestack_replication_cycle() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" sequence="${4-}" cycle_type="${5-}"
-  local disk_map manifest_path checkpoint_path cycle_run
+  local disk_map manifest_path checkpoint_path cycle_run normalized_cycle_type
 
   [[ -n "${plan}" && -n "${run}" && -n "${profile_file}" ]] || return 2
   cycle_run="${run}-cycle-${sequence:-0}"
   disk_map="$(ftctl_dr_ablestack_disk_map_path "${plan}")"
   manifest_path="$(ftctl_dr_ablestack_manifest_path "${plan}" "${cycle_run}")"
   checkpoint_path="$(ftctl_dr_ablestack_checkpoint_path "${plan}" "${cycle_run}")"
-  if [[ "${cycle_type}" == *INCREMENTAL* ]] &&
+  normalized_cycle_type="$(ftctl_dr_ablestack_normalize_cycle_type "${cycle_type}")"
+  if [[ "${normalized_cycle_type}" == *INCREMENTAL* ]] &&
      { ftctl_dr_ablestack_site_agent_transport_load "${disk_map}" 2>/dev/null ||
        ftctl_dr_ablestack_remote_transport_load "${disk_map}" 2>/dev/null; }; then
     local incremental_rc=0
@@ -1417,7 +1447,8 @@ ftctl_dr_ablestack_replication_cycle() {
     if [[ "${incremental_rc}" == "91" ]]; then
       ftctl_log_event "dr-runtime" "dr.ablestack.incremental_fallback" "warn" "" "" \
         "plan=${plan} run=${cycle_run} reason=baseline_unavailable"
-      ftctl_dr_ablestack_full_seed_once "${plan}" "${cycle_run}" "${profile_file}" "${disk_map}" "${manifest_path}" "${checkpoint_path}" || return $?
+      ftctl_dr_ablestack_full_seed_once "${plan}" "${cycle_run}" "${profile_file}" "${disk_map}" \
+        "${manifest_path}" "${checkpoint_path}" CBT_INCREMENTAL FULL_SEED baseline_unavailable || return $?
     elif [[ "${incremental_rc}" != "0" ]]; then
       ftctl_log_event "dr-runtime" "dr.ablestack.incremental" "fail" "" "${incremental_rc}" \
         "plan=${plan} run=${cycle_run} reason=incremental_transfer_failed"
