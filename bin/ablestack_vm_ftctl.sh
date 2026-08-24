@@ -281,6 +281,10 @@ Commands:
   dr-reprotect       Accept a DR reprotect session
   dr-target-materialized
                      Mark Cloud target VM/volume materialization complete
+  dr-target-export-start
+                     Start Plan Owner controlled target RBD NBD exports
+  dr-target-export-stop
+                     Stop Plan Owner controlled target RBD NBD exports
   dr-cutover-commit  Commit Cloud-owned target promotion to FTCTL authority state
   dr-cutover-commit-status
                      Read the durable Cloud-owned cutover commit outcome
@@ -417,7 +421,7 @@ parse_args() {
         print_version
         exit "${EXIT_OK}"
         ;;
-      protect|protect-start|status|reconcile|failover|failover-prepare|failback|failback-sync|failback-finalize|failback-reprotect|unprotect|fence-confirm|fence-clear|pause-protection|resume-protection|preflight-remote|dr-key-ensure|dr-key-install|dr-key-remove|check|health|events|snapshot|dr-plan-apply|dr-sync-start|dr-sync-recover|dr-sync-pause|dr-sync-resume|dr-scheduler-run|dr-reconcile|dr-test-failover|dr-test-cleanup|dr-test-prepare|dr-test-artifact-cleanup|dr-failover|dr-failover-abort|dr-failback|dr-reprotect|dr-target-materialized|dr-cutover-commit|dr-cutover-commit-status|dr-failback-commit|dr-failback-commit-status|dr-failback-abort|dr-release|dr-status|dr-transition-preflight|dr-reverse-preflight|dr-capabilities|dr-cancel|config)
+      protect|protect-start|status|reconcile|failover|failover-prepare|failback|failback-sync|failback-finalize|failback-reprotect|unprotect|fence-confirm|fence-clear|pause-protection|resume-protection|preflight-remote|dr-key-ensure|dr-key-install|dr-key-remove|check|health|events|snapshot|dr-plan-apply|dr-sync-start|dr-sync-recover|dr-sync-pause|dr-sync-resume|dr-scheduler-run|dr-reconcile|dr-test-failover|dr-test-cleanup|dr-test-prepare|dr-test-artifact-cleanup|dr-failover|dr-failover-abort|dr-failback|dr-reprotect|dr-target-materialized|dr-target-export-start|dr-target-export-stop|dr-cutover-commit|dr-cutover-commit-status|dr-failback-commit|dr-failback-commit-status|dr-failback-abort|dr-release|dr-status|dr-transition-preflight|dr-reverse-preflight|dr-capabilities|dr-cancel|config)
         [[ -z "${CLI_COMMAND}" ]] || {
           echo "ERROR: multiple commands specified" >&2
           exit "${EXIT_USAGE}"
@@ -885,6 +889,12 @@ dispatch() {
       ftctl_dr_runtime_target_materialized "${CLI_PLAN}" "${CLI_RUN}" "${CLI_TARGET_VM_ID}" "${CLI_TARGET_EXTERNAL_REF}" \
         "${CLI_TARGET_VM_NAME}" "${CLI_TARGET_NETWORK_ID}" "${CLI_TARGET_VOLUME_MAP_JSON}" "${CLI_TARGET_READY_RPO_SECONDS}" \
         "${CLI_MATERIALIZATION_SPEC_JSON}" "${CLI_MATERIALIZATION_SPEC_SHA256}" "${CLI_JSON}"
+      ;;
+    dr-target-export-start)
+      ftctl_dr_ablestack_target_export_start "${CLI_PLAN}" "${CLI_RUN}" "${CLI_PROFILE_JSON}" "${CLI_JSON}"
+      ;;
+    dr-target-export-stop)
+      ftctl_dr_ablestack_target_export_stop "${CLI_PLAN}" "${CLI_JSON}"
       ;;
     dr-cutover-commit)
       ftctl_dr_runtime_cutover_commit "${CLI_PLAN}" "${CLI_RUN}" "${CLI_ENGINE_SESSION_ID:-${CLI_CUTOVER_SESSION_ID}}" \
