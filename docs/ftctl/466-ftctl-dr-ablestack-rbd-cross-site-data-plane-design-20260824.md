@@ -398,3 +398,34 @@ apply to VMware or local KVM paths.
 | Abort recovery | Stop loses the immediate restart input | Start reloads the persisted redacted profile and fixed endpoint intent |
 | Scheduler recovery | Source may resume against a closed export | Export restore succeeds before remote scheduler resume |
 | Existing paths | Shared changes could alter VMware behavior | Fallback is target-export-specific and remote `KVM_TO_KVM` gated by Cloud |
+
+## 17. Final Delta Incremental Baseline Contract
+
+`FAILOVER_FINAL` is a synchronization purpose, not a request to discard the
+durable RBD baseline. For an ABLESTACK-to-ABLESTACK Plan, FTCTL must classify
+both normal incremental cycles and the final cutover cycle as
+incremental-capable when a Plan-owned target transport and source baseline are
+present.
+
+The execution order is:
+
+1. read the last durable source snapshot from the per-Plan, per-disk baseline;
+2. create the final source snapshot;
+3. calculate and transfer only the RBD diff between those snapshots;
+4. durably commit the target checkpoint and manifest;
+5. replace the baseline only after target durability is confirmed;
+6. fall back to Full Seed only for the existing typed
+   `baseline_unavailable` condition.
+
+This classification is local to the ABLESTACK RBD data-plane driver. VMware
+VDDK/CBT cycle selection and every previously validated VMware-to-ABLESTACK
+path remain unchanged.
+
+### 17.1 AS-IS / TO-BE
+
+| Area | AS-IS | TO-BE |
+| --- | --- | --- |
+| Final cycle type | `FAILOVER_FINAL` misses the `INCREMENTAL` string test | `FAILOVER_FINAL` is explicitly incremental-capable |
+| Data moved | A 60 GiB replica can be rewritten for a small final delta | Only changed RBD extents are sent when a baseline exists |
+| Baseline failure | Final cutover silently follows the normal Full Seed branch | Typed `baseline_unavailable` is the only Full Seed fallback |
+| Regression scope | Shared cycle parsing could affect VMware | Change is contained in `dr_ablestack.sh` and covered by an RBD-only smoke gate |

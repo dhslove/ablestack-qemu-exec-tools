@@ -1684,6 +1684,12 @@ ftctl_dr_ablestack_normalize_cycle_type() {
   printf '%s\n' "${cycle_type}"
 }
 
+ftctl_dr_ablestack_cycle_incremental_capable() {
+  local normalized_cycle_type
+  normalized_cycle_type="$(ftctl_dr_ablestack_normalize_cycle_type "${1-}")"
+  [[ "${normalized_cycle_type}" == *INCREMENTAL* || "${normalized_cycle_type}" == "FAILOVER_FINAL" ]]
+}
+
 ftctl_dr_ablestack_replication_cycle() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" sequence="${4-}" cycle_type="${5-}"
   local disk_map manifest_path checkpoint_path cycle_run normalized_cycle_type
@@ -1694,7 +1700,7 @@ ftctl_dr_ablestack_replication_cycle() {
   manifest_path="$(ftctl_dr_ablestack_manifest_path "${plan}" "${cycle_run}")"
   checkpoint_path="$(ftctl_dr_ablestack_checkpoint_path "${plan}" "${cycle_run}")"
   normalized_cycle_type="$(ftctl_dr_ablestack_normalize_cycle_type "${cycle_type}")"
-  if [[ "${normalized_cycle_type}" == *INCREMENTAL* ]] &&
+  if ftctl_dr_ablestack_cycle_incremental_capable "${normalized_cycle_type}" &&
      { ftctl_dr_ablestack_site_agent_transport_load "${disk_map}" 2>/dev/null ||
        ftctl_dr_ablestack_remote_transport_load "${disk_map}" 2>/dev/null; }; then
     local incremental_rc=0

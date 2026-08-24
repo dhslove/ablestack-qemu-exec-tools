@@ -125,6 +125,10 @@ grep -q 'ftctl_dr_ablestack_site_agent_incremental_once' "${ROOT}/lib/ftctl/dr_a
 grep -q 'rbd_extent_copy.py' "${ROOT}/lib/ftctl/dr_ablestack.sh"
 [[ "$(ftctl_dr_ablestack_normalize_cycle_type incremental)" == "INCREMENTAL" ]]
 [[ "$(ftctl_dr_ablestack_normalize_cycle_type cbt-incremental)" == "CBT_INCREMENTAL" ]]
+ftctl_dr_ablestack_cycle_incremental_capable incremental
+ftctl_dr_ablestack_cycle_incremental_capable cbt-incremental
+ftctl_dr_ablestack_cycle_incremental_capable failover-final
+! ftctl_dr_ablestack_cycle_incremental_capable full-reseed
 
 checkpoint_manifest="${TMP}/checkpoint-manifest.json"
 checkpoint_path="${TMP}/checkpoint.json"
