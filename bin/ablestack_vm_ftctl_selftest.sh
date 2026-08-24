@@ -9975,6 +9975,7 @@ selftest_case_dr_kvm_vmware_reverses_forward_profile_roles() {
     "source":{"vmdkPath":"[datastore] w22-01/w22-01.vmdk"},
     "target":{"storagePath":"rbd","name":"w22-01-dr-disk-0"}
   }]}
+}
 JSON
 
   ftctl_dr_runtime_build_reverse_profile "plan-forward-profile" "run-reverse" \
