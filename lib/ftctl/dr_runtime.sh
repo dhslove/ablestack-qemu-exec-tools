@@ -1146,6 +1146,18 @@ ftctl_dr_runtime_default_restore_points_path() {
   printf '%s\n' "${restore_points_path}"
 }
 
+ftctl_dr_runtime_remote_source_transition() {
+  local profile_file="${1-}"
+  [[ -n "${profile_file}" && -f "${profile_file}" ]] || return 1
+  jq -e '
+    ((.direction // "") | ascii_upcase) == "KVM_TO_KVM"
+    and ((.request.schedulerTransitionScope // "") | ascii_upcase) == "REMOTE_SOURCE"
+    and ((.workers.source // "") | length) > 0
+    and ((.workers.coordinator // "") | length) > 0
+    and (.workers.source != .workers.coordinator)
+  ' "${profile_file}" >/dev/null 2>&1
+}
+
 ftctl_dr_runtime_profile_bool_default() {
   local profile_file="${1-}" field="${2-}" default_value="${3-}"
   local value
@@ -1503,7 +1515,7 @@ ftctl_dr_runtime_failover_final_checkpoint() {
 }
 
 ftctl_dr_runtime_prepare_test_session() {
-  local plan="${1-}" run="${2-}" profile_file="${3-}" restore_point="${4-}" run_path="${5-}" status_path="${6-}"
+  local plan="${1-}" run="${2-}" profile_file="${3-}" restore_point="${4-}" run_path="${5-}" status_path="${6-}" artifact_spec_path="${7-}"
   local session_path active_path selection_path restore_points_path profile_path
   local test_session_id test_lease_owner_run test_restore_point_ref test_restore_point_sequence test_manifest_path test_checkpoint_path
   local last_source last_target target_rpo now rc=0
@@ -1518,13 +1530,13 @@ ftctl_dr_runtime_prepare_test_session() {
   now="$(ftctl_now_iso8601)"
 
   python3 - "${plan}" "${run}" "${profile_path}" "${restore_point}" "${status_path}" \
-    "${restore_points_path}" "${session_path}" "${active_path}" "${selection_path}" "${now}" <<'PY' || rc=$?
+    "${restore_points_path}" "${session_path}" "${active_path}" "${selection_path}" "${now}" "${artifact_spec_path}" <<'PY' || rc=$?
 import json
 import os
 import shutil
 import sys
 
-plan, run, profile_path, restore_selector, status_path, restore_points_path, session_path, active_path, selection_path, now = sys.argv[1:11]
+plan, run, profile_path, restore_selector, status_path, restore_points_path, session_path, active_path, selection_path, now, artifact_spec_path = sys.argv[1:12]
 
 def read_state(path):
     values = {}
@@ -1596,6 +1608,51 @@ def matches(record, selector):
     }
     return str(selector) in candidates
 
+def controller_checkpoint(profile, request, selector, artifact_spec):
+    if str(profile.get("direction") or "").upper() != "KVM_TO_KVM":
+        return None
+    try:
+        contract_version = int(request.get("checkpointContractVersion"))
+        sequence = int(request.get("checkpointSequence"))
+    except (TypeError, ValueError):
+        return None
+    checkpoint_ref = str(request.get("checkpointRef") or request.get("restorePointRef") or "")
+    if contract_version != 1 or sequence <= 0 or not checkpoint_ref:
+        return None
+    if str(request.get("checkpointPlanUuid") or "") != plan:
+        return None
+    if str(request.get("checkpointState") or "").upper() != "READY":
+        return None
+    if str(selector or "") != checkpoint_ref:
+        return None
+    if not isinstance(artifact_spec, dict):
+        return None
+    try:
+        artifact_sequence = int(artifact_spec.get("checkpointSequence"))
+    except (TypeError, ValueError):
+        return None
+    if (str(artifact_spec.get("contractVersion") or "") != "3"
+            or str(artifact_spec.get("planUuid") or "") != plan
+            or str(artifact_spec.get("runUuid") or "") != run
+            or str(artifact_spec.get("checkpointRef") or "") != checkpoint_ref
+            or artifact_sequence != sequence):
+        return None
+    return {
+        "planUuid": plan,
+        "runUuid": run,
+        "checkpointSequence": sequence,
+        "checkpointRef": checkpoint_ref,
+        "cycleType": request.get("checkpointCycleType"),
+        "cycleToken": request.get("checkpointCycleToken"),
+        "effectiveMode": request.get("checkpointEffectiveMode"),
+        "sourceCheckpointAt": request.get("checkpointSourceCreatedAt"),
+        "targetDurableAt": request.get("checkpointTargetReadyAt"),
+        "targetReadyRpoSeconds": request.get("checkpointTargetReadyRpoSeconds"),
+        "state": "READY",
+        "controllerProjected": True,
+        "recordedAt": now,
+    }
+
 state = read_state(status_path)
 profile = read_json(profile_path)
 request = profile.get("request") if isinstance(profile.get("request"), dict) else {}
@@ -1605,8 +1662,10 @@ selected = None
 if selector:
     selected = next((record for record in records if matches(record, str(selector))), None)
     if selected is None:
-        sys.stderr.write(f"ERROR: restore point {selector} was not found\n")
-        sys.exit(44)
+        selected = controller_checkpoint(profile, request, str(selector), read_json(artifact_spec_path))
+        if selected is None:
+            sys.stderr.write(f"ERROR: restore point {selector} was not found\n")
+            sys.exit(44)
 elif records:
     selected = records[-1]
 
@@ -1862,6 +1921,7 @@ ftctl_dr_runtime_finalize_failed_test() {
   local plan="${1-}" run="${2-}" run_path="${3-}" status_path="${4-}"
   local failure_rc="${5-1}" error_code="${6-DR_TEST_FAILOVER_FAILED}" failed_step="${7-test-failed}"
   local cleanup_rc=0 resume_rc=0 lease_rc=0 sequence lease_owner_run cleanup_state cleanup_required=true
+  local transition_scope
 
   ftctl_dr_runtime_cleanup_test_session "${plan}" "${run}" "${run_path}" "${status_path}" || cleanup_rc=$?
   sequence="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "test_restore_point_sequence")"
@@ -1875,12 +1935,14 @@ ftctl_dr_runtime_finalize_failed_test() {
       "checkpoint_lease_state=RELEASED" \
       "checkpoint_lease_path=" || true
   fi
-  if command -v ftctl_dr_scheduler_resume_after_transition >/dev/null 2>&1; then
+  transition_scope="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "scheduler_transition_scope")"
+  if [[ "${transition_scope}" != "REMOTE_SOURCE" ]] && command -v ftctl_dr_scheduler_resume_after_transition >/dev/null 2>&1; then
     ftctl_dr_scheduler_resume_after_transition "${plan}" "${run}" "test-failover-rollback" \
       "${run_path}" "${status_path}" || resume_rc=$?
   fi
-  command -v ftctl_dr_scheduler_transition_end >/dev/null 2>&1 && \
+  if [[ "${transition_scope}" != "REMOTE_SOURCE" ]] && command -v ftctl_dr_scheduler_transition_end >/dev/null 2>&1; then
     ftctl_dr_scheduler_transition_end "${plan}"
+  fi
 
   cleanup_state="FAILED"
   if [[ "${cleanup_rc}" == "0" && "${lease_rc}" == "0" ]]; then
@@ -2207,6 +2269,36 @@ def matches(record, selector):
     }
     return str(selector) in candidates
 
+def controller_checkpoint(profile, request, selector):
+    if str(profile.get("direction") or "").upper() != "KVM_TO_KVM":
+        return None
+    try:
+        contract_version = int(request.get("checkpointContractVersion"))
+        sequence = int(request.get("checkpointSequence"))
+    except (TypeError, ValueError):
+        return None
+    checkpoint_ref = str(request.get("checkpointRef") or request.get("restorePointRef") or "")
+    if (contract_version != 1 or sequence <= 0 or not checkpoint_ref
+            or str(request.get("checkpointPlanUuid") or "") != plan
+            or str(request.get("checkpointState") or "").upper() != "READY"
+            or str(selector or "") != checkpoint_ref):
+        return None
+    return {
+        "planUuid": plan,
+        "runUuid": run,
+        "checkpointSequence": sequence,
+        "checkpointRef": checkpoint_ref,
+        "cycleType": request.get("checkpointCycleType"),
+        "cycleToken": request.get("checkpointCycleToken"),
+        "effectiveMode": request.get("checkpointEffectiveMode"),
+        "sourceCheckpointAt": request.get("checkpointSourceCreatedAt"),
+        "targetDurableAt": request.get("checkpointTargetReadyAt"),
+        "targetReadyRpoSeconds": request.get("checkpointTargetReadyRpoSeconds"),
+        "state": "READY",
+        "controllerProjected": True,
+        "recordedAt": now,
+    }
+
 def seconds_between(start, end):
     def parse(value):
         if not value:
@@ -2235,8 +2327,10 @@ selected = None
 if selector:
     selected = next((record for record in records if matches(record, str(selector))), None)
     if selected is None:
-        sys.stderr.write(f"ERROR: restore point {selector} was not found\n")
-        sys.exit(44)
+        selected = controller_checkpoint(profile, request, str(selector))
+        if selected is None:
+            sys.stderr.write(f"ERROR: restore point {selector} was not found\n")
+            sys.exit(44)
 elif records:
     selected = records[-1]
 
@@ -4798,6 +4892,7 @@ ftctl_dr_runtime_action() {
   local state_tuple state step progress run_path status_path external_ref rc error_code
   local target_vm_id target_external_ref checkpoint_lease_path test_sequence persisted_artifact_spec="" persisted_authority_spec=""
   local release_authority_side="" release_authority_generation="" release_resource_disposition="RETAIN_OPERATIONAL_VM"
+  local remote_source_transition=0
 
   ftctl_dr_runtime_require_plan "${plan}" || return 2
   ftctl_dr_runtime_require_run "${run}" || return 2
@@ -4832,6 +4927,9 @@ ftctl_dr_runtime_action() {
   external_ref="${run}"
   run_path="$(ftctl_dr_runtime_run_path "${plan}" "${run}")"
   status_path="$(ftctl_dr_runtime_status_path "${plan}")"
+  if ftctl_dr_runtime_remote_source_transition "$(ftctl_dr_runtime_profile_path "${plan}")"; then
+    remote_source_transition=1
+  fi
   if [[ "${action}" == "dr-release" && -f "${status_path}" ]]; then
     release_authority_side="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "active_side")"
     release_authority_generation="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "cloud_authority_generation")"
@@ -4962,7 +5060,9 @@ ftctl_dr_runtime_action() {
       ;;
     dr-test-failover|dr-test-prepare)
       rc=0
-      if command -v ftctl_dr_scheduler_transition_begin >/dev/null 2>&1; then
+      ftctl_dr_runtime_path_set "${run_path}" \
+        "scheduler_transition_scope=$([[ "${remote_source_transition}" == "1" ]] && printf REMOTE_SOURCE || printf LOCAL)" || true
+      if [[ "${remote_source_transition}" != "1" ]] && command -v ftctl_dr_scheduler_transition_begin >/dev/null 2>&1; then
         ftctl_dr_scheduler_transition_begin "${plan}" "${run}" "${action}" "${run_path}" "${status_path}" || rc=$?
       fi
       if [[ "${rc}" != "0" ]]; then
@@ -4982,7 +5082,8 @@ ftctl_dr_runtime_action() {
         [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_state_json "${action}" "error" "${plan}" "${run}" "${run_path}" "0"
         return "${rc}"
       fi
-      ftctl_dr_runtime_prepare_test_session "${plan}" "${run}" "${profile_file}" "${restore_point}" "${run_path}" "${status_path}" || rc=$?
+      ftctl_dr_runtime_prepare_test_session "${plan}" "${run}" "${profile_file}" "${restore_point}" "${run_path}" "${status_path}" \
+        "$(ftctl_dr_runtime_artifact_spec_path "${plan}" "${run}")" || rc=$?
       if [[ "${rc}" == "0" ]]; then
         ftctl_guestprep_preflight_test_session "$(ftctl_dr_runtime_test_session_path "${plan}" "${run}")" "${run_path}" || rc=$?
       fi
@@ -5035,13 +5136,17 @@ ftctl_dr_runtime_action() {
         fi
         return "${rc}"
       fi
-      command -v ftctl_dr_scheduler_transition_end >/dev/null 2>&1 && ftctl_dr_scheduler_transition_end "${plan}"
+      if [[ "${remote_source_transition}" != "1" ]] && command -v ftctl_dr_scheduler_transition_end >/dev/null 2>&1; then
+        ftctl_dr_scheduler_transition_end "${plan}"
+      fi
       ftctl_log_event "dr-runtime" "dr.test.failover" "ok" "" "" \
         "plan=${plan} run=${run} restore_point=$(ftctl_dr_runtime_state_get_from_path "${run_path}" "test_restore_point_ref")"
       ;;
     dr-test-cleanup|dr-test-artifact-cleanup)
       rc=0
-      if command -v ftctl_dr_scheduler_transition_begin >/dev/null 2>&1; then
+      ftctl_dr_runtime_path_set "${run_path}" \
+        "scheduler_transition_scope=$([[ "${remote_source_transition}" == "1" ]] && printf REMOTE_SOURCE || printf LOCAL)" || true
+      if [[ "${remote_source_transition}" != "1" ]] && command -v ftctl_dr_scheduler_transition_begin >/dev/null 2>&1; then
         ftctl_dr_scheduler_transition_begin "${plan}" "${run}" "${action}" "${run_path}" "${status_path}" || rc=$?
       fi
       if [[ "${rc}" != "0" ]]; then
@@ -5058,7 +5163,9 @@ ftctl_dr_runtime_action() {
           "updated_at=$(ftctl_now_iso8601)" || true
         cp -f "${run_path}" "${status_path}" 2>/dev/null || true
         ftctl_dr_runtime_mark_worker_terminal "${run_path}" "${status_path}" "FAILED" "${rc}" "${error_code}" "$([[ "${rc}" == "20" ]] && printf true || printf false)" "$([[ "${rc}" == "20" ]] && printf 2 || printf '')"
-        command -v ftctl_dr_scheduler_transition_end >/dev/null 2>&1 && ftctl_dr_scheduler_transition_end "${plan}"
+        if [[ "${remote_source_transition}" != "1" ]] && command -v ftctl_dr_scheduler_transition_end >/dev/null 2>&1; then
+          ftctl_dr_scheduler_transition_end "${plan}"
+        fi
         [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_state_json "${action}" "error" "${plan}" "${run}" "${run_path}" "0"
         return "${rc}"
       fi
@@ -5075,7 +5182,9 @@ ftctl_dr_runtime_action() {
         chmod 0644 "${status_path}" 2>/dev/null || true
         ftctl_log_event "dr-runtime" "dr.test.cleanup" "fail" "" "${rc}" \
           "plan=${plan} run=${run}"
-        command -v ftctl_dr_scheduler_transition_end >/dev/null 2>&1 && ftctl_dr_scheduler_transition_end "${plan}"
+        if [[ "${remote_source_transition}" != "1" ]] && command -v ftctl_dr_scheduler_transition_end >/dev/null 2>&1; then
+          ftctl_dr_scheduler_transition_end "${plan}"
+        fi
         if [[ "${json}" == "1" ]]; then
           ftctl_dr_runtime_emit_state_json "${action}" "error" "${plan}" "${run}" "${run_path}" "0"
         else
@@ -5089,10 +5198,12 @@ ftctl_dr_runtime_action() {
       [[ -n "${test_lease_owner_run}" ]] || test_lease_owner_run="${run}"
       [[ -n "${test_sequence}" ]] && ftctl_dr_scheduler_checkpoint_lease_release_owned "${plan}" "${test_sequence}" "${test_lease_owner_run}"
       ftctl_dr_runtime_path_set "${run_path}" "checkpoint_lease_state=RELEASED" "checkpoint_lease_path=" || true
-      if command -v ftctl_dr_scheduler_resume_after_transition >/dev/null 2>&1; then
+      if [[ "${remote_source_transition}" != "1" ]] && command -v ftctl_dr_scheduler_resume_after_transition >/dev/null 2>&1; then
         ftctl_dr_scheduler_resume_after_transition "${plan}" "${run}" "test-cleanup" "${run_path}" "${status_path}" || rc=$?
       fi
-      command -v ftctl_dr_scheduler_transition_end >/dev/null 2>&1 && ftctl_dr_scheduler_transition_end "${plan}"
+      if [[ "${remote_source_transition}" != "1" ]] && command -v ftctl_dr_scheduler_transition_end >/dev/null 2>&1; then
+        ftctl_dr_scheduler_transition_end "${plan}"
+      fi
       if [[ "${rc}" != "0" ]]; then
         ftctl_dr_runtime_path_set "${run_path}" \
           "state=ERROR" \

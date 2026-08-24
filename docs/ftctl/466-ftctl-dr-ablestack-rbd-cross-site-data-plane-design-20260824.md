@@ -278,3 +278,52 @@ execution. RBD synchronization continues to open the target image through
 | Readiness | Successful launch command is treated as ready | PID and fixed TCP endpoint must both remain reachable |
 | Restart | Intent is retried but the recreated child is killed at oneshot exit | Restart-on-failure service survives reconcile and Agent restarts |
 | Stop | PID-only best effort | Unit stop plus PID fallback, followed by manifest removal |
+
+## 14. Plan-Owner Checkpoint Evidence For Target-Side Transitions
+
+`KVM_TO_KVM` replication runs on the remote source worker, while test failover
+and failover must execute on the target worker that owns the replica RBD and VM.
+The source worker therefore owns the canonical `restore-points.jsonl`; the
+target worker is not required to duplicate that source-local journal.
+
+For these target-side transitions Cloud sends a versioned controller
+checkpoint envelope selected from the latest `READY` `dr_restore_point`. The
+envelope contains the Plan UUID, exact checkpoint reference and sequence,
+cycle token/type, source-created and target-ready timestamps, target RPO,
+effective mode, and readiness state. Test failover also carries the existing
+artifact contract, whose checkpoint reference and sequence must match the
+envelope.
+
+FTCTL resolves a transition checkpoint in this order:
+
+1. use an exact record from the local restore-point journal when present;
+2. only for `KVM_TO_KVM`, accept the Plan Owner envelope when its version,
+   Plan, selector, positive sequence, and `READY` state are valid;
+3. for test failover, additionally require the artifact contract Plan/Run and
+   checkpoint identity to match;
+4. reject every mismatch as `DR_RESTORE_POINT_NOT_FOUND` or a typed checkpoint
+   contract error before changing target resources.
+
+This is metadata authority transfer, not data transfer. The replica RBD remains
+the already durable target of the selected Cycle. VMware-origin paths continue
+to use their validated local restore-point journal and are not eligible for the
+controller-envelope fallback.
+
+Cloud also sends `schedulerTransitionScope=REMOTE_SOURCE` for a remote
+`KVM_TO_KVM` Plan. Test failover and test cleanup must not create, pause, or
+resume a scheduler on the target coordinator. Their target RBD snapshot/clone
+operation is atomic, while the source-site scheduler remains the sole writer
+authority. Production failover remains a separate Plan-Owner orchestration:
+Cloud must pause and confirm the remote source scheduler before stopping the
+target export and promoting the target VM.
+
+### 14.1 AS-IS / TO-BE
+
+| Area | AS-IS | TO-BE |
+| --- | --- | --- |
+| Checkpoint location | Source worker journal is searched on the target coordinator | Local journal first; validated Plan Owner envelope for remote KVM source |
+| Test failover | Exact Cloud selector fails with exit 44 on target host | Selector, controller evidence, and artifact contract are cross-checked |
+| Failover | Repeats the same source-local journal dependency | Uses the same versioned checkpoint evidence without cloning source metadata |
+| Safety scope | A generic fallback could affect VMware | Fallback is explicitly limited to `KVM_TO_KVM` |
+| Data authority | Missing local metadata appears to mean missing replica data | Cloud proves the durable Cycle; target FTCTL still verifies target artifacts |
+| Test scheduler ownership | Target transition may create a duplicate local scheduler | Remote source remains the only scheduler; target performs artifact operations only |

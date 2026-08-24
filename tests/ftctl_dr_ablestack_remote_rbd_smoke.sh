@@ -211,6 +211,69 @@ kill "${listener_pid}"
 wait "${listener_pid}" 2>/dev/null || true
 ! ftctl_dr_ablestack_target_export_reachable 127.0.0.1 "${listener_port}" 1
 
+# A Plan Owner may dispatch target-side test actions while the canonical
+# restore-point journal remains on a remote KVM source worker.
+ftctl_state_vm_key() { printf '%s\n' "${1//[^A-Za-z0-9._-]/_}"; }
+ftctl_now_iso8601() { printf '%s\n' 2026-08-24T00:05:00Z; }
+export FTCTL_RUN_DIR="${TMP}/runtime-root"
+# shellcheck source=../lib/ftctl/dr_runtime.sh
+source "${ROOT}/lib/ftctl/dr_runtime.sh"
+
+plan_owner_profile="${TMP}/plan-owner-profile.json"
+plan_owner_artifact="${TMP}/plan-owner-artifact.json"
+checkpoint_ref="ftctl:plan-owner:source-run:12"
+cat > "${plan_owner_profile}" <<EOF
+{
+  "direction":"KVM_TO_KVM",
+  "workers":{"source":"source-host","coordinator":"target-host","target":"target-host"},
+  "request":{
+    "schedulerTransitionScope":"REMOTE_SOURCE",
+    "checkpointContractVersion":1,
+    "checkpointPlanUuid":"plan-owner",
+    "checkpointRef":"${checkpoint_ref}",
+    "restorePointRef":"${checkpoint_ref}",
+    "checkpointSequence":12,
+    "checkpointState":"READY",
+    "checkpointCycleType":"CBT_INCREMENTAL",
+    "checkpointCycleToken":"plan-owner:12",
+    "checkpointEffectiveMode":"CBT_INCREMENTAL",
+    "checkpointSourceCreatedAt":"2026-08-24T00:04:57Z",
+    "checkpointTargetReadyAt":"2026-08-24T00:05:00Z",
+    "checkpointTargetReadyRpoSeconds":3
+  }
+}
+EOF
+cat > "${plan_owner_artifact}" <<EOF
+{"contractVersion":3,"planUuid":"plan-owner","runUuid":"test-run","checkpointRef":"${checkpoint_ref}","checkpointSequence":12,"disks":[]}
+EOF
+ftctl_dr_runtime_remote_source_transition "${plan_owner_profile}"
+ftctl_dr_runtime_ensure_plan_dirs plan-owner
+plan_owner_run_path="$(ftctl_dr_runtime_run_path plan-owner test-run)"
+plan_owner_status_path="$(ftctl_dr_runtime_status_path plan-owner)"
+printf 'state=READY\n' > "${plan_owner_run_path}"
+printf 'state=READY\nrestore_points_path=%s\n' "${TMP}/missing-restore-points.jsonl" > "${plan_owner_status_path}"
+ftctl_dr_runtime_prepare_test_session plan-owner test-run "${plan_owner_profile}" "${checkpoint_ref}" \
+  "${plan_owner_run_path}" "${plan_owner_status_path}" "${plan_owner_artifact}"
+plan_owner_session="$(ftctl_dr_runtime_test_session_path plan-owner test-run)"
+jq -e --arg ref "${checkpoint_ref}" '.restorePoint.ref == $ref
+  and .restorePoint.checkpointSequence == 12
+  and .request.schedulerTransitionScope == "REMOTE_SOURCE"' "${plan_owner_session}" >/dev/null
+
+invalid_profile="${TMP}/invalid-plan-owner-profile.json"
+jq '.request.checkpointPlanUuid="wrong-plan"' "${plan_owner_profile}" > "${invalid_profile}"
+ftctl_dr_runtime_ensure_plan_dirs invalid-plan
+invalid_run_path="$(ftctl_dr_runtime_run_path invalid-plan invalid-run)"
+invalid_status_path="$(ftctl_dr_runtime_status_path invalid-plan)"
+printf 'state=READY\n' > "${invalid_run_path}"
+printf 'state=READY\nrestore_points_path=%s\n' "${TMP}/missing-invalid-restore-points.jsonl" > "${invalid_status_path}"
+if ftctl_dr_runtime_prepare_test_session invalid-plan invalid-run "${invalid_profile}" "${checkpoint_ref}" \
+  "${invalid_run_path}" "${invalid_status_path}" "${plan_owner_artifact}"; then
+  echo "controller checkpoint with mismatched Plan was accepted" >&2
+  exit 1
+else
+  [[ "$?" == "44" ]]
+fi
+
 reconcile_marker="${TMP}/reconciled"
 ftctl_log_event() { :; }
 ftctl_dr_ablestack_target_export_start() {
