@@ -72,6 +72,7 @@ site_agent_profile="${TMP}/site-agent-profile.json"
 site_agent_canonical="${TMP}/site-agent-canonical.json"
 cat > "${site_agent_profile}" <<'EOF'
 {
+  "planUuid": "plan-a",
   "source": {
     "provider": "ABLESTACK",
     "externalRef": "source-vm-uuid",
@@ -125,12 +126,21 @@ checkpoint_path="${TMP}/checkpoint.json"
 printf '{"disks":[]}\n' > "${checkpoint_manifest}"
 ftctl_dr_ablestack_write_checkpoint "${site_agent_canonical}" "${checkpoint_manifest}" "${checkpoint_path}" \
   TARGET_READY 2026-08-24T00:00:00Z 2026-08-24T00:00:02Z 2 \
-  CBT_INCREMENTAL CBT_INCREMENTAL true 4096 ""
+  CBT_INCREMENTAL CBT_INCREMENTAL true 4096 "" 7 1 1
 jq -e '.requestedMode == "CBT_INCREMENTAL"
   and .effectiveMode == "CBT_INCREMENTAL"
   and .incrementalVerified == true
   and .changedBytes == 4096
-  and .targetWrittenBytes == 4096' "${checkpoint_path}" >/dev/null
+  and .targetWrittenBytes == 4096
+  and .sequence == 7
+  and .baselineGeneration == 7
+  and .cycleToken == "plan-a:7"' "${checkpoint_path}" >/dev/null
+jq -e '.cycleCommitState == "LOCAL_DURABLE"
+  and .nbdTeardownState == "DRAINED"
+  and .nbdSourceDeviceCount == 1
+  and .nbdTargetDeviceCount == 1
+  and .nbdQuarantinedDeviceCount == 0
+  and .nbdTeardownCompletedAtEpochMs > 0' "${checkpoint_path}" >/dev/null
 
 FTCTL_REMOTE_NBD_PORT_BASE=11809
 FTCTL_REMOTE_NBD_PORT_COUNT=4

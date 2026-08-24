@@ -185,3 +185,37 @@ behavior.
 | Package/host restart | Export silently disappears | Reconcile recreates the Plan-owned export without recreating the VM or RBD image |
 | Source failure classification | Connection refusal can become teardown timeout and create retry cycles rapidly | `DR_TARGET_EXPORT_UNAVAILABLE`, same pending Cycle, bounded backoff |
 | Baseline safety | Repeated failed Cycles obscure the last durable point | Baseline and source snapshot advance only after target durable commit |
+
+## 11. Canonical Completed-Cycle Evidence
+
+The ABLESTACK replication driver must publish the same completed-cycle identity
+contract as the validated VMware mover. Every scheduler-owned full or
+incremental Cycle writes the following fields into its final checkpoint before
+the scheduler advances `latest_completed_cycle_sequence`:
+
+- `sequence` and `baselineGeneration` equal the scheduler Cycle sequence;
+- `cycleToken` is exactly `<plan_uuid>:<sequence>`;
+- `cycleUuid` is the deterministic UUIDv5 of `ablestack-dr:<plan_uuid>:<sequence>`;
+- `cycleCommitState` is `LOCAL_DURABLE` only after the target write is durable;
+- incremental Cycles publish `nbdTeardownState=DRAINED` after every Plan-owned
+  source and target NBD attachment has been disconnected;
+- `nbdSourceDeviceCount`, `nbdTargetDeviceCount`, and teardown timestamps are
+  recorded even when a transport uses zero local NBD devices.
+
+The scheduler copies these fields into the Plan authority state as one terminal
+publication. Cloud continues to reject incomplete evidence; it must not infer a
+successful Cycle from transfer bytes alone. Initial target preparation
+checkpoints are not scheduler terminal evidence and therefore do not receive a
+synthetic sequence.
+
+This change is scoped to `dr_ablestack.sh`. VMware VDDK cycle metrics and all
+previously validated VMware-to-ABLESTACK action contracts remain unchanged.
+
+### 11.1 AS-IS / TO-BE
+
+| Area | AS-IS | TO-BE |
+| --- | --- | --- |
+| Cycle identity | ABLESTACK final checkpoint omits token and generation | Deterministic token, UUID, sequence, and generation are persisted before completion |
+| Incremental cleanup | NBD devices are disconnected but teardown evidence is omitted | Disconnect completion is published as `DRAINED` with device counts and timestamps |
+| Cloud projection | Strict validator returns `DR_STATUS_CYCLE_EVIDENCE_INCOMPLETE` | The unchanged validator accepts complete ABLESTACK evidence and projects `READY` |
+| Regression scope | Transfer success can pass without status-contract coverage | Full seed, incremental, and zero-device transport tests assert canonical terminal evidence |

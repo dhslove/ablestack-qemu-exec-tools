@@ -1190,14 +1190,18 @@ PY
 ftctl_dr_ablestack_write_checkpoint() {
   local disk_map="${1-}" manifest_path="${2-}" checkpoint_path="${3-}" state="${4-}" source_at="${5-}" target_at="${6-}" rpo="${7-}"
   local requested_mode="${8-}" effective_mode="${9-}" incremental_verified="${10-}" changed_bytes="${11-}" reseed_reason="${12-}"
+  local cycle_sequence="${13-}" nbd_source_count="${14-0}" nbd_target_count="${15-0}"
   ftctl_ensure_dir "$(dirname "${checkpoint_path}")" "0755"
   python3 - "${disk_map}" "${manifest_path}" "${checkpoint_path}" "${state}" "${source_at}" "${target_at}" "${rpo}" \
-    "${requested_mode}" "${effective_mode}" "${incremental_verified}" "${changed_bytes}" "${reseed_reason}" <<'PY'
+    "${requested_mode}" "${effective_mode}" "${incremental_verified}" "${changed_bytes}" "${reseed_reason}" \
+    "${cycle_sequence}" "${nbd_source_count}" "${nbd_target_count}" <<'PY'
+import datetime
 import json
 import os
 import sys
+import uuid
 
-disk_map_path, manifest_path, checkpoint_path, state, source_at, target_at, rpo, requested_mode, effective_mode, incremental_verified, changed_bytes, reseed_reason = sys.argv[1:13]
+disk_map_path, manifest_path, checkpoint_path, state, source_at, target_at, rpo, requested_mode, effective_mode, incremental_verified, changed_bytes, reseed_reason, cycle_sequence, nbd_source_count, nbd_target_count = sys.argv[1:16]
 with open(disk_map_path, "r", encoding="utf-8") as fh:
     disk_map = json.load(fh)
 manifest = {}
@@ -1229,6 +1233,37 @@ if str(changed_bytes).isdigit():
     checkpoint["transferPayloadBytes"] = int(changed_bytes)
 if reseed_reason:
     checkpoint["reseedReason"] = reseed_reason
+if str(cycle_sequence).isdigit():
+    sequence = int(cycle_sequence)
+    plan = str(checkpoint.get("planUuid") or "")
+    if not plan:
+        raise SystemExit("scheduler cycle checkpoint requires planUuid")
+    checkpoint.update({
+        "sequence": sequence,
+        "cycleUuid": str(uuid.uuid5(uuid.NAMESPACE_URL, f"ablestack-dr:{plan}:{sequence}")),
+        "cycleToken": f"{plan}:{sequence}",
+        "baselineGeneration": sequence,
+        "cycleCommitState": "LOCAL_DURABLE",
+        "trackerState": "LOCAL_DURABLE",
+        "writerState": "DURABLE",
+        "targetWritten": True,
+        "writeVerified": True,
+        "metricsEstimated": False,
+        "nbdTeardownState": "DRAINED",
+        "nbdSourceDeviceCount": int(nbd_source_count) if str(nbd_source_count).isdigit() else 0,
+        "nbdTargetDeviceCount": int(nbd_target_count) if str(nbd_target_count).isdigit() else 0,
+        "nbdQuarantinedDeviceCount": 0,
+    })
+    completed_at = target_at or source_at
+    if completed_at:
+        try:
+            normalized_at = completed_at[:-1] + "+00:00" if completed_at.endswith("Z") else completed_at
+            completed_ms = int(datetime.datetime.fromisoformat(normalized_at).timestamp() * 1000)
+            checkpoint["nbdTeardownStartedAtEpochMs"] = completed_ms
+            checkpoint["nbdTeardownCompletedAtEpochMs"] = completed_ms
+            checkpoint["nbdTeardownDurationMs"] = 0
+        except ValueError:
+            pass
 tmp = checkpoint_path + ".tmp"
 with open(tmp, "w", encoding="utf-8") as fh:
     json.dump(checkpoint, fh, sort_keys=True, separators=(",", ":"))
@@ -1304,6 +1339,7 @@ ftctl_dr_ablestack_prepare_targets() {
 ftctl_dr_ablestack_full_seed_once() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" disk_map="${4-}" manifest_path="${5-}" checkpoint_path="${6-}"
   local requested_mode="${7-FULL_SEED}" effective_mode="${8-FULL_SEED}" reseed_reason="${9-}"
+  local cycle_sequence="${10-}"
   local disk_json device source_path target_path source_format target_format size_bytes source_type target_type resolved_size target_uri
   local out="" err="" rc=0 source_at target_at source_epoch target_epoch rpo="0"
   local remote_transport="0" remote_path="" export_name="" export_port="" export_host="" vm_name=""
@@ -1373,7 +1409,7 @@ ftctl_dr_ablestack_full_seed_once() {
   ftctl_dr_ablestack_write_manifest "${disk_map}" "${manifest_path}.records.jsonl" "${manifest_path}" "full-seed-complete" || return $?
   ftctl_dr_ablestack_write_checkpoint "${disk_map}" "${manifest_path}" "${checkpoint_path}" "TARGET_READY" \
     "${source_at}" "${target_at}" "${rpo}" "${requested_mode}" "${effective_mode}" false \
-    "" "${reseed_reason}" || return $?
+    "" "${reseed_reason}" "${cycle_sequence}" 0 0 || return $?
   if [[ "${remote_transport}" == "1" ]]; then
     if [[ "${site_agent_transport}" == "1" ]]; then
       ftctl_dr_ablestack_initialize_source_baselines "${plan}" "${run}" "${disk_map}" || return $?
@@ -1537,12 +1573,13 @@ ftctl_dr_ablestack_incremental_once() {
   completed_at="$(ftctl_now_iso8601)"
   ftctl_dr_ablestack_write_manifest "${disk_map}" "${manifest_path}.records.jsonl" "${manifest_path}" "incremental-complete" || return $?
   ftctl_dr_ablestack_write_checkpoint "${disk_map}" "${manifest_path}" "${checkpoint_path}" "TARGET_READY" \
-    "${started_at}" "${completed_at}" "0" CBT_INCREMENTAL CBT_INCREMENTAL true "${total_changed_bytes}" "" || return $?
+    "${started_at}" "${completed_at}" "0" CBT_INCREMENTAL CBT_INCREMENTAL true "${total_changed_bytes}" "" \
+    "${sequence}" 0 0 || return $?
 }
 
 ftctl_dr_ablestack_site_agent_incremental_once() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" disk_map="${4-}" manifest_path="${5-}" checkpoint_path="${6-}" sequence="${7-}"
-  local disk_json device source_path source_spec baseline previous current host port name diff_json changed_bytes total_changed_bytes="0" started_at completed_at
+  local disk_json device source_path source_spec baseline previous current host port name diff_json changed_bytes total_changed_bytes="0" started_at completed_at disk_count
   ftctl_dr_ablestack_canonicalize_profile "${profile_file}" "${disk_map}" || return $?
   ftctl_dr_ablestack_site_agent_transport_load "${disk_map}" || return 90
   current="$(ftctl_dr_ablestack_snapshot_name "${plan}" "${sequence}")"
@@ -1580,9 +1617,11 @@ ftctl_dr_ablestack_site_agent_incremental_once() {
       "plan=${plan} run=${run} device=${device} from=${previous} to=${current} bytes=${changed_bytes} transport=site-agent-nbd"
   done < <(ftctl_dr_ablestack_disk_rows "${disk_map}")
   completed_at="$(ftctl_now_iso8601)"
+  disk_count="$(ftctl_dr_ablestack_disk_count "${disk_map}")" || return $?
   ftctl_dr_ablestack_write_manifest "${disk_map}" "${manifest_path}.records.jsonl" "${manifest_path}" "incremental-complete" || return $?
   ftctl_dr_ablestack_write_checkpoint "${disk_map}" "${manifest_path}" "${checkpoint_path}" "TARGET_READY" \
-    "${started_at}" "${completed_at}" "0" CBT_INCREMENTAL CBT_INCREMENTAL true "${total_changed_bytes}" "" || return $?
+    "${started_at}" "${completed_at}" "0" CBT_INCREMENTAL CBT_INCREMENTAL true "${total_changed_bytes}" "" \
+    "${sequence}" "${disk_count}" "${disk_count}" || return $?
 }
 
 ftctl_dr_ablestack_normalize_cycle_type() {
@@ -1615,14 +1654,15 @@ ftctl_dr_ablestack_replication_cycle() {
       ftctl_log_event "dr-runtime" "dr.ablestack.incremental_fallback" "warn" "" "" \
         "plan=${plan} run=${cycle_run} reason=baseline_unavailable"
       ftctl_dr_ablestack_full_seed_once "${plan}" "${cycle_run}" "${profile_file}" "${disk_map}" \
-        "${manifest_path}" "${checkpoint_path}" CBT_INCREMENTAL FULL_SEED baseline_unavailable || return $?
+        "${manifest_path}" "${checkpoint_path}" CBT_INCREMENTAL FULL_SEED baseline_unavailable "${sequence}" || return $?
     elif [[ "${incremental_rc}" != "0" ]]; then
       ftctl_log_event "dr-runtime" "dr.ablestack.incremental" "fail" "" "${incremental_rc}" \
         "plan=${plan} run=${cycle_run} reason=incremental_transfer_failed"
       return "${incremental_rc}"
     fi
   else
-    ftctl_dr_ablestack_full_seed_once "${plan}" "${cycle_run}" "${profile_file}" "${disk_map}" "${manifest_path}" "${checkpoint_path}" || return $?
+    ftctl_dr_ablestack_full_seed_once "${plan}" "${cycle_run}" "${profile_file}" "${disk_map}" \
+      "${manifest_path}" "${checkpoint_path}" FULL_SEED FULL_SEED "" "${sequence}" || return $?
   fi
   printf '%s\t%s\n' "${manifest_path}" "${checkpoint_path}"
 }
