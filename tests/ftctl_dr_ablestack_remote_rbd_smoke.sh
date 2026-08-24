@@ -150,6 +150,15 @@ selected_port=""
 ftctl_dr_ablestack_target_export_pick_port plan-a sda selected_port
 [[ "${selected_port}" == "11811" ]]
 
+export_unit_a="$(ftctl_dr_ablestack_target_export_unit_name plan-a sda)"
+export_unit_b="$(ftctl_dr_ablestack_target_export_unit_name plan-a sda)"
+export_unit_c="$(ftctl_dr_ablestack_target_export_unit_name plan-a sdb)"
+[[ "${export_unit_a}" == "${export_unit_b}" ]]
+[[ "${export_unit_a}" != "${export_unit_c}" ]]
+[[ "${export_unit_a}" =~ ^ablestack-vm-ftctl-dr-export-[0-9a-f]{20}\.service$ ]]
+grep -q 'systemd-run --quiet --collect --unit' "${ROOT}/lib/ftctl/dr_ablestack.sh"
+grep -q 'property=Restart=on-failure' "${ROOT}/lib/ftctl/dr_ablestack.sh"
+
 rollback_records="${TMP}/rollback.records"
 rollback_manifest="${TMP}/rollback.json"
 rollback_pid="${TMP}/rollback.pid"

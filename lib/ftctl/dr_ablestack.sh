@@ -749,16 +749,36 @@ ftctl_dr_ablestack_target_export_pick_port() {
   return 93
 }
 
+ftctl_dr_ablestack_target_export_unit_name() {
+  local plan="${1-}" device="${2-}" digest
+  digest="$(printf '%s' "${plan}:${device}" | sha256sum | awk '{print substr($1,1,20)}')"
+  printf 'ablestack-vm-ftctl-dr-export-%s.service\n' "${digest}"
+}
+
+ftctl_dr_ablestack_target_export_systemd_available() {
+  [[ -d /run/systemd/system ]] && command -v systemd-run >/dev/null 2>&1 && command -v systemctl >/dev/null 2>&1
+}
+
+ftctl_dr_ablestack_target_export_stop_item() {
+  local item="${1-}" pid_file pid unit_name
+  pid_file="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("pidFile", ""))' "${item}")"
+  unit_name="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("unitName", ""))' "${item}")"
+  if [[ -n "${unit_name}" ]] && ftctl_dr_ablestack_target_export_systemd_available; then
+    systemctl stop "${unit_name}" >/dev/null 2>&1 || true
+    systemctl reset-failed "${unit_name}" >/dev/null 2>&1 || true
+  fi
+  pid="$(cat "${pid_file}" 2>/dev/null || true)"
+  if [[ "${pid}" =~ ^[0-9]+$ ]]; then
+    kill "${pid}" >/dev/null 2>&1 || true
+  fi
+  [[ -z "${pid_file}" ]] || rm -f "${pid_file}"
+}
+
 ftctl_dr_ablestack_target_export_stop_records() {
-  local records="${1-}" item pid_file pid
+  local records="${1-}" item
   [[ -s "${records}" ]] || return 0
   while IFS= read -r item; do
-    pid_file="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("pidFile", ""))' "${item}")"
-    pid="$(cat "${pid_file}" 2>/dev/null || true)"
-    if [[ "${pid}" =~ ^[0-9]+$ ]]; then
-      kill "${pid}" >/dev/null 2>&1 || true
-    fi
-    [[ -z "${pid_file}" ]] || rm -f "${pid_file}"
+    ftctl_dr_ablestack_target_export_stop_item "${item}"
   done < "${records}"
 }
 
@@ -771,7 +791,7 @@ ftctl_dr_ablestack_target_export_abort() {
 ftctl_dr_ablestack_target_export_start() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" json="${4-0}"
   local disk_map manifest host count disk_json device target_path target_type size_bytes target_format spec uri
-  local port name pid_file current_pid out="" err="" rc=0 records
+  local port name pid_file current_pid unit_name out="" err="" rc=0 records ready
   [[ -n "${plan}" && -n "${run}" && -f "${profile_file}" ]] || return 2
   disk_map="$(ftctl_dr_ablestack_disk_map_path "${plan}")"
   ftctl_dr_ablestack_canonicalize_profile "${profile_file}" "${disk_map}" || return $?
@@ -803,6 +823,7 @@ ftctl_dr_ablestack_target_export_start() {
     fi
     name="dr-${plan//[^A-Za-z0-9]/}-${device//[^A-Za-z0-9]/}"
     pid_file="/run/ablestack-vm-ftctl/nbd-${plan//[^A-Za-z0-9]/}-${device//[^A-Za-z0-9]/}.pid"
+    unit_name="$(ftctl_dr_ablestack_target_export_unit_name "${plan}" "${device}")"
     current_pid="$(cat "${pid_file}" 2>/dev/null || true)"
     if [[ "${current_pid}" =~ ^[0-9]+$ ]] && kill -0 "${current_pid}" 2>/dev/null; then
       port="$(ss -lntp 2>/dev/null | awk -v pid="${current_pid}" '$0 ~ ("pid=" pid ",") {split($4,a,":"); print a[length(a)]; exit}')"
@@ -817,20 +838,46 @@ ftctl_dr_ablestack_target_export_start() {
         return 93
       fi
       out=""; err=""; rc=0
-      ftctl_cmd_run "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC:-30}" out err rc -- \
-        qemu-nbd --fork --persistent --shared=8 --cache=none --aio=io_uring \
-        --bind "${host}" --port "${port}" --export-name "${name}" --format "${target_format:-raw}" \
-        --pid-file "${pid_file}" "rbd:${spec}" || true
+      if ftctl_dr_ablestack_target_export_systemd_available; then
+        systemctl stop "${unit_name}" >/dev/null 2>&1 || true
+        systemctl reset-failed "${unit_name}" >/dev/null 2>&1 || true
+        ftctl_cmd_run "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC:-30}" out err rc -- \
+          systemd-run --quiet --collect --unit "${unit_name}" \
+          --property=Restart=on-failure --property=RestartSec=2s --property=TimeoutStopSec=15s \
+          qemu-nbd --persistent --shared=8 --cache=none --aio=io_uring \
+          --bind "${host}" --port "${port}" --export-name "${name}" --format "${target_format:-raw}" \
+          --pid-file "${pid_file}" "rbd:${spec}" || true
+      else
+        ftctl_cmd_run "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC:-30}" out err rc -- \
+          qemu-nbd --fork --persistent --shared=8 --cache=none --aio=io_uring \
+          --bind "${host}" --port "${port}" --export-name "${name}" --format "${target_format:-raw}" \
+          --pid-file "${pid_file}" "rbd:${spec}" || true
+      fi
       if [[ "${rc}" != "0" ]]; then
         printf '%s\n' "${err}" >&2
         ftctl_dr_ablestack_target_export_abort "${records}" "${manifest}"
         return "${rc}"
       fi
+      ready=0
+      for _ in $(seq 1 50); do
+        current_pid="$(cat "${pid_file}" 2>/dev/null || true)"
+        if [[ "${current_pid}" =~ ^[0-9]+$ ]] && kill -0 "${current_pid}" 2>/dev/null \
+          && ftctl_dr_ablestack_target_export_reachable "${host}" "${port}" 1; then
+          ready=1
+          break
+        fi
+        sleep 0.1
+      done
+      if [[ "${ready}" != "1" ]]; then
+        ftctl_dr_ablestack_target_export_stop_item "$(printf '{"pidFile":"%s","unitName":"%s"}' "${pid_file}" "${unit_name}")"
+        ftctl_dr_ablestack_target_export_abort "${records}" "${manifest}"
+        return 93
+      fi
     fi
     uri="nbd://${host}:${port}/${name}"
-    python3 - "${records}" "${device}" "${host}" "${port}" "${name}" "${uri}" "${target_path}" "${pid_file}" <<'PY'
+    python3 - "${records}" "${device}" "${host}" "${port}" "${name}" "${uri}" "${target_path}" "${pid_file}" "${unit_name}" <<'PY'
 import json,sys
-record = dict(zip(("device","host","port","name","uri","targetPath","pidFile"), sys.argv[2:]))
+record = dict(zip(("device","host","port","name","uri","targetPath","pidFile","unitName"), sys.argv[2:]))
 record["port"] = int(record["port"])
 with open(sys.argv[1], "a", encoding="utf-8") as fh:
     fh.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
@@ -862,18 +909,13 @@ PY
 }
 
 ftctl_dr_ablestack_target_export_stop() {
-  local plan="${1-}" json="${2-0}" manifest item pid_file pid stopped=0
+  local plan="${1-}" json="${2-0}" manifest item stopped=0
   manifest="$(ftctl_dr_ablestack_export_manifest_path "${plan}")"
   ftctl_dr_ablestack_export_persist_intent "${plan}" "" "STOPPED" "" "" || return $?
   if [[ -f "${manifest}" ]]; then
     while IFS= read -r item; do
-      pid_file="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("pidFile", ""))' "${item}")"
-      pid="$(cat "${pid_file}" 2>/dev/null || true)"
-      if [[ "${pid}" =~ ^[0-9]+$ ]]; then
-        kill "${pid}" >/dev/null 2>&1 || true
-        stopped=$((stopped + 1))
-      fi
-      [[ -z "${pid_file}" ]] || rm -f "${pid_file}"
+      ftctl_dr_ablestack_target_export_stop_item "${item}"
+      stopped=$((stopped + 1))
     done < <(python3 - "${manifest}" <<'PY'
 import json,sys
 with open(sys.argv[1], encoding="utf-8") as fh: data=json.load(fh)

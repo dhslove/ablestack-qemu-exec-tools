@@ -245,3 +245,36 @@ not. FTCTL must therefore separate transport integrity from ownership identity.
 | Revalidation | New sync Run conflicts at the same generation | Same target ownership is idempotently accepted |
 | Ownership guard | Transport digest doubles as ownership identity | Transport SHA and ownership fingerprint have separate roles |
 | Upgrade | Old status has no fingerprint | Exact legacy resource match performs one-way migration |
+
+## 13. Target Export Process Ownership
+
+The durable export intent is not sufficient when reconciliation starts the
+exporter from the periodic `ablestack-vm-ftctl.service`. That unit is oneshot;
+a forked `qemu-nbd` remains in the unit cgroup and is terminated when the
+reconcile invocation exits. A successful command return therefore does not
+prove that the fixed endpoint survived.
+
+For `site-agent-nbd`, every Plan-owned target export runs in a dedicated
+transient systemd service named from the Plan and disk identity. The service:
+
+- executes `qemu-nbd` in the foreground with the existing librbd locator;
+- owns restart-on-failure and stop semantics independently of the reconcile
+  oneshot and Mold Agent process;
+- writes the existing PID file and publishes the unit name in the export
+  manifest;
+- is accepted as ready only after both PID liveness and TCP reachability pass;
+- is stopped through its unit before release, failover, or rollback removes
+  the manifest.
+
+The non-systemd fallback retains the validated forked process behavior for
+test harnesses and minimal environments. This change does not alter VMware
+VDDK, source RBD snapshot selection, NBD attachment ranges, or target VM krbd
+execution. RBD synchronization continues to open the target image through
+`qemu-nbd` and librbd; krbd remains the Cloud/libvirt VM execution path.
+
+| Area | AS-IS | TO-BE |
+| --- | --- | --- |
+| Reconcile ownership | Exporter is a child of the periodic oneshot cgroup | Dedicated transient systemd service owns each Plan/disk exporter |
+| Readiness | Successful launch command is treated as ready | PID and fixed TCP endpoint must both remain reachable |
+| Restart | Intent is retried but the recreated child is killed at oneshot exit | Restart-on-failure service survives reconcile and Agent restarts |
+| Stop | PID-only best effort | Unit stop plus PID fallback, followed by manifest removal |
