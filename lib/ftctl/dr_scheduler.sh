@@ -282,19 +282,56 @@ ftctl_dr_scheduler_run_from_launch() {
   return "${rc}"
 }
 
+ftctl_dr_scheduler_nbd_recovery_tool() {
+  local candidate
+  for candidate in \
+    "${FTCTL_DR_NBD_RECOVERY_TOOL:-}" \
+    "${FTCTL_LIB_BASE:-}/ftctl/dr_vmware_mover.sh" \
+    "/usr/local/lib/ablestack-qemu-exec-tools/ftctl/dr_vmware_mover.sh"; do
+    [[ -n "${candidate}" && -x "${candidate}" ]] || continue
+    printf '%s\n' "${candidate}"
+    return 0
+  done
+  return 65
+}
+
 ftctl_dr_scheduler_recover_nbd_quarantine() {
-  local plan="${1-}" state_path="${2-}" status_path="${3-}" mover rc=0
+  local plan="${1-}" state_path="${2-}" status_path="${3-}" recovery_tool rc=0
   [[ "$(ftctl_dr_runtime_state_get_from_path "${status_path}" "nbd_teardown_state")" == "QUARANTINED" ]] || return 0
-  mover="$(ftctl_dr_vmware_resolve_mover 2>/dev/null || true)"
-  [[ -n "${mover}" ]] || return 65
-  "${mover}" --recover-nbd "${plan}" || rc=$?
-  [[ "${rc}" == "0" ]] || return "${rc}"
+  ftctl_dr_scheduler_update_state "${state_path}" "${status_path}" \
+    "scheduler_recovery_stage=NBD_RECOVERY" \
+    "scheduler_recovery_rc=" \
+    "updated_at=$(ftctl_now_iso8601)" || true
+  recovery_tool="$(ftctl_dr_scheduler_nbd_recovery_tool 2>/dev/null || true)"
+  if [[ -z "${recovery_tool}" ]]; then
+    ftctl_dr_scheduler_update_state "${state_path}" "${status_path}" \
+      "scheduler_recovery_state=FAILED" \
+      "scheduler_recovery_stage=NBD_RECOVERY_TOOL_RESOLUTION" \
+      "scheduler_recovery_rc=65" \
+      "error_code=DR_NBD_RECOVERY_TOOL_UNAVAILABLE" \
+      "error_message=Installed NBD recovery tool is unavailable" \
+      "updated_at=$(ftctl_now_iso8601)" || true
+    return 65
+  fi
+  "${recovery_tool}" --recover-nbd "${plan}" || rc=$?
+  if [[ "${rc}" != "0" ]]; then
+    ftctl_dr_scheduler_update_state "${state_path}" "${status_path}" \
+      "scheduler_recovery_state=FAILED" \
+      "scheduler_recovery_stage=NBD_RECOVERY" \
+      "scheduler_recovery_rc=${rc}" \
+      "error_code=DR_NBD_RECOVERY_FAILED" \
+      "error_message=NBD recovery tool failed with exit code ${rc}" \
+      "updated_at=$(ftctl_now_iso8601)" || true
+    return "${rc}"
+  fi
   ftctl_dr_scheduler_update_state "${state_path}" "${status_path}" \
     "nbd_teardown_state=DRAINED" \
     "nbd_quarantined_device_count=0" \
     "nbd_teardown_error_code=" \
     "nbd_teardown_error_message=" \
     "scheduler_recovery_state=RECOVERING" \
+    "scheduler_recovery_stage=NBD_RECOVERY_COMPLETED" \
+    "scheduler_recovery_rc=0" \
     "error_code=" \
     "error_message=" \
     "updated_at=$(ftctl_now_iso8601)" || true
@@ -342,6 +379,8 @@ ftctl_dr_scheduler_recover() {
     "scheduler_state=RECOVERING" \
     "scheduler_health=RECOVERING" \
     "scheduler_recovery_state=RECOVERING" \
+    "scheduler_recovery_stage=SCHEDULER_LAUNCH" \
+    "scheduler_recovery_rc=" \
     "scheduler_recovery_trigger=${trigger}" \
     "replication_activity=RECOVERING" \
     "protection_state=DEGRADED" \

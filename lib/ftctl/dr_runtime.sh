@@ -4873,6 +4873,7 @@ ftctl_dr_runtime_action() {
         41) error_code="DR_RECOVERY_SUPPRESSED_TARGET" ;;
         42) error_code="DR_RECOVERY_SUPPRESSED_CONTROL_STATE" ;;
         43) error_code="DR_RECOVERY_TRANSITION_ACTIVE" ;;
+        65) error_code="DR_NBD_RECOVERY_TOOL_UNAVAILABLE" ;;
         69) error_code="DR_RECOVERY_UNIT_START_FAILED" ;;
         92) error_code="DR_NBD_TEARDOWN_TIMEOUT" ;;
         93) error_code="DR_NBD_DISCONNECT_FAILED" ;;
@@ -4887,6 +4888,7 @@ ftctl_dr_runtime_action() {
         "progress=100" \
         "accepted=false" \
         "scheduler_recovery_state=FAILED" \
+        "scheduler_recovery_rc=${rc}" \
         "error_code=${error_code}" \
         "updated_at=$(ftctl_now_iso8601)" || true
       [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_state_json "${action}" "error" "${plan}" "${run}" "${run_path}" "0"

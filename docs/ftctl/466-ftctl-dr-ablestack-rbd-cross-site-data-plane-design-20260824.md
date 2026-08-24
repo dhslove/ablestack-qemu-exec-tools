@@ -118,3 +118,27 @@ installed. Full cross-site port and signed-broker probes remain release gates.
 - release with retain/delete resource dispositions;
 - profile tombstone status after process restart;
 - unchanged VMware-to-ABLESTACK contract suite.
+
+## 9. Scheduler Recovery Contract
+
+Cross-site recovery uses the target export as a prerequisite and the source
+scheduler as the operation authority. After the Plan Owner has prepared the
+target export, the source FTCTL performs these steps in order:
+
+1. inspect Plan status for an NBD quarantine;
+2. invoke the installed deterministic NBD recovery tool by an explicit path;
+3. clear quarantine fields only after the tool succeeds;
+4. rewrite the scheduler launch journal with the recovery Run identity;
+5. start the Plan-scoped systemd unit and publish `RECOVERING`.
+
+The recovery tool is shared by VMware and ABLESTACK providers because it owns
+kernel NBD lifecycle, not source-disk semantics. An absent quarantine directory
+is an idempotent success. A failed recovery publishes the failed stage and
+original return code; it never collapses the result into an untyped success.
+
+`dr-status` has two result dimensions. Top-level `result=ok` means the status
+query succeeded. The requested Run is accepted only when `accepted=true`, its
+state is not `ERROR`, `FAILED`, or `REJECTED`, and `error_code` is empty. Agent
+and Cloud tests cover this distinction, target-before-source ordering, missing
+recovery-tool failure, successful scheduler relaunch, and the unchanged
+VMware-to-ABLESTACK baseline contracts.
