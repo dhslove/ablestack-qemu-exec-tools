@@ -625,3 +625,32 @@ change VMware-to-ABLESTACK inventory, transfer, or cutover behavior.
 | Snapshot probe | Unsupported `rbd snap info` always fails | Exact-name lookup in `rbd snap ls --format json` |
 | Cutover | Reverse baseline creation loops at 45% | Baseline becomes `READY`, then promotion continues |
 | Regression scope | Test stub accepts the unsupported command | Test rejects `snap info` and requires `snap ls` |
+
+## 24. Planned Failover Final Checkpoint Canonicalization
+
+A planned Failover that requests a final synchronization has exactly one
+cutover checkpoint authority. After `FAILOVER_FINAL` becomes durable, FTCTL
+must replace the previously selected restore-point reference with the final
+checkpoint reference before guest preparation, cutover-session creation, and
+Cloud commit validation.
+
+The final checkpoint function records both
+`failover_final_checkpoint_sequence` and
+`failover_final_restore_point_ref=ftctl:<plan>:<run>:<sequence>` only after the
+manifest, checkpoint, and restore-point record are durable. The Failover worker
+then uses that immutable reference for every remaining stage. A missing final
+reference is a typed final-checkpoint failure; it must not silently reuse the
+pre-Failover checkpoint.
+
+This rule applies only when planned Failover final synchronization actually
+produced a new checkpoint. Disaster Failover and explicit no-final-sync flows
+retain the existing selected restore point. VMware transfer and ABLESTACK RBD
+transfer algorithms are unchanged.
+
+| Area | AS-IS | TO-BE |
+| --- | --- | --- |
+| Final synchronization | Produces sequence N+1 but leaves the selected reference at N | Publishes one canonical reference for N+1 |
+| Guest preparation | Can carry the stale pre-Failover reference | Uses the final durable reference |
+| Cutover session | `checkpoint_sequence` and `failover_restore_point_sequence` can diverge | Both identify the same final checkpoint |
+| Cloud commit | Rejects with `DR_CUTOVER_CHECKPOINT_MISMATCH` after the VM boots | Validates the immutable final checkpoint and terminalizes |
+| Regression scope | A broad selector change could affect disaster Failover | Override occurs only after successful planned final sync |

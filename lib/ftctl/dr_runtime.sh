@@ -1522,7 +1522,7 @@ ftctl_dr_runtime_reverse_checkpoint() {
 ftctl_dr_runtime_failover_final_checkpoint() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" run_path="${4-}" status_path="${5-}"
   local restore_points_path sequence cycle_type output rc=0 manifest_path checkpoint_path
-  local source_at target_at rpo source_provider target_provider driver now
+  local source_at target_at rpo source_provider target_provider driver now final_restore_point_ref
 
   command -v ftctl_dr_scheduler_run_cycle >/dev/null 2>&1 || return 0
   restore_points_path="$(ftctl_dr_runtime_default_restore_points_path "${plan}" "${status_path}")"
@@ -1556,6 +1556,7 @@ ftctl_dr_runtime_failover_final_checkpoint() {
   target_provider="$(ftctl_dr_scheduler_profile_provider "${profile_file}" target)"
   driver="$(ftctl_dr_scheduler_driver_name "${source_provider}" "${target_provider}")"
   ftctl_dr_scheduler_append_restore_point "${restore_points_path}" "${plan}" "${run}" "${sequence}" "${cycle_type}" "${driver}" "${manifest_path}" "${checkpoint_path}" || return $?
+  final_restore_point_ref="ftctl:${plan}:${run}:${sequence}"
   now="$(ftctl_now_iso8601)"
   ftctl_dr_runtime_path_set "${run_path}" \
     "state=RUNNING" \
@@ -1566,6 +1567,8 @@ ftctl_dr_runtime_failover_final_checkpoint() {
     "checkpoint_sequence=${sequence}" \
     "manifest_path=${manifest_path}" \
     "checkpoint_path=${checkpoint_path}" \
+    "failover_final_checkpoint_sequence=${sequence}" \
+    "failover_final_restore_point_ref=${final_restore_point_ref}" \
     "restore_points_path=${restore_points_path}" \
     "last_source_checkpoint_at=${source_at}" \
     "last_target_durable_at=${target_at}" \
@@ -2589,7 +2592,7 @@ PY
 
 ftctl_dr_runtime_failover_worker() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" restore_point="${4-}" mode="${5-}" run_path="${6-}" status_path="${7-}"
-  local final_sync rc=0 error_code now source_isolation_ack source_isolation_reason source_fence_state
+  local final_sync final_restore_point_ref rc=0 error_code now source_isolation_ack source_isolation_reason source_fence_state
 
   now="$(ftctl_now_iso8601)"
   source_isolation_ack="$(jq -r '.request.sourceIsolationAcknowledged // false' "${profile_file}" 2>/dev/null || echo false)"
@@ -2669,6 +2672,23 @@ ftctl_dr_runtime_failover_worker() {
         "plan=${plan} run=${run} mode=${mode} rc=${rc}"
       return "${rc}"
     fi
+    final_restore_point_ref="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "failover_final_restore_point_ref")"
+    if [[ -z "${final_restore_point_ref}" ]]; then
+      ftctl_dr_runtime_path_set "${run_path}" \
+        "state=ERROR" \
+        "step=final-checkpoint-reference-missing" \
+        "progress=100" \
+        "accepted=false" \
+        "worker_state=FAILED" \
+        "worker_pid=$$" \
+        "worker_exit_code=67" \
+        "error_code=DR_FINAL_CHECKPOINT_REFERENCE_MISSING" \
+        "error_message=The durable final checkpoint reference was not published" \
+        "updated_at=$(ftctl_now_iso8601)" || true
+      cp -f "${run_path}" "${status_path}" 2>/dev/null || true
+      return 67
+    fi
+    restore_point="${final_restore_point_ref}"
   fi
 
   local cutover_workdir direction cutover_checkpoint_sequence
