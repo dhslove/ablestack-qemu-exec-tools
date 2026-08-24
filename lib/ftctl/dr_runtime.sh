@@ -1236,6 +1236,118 @@ PY
   printf '%s\n' "$((current + 1))"
 }
 
+ftctl_dr_runtime_repair_final_checkpoint_selection() {
+  local plan="${1-}" run="${2-}" checkpoint_sequence="${3-}" run_path="${4-}"
+  local status_path="${5-}" session_path="${6-}" active_path="${7-}"
+  local restore_points_path evidence
+  local -a fields=()
+
+  [[ "${checkpoint_sequence}" =~ ^[1-9][0-9]*$ ]] || return 1
+  restore_points_path="$(ftctl_dr_runtime_default_restore_points_path "${plan}" "${status_path}")"
+  [[ -n "${restore_points_path}" && -s "${restore_points_path}" ]] || return 1
+
+  evidence="$(python3 - "${restore_points_path}" "${plan}" "${run}" "${checkpoint_sequence}" \
+    "${session_path}" "${active_path}" <<'PY'
+import json
+import os
+import sys
+import tempfile
+
+restore_points_path, plan, run, sequence_text, session_path, active_path = sys.argv[1:7]
+sequence = int(sequence_text)
+record = None
+with open(restore_points_path, "r", encoding="utf-8") as fh:
+    for line in fh:
+        try:
+            candidate = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        if (str(candidate.get("planUuid") or "") == plan
+                and str(candidate.get("runUuid") or "") == run
+                and candidate.get("checkpointSequence") == sequence
+                and str(candidate.get("cycleType") or "").lower() == "failover-final"
+                and str(candidate.get("state") or "").upper() == "TARGET_READY"):
+            record = candidate
+
+if record is None:
+    raise SystemExit(1)
+checkpoint_path = str(record.get("checkpoint") or "")
+manifest_path = str(record.get("manifest") or "")
+if not checkpoint_path or not manifest_path or not os.path.isfile(checkpoint_path) or not os.path.isfile(manifest_path):
+    raise SystemExit(1)
+with open(checkpoint_path, "r", encoding="utf-8") as fh:
+    checkpoint = json.load(fh)
+if (str(checkpoint.get("planUuid") or "") != plan
+        or str(checkpoint.get("runUuid") or "") != run
+        or checkpoint.get("sequence") != sequence
+        or str(checkpoint.get("state") or "").upper() != "TARGET_READY"
+        or str(checkpoint.get("cycleCommitState") or "").upper() != "LOCAL_DURABLE"
+        or checkpoint.get("targetWritten") is not True
+        or checkpoint.get("writeVerified") is not True
+        or str(checkpoint.get("nbdTeardownState") or "").upper() != "DRAINED"):
+    raise SystemExit(1)
+
+restore_ref = str(record.get("checkpointRef") or f"ftctl:{plan}:{run}:{sequence}")
+restore_point = {
+    "ref": restore_ref,
+    "checkpointSequence": sequence,
+    "manifest": manifest_path,
+    "checkpoint": checkpoint_path,
+    "sourceCheckpointAt": record.get("sourceCheckpointAt") or checkpoint.get("sourceCheckpointAt"),
+    "targetDurableAt": record.get("targetDurableAt") or checkpoint.get("targetDurableAt"),
+    "targetReadyRpoSeconds": record.get("targetReadyRpoSeconds") or checkpoint.get("targetReadyRpoSeconds"),
+}
+
+def update_session(path):
+    if not path or not os.path.isfile(path):
+        return
+    with open(path, "r", encoding="utf-8") as fh:
+        session = json.load(fh)
+    if str(session.get("planUuid") or "") != plan or str(session.get("runUuid") or "") != run:
+        raise SystemExit(1)
+    session["restorePoint"] = restore_point
+    directory = os.path.dirname(path)
+    fd, tmp_path = tempfile.mkstemp(prefix=".failover-final.", dir=directory, text=True)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(session, fh, sort_keys=True, separators=(",", ":"))
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+update_session(session_path)
+update_session(active_path)
+for value in (
+    restore_ref,
+    manifest_path,
+    checkpoint_path,
+    str(restore_point.get("sourceCheckpointAt") or ""),
+    str(restore_point.get("targetDurableAt") or ""),
+    str(restore_point.get("targetReadyRpoSeconds") or ""),
+):
+    print(value)
+PY
+)" || return 1
+  mapfile -t fields <<< "${evidence}"
+  [[ "${#fields[@]}" -ge 6 && -n "${fields[0]}" ]] || return 1
+
+  ftctl_dr_runtime_path_set "${run_path}" \
+    "failover_restore_point_ref=${fields[0]}" \
+    "failover_restore_point_sequence=${checkpoint_sequence}" \
+    "failover_manifest_path=${fields[1]}" \
+    "failover_checkpoint_path=${fields[2]}" \
+    "failover_final_checkpoint_sequence=${checkpoint_sequence}" \
+    "failover_final_restore_point_ref=${fields[0]}" \
+    "last_source_checkpoint_at=${fields[3]}" \
+    "last_target_durable_at=${fields[4]}" \
+    "target_ready_rpo_seconds=${fields[5]}" \
+    "updated_at=$(ftctl_now_iso8601)" || return 1
+}
+
 ftctl_dr_runtime_build_reverse_profile() {
   local plan="${1-}" run="${2-}" source_profile="${3-}" out_profile="${4-}" operation="${5-reverse}"
 
@@ -6055,6 +6167,14 @@ ftctl_dr_runtime_cutover_commit() {
       "DR_CUTOVER_SESSION_MISMATCH" "Cloud cutover session does not match FTCTL runtime" 79
     return 79
   }
+  if [[ "${current_checkpoint}" != "${checkpoint_sequence}" \
+        && "${state}" == "CUTOVER_READY" \
+        && "$(ftctl_dr_runtime_state_get_from_path "${run_path}" "checkpoint_sequence")" == "${checkpoint_sequence}" ]] \
+      && ftctl_dr_runtime_remote_source_transition "$(ftctl_dr_runtime_profile_path "${plan}")" \
+      && ftctl_dr_runtime_repair_final_checkpoint_selection "${plan}" "${run}" "${checkpoint_sequence}" \
+        "${run_path}" "${status_path}" "${session_path}" "${active_path}"; then
+    current_checkpoint="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "failover_restore_point_sequence")"
+  fi
   [[ "${current_checkpoint}" == "${checkpoint_sequence}" ]] || {
     [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_error_json "dr-cutover-commit" "${plan}" "${run}" \
       "DR_CUTOVER_CHECKPOINT_MISMATCH" "Cloud checkpoint does not match FTCTL cutover checkpoint" 79

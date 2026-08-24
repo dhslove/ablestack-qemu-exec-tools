@@ -647,6 +647,14 @@ produced a new checkpoint. Disaster Failover and explicit no-final-sync flows
 retain the existing selected restore point. VMware transfer and ABLESTACK RBD
 transfer algorithms are unchanged.
 
+For an in-flight remote `KVM_TO_KVM` Run created by an older package, commit
+retry may observe `checkpoint_sequence=N+1` while the selected restore point is
+still N. FTCTL may repair this legacy state only when the same Plan and Run own
+a `failover-final` restore-point record for N+1 and its checkpoint proves
+`TARGET_READY`, `LOCAL_DURABLE`, verified target writes, and drained NBD
+endpoints. The repair updates the Run and failover-session evidence together;
+otherwise the mismatch remains a hard failure.
+
 | Area | AS-IS | TO-BE |
 | --- | --- | --- |
 | Final synchronization | Produces sequence N+1 but leaves the selected reference at N | Publishes one canonical reference for N+1 |
@@ -654,3 +662,4 @@ transfer algorithms are unchanged.
 | Cutover session | `checkpoint_sequence` and `failover_restore_point_sequence` can diverge | Both identify the same final checkpoint |
 | Cloud commit | Rejects with `DR_CUTOVER_CHECKPOINT_MISMATCH` after the VM boots | Validates the immutable final checkpoint and terminalizes |
 | Regression scope | A broad selector change could affect disaster Failover | Override occurs only after successful planned final sync |
+| In-flight upgrade | Old Run remains permanently `COMMIT_VERIFYING` | Exact durable same-Run evidence permits idempotent KVM-only repair |

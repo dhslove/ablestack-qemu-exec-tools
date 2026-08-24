@@ -63,3 +63,49 @@ if grep -Fq "${OLD_REF}" "${CAPTURE}"; then
 fi
 
 echo 'ftctl DR Failover final checkpoint smoke: PASS'
+
+REPAIR_DIR="${TMP}/repair"
+REPAIR_RUN_PATH="${REPAIR_DIR}/run.state"
+REPAIR_STATUS_PATH="${REPAIR_DIR}/status.state"
+REPAIR_POINTS="${REPAIR_DIR}/restore-points.jsonl"
+REPAIR_MANIFEST="${REPAIR_DIR}/manifest.json"
+REPAIR_CHECKPOINT="${REPAIR_DIR}/checkpoint.json"
+REPAIR_SESSION="${REPAIR_DIR}/session.json"
+REPAIR_ACTIVE="${REPAIR_DIR}/active.json"
+mkdir -p "${REPAIR_DIR}"
+printf '{}\n' > "${REPAIR_MANIFEST}"
+cat > "${REPAIR_CHECKPOINT}" <<EOF
+{"planUuid":"${PLAN}","runUuid":"${RUN}","sequence":5,"state":"TARGET_READY","cycleCommitState":"LOCAL_DURABLE","targetWritten":true,"writeVerified":true,"nbdTeardownState":"DRAINED","sourceCheckpointAt":"2026-08-25T00:00:01Z","targetDurableAt":"2026-08-25T00:00:02Z","targetReadyRpoSeconds":1}
+EOF
+cat > "${REPAIR_POINTS}" <<EOF
+{"planUuid":"${PLAN}","runUuid":"${RUN}","checkpointSequence":5,"checkpointRef":"${FINAL_REF}","cycleType":"failover-final","state":"TARGET_READY","manifest":"${REPAIR_MANIFEST}","checkpoint":"${REPAIR_CHECKPOINT}"}
+EOF
+printf '{"planUuid":"%s","runUuid":"%s","restorePoint":{"ref":"%s","checkpointSequence":4}}\n' \
+  "${PLAN}" "${RUN}" "${OLD_REF}" > "${REPAIR_SESSION}"
+cp "${REPAIR_SESSION}" "${REPAIR_ACTIVE}"
+printf 'restore_points_path=%s\nfailover_restore_point_sequence=4\n' "${REPAIR_POINTS}" > "${REPAIR_RUN_PATH}"
+cp "${REPAIR_RUN_PATH}" "${REPAIR_STATUS_PATH}"
+
+ftctl_dr_runtime_path_set() {
+  local path="${1-}" item key tmp
+  shift
+  for item in "$@"; do
+    key="${item%%=*}"
+    tmp="${path}.tmp"
+    awk -F= -v key="${key}" '$1 != key' "${path}" > "${tmp}" 2>/dev/null || true
+    printf '%s\n' "${item}" >> "${tmp}"
+    mv "${tmp}" "${path}"
+  done
+}
+ftctl_dr_runtime_default_restore_points_path() { printf '%s\n' "${REPAIR_POINTS}"; }
+
+ftctl_dr_runtime_repair_final_checkpoint_selection "${PLAN}" "${RUN}" 5 \
+  "${REPAIR_RUN_PATH}" "${REPAIR_STATUS_PATH}" "${REPAIR_SESSION}" "${REPAIR_ACTIVE}"
+grep -Fxq "failover_restore_point_ref=${FINAL_REF}" "${REPAIR_RUN_PATH}"
+grep -Fxq 'failover_restore_point_sequence=5' "${REPAIR_RUN_PATH}"
+/usr/bin/jq -e --arg ref "${FINAL_REF}" '.restorePoint.ref == $ref and .restorePoint.checkpointSequence == 5' \
+  "${REPAIR_SESSION}" >/dev/null
+/usr/bin/jq -e --arg ref "${FINAL_REF}" '.restorePoint.ref == $ref and .restorePoint.checkpointSequence == 5' \
+  "${REPAIR_ACTIVE}" >/dev/null
+
+echo 'ftctl DR legacy final checkpoint repair smoke: PASS'
