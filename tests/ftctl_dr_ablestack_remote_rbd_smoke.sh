@@ -190,6 +190,18 @@ persist_dir="$(ftctl_dr_ablestack_export_persist_dir plan-persist)"
 [[ "$(jq -r '.desiredState' "${persist_dir}/intent.json")" == "RUNNING" ]]
 [[ "$(jq -r '.runUuid' "${persist_dir}/intent.json")" == "run-persist" ]]
 [[ "$(jq -r '.exports[0].port' "${persist_dir}/exports.json")" == "12032" ]]
+resolved_persisted_profile=""
+ftctl_dr_ablestack_target_export_resolve_profile plan-persist "" resolved_persisted_profile
+[[ "${resolved_persisted_profile}" == "${persist_dir}/profile.json" ]]
+resolved_requested_profile=""
+ftctl_dr_ablestack_target_export_resolve_profile plan-persist "${site_agent_profile}" resolved_requested_profile
+[[ "${resolved_requested_profile}" == "${site_agent_profile}" ]]
+if ftctl_dr_ablestack_target_export_resolve_profile missing-plan "" resolved_missing_profile; then
+  echo "missing Plan-owned export profile was accepted" >&2
+  exit 1
+else
+  [[ "$?" == "2" ]]
+fi
 
 ftctl_dr_ablestack_local_port_in_use() { return 1; }
 selected_port=""

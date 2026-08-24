@@ -788,11 +788,22 @@ ftctl_dr_ablestack_target_export_abort() {
   rm -f "${records}" "${manifest}" "${manifest}.tmp"
 }
 
+ftctl_dr_ablestack_target_export_resolve_profile() {
+  local plan="${1-}" requested="${2-}" out_var="${3-}" candidate
+  candidate="${requested}"
+  if [[ -z "${candidate}" || ! -f "${candidate}" ]]; then
+    candidate="$(ftctl_dr_ablestack_export_persist_profile_path "${plan}")"
+  fi
+  [[ -n "${out_var}" && -f "${candidate}" ]] || return 2
+  printf -v "${out_var}" '%s' "${candidate}"
+}
+
 ftctl_dr_ablestack_target_export_start() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" json="${4-0}"
   local disk_map manifest host count disk_json device target_path target_type size_bytes target_format spec uri
   local port name pid_file current_pid unit_name out="" err="" rc=0 records ready
-  [[ -n "${plan}" && -n "${run}" && -f "${profile_file}" ]] || return 2
+  [[ -n "${plan}" && -n "${run}" ]] || return 2
+  ftctl_dr_ablestack_target_export_resolve_profile "${plan}" "${profile_file}" profile_file || return $?
   disk_map="$(ftctl_dr_ablestack_disk_map_path "${plan}")"
   ftctl_dr_ablestack_canonicalize_profile "${profile_file}" "${disk_map}" || return $?
   host="$(ftctl_dr_ablestack_json_field "${disk_map}" transport.targetHostAddress 2>/dev/null || true)"

@@ -281,10 +281,11 @@ execution. RBD synchronization continues to open the target image through
 
 ## 14. Plan-Owner Checkpoint Evidence For Target-Side Transitions
 
-`KVM_TO_KVM` replication runs on the remote source worker, while test failover
-and failover must execute on the target worker that owns the replica RBD and VM.
-The source worker therefore owns the canonical `restore-points.jsonl`; the
-target worker is not required to duplicate that source-local journal.
+`KVM_TO_KVM` replication and production failover final-delta transfer run on
+the remote source worker. Test failover executes on the target worker because
+it owns the replica RBD artifact. The source worker therefore owns the
+canonical `restore-points.jsonl` and the production cutover engine session;
+the target worker is not required to duplicate that source-local journal.
 
 For these target-side transitions Cloud sends a versioned controller
 checkpoint envelope selected from the latest `READY` `dr_restore_point`. The
@@ -314,8 +315,9 @@ Cloud also sends `schedulerTransitionScope=REMOTE_SOURCE` for a remote
 resume a scheduler on the target coordinator. Their target RBD snapshot/clone
 operation is atomic, while the source-site scheduler remains the sole writer
 authority. Production failover remains a separate Plan-Owner orchestration:
-Cloud must pause and confirm the remote source scheduler before stopping the
-target export and promoting the target VM.
+The target export stays reachable while remote source FTCTL writes and durably
+records the final delta. Cloud then pauses the source scheduler, stops the
+source VM, drains the target export, and promotes the target VM.
 
 ### 14.1 AS-IS / TO-BE
 
@@ -323,7 +325,7 @@ target export and promoting the target VM.
 | --- | --- | --- |
 | Checkpoint location | Source worker journal is searched on the target coordinator | Local journal first; validated Plan Owner envelope for remote KVM source |
 | Test failover | Exact Cloud selector fails with exit 44 on target host | Selector, controller evidence, and artifact contract are cross-checked |
-| Failover | Repeats the same source-local journal dependency | Uses the same versioned checkpoint evidence without cloning source metadata |
+| Failover | Target worker cannot read the source RBD or canonical journal | Remote source owns final delta and cutover session; Cloud supplies immutable checkpoint evidence |
 | Safety scope | A generic fallback could affect VMware | Fallback is explicitly limited to `KVM_TO_KVM` |
 | Data authority | Missing local metadata appears to mean missing replica data | Cloud proves the durable Cycle; target FTCTL still verifies target artifacts |
 | Test scheduler ownership | Target transition may create a duplicate local scheduler | Remote source remains the only scheduler; target performs artifact operations only |
@@ -348,7 +350,7 @@ For that scope FTCTL performs only the engine half of cutover:
 5. publish `FAILED_OVER / TARGET` only after Cloud reports the source fence,
    target VM power, boot validation, and matching manifest hash.
 
-The target runtime also persists `target_vm_id` and `target_external_ref` from
+The remote source runtime also persists `target_vm_id` and `target_external_ref` from
 the profile so the commit cannot be redirected to another replica. Planned
 failover requires `VERIFIED / POWERED_OFF`; disaster failover accepts only the
 existing explicit `ACKNOWLEDGED / UNKNOWN|UNREACHABLE` contract. Test failover
@@ -363,3 +365,36 @@ never enters this barrier and keeps the source scheduler running.
 | Target identity | Commit may lack target VM identity in runtime | VM ID and external reference are immutable commit inputs |
 | Authority | Engine state can precede Cloud VM lifecycle | Cloud source fence and target boot evidence precede final engine authority |
 | Regression boundary | Shared KVM behavior could change | Branch is exact `KVM_TO_KVM + REMOTE_SOURCE`; VMware and local KVM are unchanged |
+
+## 16. Target Export Cutover Drain And Abort Resume
+
+The target export is a transport endpoint, not the target VM's execution
+device. It must remain `RUNNING` through the final delta and must be stopped
+before Cloud starts the target VM. The Plan Owner therefore uses the following
+contract:
+
+1. `dr-target-export-start` persists a redacted canonical profile and fixed
+   endpoint intent on the target worker;
+2. remote source `dr-failover` uses those endpoints until it publishes durable
+   `CUTOVER_READY`;
+3. Cloud invokes `dr-target-export-stop` only after source isolation and before
+   target VM power-on;
+4. if promotion is aborted, Cloud invokes `dr-target-export-start` without a
+   transient profile; FTCTL restores the persisted profile and the same fixed
+   endpoints before source scheduling resumes;
+5. successful cutover leaves export desired state `STOPPED`, preventing
+   qemu-nbd and the target VM from writing the same RBD concurrently.
+
+The persisted-profile fallback is accepted only for an existing Plan-owned
+target export record. It does not synthesize storage mappings and does not
+apply to VMware or local KVM paths.
+
+### 16.1 AS-IS / TO-BE
+
+| Area | AS-IS | TO-BE |
+| --- | --- | --- |
+| Final transfer | Export is stopped before remote final delta | Export remains reachable through durable `CUTOVER_READY` |
+| VM start barrier | Export and target VM ownership can overlap or be ordered incorrectly | Export stop is a required pre-power-on barrier |
+| Abort recovery | Stop loses the immediate restart input | Start reloads the persisted redacted profile and fixed endpoint intent |
+| Scheduler recovery | Source may resume against a closed export | Export restore succeeds before remote scheduler resume |
+| Existing paths | Shared changes could alter VMware behavior | Fallback is target-export-specific and remote `KVM_TO_KVM` gated by Cloud |
