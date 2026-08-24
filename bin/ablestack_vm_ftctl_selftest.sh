@@ -6416,7 +6416,7 @@ selftest_case_dr_target_materialization_manifest_v2() {
   selftest_reset_env
   selftest_info "FTCTL_DR target materialization manifest v2 ownership contract"
 
-  local plan="plan-materialization-v2" run="run-materialization-v2"
+  local plan="plan-materialization-v2" run="run-materialization-v2" retry_run="run-materialization-retry"
   local profile="${SELFTEST_ROOT}/dr-materialization-profile.json"
   local volume_map manifest digest out status rc=0
   cat > "${profile}" <<JSON
@@ -6451,7 +6451,18 @@ JSON
   selftest_assert_file_contains "${status}" "materialization_replica_id=41"
   selftest_assert_file_contains "${status}" "materialization_ownership_generation=2"
   selftest_assert_file_contains "${status}" "materialization_spec_sha256=${digest}"
+  selftest_assert_file_contains "${status}" "materialization_ownership_fingerprint_sha256="
   selftest_assert_file_contains "${status}" "materialization_observed_power_state=POWERED_OFF"
+
+  manifest="{\"contractVersion\":2,\"planUuid\":\"${plan}\",\"runUuid\":\"${retry_run}\",\"replicaId\":41,\"ownershipGeneration\":2,\"targetVm\":{\"vmId\":\"301\",\"externalRef\":\"i-2-301-VM\",\"observedPowerState\":\"POWERED_ON\"},\"targetVolumeMap\":${volume_map}}"
+  digest="$(printf '%s' "${manifest}" | sha256sum | awk '{print $1}')"
+  out="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-target-materialized \
+    --config "${SELFTEST_CONFIG}" --plan "${plan}" --run "${retry_run}" \
+    --target-vm-id 301 --target-external-ref i-2-301-VM \
+    --target-volume-map-json "${volume_map}" \
+    --materialization-spec-json "${manifest}" \
+    --materialization-spec-sha256 "${digest}" --json)"
+  selftest_assert_contains "${out}" '"result":"ok"' "same ownership accepts a new run and power observation"
 
   manifest="{\"contractVersion\":2,\"planUuid\":\"${plan}\",\"runUuid\":\"${run}\",\"replicaId\":41,\"ownershipGeneration\":1,\"targetVm\":{\"vmId\":\"301\",\"externalRef\":\"i-2-301-VM\",\"observedPowerState\":\"POWERED_OFF\"},\"targetVolumeMap\":${volume_map}}"
   digest="$(printf '%s' "${manifest}" | sha256sum | awk '{print $1}')"
@@ -6466,14 +6477,16 @@ JSON
 
   rc=0
   volume_map='{"disks":[{"diskIndex":0,"targetVolumeId":"999","targetDiskRef":"rbd/foreign-volume"}]}'
+  manifest="{\"contractVersion\":2,\"planUuid\":\"${plan}\",\"runUuid\":\"${run}\",\"replicaId\":41,\"ownershipGeneration\":2,\"targetVm\":{\"vmId\":\"301\",\"externalRef\":\"i-2-301-VM\",\"observedPowerState\":\"POWERED_OFF\"},\"targetVolumeMap\":${volume_map}}"
+  digest="$(printf '%s' "${manifest}" | sha256sum | awk '{print $1}')"
   out="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-target-materialized \
     --config "${SELFTEST_CONFIG}" --plan "${plan}" --run "${run}" \
     --target-vm-id 301 --target-external-ref i-2-301-VM \
     --target-volume-map-json "${volume_map}" \
     --materialization-spec-json "${manifest}" \
     --materialization-spec-sha256 "${digest}" --json 2>/dev/null)" || rc=$?
-  selftest_assert_eq "${rc}" "81" "disk ownership mismatch exit"
-  selftest_assert_contains "${out}" '"error_code":"DR_MATERIALIZATION_DISK_MAP_MISMATCH"' "disk ownership mismatch is typed"
+  selftest_assert_eq "${rc}" "79" "same-generation ownership conflict exit"
+  selftest_assert_contains "${out}" '"error_code":"DR_MATERIALIZATION_GENERATION_CONFLICT"' "same-generation target change is typed"
 }
 
 selftest_case_dr_runtime_control_actions() {

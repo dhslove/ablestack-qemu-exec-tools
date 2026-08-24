@@ -219,3 +219,29 @@ previously validated VMware-to-ABLESTACK action contracts remain unchanged.
 | Incremental cleanup | NBD devices are disconnected but teardown evidence is omitted | Disconnect completion is published as `DRAINED` with device counts and timestamps |
 | Cloud projection | Strict validator returns `DR_STATUS_CYCLE_EVIDENCE_INCOMPLETE` | The unchanged validator accepts complete ABLESTACK evidence and projects `READY` |
 | Regression scope | Transfer success can pass without status-contract coverage | Full seed, incremental, and zero-device transport tests assert canonical terminal evidence |
+
+## 12. Repeated Target Materialization Ownership Identity
+
+Cloud may revalidate an already materialized target for a later sync Run. The
+signed materialization manifest contains the current `runUuid` and observed VM
+power state, so its transport SHA changes even when the owned VM and disks do
+not. FTCTL must therefore separate transport integrity from ownership identity.
+
+- `materialization_spec_sha256` validates the exact manifest received for the
+  current Run.
+- `materialization_ownership_fingerprint_sha256` is calculated from contract
+  version, plan UUID, replica ID, ownership generation, target VM ID/external
+  reference, and the canonical target disk map.
+- A new Run UUID or changed observed power state is accepted at the same
+  ownership generation when the ownership fingerprint is unchanged.
+- A VM, replica, or disk-map change at the same generation is rejected with
+  `DR_MATERIALIZATION_GENERATION_CONFLICT`.
+- A status written before this field was introduced is migrated only when the
+  stored replica, VM, external reference, and disk-map digest all match.
+
+| Area | AS-IS | TO-BE |
+| --- | --- | --- |
+| Retry identity | Full manifest SHA includes Run UUID | Stable ownership fingerprint excludes Run and observation fields |
+| Revalidation | New sync Run conflicts at the same generation | Same target ownership is idempotently accepted |
+| Ownership guard | Transport digest doubles as ownership identity | Transport SHA and ownership fingerprint have separate roles |
+| Upgrade | Old status has no fingerprint | Exact legacy resource match performs one-way migration |

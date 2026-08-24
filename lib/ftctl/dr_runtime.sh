@@ -5408,7 +5408,9 @@ ftctl_dr_runtime_target_materialized() {
   local plan="${1-}" run="${2-}" target_vm_id="${3-}" target_external_ref="${4-}" target_vm_name="${5-}" target_network_id="${6-}"
   local target_volume_map_json="${7-}" target_ready_rpo_seconds="${8-}" materialization_spec_json="${9-}"
   local materialization_spec_sha256="${10-}" json="${11-0}"
-  local run_path status_path now updates validation generation observed_power_state disk_digest replica_id previous_generation previous_digest rc
+  local run_path status_path now updates validation generation observed_power_state disk_digest replica_id ownership_fingerprint
+  local previous_generation previous_digest previous_ownership_fingerprint previous_replica_id previous_target_vm_id
+  local previous_target_external_ref previous_disk_digest legacy_ownership_matches rc
 
   ftctl_dr_runtime_require_plan "${plan}" || return 2
   ftctl_dr_runtime_require_run "${run}" || return 2
@@ -5466,7 +5468,21 @@ for disk in spec_disks:
         print("DR_MATERIALIZATION_DISK_MAP_MISMATCH")
         raise SystemExit(81)
 disk_digest = hashlib.sha256(json.dumps(spec_disks, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
-print(f"OK\t{generation}\t{supplied_hash.lower()}\t{power}\t{disk_digest}\t{replica_id}")
+ownership = {
+    "contractVersion": spec.get("contractVersion"),
+    "planUuid": spec.get("planUuid"),
+    "replicaId": replica_id,
+    "ownershipGeneration": generation,
+    "targetVm": {
+        "vmId": str(target.get("vmId", "")),
+        "externalRef": str(target.get("externalRef", "")),
+    },
+    "targetVolumeMap": {"disks": spec_disks},
+}
+ownership_fingerprint = hashlib.sha256(
+    json.dumps(ownership, sort_keys=True, separators=(",", ":")).encode("utf-8")
+).hexdigest()
+print(f"OK\t{generation}\t{supplied_hash.lower()}\t{power}\t{disk_digest}\t{replica_id}\t{ownership_fingerprint}")
 PY
   )" || rc=$?
   rc="${rc:-0}"
@@ -5475,21 +5491,44 @@ PY
       "${validation:-DR_MATERIALIZATION_CONTRACT_INVALID}" "materialization contract v2 validation failed" "${rc}"
     return "${rc}"
   fi
-  IFS=$'\t' read -r _ generation materialization_spec_sha256 observed_power_state disk_digest replica_id <<<"${validation}"
+  IFS=$'\t' read -r _ generation materialization_spec_sha256 observed_power_state disk_digest replica_id ownership_fingerprint <<<"${validation}"
 
   ftctl_dr_runtime_ensure_plan_dirs "${plan}"
   run_path="$(ftctl_dr_runtime_run_path "${plan}" "${run}")"
   status_path="$(ftctl_dr_runtime_status_path "${plan}")"
   previous_generation="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "materialization_ownership_generation" 2>/dev/null || true)"
   previous_digest="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "materialization_spec_sha256" 2>/dev/null || true)"
+  previous_ownership_fingerprint="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "materialization_ownership_fingerprint_sha256" 2>/dev/null || true)"
+  previous_replica_id="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "materialization_replica_id" 2>/dev/null || true)"
+  previous_target_vm_id="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "target_vm_id" 2>/dev/null || true)"
+  previous_target_external_ref="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "target_external_ref" 2>/dev/null || true)"
+  previous_disk_digest="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "materialization_disk_map_sha256" 2>/dev/null || true)"
   if [[ "${previous_generation}" =~ ^[0-9]+$ ]] && (( generation < previous_generation )); then
     [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_error_json "dr-target-materialized" "${plan}" "${run}" \
       "DR_MATERIALIZATION_STALE_GENERATION" "materialization ownership generation is stale" 79
     return 79
   fi
-  if [[ "${previous_generation}" == "${generation}" && -n "${previous_digest}" && "${previous_digest}" != "${materialization_spec_sha256}" ]]; then
+  legacy_ownership_matches=false
+  if [[ -z "${previous_ownership_fingerprint}" && -n "${previous_digest}" \
+      && "${previous_replica_id}" == "${replica_id}" \
+      && "${previous_target_vm_id}" == "${target_vm_id}" \
+      && "${previous_target_external_ref}" == "${target_external_ref}" \
+      && "${previous_disk_digest}" == "${disk_digest}" ]]; then
+    legacy_ownership_matches=true
+  fi
+  if [[ "${previous_generation}" == "${generation}" \
+      && -n "${previous_ownership_fingerprint}" \
+      && "${previous_ownership_fingerprint}" != "${ownership_fingerprint}" ]]; then
     [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_error_json "dr-target-materialized" "${plan}" "${run}" \
-      "DR_MATERIALIZATION_GENERATION_CONFLICT" "materialization digest changed without generation advance" 79
+      "DR_MATERIALIZATION_GENERATION_CONFLICT" "materialization ownership changed without generation advance" 79
+    return 79
+  fi
+  if [[ "${previous_generation}" == "${generation}" && -n "${previous_digest}" \
+      && -z "${previous_ownership_fingerprint}" \
+      && "${legacy_ownership_matches}" != "true" \
+      && "${previous_digest}" != "${materialization_spec_sha256}" ]]; then
+    [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_error_json "dr-target-materialized" "${plan}" "${run}" \
+      "DR_MATERIALIZATION_GENERATION_CONFLICT" "materialization ownership changed without generation advance" 79
     return 79
   fi
   if [[ ! -f "${run_path}" ]]; then
@@ -5521,6 +5560,7 @@ PY
     "materialization_replica_id=${replica_id}"
     "materialization_ownership_generation=${generation}"
     "materialization_spec_sha256=${materialization_spec_sha256}"
+    "materialization_ownership_fingerprint_sha256=${ownership_fingerprint}"
     "materialization_disk_map_sha256=${disk_digest}"
     "materialization_observed_power_state=${observed_power_state}"
     "worker_state=SUCCEEDED"
