@@ -312,6 +312,7 @@ source = obj(profile.get("source"))
 target = obj(profile.get("target"))
 mapping = obj(profile.get("mapping"))
 mapping_target = obj(mapping.get("target"))
+transport = obj(profile.get("transport"))
 
 disk_items = []
 for key in ("disks", "diskMappings", "volumes", "volumeMappings"):
@@ -346,6 +347,11 @@ out = {
     "targetProvider": str(target.get("provider", "")).upper(),
     "sourceDriver": source.get("driver", ""),
     "targetDriver": target.get("driver", ""),
+    "source": {
+        "externalRef": first_str(source.get("externalRef"), source.get("vmUuid"), source.get("vmId")),
+        "instanceName": first_str(source.get("instanceName"), obj(source.get("hardware")).get("instanceName")),
+        "hostUuid": first_str(source.get("hostUuid"), obj(source.get("hardware")).get("sourceHostUuid")),
+    },
     "target": {
         "siteId": first_str(target.get("siteId"), mapping_target.get("siteId")),
         "siteUuid": first_str(target.get("siteUuid"), mapping_target.get("siteUuid")),
@@ -355,6 +361,17 @@ out = {
         "storageRef": first_str(target.get("storageRef"), target.get("storagePoolId"), mapping_target.get("storageRef"), mapping_target.get("storagePoolId"), mapping.get("targetStorageRef"), mapping.get("targetDatastoreRef")),
         "serviceOfferingId": first_str(target.get("serviceOfferingId"), mapping_target.get("serviceOfferingId"), mapping.get("targetComputeRef")),
         "networks": first_networks(target.get("networks"), mapping_target.get("networks")),
+    },
+    "transport": {
+        "mode": first_str(transport.get("mode"), "local"),
+        "targetHostUuid": first_str(transport.get("targetHostUuid")),
+        "targetHostAddress": first_str(transport.get("targetHostAddress")),
+        "secondaryUri": first_str(transport.get("secondaryUri")),
+        "sshUser": first_str(transport.get("sshUser"), "root"),
+        "sshPort": first_str(transport.get("sshPort"), "22"),
+        "sshKeyFile": first_str(transport.get("sshKeyFile")),
+        "remoteNbdExportAddress": first_str(transport.get("remoteNbdExportAddress"), transport.get("targetHostAddress")),
+        "targetStorageScope": first_str(transport.get("targetStorageScope"), "secondary-local"),
     },
     "requiresDiskMap": len(disks) == 0,
     "count": len(disks),
@@ -520,6 +537,69 @@ except Exception:
 value = disk.get(sys.argv[2], "")
 print("" if value is None else str(value))
 PY
+}
+
+ftctl_dr_ablestack_json_field() {
+  local json_path="${1-}" field_path="${2-}"
+  [[ -f "${json_path}" && -n "${field_path}" ]] || return 1
+  python3 - "${json_path}" "${field_path}" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    value = json.load(fh)
+for key in sys.argv[2].split("."):
+    value = value.get(key) if isinstance(value, dict) else None
+    if value is None:
+        break
+print("" if value is None else str(value))
+PY
+}
+
+ftctl_dr_ablestack_remote_transport_load() {
+  local disk_map="${1-}" mode host port
+  mode="$(ftctl_dr_ablestack_json_field "${disk_map}" transport.mode 2>/dev/null || true)"
+  [[ "${mode}" == "remote-nbd" ]] || return 1
+  host="$(ftctl_dr_ablestack_json_field "${disk_map}" transport.targetHostAddress 2>/dev/null || true)"
+  port="$(ftctl_dr_ablestack_json_field "${disk_map}" transport.sshPort 2>/dev/null || true)"
+  [[ -n "${host}" ]] || return 2
+  FTCTL_PROFILE_BACKEND_MODE="remote-nbd"
+  FTCTL_PROFILE_PROVISIONING_BACKEND="cloud-managed"
+  FTCTL_PROFILE_TARGET_STORAGE_SCOPE="secondary-local"
+  FTCTL_PROFILE_SECONDARY_URI="$(ftctl_dr_ablestack_json_field "${disk_map}" transport.secondaryUri)"
+  FTCTL_PROFILE_SECONDARY_SSH_KEY_FILE="$(ftctl_dr_ablestack_json_field "${disk_map}" transport.sshKeyFile)"
+  FTCTL_PROFILE_REMOTE_NBD_EXPORT_ADDR="$(ftctl_dr_ablestack_json_field "${disk_map}" transport.remoteNbdExportAddress)"
+  FTCTL_PROFILE_FENCING_SSH_USER="$(ftctl_dr_ablestack_json_field "${disk_map}" transport.sshUser)"
+  FTCTL_PROFILE_REMOTE_NBD_EXPORT_PORT="auto"
+  FTCTL_PROFILE_REMOTE_NBD_EXPORT_NAME="dr-rbd"
+  FTCTL_PROFILE_SECONDARY_TARGET_DIR="/dev/rbd"
+  [[ "${port}" == "22" || -z "${port}" ]] || FTCTL_PROFILE_SECONDARY_URI="qemu+ssh://${FTCTL_PROFILE_FENCING_SSH_USER}@${host}:${port}/system"
+  return 0
+}
+
+ftctl_dr_ablestack_remote_rbd_path() {
+  local target_path="${1-}" out_var="${2}" spec=""
+  ftctl_dr_ablestack_rbd_spec_from_path "${target_path}" spec || return 1
+  printf -v "${out_var}" '/dev/rbd/%s' "${spec}"
+}
+
+ftctl_dr_ablestack_remote_nbd_stop() {
+  local vm="${1-}" device="${2-}" port="${3-}" host="" user="" out="" err="" rc=0 pid_file=""
+  ftctl_blockcopy_remote_target_host_user host user || return 2
+  pid_file="/run/ablestack-vm-ftctl/nbd-${vm}-${device}.pid"
+  ftctl_blockcopy_remote_exec "${host}" "${user}" out err rc "$(cat <<EOF
+set -euo pipefail
+if [[ -f '${pid_file}' ]]; then
+  pid=\$(cat '${pid_file}' 2>/dev/null || true)
+  [[ -z \"\${pid}\" ]] || kill \"\${pid}\" >/dev/null 2>&1 || true
+  rm -f '${pid_file}'
+fi
+for pid in \$(ss -lntp | awk '/:${port}[[:space:]]/ {while (match(\$0,/pid=[0-9]+/)){print substr(\$0,RSTART+4,RLENGTH-4);\$0=substr(\$0,RSTART+RLENGTH)}}' | sort -u); do
+  kill \"\${pid}\" >/dev/null 2>&1 || true
+done
+EOF
+)" || true
+  [[ "${rc}" == "0" ]]
 }
 
 ftctl_dr_ablestack_append_disk_record() {
@@ -781,9 +861,12 @@ PY
 ftctl_dr_ablestack_prepare_targets() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" disk_map="${4-}" manifest_path="${5-}" checkpoint_path="${6-}"
   local records_path count disk_json device source_path target_path source_format target_format size_bytes source_type target_type resolved_size
-  local source_at
+  local source_at remote_transport="0"
 
   ftctl_dr_ablestack_canonicalize_profile "${profile_file}" "${disk_map}" || return $?
+  if ftctl_dr_ablestack_remote_transport_load "${disk_map}"; then
+    remote_transport="1"
+  fi
   count="$(ftctl_dr_ablestack_disk_count "${disk_map}")" || return $?
   if [[ "${count}" == "0" ]]; then
     ftctl_log_event "dr-runtime" "dr.ablestack.disk_map" "warn" "" "" \
@@ -821,7 +904,8 @@ ftctl_dr_ablestack_prepare_targets() {
         "plan=${plan} run=${run} device=${device} source=${source_path} explicit_size=${size_bytes:-0}"
       return 33
     fi
-    if ! ftctl_dr_ablestack_prepare_target "${target_path}" "${target_format}" "${resolved_size}" "${target_type}"; then
+    if [[ "${remote_transport}" != "1" ]] &&
+       ! ftctl_dr_ablestack_prepare_target "${target_path}" "${target_format}" "${resolved_size}" "${target_type}"; then
       ftctl_log_event "dr-runtime" "dr.ablestack.target_prepare" "fail" "" "34" \
         "plan=${plan} run=${run} device=${device} target=${target_path} target_type=${target_type} size=${resolved_size}"
       return 34
@@ -834,15 +918,21 @@ ftctl_dr_ablestack_prepare_targets() {
   source_at="$(ftctl_now_iso8601)"
   ftctl_dr_ablestack_write_checkpoint "${disk_map}" "${manifest_path}" "${checkpoint_path}" "TARGET_PREPARED" "${source_at}" "" "" || return $?
   ftctl_log_event "dr-runtime" "dr.ablestack.targets_prepared" "ok" "" "" \
-    "plan=${plan} run=${run} disks=${count} manifest=${manifest_path}"
+    "plan=${plan} run=${run} disks=${count} manifest=${manifest_path} remote_transport=${remote_transport}"
 }
 
 ftctl_dr_ablestack_full_seed_once() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" disk_map="${4-}" manifest_path="${5-}" checkpoint_path="${6-}"
   local disk_json device source_path target_path source_format target_format size_bytes source_type target_type resolved_size target_uri
   local out="" err="" rc=0 source_at target_at source_epoch target_epoch rpo="0"
+  local remote_transport="0" remote_path="" export_name="" export_port="" vm_name=""
 
   ftctl_dr_ablestack_prepare_targets "${plan}" "${run}" "${profile_file}" "${disk_map}" "${manifest_path}" "${checkpoint_path}" || return $?
+  if ftctl_dr_ablestack_remote_transport_load "${disk_map}"; then
+    remote_transport="1"
+  fi
+  vm_name="$(ftctl_dr_ablestack_json_field "${disk_map}" source.instanceName 2>/dev/null || true)"
+  [[ -n "${vm_name}" ]] || vm_name="dr-${plan}"
   source_at="$(ftctl_now_iso8601)"
   while IFS= read -r disk_json; do
     device="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" device)"
@@ -859,7 +949,17 @@ ftctl_dr_ablestack_full_seed_once() {
     [[ -n "${target_format}" ]] || target_format="${source_format}"
     resolved_size=""
     ftctl_dr_ablestack_source_size_bytes "${device}" "${source_path}" "" resolved_size || return $?
-    ftctl_dr_ablestack_target_uri_for_qemu "${target_path}" target_uri
+    if [[ "${remote_transport}" == "1" ]]; then
+      ftctl_dr_ablestack_remote_rbd_path "${target_path}" remote_path || return 35
+      FTCTL_PROFILE_DISK_MAP="${device}=${remote_path}"
+      export_name="dr-${plan//[^A-Za-z0-9]/}-${device}"
+      ftctl_blockcopy_remote_nbd_pick_port "${vm_name}" "${device}" export_port || return $?
+      ftctl_blockcopy_remote_nbd_prepare_target "${vm_name}" "${device}" "${source_path}" \
+        "${source_format}" "${remote_path}" "${export_name}" "${export_port}" || return $?
+      target_uri="$(ftctl_blockcopy_remote_nbd_uri "${FTCTL_PROFILE_REMOTE_NBD_EXPORT_ADDR}" "${export_port}" "${export_name}")"
+    else
+      ftctl_dr_ablestack_target_uri_for_qemu "${target_path}" target_uri
+    fi
     out=""
     err=""
     rc=0
@@ -867,6 +967,9 @@ ftctl_dr_ablestack_full_seed_once() {
       qemu-img convert --force-share -p -n -S "${FTCTL_THIN_SPARSE_SIZE:-4k}" \
       -f "${source_format}" -O "${target_format}" "${source_path}" "${target_uri}" || true
     : "${out}${err}${resolved_size}"
+    if [[ "${remote_transport}" == "1" ]]; then
+      ftctl_dr_ablestack_remote_nbd_stop "${vm_name}" "${device}" "${export_port}" || true
+    fi
     [[ "${rc}" == "0" ]] || return "${rc}"
   done < <(ftctl_dr_ablestack_disk_rows "${disk_map}")
 
@@ -878,8 +981,104 @@ ftctl_dr_ablestack_full_seed_once() {
   fi
   ftctl_dr_ablestack_write_manifest "${disk_map}" "${manifest_path}.records.jsonl" "${manifest_path}" "full-seed-complete" || return $?
   ftctl_dr_ablestack_write_checkpoint "${disk_map}" "${manifest_path}" "${checkpoint_path}" "TARGET_READY" "${source_at}" "${target_at}" "${rpo}" || return $?
+  if [[ "${remote_transport}" == "1" ]]; then
+    ftctl_dr_ablestack_initialize_baselines "${plan}" "${run}" "${disk_map}" || return $?
+  fi
   ftctl_log_event "dr-runtime" "dr.ablestack.full_seed" "ok" "" "" \
     "plan=${plan} run=${run} checkpoint=${checkpoint_path} rpo=${rpo}"
+}
+
+ftctl_dr_ablestack_baseline_path() {
+  local plan="${1-}" device="${2-}"
+  printf '%s/baseline-%s.snap\n' "$(ftctl_dr_ablestack_checkpoint_dir "${plan}")" "$(ftctl_dr_runtime_key "${device}")"
+}
+
+ftctl_dr_ablestack_snapshot_name() {
+  local plan="${1-}" sequence="${2-}"
+  printf 'ftctl-dr-%s-%s\n' "$(printf '%s' "${plan}" | cksum | awk '{print $1}')" "${sequence:-0}"
+}
+
+ftctl_dr_ablestack_remote_rbd_command() {
+  local command_text="${1-}" out_var="${2}" err_var="${3}" rc_var="${4}" host="" user=""
+  ftctl_blockcopy_remote_target_host_user host user || return 2
+  ftctl_blockcopy_remote_exec "${host}" "${user}" "${out_var}" "${err_var}" "${rc_var}" "${command_text}" || true
+}
+
+ftctl_dr_ablestack_reset_baseline_snapshot() {
+  local source_spec="${1-}" target_spec="${2-}" snap="${3-}" out="" err="" rc=0
+  [[ -n "${source_spec}" && -n "${target_spec}" && -n "${snap}" ]] || return 2
+  rbd snap rm "${source_spec}@${snap}" >/dev/null 2>&1 || true
+  ftctl_dr_ablestack_remote_rbd_command \
+    "rbd snap rm '${target_spec}@${snap}' >/dev/null 2>&1 || true" out err rc
+  [[ "${rc}" == "0" ]]
+}
+
+ftctl_dr_ablestack_initialize_baselines() {
+  local plan="${1-}" sequence="${2-}" disk_map="${3-}" snap="" disk_json device source_path target_path source_spec target_spec baseline previous
+  local out="" err="" rc=0
+  snap="$(ftctl_dr_ablestack_snapshot_name "${plan}" "${sequence}")"
+  while IFS= read -r disk_json; do
+    device="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" device)"
+    source_path="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" sourcePath)"
+    target_path="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" targetPath)"
+    ftctl_dr_ablestack_rbd_spec_from_path "${source_path}" source_spec || return 32
+    ftctl_dr_ablestack_rbd_spec_from_path "${target_path}" target_spec || return 32
+    baseline="$(ftctl_dr_ablestack_baseline_path "${plan}" "${device}")"
+    if [[ -s "${baseline}" ]]; then
+      previous="$(head -n 1 "${baseline}")"
+      ftctl_dr_ablestack_reset_baseline_snapshot "${source_spec}" "${target_spec}" "${previous}" || return $?
+    fi
+    ftctl_dr_ablestack_reset_baseline_snapshot "${source_spec}" "${target_spec}" "${snap}" || return $?
+    rbd snap create "${source_spec}@${snap}" || return $?
+    ftctl_dr_ablestack_remote_rbd_command "rbd snap create '${target_spec}@${snap}'" out err rc
+    if [[ "${rc}" != "0" ]]; then
+      rbd snap rm "${source_spec}@${snap}" >/dev/null 2>&1 || true
+      return "${rc}"
+    fi
+    printf '%s\n' "${snap}" > "${baseline}"
+  done < <(ftctl_dr_ablestack_disk_rows "${disk_map}")
+}
+
+ftctl_dr_ablestack_incremental_once() {
+  local plan="${1-}" run="${2-}" profile_file="${3-}" disk_map="${4-}" manifest_path="${5-}" checkpoint_path="${6-}" sequence="${7-}"
+  local disk_json device source_path target_path source_spec target_spec baseline previous current host user ssh_host ssh_port ssh_port_args identity_args
+  local out="" err="" rc=0 changed_bytes="0" started_at completed_at
+  ftctl_dr_ablestack_canonicalize_profile "${profile_file}" "${disk_map}" || return $?
+  ftctl_dr_ablestack_remote_transport_load "${disk_map}" || return 90
+  ftctl_blockcopy_remote_target_host_user host user || return 2
+  ftctl_blockcopy_split_ssh_host_port "${host}" ssh_host ssh_port
+  ssh_port_args=""
+  [[ -z "${ssh_port}" ]] || printf -v ssh_port_args -- '-p %q ' "${ssh_port}"
+  ftctl_blockcopy_dr_ssh_identity_args identity_args "$(ftctl_dr_ablestack_json_field "${disk_map}" source.instanceName)" || true
+  current="$(ftctl_dr_ablestack_snapshot_name "${plan}" "${sequence}")"
+  started_at="$(ftctl_now_iso8601)"
+  while IFS= read -r disk_json; do
+    device="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" device)"
+    source_path="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" sourcePath)"
+    target_path="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" targetPath)"
+    ftctl_dr_ablestack_rbd_spec_from_path "${source_path}" source_spec || return 32
+    ftctl_dr_ablestack_rbd_spec_from_path "${target_path}" target_spec || return 32
+    baseline="$(ftctl_dr_ablestack_baseline_path "${plan}" "${device}")"
+    [[ -s "${baseline}" ]] || return 91
+    previous="$(head -n 1 "${baseline}")"
+    rbd snap create "${source_spec}@${current}" || return $?
+    changed_bytes="$(rbd diff --from-snap "${previous}" --format json "${source_spec}@${current}" 2>/dev/null | python3 -c 'import json,sys; print(sum(int(x.get("length",0)) for x in json.load(sys.stdin)))' 2>/dev/null || printf '0')"
+    ftctl_cmd_run "${FTCTL_DR_FULL_SEED_TIMEOUT_SEC:-3600}" out err rc -- bash -lc \
+      "rbd export-diff --from-snap $(printf '%q' "${previous}") $(printf '%q' "${source_spec}@${current}") - | ssh ${ssh_port_args}${identity_args}-o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC:-30} $(printf '%q' "${user}@${ssh_host}") rbd import-diff - $(printf '%q' "${target_spec}")" || true
+    if [[ "${rc}" != "0" ]]; then
+      rbd snap rm "${source_spec}@${current}" >/dev/null 2>&1 || true
+      ftctl_dr_ablestack_remote_rbd_command "rbd snap rollback '${target_spec}@${previous}' >/dev/null 2>&1 || true; rbd snap rm '${target_spec}@${current}' >/dev/null 2>&1 || true" out err rc
+      return 92
+    fi
+    rbd snap rm "${source_spec}@${previous}" >/dev/null 2>&1 || true
+    ftctl_dr_ablestack_remote_rbd_command "rbd snap rm '${target_spec}@${previous}' >/dev/null 2>&1 || true" out err rc
+    printf '%s\n' "${current}" > "${baseline}"
+    ftctl_log_event "dr-runtime" "dr.ablestack.incremental_disk" "ok" "" "" \
+      "plan=${plan} run=${run} device=${device} from=${previous} to=${current} bytes=${changed_bytes}"
+  done < <(ftctl_dr_ablestack_disk_rows "${disk_map}")
+  completed_at="$(ftctl_now_iso8601)"
+  ftctl_dr_ablestack_write_manifest "${disk_map}" "${manifest_path}.records.jsonl" "${manifest_path}" "incremental-complete" || return $?
+  ftctl_dr_ablestack_write_checkpoint "${disk_map}" "${manifest_path}" "${checkpoint_path}" "TARGET_READY" "${started_at}" "${completed_at}" "0" || return $?
 }
 
 ftctl_dr_ablestack_replication_cycle() {
@@ -891,9 +1090,22 @@ ftctl_dr_ablestack_replication_cycle() {
   disk_map="$(ftctl_dr_ablestack_disk_map_path "${plan}")"
   manifest_path="$(ftctl_dr_ablestack_manifest_path "${plan}" "${cycle_run}")"
   checkpoint_path="$(ftctl_dr_ablestack_checkpoint_path "${plan}" "${cycle_run}")"
-  : "${cycle_type}"
-
-  ftctl_dr_ablestack_full_seed_once "${plan}" "${cycle_run}" "${profile_file}" "${disk_map}" "${manifest_path}" "${checkpoint_path}" || return $?
+  if [[ "${cycle_type}" == *INCREMENTAL* ]] &&
+     ftctl_dr_ablestack_remote_transport_load "${disk_map}" 2>/dev/null; then
+    local incremental_rc=0
+    ftctl_dr_ablestack_incremental_once "${plan}" "${cycle_run}" "${profile_file}" "${disk_map}" "${manifest_path}" "${checkpoint_path}" "${sequence}" || incremental_rc=$?
+    if [[ "${incremental_rc}" == "91" ]]; then
+      ftctl_log_event "dr-runtime" "dr.ablestack.incremental_fallback" "warn" "" "" \
+        "plan=${plan} run=${cycle_run} reason=baseline_unavailable"
+      ftctl_dr_ablestack_full_seed_once "${plan}" "${cycle_run}" "${profile_file}" "${disk_map}" "${manifest_path}" "${checkpoint_path}" || return $?
+    elif [[ "${incremental_rc}" != "0" ]]; then
+      ftctl_log_event "dr-runtime" "dr.ablestack.incremental" "fail" "" "${incremental_rc}" \
+        "plan=${plan} run=${cycle_run} reason=incremental_transfer_failed"
+      return "${incremental_rc}"
+    fi
+  else
+    ftctl_dr_ablestack_full_seed_once "${plan}" "${cycle_run}" "${profile_file}" "${disk_map}" "${manifest_path}" "${checkpoint_path}" || return $?
+  fi
   printf '%s\t%s\n' "${manifest_path}" "${checkpoint_path}"
 }
 
