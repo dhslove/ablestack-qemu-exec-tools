@@ -571,3 +571,57 @@ publish target scheduler authority. Error evidence names the provider-specific
 | Power barrier | Original VM start is independent of export drain | Export stop acknowledgement precedes original VM start |
 | Diagnostics | Every failure is labeled `kvm-vmware-mover` | ABLESTACK pair reports `ablestack-rbd-mover` |
 | Existing success path | Shared reverse logic can regress VMware | Provider and action guards isolate the new RBD branch |
+
+## 21. KVM Firmware Evidence Boundary
+
+FTCTL does not select a Cloud VM firmware mode. The Plan Owner Cloud resolves
+the source firmware contract and Cloud creates the target VM with that
+contract. FTCTL receives the resulting immutable source hardware fingerprint
+and materialization manifest and must reject a target whose manifest no longer
+matches the Plan.
+
+For ABLESTACK KVM inventory, Cloud detail `UEFI=<LEGACY|SECURE>` is normalized
+to `bootType=UEFI` plus the corresponding boot mode. FTCTL must not reinterpret
+the value `LEGACY` as BIOS. Existing VMware govc firmware discovery remains
+unchanged.
+
+Before cutover, the materialization contract requires a stopped target VM whose
+Cloud details and runtime domain agree with the Plan boot type. A mismatch is a
+typed readiness failure; FTCTL must not attempt guest preparation or power-on
+as a workaround. This preserves the separation between Cloud-owned VM
+lifecycle and FTCTL-owned replication.
+
+| Area | AS-IS | TO-BE |
+| --- | --- | --- |
+| Firmware input | Ambiguous string may reach the manifest | Cloud supplies normalized boot type and mode |
+| FTCTL behavior | Incorrect BIOS target can reach cutover | Manifest mismatch blocks cutover before power-on |
+| Provider isolation | Shared code could affect VDDK | Rule is scoped to `KVM_TO_KVM`; VMware evidence is unchanged |
+
+## 22. Target-Controlled Initial Seed Ownership Barrier
+
+For a remote ABLESTACK source controlled from the DR site, Cloud persists the
+replica and replica-disk ownership skeleton before target materialization
+creates volumes or a VM. Cloud then persists the generated target references
+before dispatching FTCTL.
+
+FTCTL receives only the resulting durable target storage and profile contract.
+It does not create Cloud VM inventory or compensate for a missing `dr_replica`
+row. This preserves the established split: Cloud owns VM, volume, network,
+firmware, and authority state; FTCTL owns data transfer and runtime evidence.
+
+## 23. Ceph CLI-Compatible Reverse Baseline Verification
+
+The target worker verifies a reverse baseline with
+`rbd snap ls --format json <pool>/<image>` and an exact snapshot-name match.
+It must not use `rbd snap info`, because that subcommand is unavailable in the
+Ceph CLI shipped by the supported ABLESTACK clusters. A created reverse
+baseline becomes `READY` only when its exact name is present in the JSON list.
+
+This rule is limited to the ABLESTACK RBD reverse-baseline path. It does not
+change VMware-to-ABLESTACK inventory, transfer, or cutover behavior.
+
+| Area | AS-IS | TO-BE |
+| --- | --- | --- |
+| Snapshot probe | Unsupported `rbd snap info` always fails | Exact-name lookup in `rbd snap ls --format json` |
+| Cutover | Reverse baseline creation loops at 45% | Baseline becomes `READY`, then promotion continues |
+| Regression scope | Test stub accepts the unsupported command | Test rejects `snap info` and requires `snap ls` |

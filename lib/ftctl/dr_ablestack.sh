@@ -941,7 +941,8 @@ ftctl_dr_ablestack_source_baselines_ready() {
     [[ -s "${baseline}" ]] || return 1
     snap="$(head -n 1 "${baseline}")"
     [[ -n "${snap}" ]] || return 1
-    rbd snap info "${source_spec}@${snap}" >/dev/null 2>&1 || return 1
+    rbd snap ls --format json "${source_spec}" 2>/dev/null \
+      | jq -e --arg snap "${snap}" 'any(.[]; .name == $snap)' >/dev/null || return 1
   done < <(ftctl_dr_ablestack_disk_rows "${disk_map}")
 }
 

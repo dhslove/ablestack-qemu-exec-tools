@@ -315,9 +315,15 @@ jq '.direction="KVM_TO_KVM"
   "${site_agent_profile}" > "${reverse_profile_source}"
 ftctl_dr_ablestack_export_persist_intent plan-reverse run-cutover RUNNING \
   "${reverse_profile_source}" "${persistent_manifest}"
+reverse_snap="$(ftctl_dr_ablestack_snapshot_name plan-reverse reverse-33)"
 rbd() {
   case "${1-} ${2-}" in
-    "snap create"|"snap rm"|"snap info") return 0 ;;
+    "snap create"|"snap rm") return 0 ;;
+    "snap ls")
+      printf '[{"name":"%s"}]\n' "${reverse_snap}"
+      return 0
+      ;;
+    "snap info") return 99 ;;
     *) return 0 ;;
   esac
 }
