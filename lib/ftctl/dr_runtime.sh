@@ -1181,6 +1181,24 @@ ftctl_dr_runtime_record_worker_role() {
     "plan=${plan}" "worker_role=${role}" "updated_at=${now}"
 }
 
+ftctl_dr_runtime_record_export_worker_role() {
+  local plan="${1-}" role="${2-}"
+  [[ -n "${plan}" && -n "${role}" ]] || return 0
+  role="$(printf '%s' "${role}" | tr '[:upper:]' '[:lower:]')"
+  case "${role}" in
+    reverse-target)
+      # This is an action-scoped Failback role, not scheduler authority.
+      return 0
+      ;;
+    source|target|coordinator)
+      ftctl_dr_runtime_record_worker_role "${plan}" "${role}"
+      ;;
+    *)
+      return 2
+      ;;
+  esac
+}
+
 ftctl_dr_runtime_local_worker_role() {
   local plan="${1-}" path role
   path="$(ftctl_dr_runtime_worker_role_path "${plan}")"

@@ -375,10 +375,17 @@ cp "${plan_owner_profile}" "${role_plan_dir}/profile.json"
 printf 'state=READY\nscheduler_health=HEALTHY\n' > "${role_plan_dir}/status.state"
 ftctl_dr_runtime_record_worker_role "${role_plan}" source
 [[ "$(ftctl_dr_runtime_local_worker_role "${role_plan}")" == "source" ]]
+ftctl_dr_runtime_record_export_worker_role "${role_plan}" reverse-target
+[[ "$(ftctl_dr_runtime_local_worker_role "${role_plan}")" == "source" ]]
+set +e
+ftctl_dr_runtime_record_export_worker_role "${role_plan}" unexpected-role
+invalid_export_role_rc=$?
+set -e
+[[ "${invalid_export_role_rc}" == "2" ]]
 ftctl_dr_scheduler_active_worker_valid() { return 0; }
 ftctl_dr_scheduler_reconcile_plan "${role_plan}"
 [[ "$(ftctl_dr_runtime_state_get_from_path "${role_plan_dir}/status.state" scheduler_health)" == "HEALTHY" ]]
-ftctl_dr_runtime_record_worker_role "${role_plan}" target
+ftctl_dr_runtime_record_export_worker_role "${role_plan}" target
 [[ "$(ftctl_dr_runtime_local_worker_role "${role_plan}")" == "target" ]]
 ftctl_dr_scheduler_control_command() { printf 'stop\n'; }
 ftctl_dr_scheduler_systemd_available() { return 1; }

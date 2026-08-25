@@ -663,3 +663,31 @@ otherwise the mismatch remains a hard failure.
 | Cloud commit | Rejects with `DR_CUTOVER_CHECKPOINT_MISMATCH` after the VM boots | Validates the immutable final checkpoint and terminalizes |
 | Regression scope | A broad selector change could affect disaster Failover | Override occurs only after successful planned final sync |
 | In-flight upgrade | Old Run remains permanently `COMMIT_VERIFYING` | Exact durable same-Run evidence permits idempotent KVM-only repair |
+
+## 25. Reverse Export Action Role Isolation
+
+`source`, `target`, and `coordinator` are durable worker roles. They control
+scheduler ownership and are persisted in the Plan-scoped `worker-role.state`.
+`reverse-target` is different: it is an action-scoped role used only while the
+original-site Agent exposes the original RBD image as the temporary Failback
+destination. It must never replace the original site's durable `source` role.
+
+The target-export command therefore validates its requested role through an
+export-specific adapter. A normal `target` request continues to persist the
+durable target role. A `reverse-target` request is accepted without modifying
+`worker-role.state`. Every other unknown role remains a usage error. Export
+stop follows the same rule, so cleanup cannot accidentally change scheduler
+authority.
+
+Regression coverage proves that a source worker remains `source` across
+reverse export start and stop, a normal target request is still persisted, and
+an unknown role is rejected before any export action. This contract is limited
+to ABLESTACK RBD target-export commands and does not modify VMware movers,
+forward replication, or the shared structural role validation.
+
+| Area | AS-IS | TO-BE |
+| --- | --- | --- |
+| Role validation | `reverse-target` is rejected with exit code 2 before qemu-nbd starts | Export commands accept the documented auxiliary role |
+| Scheduler ownership | Reusing structural role recording risks overwriting the original site's `source` authority | Auxiliary role validation leaves `worker-role.state` unchanged |
+| Forward export | Normal target role uses the same ambiguous path | Normal `target` remains durable and unchanged |
+| Safety | Broad role relaxation could hide invalid callers | Only target-export start/stop accept `reverse-target`; unknown roles remain rejected |

@@ -891,11 +891,11 @@ dispatch() {
         "${CLI_MATERIALIZATION_SPEC_JSON}" "${CLI_MATERIALIZATION_SPEC_SHA256}" "${CLI_JSON}"
       ;;
     dr-target-export-start)
-      ftctl_dr_runtime_record_worker_role "${CLI_PLAN}" "${CLI_ROLE:-target}"
+      ftctl_dr_runtime_record_export_worker_role "${CLI_PLAN}" "${CLI_ROLE:-target}"
       ftctl_dr_ablestack_target_export_start "${CLI_PLAN}" "${CLI_RUN}" "${CLI_PROFILE_JSON}" "${CLI_JSON}"
       ;;
     dr-target-export-stop)
-      ftctl_dr_runtime_record_worker_role "${CLI_PLAN}" "${CLI_ROLE:-target}"
+      ftctl_dr_runtime_record_export_worker_role "${CLI_PLAN}" "${CLI_ROLE:-target}"
       ftctl_dr_ablestack_target_export_stop "${CLI_PLAN}" "${CLI_JSON}" "${CLI_RUN}" "${CLI_CHECKPOINT_SEQUENCE}"
       ;;
     dr-cutover-commit)
