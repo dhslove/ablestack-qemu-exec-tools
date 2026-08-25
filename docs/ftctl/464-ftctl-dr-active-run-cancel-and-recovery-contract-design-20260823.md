@@ -87,6 +87,24 @@ FTCTL JSON 응답의 `state=CANCELED`, `terminal_authoritative=true`,
 7. 운영자 취소 후 자동 복구 평가 주기를 지나도 scheduler가 `STOPPED`로 유지
 8. UI `동기화 복구` 후에만 같은 시퀀스 Full Reseed 재시작
 9. systemd 종료와 status 투영 사이에 로컬 reconcile이 실행돼도 `command=stop` 보류 유지
+10. 전송이 이미 terminal이고 live scheduler/worker가 없으면 그 부재를 drain 경계로 사용해
+    STOP generation을 로컬 ACK하고 즉시 `CANCELED`로 종결
+
+## 4.1 무워커 취소 ACK 보강
+
+ABLESTACK RBD 간 페일백은 역방향 복사가 끝난 뒤 Cloud 수명주기 커밋을 기다리는 동안
+FTCTL one-shot worker가 먼저 종료될 수 있다. 이때 UI에서 `현재 작업 실행 취소`를 요청하면
+기존 구현은 존재하지 않는 worker의 STOP ACK를 기다려 `DR_CANCEL_DRAIN_PENDING`에 고정됐다.
+
+다음 조건을 모두 만족하면 별도 worker ACK 없이 로컬 STOP ACK를 기록한다.
+
+- scheduler unit 또는 worker PID가 살아 있지 않음
+- 현재 요청이 `dr-cancel`의 STOP generation임
+- 실행 중인 scheduler cgroup 소유자가 없음
+
+이 처리는 전송 중 worker 강제 종료 경로를 대체하지 않는다. live worker가 있으면 기존대로
+systemd cgroup을 중단하고 unit inactive 및 lease 종료를 확인해야 한다. 따라서 검증된 RBD 전송과
+VMware 전송 경로에는 영향이 없고, 이미 종료된 제어 주체에 대한 terminal 수렴만 보강한다.
 
 ## 5. AS-IS / TO-BE
 
@@ -99,4 +117,5 @@ FTCTL JSON 응답의 `state=CANCELED`, `terminal_authoritative=true`,
 | 로컬 reconcile | 지연된 status의 `RUNNING`을 보고 재시작 | 내구성 control의 `stop`을 우선해 재시작 금지 |
 | 대상 기준선 | 부분 덮어쓰기 여부 미표시 | baseline 무효와 Full Reseed 필요 명시 |
 | 복구 | STOPPED 상태에서 거절 | 취소 복구 계약일 때만 제한적으로 재시작 |
+| terminal one-shot 취소 | 종료된 worker의 ACK를 기다려 pending | live owner 부재를 drain으로 인정하고 로컬 STOP ACK |
 | 성공 경로 | 전송 코드와 제어 코드가 결합 | 검증된 전송은 유지하고 제어 경계만 보강 |

@@ -47,4 +47,30 @@ test_control_command=run
 ftctl_dr_scheduler_reconcile_plan plan-1
 [[ -e "${tmp}/recover.called" ]]
 
+# A terminal one-shot operation has no live scheduler left to acknowledge a
+# STOP request. Cancel must use that absence as the drain boundary instead of
+# waiting for a worker that cannot respond.
+ftctl_dr_scheduler_systemd_available() { return 0; }
+ftctl_dr_scheduler_has_live_worker() { return 1; }
+ftctl_dr_scheduler_active_value() { printf '\n'; }
+ftctl_dr_scheduler_control_set() { printf '42\n'; }
+ftctl_dr_scheduler_control_ack() { printf '%s\n' "$*" > "${tmp}/cancel.ack"; }
+ftctl_dr_scheduler_wait_for_ack() { return 21; }
+ftctl_now_iso8601() { printf '2026-08-25T14:00:00+09:00\n'; }
+ftctl_dr_scheduler_sequence_path() { printf '%s\n' "${tmp}/sequence.state"; }
+ftctl_dr_scheduler_update_state() { printf '%s\n' "$*" > "${tmp}/cancel.state"; }
+ftctl_dr_runtime_state_get_from_path() {
+  case "${2-}" in
+    transfer_activity_state) printf 'IDLE\n' ;;
+    cycle_state) printf 'IDLE\n' ;;
+    baseline_state) printf 'LOCAL_DURABLE\n' ;;
+    reseed_reason|current_checkpoint_state) printf '\n' ;;
+  esac
+}
+
+generation="$(ftctl_dr_scheduler_cancel_active_transfer plan-1 run-1 "${tmp}/run.state" "${tmp}/status.state")"
+[[ "${generation}" == "42" ]]
+grep -q 'plan-1 42 STOPPED IDLE run-1' "${tmp}/cancel.ack"
+grep -q 'runtime_endpoints_drained=true' "${tmp}/cancel.state"
+
 echo 'ftctl DR active cancel recovery smoke: PASS'

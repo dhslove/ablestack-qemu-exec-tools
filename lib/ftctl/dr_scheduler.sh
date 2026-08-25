@@ -1114,6 +1114,13 @@ ftctl_dr_scheduler_cancel_active_transfer() {
       "${owner_run}" "${worker_pid}" "${worker_start_ticks}"
     ftctl_dr_scheduler_control_ack "${plan}" "${generation}" "STOPPED" "IDLE" "${owner_run}" \
       "${session}" "${lease_epoch}" "${worker_pid}" "${worker_start_ticks}"
+  elif ! ftctl_dr_scheduler_has_live_worker "${plan}"; then
+    # A completed one-shot transfer may leave no scheduler process to ACK the
+    # stop generation. The absence of a live owner is already the durable
+    # drain boundary, so acknowledge STOP locally instead of waiting forever
+    # for a worker that cannot respond.
+    ftctl_dr_scheduler_control_ack "${plan}" "${generation}" "STOPPED" "IDLE" "${owner_run}" \
+      "${session}" "${lease_epoch}" "${worker_pid}" "${worker_start_ticks}"
   else
     ftctl_dr_scheduler_wait_for_ack "${plan}" "${generation}" "STOPPED" \
       "${FTCTL_DR_CANCEL_STOP_TIMEOUT_SEC}" "${owner_run}" "${session}" \
