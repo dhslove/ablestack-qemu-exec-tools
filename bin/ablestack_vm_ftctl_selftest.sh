@@ -10023,6 +10023,7 @@ JSON
   ftctl_dr_runtime_build_reverse_profile "plan-rbd-reverse" "run-rbd-reverse" \
     "${profile}" "${reverse_profile}" "failback"
   selftest_assert_file_contains "${reverse_profile}" '"providerPair":"ABLESTACK_TO_ABLESTACK"'
+  selftest_assert_file_contains "${reverse_profile}" '"state":"NATIVE_COMPATIBILITY_PRESERVED"'
   selftest_assert_file_contains "${reverse_profile}" '"sourcePath":"rbd:rbd/target-image"'
   selftest_assert_file_contains "${reverse_profile}" '"targetPath":"rbd:rbd/source-image"'
   selftest_assert_file_contains "${reverse_profile}" '"source":"target-host"'

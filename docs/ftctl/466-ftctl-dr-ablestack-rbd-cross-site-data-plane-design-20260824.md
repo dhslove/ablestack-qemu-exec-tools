@@ -718,3 +718,26 @@ an ABLESTACK checkpoint and continues to reject non-durable states.
 | Cloud data gate | Waits for the missing field, then safely aborts Failback | Receives complete evidence and proceeds to authority commit |
 | Failure safety | Relaxing Cloud validation could accept a partial checkpoint | Cloud validation remains strict; FTCTL fixes the producer contract |
 | Existing routes | Shared gate changes could weaken VMware safety | Change is limited to the ABLESTACK checkpoint writer |
+
+## 27. Provider-Specific Reverse Guest Compatibility
+
+Guest compatibility evidence is a route contract, not a universal VMware
+conversion requirement. An `ABLESTACK_TO_ABLESTACK` Failback returns a VM to
+its original KVM/ABLESTACK environment. Its reverse checkpoint must therefore
+publish `NATIVE_COMPATIBILITY_PRESERVED` after the native disk image has been
+written and verified. It must not inherit the generic
+`VALIDATION_REQUIRED` value used for unimplemented provider pairs.
+
+The established VMware-to-ABLESTACK path is unchanged. Its KVM-to-VMware
+Failback continues to publish
+`ORIGINAL_VMWARE_COMPATIBILITY_PRESERVED` and remains subject to the existing
+VMware guest compatibility gate. The Cloud consumer validates compatibility
+against the expected reverse provider pair and does not accept the native KVM
+value for a VMware destination.
+
+| Area | AS-IS | TO-BE |
+| --- | --- | --- |
+| ABLESTACK reverse profile | Emits `VALIDATION_REQUIRED` | Emits `NATIVE_COMPATIBILITY_PRESERVED` |
+| Cloud gate | Applies VMware boot wording and accepted values to every route | Selects the accepted state by reverse provider pair |
+| VMware regression | Shared relaxation could weaken the validated route | Existing VMware values and checks remain unchanged |
+| Unknown routes | May pass through an ambiguous state | Remain `VALIDATION_REQUIRED` and are blocked |

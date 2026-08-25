@@ -1551,10 +1551,14 @@ mapping[disk_key] = reversed_disks
 reverse["mapping"] = mapping
 original_source_provider = first_str(source.get("provider")).upper()
 original_target_provider = first_str(target.get("provider")).upper()
+if original_source_provider == "VMWARE" and original_target_provider == "ABLESTACK":
+    guest_compatibility_state = "ORIGINAL_VMWARE_COMPATIBILITY_PRESERVED"
+elif original_source_provider == "ABLESTACK" and original_target_provider == "ABLESTACK":
+    guest_compatibility_state = "NATIVE_COMPATIBILITY_PRESERVED"
+else:
+    guest_compatibility_state = "VALIDATION_REQUIRED"
 reverse["guestCompatibility"] = {
-    "state": "ORIGINAL_VMWARE_COMPATIBILITY_PRESERVED"
-        if original_source_provider == "VMWARE" and original_target_provider == "ABLESTACK"
-        else "VALIDATION_REQUIRED",
+    "state": guest_compatibility_state,
     "sourceLineage": original_source_provider,
     "targetProvider": first_str(reverse.get("target", {}).get("provider")).upper(),
     "bootValidationRequired": True,
