@@ -8612,6 +8612,34 @@ PY
   selftest_assert_contains "${out}" '"error_code":""' "rollback clears stale failback error"
   selftest_assert_contains "${out}" '"error_message":""' "rollback clears stale failback message"
   selftest_assert_contains "${out}" '"failed_component":""' "rollback clears stale failed component"
+
+  out="$(
+    ftctl_dr_scheduler_request_and_wait() {
+      selftest_fail "completed rollback must not fence the scheduler again"
+    }
+    ftctl_dr_runtime_failback_abort "${plan}" "run-failback" "${plan}:run-failback" \
+      "prepare" "POWERED_ON" "POWERED_OFF" "1"
+  )"
+  selftest_assert_contains "${out}" '"rollback_state":"COMPLETED"' "completed rollback prepare is idempotent"
+  selftest_assert_file_contains "$(ftctl_dr_runtime_run_path "${plan}" "run-failback")" "failback_phase=ABORTED"
+
+  local newer_run_path
+  newer_run_path="$(ftctl_dr_runtime_run_path "${plan}" "run-newer-failback")"
+  ftctl_state_write_kv_all "${newer_run_path}" \
+    "action=dr-failback-start" "state=FAILBACK_DATA_READY" "worker_state=SUCCEEDED" \
+    "run_uuid=run-newer-failback" "control_request_run_uuid=run-newer-failback" \
+    "rollback_state=NONE" "updated_at=$(ftctl_now_iso8601)"
+  ftctl_dr_runtime_atomic_copy "${newer_run_path}" "${status_path}" "0644"
+  ftctl_dr_runtime_path_set "$(ftctl_dr_runtime_run_path "${plan}" "run-failback")" \
+    "run_uuid=run-failback" "control_request_run_uuid=run-failback"
+  ftctl_dr_runtime_publish_status "$(ftctl_dr_runtime_run_path "${plan}" "run-failback")" "${status_path}"
+  selftest_assert_file_contains "${status_path}" "control_request_run_uuid=run-newer-failback"
+  selftest_assert_file_not_contains "${status_path}" "control_request_run_uuid=run-failback"
+
+  ftctl_dr_runtime_path_set "${newer_run_path}" "state=READY" "worker_state=SUCCEEDED"
+  ftctl_dr_runtime_atomic_copy "${newer_run_path}" "${status_path}" "0644"
+  ftctl_dr_runtime_publish_status "$(ftctl_dr_runtime_run_path "${plan}" "run-failback")" "${status_path}"
+  selftest_assert_file_contains "${status_path}" "control_request_run_uuid=run-failback"
 }
 
 selftest_case_dr_scheduler_wait_is_interrupted_by_new_generation() {

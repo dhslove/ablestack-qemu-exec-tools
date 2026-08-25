@@ -741,3 +741,24 @@ value for a VMware destination.
 | Cloud gate | Applies VMware boot wording and accepted values to every route | Selects the accepted state by reverse provider pair |
 | VMware regression | Shared relaxation could weaken the validated route | Existing VMware values and checks remain unchanged |
 | Unknown routes | May pass through an ambiguous state | Remain `VALIDATION_REQUIRED` and are blocked |
+
+## 28. Failback Abort Run Ownership
+
+Plan status is shared authority state, but an abort is owned by one immutable
+Failback Run. When a later Run is live, an older abort may finish its own Run
+journal but must not replace the plan status published by that later owner.
+The status publisher compares `control_request_run_uuid` with the publishing
+Run and preserves the newer live owner.
+
+Abort prepare and commit are also monotonic. Once an abort journal reports
+`rollback_state=COMPLETED`, later retries return the same terminal
+acknowledgement and cannot move the Run back to `FENCED`. This keeps Cloud
+cleanup retries idempotent without changing forward synchronization, native
+RBD transfer, or the validated VMware data path.
+
+| Area | AS-IS | TO-BE |
+| --- | --- | --- |
+| Plan status | Old abort prepare can overwrite a newer Failback Run | Newer live Run retains status ownership |
+| Abort retry | Completed rollback can regress to `FENCED` | Completed rollback is returned unchanged |
+| Run journal | Cleanup relies on mutable plan status | Each abort updates only its immutable Run journal |
+| Regression | A broad cleanup change could affect sync | Guard applies only to stale status publication and abort retry |

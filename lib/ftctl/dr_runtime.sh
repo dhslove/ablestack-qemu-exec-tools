@@ -859,7 +859,38 @@ ftctl_dr_runtime_path_set() {
 
 ftctl_dr_runtime_publish_status() {
   local run_path="${1-}" status_path="${2-}"
+  local publishing_run current_owner plan_dir owner_path owner_state owner_worker_state owner_rollback_state owner_active
   [[ -n "${run_path}" && -f "${run_path}" && -n "${status_path}" ]] || return 1
+  publishing_run="$(ftctl_state_read_kv "${run_path}" "control_request_run_uuid" 2>/dev/null || true)"
+  [[ -n "${publishing_run}" ]] || publishing_run="$(ftctl_state_read_kv "${run_path}" "run_uuid" 2>/dev/null || true)"
+  [[ -n "${publishing_run}" ]] || publishing_run="$(basename "${run_path}" .state)"
+  if [[ -f "${status_path}" ]]; then
+    current_owner="$(ftctl_state_read_kv "${status_path}" "control_request_run_uuid" 2>/dev/null || true)"
+    [[ -n "${current_owner}" ]] || current_owner="$(ftctl_state_read_kv "${status_path}" "run_uuid" 2>/dev/null || true)"
+    if [[ -n "${current_owner}" && -n "${publishing_run}" && "${current_owner}" != "${publishing_run}" ]]; then
+      plan_dir="$(dirname "${status_path}")"
+      owner_path="${plan_dir}/runs/${current_owner}.state"
+      if [[ -f "${owner_path}" ]]; then
+        owner_state="$(ftctl_state_read_kv "${owner_path}" "state" 2>/dev/null || true)"
+        owner_worker_state="$(ftctl_state_read_kv "${owner_path}" "worker_state" 2>/dev/null || true)"
+        owner_rollback_state="$(ftctl_state_read_kv "${owner_path}" "rollback_state" 2>/dev/null || true)"
+        owner_active="false"
+        case "${owner_state}" in
+          ACCEPTED|RUNNING|SYNCING|RESEEDING|WAITING_RESOURCE|FAILBACK_DATA_READY|COMMIT_VERIFYING|PROTECTION_RESUMING|FAILING_OVER|TESTING|CLEANING_UP)
+            owner_active="true"
+            ;;
+        esac
+        case "${owner_worker_state}" in
+          PENDING|STARTING|RUNNING) owner_active="true" ;;
+        esac
+        if [[ "${owner_rollback_state}" != "COMPLETED" && "${owner_active}" == "true" ]]; then
+          ftctl_log_event "dr-runtime" "dr.status.publish.skipped_stale_owner" "ok" "" "" \
+            "current_owner=${current_owner} publishing_run=${publishing_run} state=${owner_state} worker_state=${owner_worker_state}"
+          return 0
+        fi
+      fi
+    fi
+  fi
   ftctl_dr_runtime_atomic_copy "${run_path}" "${status_path}" "0644" || return $?
   ftctl_dr_runtime_overlay_failback_plan_authority "${run_path}" "${status_path}"
 }
@@ -7001,7 +7032,7 @@ ftctl_dr_runtime_failback_commit_status() {
 ftctl_dr_runtime_failback_abort() {
   local plan="${1-}" run="${2-}" session_id="${3-}" phase="${4-commit}"
   local target_power_state="${5-POWERED_ON}" source_power_state="${6-POWERED_OFF}" json="${7-0}"
-  local run_path status_path current_session now generation
+  local run_path status_path current_session current_rollback_state current_failback_phase now generation
   if [[ "${phase}" == "0" || "${phase}" == "1" ]]; then
     json="${phase}"
     phase="commit"
@@ -7012,6 +7043,13 @@ ftctl_dr_runtime_failback_abort() {
   status_path="$(ftctl_dr_runtime_status_path "${plan}")"
   current_session="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "failback_session_id")"
   [[ -n "${session_id}" && "${current_session}" == "${session_id}" ]] || return 79
+  current_rollback_state="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "rollback_state")"
+  current_failback_phase="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "failback_phase")"
+  if [[ "${current_rollback_state}" == "COMPLETED" || "${current_failback_phase}" == "ABORTED" ]]; then
+    [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_state_json \
+      "dr-failback-abort" "ok" "${plan}" "${run}" "${run_path}" "0"
+    return 0
+  fi
   now="$(ftctl_now_iso8601)"
   generation="$(ftctl_dr_scheduler_request_and_wait "${plan}" "stop" "STOPPED" \
     "failback-abort-${phase}" "${run}" "false")" || {
@@ -7021,7 +7059,7 @@ ftctl_dr_runtime_failback_abort() {
         "error_code=DR_FAILBACK_ROLLBACK_FENCE_FAILED" \
         "error_message=Scheduler STOPPED acknowledgement was not received" \
         "retryable=false" "updated_at=$(ftctl_now_iso8601)" || true
-      cp -f "${run_path}" "${status_path}" 2>/dev/null || true
+      ftctl_dr_runtime_publish_status "${run_path}" "${status_path}" 2>/dev/null || true
       [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_state_json \
         "dr-failback-abort" "error" "${plan}" "${run}" "${run_path}" "0"
       return 21
@@ -7032,7 +7070,7 @@ ftctl_dr_runtime_failback_abort() {
     "control_ack_generation=${generation}" "rollback_generation=${generation}" \
     "rollback_state=FENCED" "failback_phase=ROLLBACK_FENCING" \
     "cloud_lifecycle_state=ROLLBACK_FENCING" "updated_at=$(ftctl_now_iso8601)" || return 2
-  cp -f "${run_path}" "${status_path}" || return 2
+  ftctl_dr_runtime_publish_status "${run_path}" "${status_path}" || return 2
   if [[ "${phase}" == "prepare" ]]; then
     ftctl_log_event "dr-runtime" "dr.failback.abort.prepare" "ok" "" "" \
       "plan=${plan} run=${run} session=${session_id} generation=${generation}"
