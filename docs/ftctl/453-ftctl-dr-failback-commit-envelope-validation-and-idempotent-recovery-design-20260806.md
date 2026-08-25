@@ -361,3 +361,39 @@ Failback commit envelope, scheduler resume, post-failback incremental 테스트�
 | Compatibility | VMware 원본 계보 보존 | 성공 경로는 보존, 기타 경로만 `VALIDATION_REQUIRED` |
 | FTCTL 방어 | guest family와 무관하게 power-only 허용 | Windows 프로필 power-only 거부 |
 | 데이터 경로 | 검증된 증분 writer | 변경 없음 |
+
+## 16. Provider-pair별 Windows 부팅 증거 분리 (2026-08-25)
+
+### 16.1 문제
+
+`ABLESTACK -> ABLESTACK` RBD Failback에서 원본 KVM VM이 UEFI로 정상 기동하고
+QGA가 응답해도, 공통 Windows 게이트가 경로를 구분하지 않고 vCenter guest heartbeat를
+요구했다. 그 결과 데이터 역전송과 Cloud 전원 전환은 완료됐지만
+`DR_FAILBACK_WINDOWS_GUEST_HEARTBEAT_REQUIRED`로 commit journal이 생성되지 않았다.
+
+### 16.2 계약
+
+- Windows guest 판정과 부팅 증거 판정은 `providerPair`와 함께 수행한다.
+- 역방향 대상이 VMware인 `*_TO_VMWARE` 경로는 기존 성공 계약대로
+  `GUEST_HEARTBEAT_VALIDATED`만 허용한다.
+- `ABLESTACK_TO_ABLESTACK` 경로는 Cloud/KVM Agent가 확인한
+  `POWER_STATE_VALIDATED` 또는 `GUEST_HEARTBEAT_VALIDATED`를 허용한다.
+- 알 수 없거나 누락된 provider pair는 보수적으로 기존 Windows vCenter heartbeat
+  게이트를 유지한다.
+- 전송, RBD URI, checkpoint, scheduler와 VMware writer 로직은 변경하지 않는다.
+
+### 16.3 회귀 게이트
+
+- Windows + `ABLESTACK_TO_ABLESTACK` + power validation은 commit 가능해야 한다.
+- Windows + `ABLESTACK_TO_VMWARE` + power validation은 기존 오류 코드로 거부해야 한다.
+- Windows + `ABLESTACK_TO_VMWARE` + guest heartbeat는 commit 가능해야 한다.
+- 기존 Failback envelope/hash/idempotency 및 scheduler resume 테스트를 모두 통과해야 한다.
+
+### 16.4 AS-IS / TO-BE
+
+| 영역 | AS-IS | TO-BE |
+| --- | --- | --- |
+| Windows 부팅 게이트 | provider와 무관하게 vCenter heartbeat 요구 | 역방향 대상 provider별 검증 |
+| ABLESTACK 대상 | 정상 KVM 부팅도 commit 거부 | power/QGA 계열 검증으로 commit 허용 |
+| VMware 대상 | vCenter heartbeat 필수 | 기존 계약 유지 |
+| 데이터 경로 | 정상 RBD/VDDK 전송 | 변경 없음 |

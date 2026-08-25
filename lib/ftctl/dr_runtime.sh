@@ -6769,6 +6769,14 @@ ftctl_dr_runtime_profile_is_windows_guest() {
   [[ "$(tr '[:upper:]' '[:lower:]' <<< "${guest_id}")" == *windows* ]]
 }
 
+ftctl_dr_runtime_failback_requires_vcenter_guest_heartbeat() {
+  local profile_file="${1-}" provider_pair=""
+  ftctl_dr_runtime_profile_is_windows_guest "${profile_file}" || return 1
+  provider_pair="$(ftctl_dr_runtime_profile_value "${profile_file}" "providerPair" 2>/dev/null || true)"
+  [[ "${provider_pair}" == "ABLESTACK_TO_ABLESTACK" ]] && return 1
+  [[ "${provider_pair}" == *_TO_VMWARE || -z "${provider_pair}" ]]
+}
+
 ftctl_dr_runtime_failback_commit() {
   local plan="${1-}" run="${2-}" session_id="${3-}" checkpoint_sequence="${4-}"
   local authority_generation="${5-}" target_power_state="${6-}" source_power_state="${7-}"
@@ -6819,7 +6827,7 @@ ftctl_dr_runtime_failback_commit() {
     return 78
   }
   reverse_profile_path="$(ftctl_dr_runtime_reverse_profile_path "${plan}" "${run}" "failback")"
-  if ftctl_dr_runtime_profile_is_windows_guest "${reverse_profile_path}" \
+  if ftctl_dr_runtime_failback_requires_vcenter_guest_heartbeat "${reverse_profile_path}" \
         && [[ "${boot_validation_state}" != "GUEST_HEARTBEAT_VALIDATED" ]]; then
     [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_error_json "dr-failback-commit" "${plan}" "${run}" \
       "DR_FAILBACK_WINDOWS_GUEST_HEARTBEAT_REQUIRED" \

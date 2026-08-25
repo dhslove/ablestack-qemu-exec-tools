@@ -8499,6 +8499,24 @@ with open(path, "w", encoding="utf-8") as handle:
     json.dump(profile, handle, sort_keys=True, separators=(",", ":"))
     handle.write("\n")
 PY
+  set +e
+  ftctl_dr_runtime_failback_requires_vcenter_guest_heartbeat "${reverse_profile}"
+  rc=$?
+  set -e
+  selftest_assert_eq "${rc}" "1" "ABLESTACK Windows failback does not require vCenter heartbeat"
+
+  python3 - "${reverse_profile}" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as handle:
+    profile = json.load(handle)
+profile["providerPair"] = "ABLESTACK_TO_VMWARE"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(profile, handle, sort_keys=True, separators=(",", ":"))
+    handle.write("\n")
+PY
   failback_hash="$(ftctl_dr_runtime_failback_commit_envelope_sha256 \
     "${failback_contract}" "${plan}" "run-failback" "${plan}:run-failback" \
     "4" "4" "4" "run-failback" "${failback_attempt}" \
@@ -8509,7 +8527,7 @@ PY
     "${failback_contract}" "4" "run-failback" "${failback_attempt}" "${failback_hash}" 2>&1)"
   rc=$?
   set -e
-  selftest_assert_eq "${rc}" "78" "Windows source rejects power-only failback commit"
+  selftest_assert_eq "${rc}" "78" "Windows VMware target rejects power-only failback commit"
   selftest_assert_contains "${out}" "DR_FAILBACK_WINDOWS_GUEST_HEARTBEAT_REQUIRED" \
     "Windows source requires guest heartbeat"
 
