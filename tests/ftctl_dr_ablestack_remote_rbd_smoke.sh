@@ -154,6 +154,7 @@ jq -e '.requestedMode == "CBT_INCREMENTAL"
   and .targetWrittenBytes == 4096
   and .sequence == 7
   and .baselineGeneration == 7
+  and .baselineState == "LOCAL_DURABLE"
   and .cycleToken == "plan-a:7"' "${checkpoint_path}" >/dev/null
 jq -e '.cycleCommitState == "LOCAL_DURABLE"
   and .nbdTeardownState == "DRAINED"

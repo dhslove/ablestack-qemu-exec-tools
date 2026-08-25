@@ -691,3 +691,30 @@ forward replication, or the shared structural role validation.
 | Scheduler ownership | Reusing structural role recording risks overwriting the original site's `source` authority | Auxiliary role validation leaves `worker-role.state` unchanged |
 | Forward export | Normal target role uses the same ambiguous path | Normal `target` remains durable and unchanged |
 | Safety | Broad role relaxation could hide invalid callers | Only target-export start/stop accept `reverse-target`; unknown roles remain rejected |
+
+## 26. ABLESTACK Reverse Checkpoint Durability Evidence
+
+Every successfully completed ABLESTACK RBD scheduler Cycle publishes one
+durable checkpoint contract. `baselineGeneration`, `cycleCommitState`,
+`trackerState`, `writerState`, `targetWritten`, and `writeVerified` are not
+sufficient if `baselineState` is absent: Cloud must not infer durability from a
+partial field set before switching VM authority.
+
+The ABLESTACK checkpoint writer therefore publishes
+`baselineState=LOCAL_DURABLE` in the same atomic JSON replacement as the other
+Cycle evidence. This applies to both full reseed and incremental Cycles only
+after the target write and NBD drain have completed. FTCTL status projection
+then copies that exact field into the Failback operation state consumed by the
+Cloud data gate.
+
+The Cloud publication grace remains a safety barrier rather than a substitute
+for missing evidence. VMware checkpoint writers and Cloud's strict data gate
+are unchanged. Regression coverage requires the complete durability tuple on
+an ABLESTACK checkpoint and continues to reject non-durable states.
+
+| Area | AS-IS | TO-BE |
+| --- | --- | --- |
+| RBD checkpoint | Publishes generation and write evidence but omits `baselineState` | Atomically publishes `baselineState=LOCAL_DURABLE` with the full tuple |
+| Cloud data gate | Waits for the missing field, then safely aborts Failback | Receives complete evidence and proceeds to authority commit |
+| Failure safety | Relaxing Cloud validation could accept a partial checkpoint | Cloud validation remains strict; FTCTL fixes the producer contract |
+| Existing routes | Shared gate changes could weaken VMware safety | Change is limited to the ABLESTACK checkpoint writer |

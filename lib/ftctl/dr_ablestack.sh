@@ -1447,6 +1447,7 @@ if str(cycle_sequence).isdigit():
         "cycleUuid": str(uuid.uuid5(uuid.NAMESPACE_URL, f"ablestack-dr:{plan}:{sequence}")),
         "cycleToken": f"{plan}:{sequence}",
         "baselineGeneration": sequence,
+        "baselineState": "LOCAL_DURABLE",
         "cycleCommitState": "LOCAL_DURABLE",
         "trackerState": "LOCAL_DURABLE",
         "writerState": "DURABLE",
