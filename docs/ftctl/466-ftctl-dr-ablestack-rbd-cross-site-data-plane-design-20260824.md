@@ -762,3 +762,46 @@ RBD transfer, or the validated VMware data path.
 | Abort retry | Completed rollback can regress to `FENCED` | Completed rollback is returned unchanged |
 | Run journal | Cleanup relies on mutable plan status | Each abort updates only its immutable Run journal |
 | Regression | A broad cleanup change could affect sync | Guard applies only to stale status publication and abort retry |
+
+## 29. Forward Export Restoration Barrier After Failback
+
+A remote `KVM_TO_KVM` Failback is not complete when reverse data and VM power
+authority have converged. Failover deliberately stopped the target-side forward
+RBD export before the replica VM was promoted. The same Plan-owned export must
+be running again before the original source scheduler resumes; otherwise the
+first post-Failback Cycle fails with `DR_TARGET_EXPORT_UNAVAILABLE` and Cloud
+remains in `PROTECTION_RESUMING`.
+
+The FTCTL export intent is therefore a durable two-state contract:
+
+- `desiredState` records the Plan Owner's requested transport state;
+- `actualState` records `STARTING`, `RUNNING`, `STOPPING`, or `STOPPED` after
+  the corresponding process transition;
+- start and stop update the intent atomically before and after the process
+  operation, so a restarted Agent can reconcile an interrupted transition;
+- repeated start for the same Plan and role is idempotent and returns the
+  current typed export endpoints.
+
+Cloud enforces the following order for the remote ABLESTACK RBD route:
+
+1. reverse checkpoint is durable;
+2. replica VM is powered off;
+3. reverse export is drained and stopped;
+4. forward target export reaches `RUNNING` and returns endpoints;
+5. original VM is powered on and validated;
+6. authority commit and source scheduler resume are acknowledged;
+7. a new forward durable checkpoint completes the Failback terminal contract.
+
+If Cloud or an Agent restarts in `PROTECTION_RESUMING`, it repeats step 4
+idempotently before checking the next durable checkpoint. Rollback performs the
+inverse safety barrier: forward export is stopped before the replica VM is
+powered on again. This contract is scoped to remote `KVM_TO_KVM` RBD Plans and
+does not alter VMware mover, CBT, VDDK, or guest-conversion behavior.
+
+| Area | AS-IS | TO-BE |
+| --- | --- | --- |
+| Export intent | Records only the requested state | Records requested and observed process state |
+| Failback completion | Scheduler may resume while target export is stopped | Export `RUNNING` is a mandatory pre-resume barrier |
+| Restart recovery | `PROTECTION_RESUMING` only polls checkpoints | Reconciles forward export before polling the checkpoint |
+| Rollback | Replica recovery can overlap a forward writer | Forward export stops before replica power-on |
+| Regression boundary | Shared transport changes can affect VMware | Branch is limited to remote `KVM_TO_KVM` RBD |

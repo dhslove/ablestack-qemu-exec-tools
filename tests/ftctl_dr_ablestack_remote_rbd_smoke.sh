@@ -204,6 +204,7 @@ EOF
 ftctl_dr_ablestack_export_persist_intent plan-persist run-persist RUNNING "${site_agent_profile}" "${persistent_manifest}"
 persist_dir="$(ftctl_dr_ablestack_export_persist_dir plan-persist)"
 [[ "$(jq -r '.desiredState' "${persist_dir}/intent.json")" == "RUNNING" ]]
+[[ "$(jq -r '.actualState' "${persist_dir}/intent.json")" == "RUNNING" ]]
 [[ "$(jq -r '.runUuid' "${persist_dir}/intent.json")" == "run-persist" ]]
 [[ "$(jq -r '.exports[0].port' "${persist_dir}/exports.json")" == "12032" ]]
 resolved_persisted_profile=""

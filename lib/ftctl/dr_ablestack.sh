@@ -636,6 +636,7 @@ ftctl_dr_ablestack_export_persist_intent_path() {
 
 ftctl_dr_ablestack_export_persist_intent() {
   local plan="${1-}" run="${2-}" desired="${3-RUNNING}" profile_file="${4-}" manifest="${5-}"
+  local actual="${6-${desired}}"
   local persist_dir persist_profile persist_manifest intent tmp redacted
   persist_dir="$(ftctl_dr_ablestack_export_persist_dir "${plan}")"
   persist_profile="$(ftctl_dr_ablestack_export_persist_profile_path "${plan}")"
@@ -656,14 +657,16 @@ ftctl_dr_ablestack_export_persist_intent() {
     chmod 0600 "${persist_manifest}" 2>/dev/null || true
   fi
   tmp="${intent}.tmp.$$"
-  python3 - "${tmp}" "${plan}" "${run}" "${desired}" <<'PY'
-import json, os, sys
-path, plan, run, desired = sys.argv[1:5]
+  python3 - "${tmp}" "${plan}" "${run}" "${desired}" "${actual}" <<'PY'
+import json, os, sys, time
+path, plan, run, desired, actual = sys.argv[1:6]
 payload = {
     "schemaVersion": 1,
     "planUuid": plan,
     "runUuid": run,
     "desiredState": desired,
+    "actualState": actual,
+    "updatedAtEpochMs": int(time.time() * 1000),
 }
 with open(path, "w", encoding="utf-8") as fh:
     json.dump(payload, fh, sort_keys=True, separators=(",", ":"))
@@ -804,6 +807,7 @@ ftctl_dr_ablestack_target_export_start() {
   local port name pid_file current_pid unit_name out="" err="" rc=0 records ready reverse_requested reverse_profile
   [[ -n "${plan}" && -n "${run}" ]] || return 2
   ftctl_dr_ablestack_target_export_resolve_profile "${plan}" "${profile_file}" profile_file || return $?
+  ftctl_dr_ablestack_export_persist_intent "${plan}" "${run}" "RUNNING" "${profile_file}" "" "STARTING" || return $?
   reverse_requested="$(ftctl_dr_runtime_profile_value "${profile_file}" "request.reverseTargetExport" 2>/dev/null || true)"
   if [[ "${reverse_requested,,}" == "true" || "${reverse_requested}" == "1" ]]; then
     reverse_profile="$(ftctl_dr_ablestack_checkpoint_dir "${plan}")/target-export-reverse-$(ftctl_dr_runtime_key "${run}").json"
@@ -912,7 +916,7 @@ with open(tmp,"w",encoding="utf-8") as fh: json.dump(data,fh,sort_keys=True,sepa
 os.replace(tmp,sys.argv[2])
 PY
   rm -f "${records}"
-  ftctl_dr_ablestack_export_persist_intent "${plan}" "${run}" "RUNNING" "${profile_file}" "${manifest}" || return $?
+  ftctl_dr_ablestack_export_persist_intent "${plan}" "${run}" "RUNNING" "${profile_file}" "${manifest}" "RUNNING" || return $?
   if [[ "${json}" == "1" ]]; then
     python3 - "${manifest}" <<'PY'
 import json,sys
@@ -1069,7 +1073,7 @@ ftctl_dr_ablestack_target_export_stop() {
   local plan="${1-}" json="${2-0}" run="${3-}" checkpoint_sequence="${4-}" manifest item stopped=0
   local reverse_baseline_state="NOT_REQUESTED"
   manifest="$(ftctl_dr_ablestack_export_manifest_path "${plan}")"
-  ftctl_dr_ablestack_export_persist_intent "${plan}" "" "STOPPED" "" "" || return $?
+  ftctl_dr_ablestack_export_persist_intent "${plan}" "${run}" "STOPPED" "" "" "STOPPING" || return $?
   if [[ -f "${manifest}" ]]; then
     while IFS= read -r item; do
       ftctl_dr_ablestack_target_export_stop_item "${item}"
@@ -1086,6 +1090,7 @@ PY
     ftctl_dr_ablestack_prepare_reverse_baseline "${plan}" "${run}" "${checkpoint_sequence}" || return $?
     reverse_baseline_state="$(ftctl_dr_ablestack_reverse_baseline_status "${plan}" "${run}" "${checkpoint_sequence}")"
   fi
+  ftctl_dr_ablestack_export_persist_intent "${plan}" "${run}" "STOPPED" "" "" "STOPPED" || return $?
   if [[ "${json}" == "1" ]]; then
     printf '{"command":"dr-target-export-stop","result":"ok","accepted":true,"state":"STOPPED","step":"target-export-stopped","progress":100,"stopped":%s,"reverse_baseline_state":"%s"}\n' "${stopped}" "$(ftctl__json_escape "${reverse_baseline_state}")"
   else
