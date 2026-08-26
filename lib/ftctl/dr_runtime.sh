@@ -7566,12 +7566,46 @@ ftctl_dr_runtime_status() {
 ftctl_dr_runtime_cancel() {
   local plan="${1-}" run="${2-}" force="${3-0}" json="${4-0}"
   local run_path status_path rc=0 now
+  local existing_state existing_step existing_terminal_source existing_terminal_authoritative
+  local existing_runtime_endpoints_drained existing_transfer_activity_state
 
   ftctl_dr_runtime_require_plan "${plan}" || return 2
   ftctl_dr_runtime_require_run "${run}" || return 2
   ftctl_dr_runtime_ensure_plan_dirs "${plan}"
   run_path="$(ftctl_dr_runtime_run_path "${plan}" "${run}")"
   status_path="$(ftctl_dr_runtime_status_path "${plan}")"
+  existing_state="$(ftctl_dr_runtime_state_get_from_path "${run_path}" state)"
+  existing_step="$(ftctl_dr_runtime_state_get_from_path "${run_path}" step)"
+  existing_terminal_source="$(ftctl_dr_runtime_state_get_from_path "${run_path}" terminal_source)"
+  existing_terminal_authoritative="$(ftctl_dr_runtime_state_get_from_path "${run_path}" terminal_authoritative)"
+  existing_runtime_endpoints_drained="$(ftctl_dr_runtime_state_get_from_path "${run_path}" runtime_endpoints_drained)"
+  existing_transfer_activity_state="$(ftctl_dr_runtime_state_get_from_path "${run_path}" transfer_activity_state)"
+  if [[ "${existing_terminal_authoritative}" == "true" ]]; then
+    case "${existing_state}" in
+      READY|FAILED|ERROR|FAILED_OVER|RELEASED|UNPROTECTED|CANCELED)
+        [[ "${existing_runtime_endpoints_drained}" == "true" ]] || existing_runtime_endpoints_drained="false"
+        [[ -n "${existing_transfer_activity_state}" ]] || existing_transfer_activity_state="IDLE"
+        if [[ "${existing_state}" == "CANCELED" ]]; then
+          existing_transfer_activity_state="CANCELED"
+        fi
+        if [[ "${json}" == "1" ]]; then
+          printf '{"command":"dr-cancel","result":"%s","accepted":true,"plan_uuid":"%s","run_uuid":"%s","state":"%s","step":"%s","terminal_source":"%s","terminal_authoritative":true,"runtime_endpoints_drained":%s,"transfer_activity_state":"%s","error_code":"","exit_code":0}\n' \
+            "$([[ "${existing_state}" == "CANCELED" ]] && printf canceled || printf already_terminal)" \
+            "$(ftctl__json_escape "${plan}")" \
+            "$(ftctl__json_escape "${run}")" \
+            "$(ftctl__json_escape "${existing_state}")" \
+            "$(ftctl__json_escape "${existing_step}")" \
+            "$(ftctl__json_escape "${existing_terminal_source}")" \
+            "${existing_runtime_endpoints_drained}" \
+            "$(ftctl__json_escape "${existing_transfer_activity_state}")"
+        else
+          printf 'dr-cancel: plan=%s run=%s already terminal state=%s\n' \
+            "${plan}" "${run}" "${existing_state}"
+        fi
+        return 0
+        ;;
+    esac
+  fi
   now="$(ftctl_now_iso8601)"
   ftctl_dr_runtime_path_set "${run_path}" \
     "plan=${plan}" "run=${run}" "action=dr-cancel" \

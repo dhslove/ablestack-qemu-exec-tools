@@ -977,3 +977,29 @@ status value must never erase a non-empty command value.
 | Resume contract | Baseline/minimum checkpoint only | Baseline/minimum checkpoint plus global authority floor |
 | Run evidence | CLI floor can be overwritten with empty prior status | Non-empty Run floor is preserved |
 | Terminal gate | Target scheduler and source scheduler ownership are mixed | Source durable Cycle is the final Failback gate |
+
+## 35. Idempotent cancellation after an authoritative terminal
+
+`dr-cancel` is a control request, not permission to rewrite history. Before it
+writes `CANCEL_REQUESTED`, FTCTL reads the addressed Run journal. If the Run is
+already authoritative terminal, the journal is left byte-for-byte unchanged
+and the command returns a typed `already_terminal` result containing the
+existing state, step, terminal source, endpoint-drain state, and transfer state.
+
+Only a non-terminal Run enters scheduler drain. A successful drain writes the
+authoritative `CANCELED` terminal. A partial drain remains retryable and never
+claims terminal success. This ordering protects a Full Seed that reaches its
+durable target immediately before an operator cancellation.
+
+The owning host is selected by Cloud, but FTCTL validates the Plan and Run UUID
+locally. For remote `KVM_TO_KVM` forward replication the command must arrive on
+the source Agent; target-owned reverse operations continue to be canceled on
+the target Agent. No fallback to a non-owner host is allowed.
+
+| Area | AS-IS | TO-BE |
+| --- | --- | --- |
+| Journal write order | Writes `CANCEL_REQUESTED` before checking terminal state | Checks terminal authority first |
+| Completed Run | Can be rewritten as canceled or pending | Returns `already_terminal` without mutation |
+| Active Run | Drains scheduler and endpoints | Existing successful cancellation path is preserved |
+| Partial drain | Generic command failure | Typed retryable `pending` result |
+| Regression | Late UI action can corrupt a valid Full Seed result | Smoke covers terminal immutability and active cancellation |
