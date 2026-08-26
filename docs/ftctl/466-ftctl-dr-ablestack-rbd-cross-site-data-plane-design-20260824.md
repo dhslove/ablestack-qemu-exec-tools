@@ -805,3 +805,30 @@ does not alter VMware mover, CBT, VDDK, or guest-conversion behavior.
 | Restart recovery | `PROTECTION_RESUMING` only polls checkpoints | Reconciles forward export before polling the checkpoint |
 | Rollback | Replica recovery can overlap a forward writer | Forward export stops before replica power-on |
 | Regression boundary | Shared transport changes can affect VMware | Branch is limited to remote `KVM_TO_KVM` RBD |
+
+## 30. Reprotect site-agent export contract
+
+For remote ABLESTACK RBD Plans, both Failback and Reprotect reverse checkpoints
+consume Cloud-owned `site-agent-nbd` exports. FTCTL does not create those
+exports and does not fall back to a local RBD path when they are absent. Each
+reverse disk row must contain a URI, host, and positive port injected by Cloud
+before the action reaches the worker.
+
+Missing export fields are a command-contract failure, not an unspecified
+reverse-copy failure. FTCTL publishes a terminal journal with
+`DR_SITE_AGENT_EXPORT_CONTRACT_MISSING`, exit code `94`, and drained runtime
+endpoints. The error is deterministic and non-retryable until Cloud dispatches
+a corrected immutable profile. Existing valid export, librbd, qemu-img, and
+incremental writer behavior is unchanged.
+
+When a terminal journal exists, `dr-status` treats it as authoritative over a
+stale worker journal. A previous `worker_state=RUNNING` sample cannot replace
+the terminal worker state or make Cloud wait indefinitely.
+
+| Area | AS-IS | TO-BE |
+| --- | --- | --- |
+| Missing export | Generic `DR_REPROTECT_REVERSE_SYNC_FAILED` | `DR_SITE_AGENT_EXPORT_CONTRACT_MISSING` with exit 94 |
+| Fallback | Ambiguous operator diagnosis | No fallback; Cloud must provide the Plan-owned export |
+| Status merge | Stale worker journal may report RUNNING beside terminal ERROR | Terminal journal owns terminal worker state and liveness |
+| Data path | Risk of broad rewrite | Valid site-agent and local RBD success paths are unchanged |
+| Tests | Reprotect terminal smoke only | Missing-export contract plus valid-export regression coverage |

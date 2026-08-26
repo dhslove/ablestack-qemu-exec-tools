@@ -3535,6 +3535,7 @@ ftctl_dr_runtime_reprotect_worker() {
       76) error_code="DR_VMWARE_VDDK_OPEN_DENIED" ;;
       77) error_code="DR_VMWARE_VDDK_THUMBPRINT_UNRESOLVED" ;;
       81) error_code="DR_VMWARE_SNAPSHOT_REF_UNRESOLVED" ;;
+      94) error_code="DR_SITE_AGENT_EXPORT_CONTRACT_MISSING" ;;
       66) error_code="DR_UNSUPPORTED_DIRECTION" ;;
       47) error_code="DR_REPROTECT_REQUIRES_TARGET_ACTIVE" ;;
       *) error_code="DR_REPROTECT_REVERSE_SYNC_FAILED" ;;
@@ -4056,6 +4057,8 @@ ftctl_dr_runtime_emit_state_json() {
       terminal_version="$(ftctl_dr_runtime_journal_value "${terminal_journal_path}" terminal_version)"
       terminal_authoritative="$(ftctl_dr_runtime_journal_value "${terminal_journal_path}" terminal_authoritative)"
       runtime_endpoints_drained="$(ftctl_dr_runtime_journal_value "${terminal_journal_path}" runtime_endpoints_drained)"
+      worker_state="TERMINAL_PUBLISHED"
+      worker_exit_code="$(ftctl_dr_runtime_journal_value "${terminal_journal_path}" terminal_exit_code)"
       worker_liveness_state="TERMINAL"
       terminal_publication_pending="false"
     fi

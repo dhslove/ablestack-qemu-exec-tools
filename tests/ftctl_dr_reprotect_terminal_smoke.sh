@@ -64,4 +64,23 @@ TERMINAL_PATH="${PLAN_DIR}/runs/${RUN}.journals/terminal.state"
 grep -q '^terminal_state=SUCCEEDED$' "${TERMINAL_PATH}"
 grep -q '^terminal_authoritative=true$' "${TERMINAL_PATH}"
 
+cat > "${PLAN_DIR}/runs/${RUN}.journals/worker.state" <<EOF
+version=1
+writer_role=worker
+plan=${PLAN}
+run=${RUN}
+launch_nonce=test-launch
+generation=42
+worker_pid=999999
+worker_start_ticks=1
+worker_state=RUNNING
+worker_heartbeat_at=2026-08-23T00:00:09Z
+EOF
+
+terminal_status_json="$(bash "${ROOT}/bin/ablestack_vm_ftctl.sh" dr-status \
+  --config "${CONFIG}" --plan "${PLAN}" --run "${RUN}" --json)"
+jq -e '.terminal_authoritative == true
+  and .worker_state == "TERMINAL_PUBLISHED"
+  and .runtime_endpoints_drained == true' <<<"${terminal_status_json}" >/dev/null
+
 echo "ftctl DR reprotect terminal smoke: PASS"
