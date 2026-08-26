@@ -7565,7 +7565,7 @@ ftctl_dr_runtime_status() {
 
 ftctl_dr_runtime_cancel() {
   local plan="${1-}" run="${2-}" force="${3-0}" json="${4-0}"
-  local run_path status_path rc=0 now
+  local run_path status_path profile_path rc=0 recovery_rc=0 recovery_queued=false now
   local existing_state existing_step existing_terminal_source existing_terminal_authoritative
   local existing_runtime_endpoints_drained existing_transfer_activity_state
 
@@ -7641,13 +7641,35 @@ ftctl_dr_runtime_cancel() {
     "updated_at=$(ftctl_now_iso8601)"
   cp -f "${run_path}" "${status_path}"
   chmod 0644 "${status_path}" 2>/dev/null || true
+  profile_path="$(ftctl_dr_runtime_profile_path "${plan}")"
+  if command -v ftctl_dr_scheduler_cancel_auto_recovery_enabled >/dev/null 2>&1 \
+      && ftctl_dr_scheduler_cancel_auto_recovery_enabled "${profile_path}"; then
+    if ftctl_dr_scheduler_queue_cancel_recovery "${plan}" "${run}" "${status_path}" >/dev/null; then
+      recovery_queued=true
+    else
+      recovery_rc=$?
+      ftctl_dr_runtime_path_set "${status_path}" \
+        "state=READY" \
+        "step=cancel-recovery-failed" \
+        "scheduler_health=DEGRADED" \
+        "scheduler_desired_state=RUNNING" \
+        "scheduler_recovery_state=FAILED" \
+        "scheduler_recovery_rc=${recovery_rc}" \
+        "replication_activity=STOPPED" \
+        "protection_state=DEGRADED" \
+        "error_code=DR_CANCEL_AUTO_RECOVERY_FAILED" \
+        "error_message=The canceled Run is terminal but continuous protection recovery could not be queued" \
+        "updated_at=$(ftctl_now_iso8601)" || true
+    fi
+  fi
   ftctl_log_event "dr-runtime" "dr.cancel" "ok" "" "" \
-    "plan=${plan} run=${run} force=${force}"
+    "plan=${plan} run=${run} force=${force} recovery_queued=${recovery_queued}"
 
   if [[ "${json}" == "1" ]]; then
-    printf '{"command":"dr-cancel","result":"canceled","accepted":true,"plan_uuid":"%s","run_uuid":"%s","state":"CANCELED","terminal_authoritative":true,"runtime_endpoints_drained":true,"transfer_activity_state":"CANCELED","error_code":"","exit_code":0}\n' \
+    printf '{"command":"dr-cancel","result":"canceled","accepted":true,"plan_uuid":"%s","run_uuid":"%s","state":"CANCELED","terminal_authoritative":true,"runtime_endpoints_drained":true,"transfer_activity_state":"CANCELED","scheduler_recovery_queued":%s,"error_code":"","exit_code":0}\n' \
       "$(ftctl__json_escape "${plan}")" \
-      "$(ftctl__json_escape "${run}")"
+      "$(ftctl__json_escape "${run}")" \
+      "${recovery_queued}"
   else
     printf 'dr-cancel: plan=%s run=%s canceled\n' "${plan}" "${run}"
   fi

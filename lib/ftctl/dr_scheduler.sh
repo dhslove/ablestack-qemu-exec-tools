@@ -391,8 +391,8 @@ ftctl_dr_scheduler_recover() {
 }
 
 ftctl_dr_scheduler_reconcile_plan() {
-  local plan="${1-}" profile_file status_path state active_side control_state transition_state run state_path
-  local control_command scheduler_desired_state
+  local plan="${1-}" profile_file status_path state active_side control_state transition_state run="" state_path
+  local control_command scheduler_desired_state recovery_state recovery_trigger
   profile_file="$(ftctl_dr_runtime_profile_path "${plan}")"
   status_path="$(ftctl_dr_runtime_status_path "${plan}")"
   [[ -f "${profile_file}" && -f "${status_path}" ]] || return 0
@@ -434,7 +434,12 @@ ftctl_dr_scheduler_reconcile_plan() {
     ""|IDLE|COMPLETED|SUCCEEDED) ;;
     *) return 0 ;;
   esac
-  run="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "latest_completed_producer_run_uuid")"
+  recovery_state="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "scheduler_recovery_state")"
+  recovery_trigger="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "scheduler_recovery_trigger")"
+  if [[ "${recovery_state}" == "REQUIRED" && "${recovery_trigger}" == "CANCEL_AUTO_RECOVERY" ]]; then
+    run="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "scheduler_recovery_run_uuid")"
+  fi
+  [[ -n "${run}" ]] || run="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "latest_completed_producer_run_uuid")"
   [[ -n "${run}" ]] || run="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "run")"
   [[ -n "${run}" ]] || return 0
   state_path="$(ftctl_dr_runtime_run_path "${plan}" "${run}")"
@@ -1193,6 +1198,75 @@ ftctl_dr_scheduler_cancel_active_transfer() {
     "runtime_endpoints_drained=true" \
     "updated_at=${now}" || return $?
   printf '%s\n' "${generation}"
+}
+
+ftctl_dr_scheduler_cancel_auto_recovery_enabled() {
+  local profile_file="${1-}" direction transport_mode
+  [[ -f "${profile_file}" ]] || return 1
+  direction="$(ftctl_dr_runtime_profile_value "${profile_file}" "direction" 2>/dev/null || true)"
+  transport_mode="$(ftctl_dr_runtime_profile_value "${profile_file}" "transport.mode" 2>/dev/null || true)"
+  [[ "${direction^^}" == "KVM_TO_KVM" && "${transport_mode}" == "site-agent-nbd" ]]
+}
+
+ftctl_dr_scheduler_queue_cancel_recovery() {
+  local plan="${1-}" canceled_run="${2-}" status_path="${3-}"
+  local profile_file sequence_path recovery_run recovery_path generation now
+  local driver driver_state
+
+  profile_file="$(ftctl_dr_runtime_profile_path "${plan}")"
+  ftctl_dr_scheduler_cancel_auto_recovery_enabled "${profile_file}" || return 1
+  sequence_path="$(ftctl_dr_scheduler_sequence_path "${plan}")"
+  recovery_run="$(ftctl_dr_runtime_launch_nonce)"
+  [[ -n "${recovery_run}" ]] || return 2
+  recovery_path="$(ftctl_dr_runtime_run_path "${plan}" "${recovery_run}")"
+  now="$(ftctl_now_iso8601)"
+  driver="$(ftctl_dr_runtime_state_get_from_path "${status_path}" driver)"
+  driver_state="$(ftctl_dr_runtime_state_get_from_path "${status_path}" driver_state)"
+
+  ftctl_dr_runtime_path_set "${recovery_path}" \
+    "plan=${plan}" \
+    "run=${recovery_run}" \
+    "action=dr-scheduler-run" \
+    "state=READY" \
+    "step=cancel-recovery-pending" \
+    "progress=0" \
+    "accepted=true" \
+    "control_request_run_uuid=" \
+    "driver=${driver}" \
+    "driver_state=${driver_state}" \
+    "scheduler_recovery_parent_run_uuid=${canceled_run}" \
+    "terminal_authoritative=false" \
+    "updated_at=${now}" || return $?
+  ftctl_state_set_path "${sequence_path}" \
+    "pending_reseed_run=${recovery_run}" \
+    "pending_reseed_request_bound=false" \
+    "requested_cycle_owner_run=" \
+    "requested_cycle_mode=FULL_RESEED" \
+    "requested_cycle_state=PENDING" \
+    "requested_cycle_at=${now}" || return $?
+  generation="$(ftctl_dr_scheduler_control_set "${plan}" "run" "cancel-auto-recovery" "${recovery_run}" "false")" || return $?
+  ftctl_dr_scheduler_update_state "${recovery_path}" "${status_path}" \
+    "state=READY" \
+    "step=cancel-recovery-pending" \
+    "progress=100" \
+    "scheduler_state=RECOVERING" \
+    "scheduler_health=RECOVERING" \
+    "scheduler_desired_state=RUNNING" \
+    "scheduler_recovery_state=REQUIRED" \
+    "scheduler_recovery_trigger=CANCEL_AUTO_RECOVERY" \
+    "scheduler_recovery_run_uuid=${recovery_run}" \
+    "scheduler_recovery_parent_run_uuid=${canceled_run}" \
+    "automatic_recovery_queued=true" \
+    "control_protocol_version=${FTCTL_DR_CONTROL_PROTOCOL_VERSION}" \
+    "control_generation=${generation}" \
+    "control_state=RUNNING" \
+    "cycle_state=IDLE" \
+    "replication_activity=RECOVERING" \
+    "runtime_endpoints_drained=true" \
+    "updated_at=${now}" || return $?
+  ftctl_log_event "dr-runtime" "dr.cancel.recovery.queued" "ok" "" "" \
+    "plan=${plan} canceled_run=${canceled_run} recovery_run=${recovery_run}"
+  printf '%s\n' "${recovery_run}"
 }
 
 ftctl_dr_scheduler_ensure_running() {

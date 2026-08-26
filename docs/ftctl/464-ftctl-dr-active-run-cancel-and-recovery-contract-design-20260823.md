@@ -45,21 +45,29 @@ DR UI의 `실행 취소`가 Cloud DB 상태만 바꾸거나, 진행 중인 전�
 
 ### 3.3 동기화 복구
 
-`dr-sync-recover`는 일반 `STOPPED` 상태를 무조건 해제하지 않는다. 오직
-`scheduler_recovery_state=REQUIRED`이고 `reseed_reason=OPERATOR_CANCELED_TRANSFER`인 경우에만
-새 control generation을 `run`으로 전환하고 systemd scheduler를 다시 시작한다. 재개 Cycle은
-중단된 시퀀스의 Full Reseed이며, 완료 후에만 `READY`와 새 durable baseline을 기록한다.
+`현재 작업 실행 취소`는 Run 범위 명령이며 지속 보호를 중지하는 명령이 아니다. FTCTL은
+취소 Run의 terminal journal을 먼저 `CANCELED`로 확정한 뒤, 별도의 내부 recovery Run UUID를
+만들어 control generation을 `run`으로 전환한다. 취소 Run UUID를 recovery producer로
+재사용해서는 안 된다. 그래야 자동 Full Reseed가 이미 종결된 Cloud Run을 성공 상태로 다시
+덮어쓰지 않는다.
 
-운영자가 명시적으로 취소한 상태는 장애 복구 컨트롤러의 자동 재시작 대상이 아니다. Cloud는
-이 상태 조합을 자동 `RECOVER_SYNC` 제출에서 제외하고 UI의 `동기화 복구` 명령으로만
-`dr-sync-recover`를 호출한다. 소스 사이트 장애나 전송 경로 장애의 자동 복구 계약은 유지한다.
+전송 중 취소는 중단된 시퀀스를 `pending_reseed_sequence`로 유지하고
+`pending_reseed_request_bound=false`로 기록한다. 로컬 reconcile은 내부 recovery Run을
+사용해 systemd scheduler를 다시 시작하고 같은 시퀀스를 Full Reseed한다. 이 Cycle은 취소한
+Cloud Run의 결과가 아니라 지속 보호의 새 producer Cycle이며, 완료 후에만 새 durable baseline과
+다음 증분 Cycle을 허용한다.
 
-FTCTL 로컬 reconcile도 동일한 계약을 따른다. 취소가 먼저 기록한
-`scheduler/control.state command=stop`은 plan `status.state`보다 우선하는 내구성 보류 상태다.
-systemd 종료와 status 투영 사이에 타이머가 실행되더라도 로컬 reconcile은 scheduler를 시작하지
-않는다. 취소 종결 상태에는 `scheduler_desired_state=STOPPED`도 함께 기록한다. 운영자가 UI에서
-`동기화 복구`를 실행해 control generation을 `command=run`으로 전환한 경우에만 같은 시퀀스의
-Full Reseed를 다시 시작한다.
+`동기화 일시 중지`와 `보호 해제`는 계속 `scheduler_desired_state=STOPPED`를 유지한다.
+`dr-sync-recover`는 자동 recovery queue가 시작되지 못했거나 scheduler 재기동이 반복 실패한
+경우의 운영자 복구 수단으로 남는다. 자동 복구 변경은 remote `KVM_TO_KVM`의
+`site-agent-nbd` 경로에만 적용하고 VMware/VDDK 및 로컬 RBD 성공 경로의 기존 취소 계약은
+변경하지 않는다.
+
+FTCTL 로컬 reconcile은 `scheduler_recovery_run_uuid`가 있으면 과거 완료 producer보다 해당
+내부 Run을 우선해 재기동한다. 취소 drain 중에는 내구성 `command=stop`을 계속 우선하고,
+terminal journal 기록과 recovery queue 생성이 모두 끝난 뒤에만 `command=run`으로 바꾼다.
+따라서 종료 중인 mover를 조기에 다시 시작하지 않으면서도 다음 timer 주기에는 보호가 자동으로
+복구된다.
 
 ### 3.4 Cloud 종결
 
@@ -81,12 +89,12 @@ FTCTL JSON 응답의 `state=CANCELED`, `terminal_authoritative=true`,
 1. 대기 중 Run 취소
 2. Full Seed 전송 중 취소와 scheduler cgroup 종료
 3. 취소 timeout 시 거짓 terminal 금지
-4. 취소 후 `dr-sync-recover`가 같은 시퀀스를 Full Reseed로 재수행
+4. 취소 terminal 이후 별도 내부 recovery Run이 같은 시퀀스를 Full Reseed로 재수행
 5. 복구 완료 후 다음 CBT incremental Cycle 성공
 6. 기존 sync, pause/resume, release, test failover/cleanup, failover/failback 계약 유지
-7. 운영자 취소 후 자동 복구 평가 주기를 지나도 scheduler가 `STOPPED`로 유지
-8. UI `동기화 복구` 후에만 같은 시퀀스 Full Reseed 재시작
-9. systemd 종료와 status 투영 사이에 로컬 reconcile이 실행돼도 `command=stop` 보류 유지
+7. remote `KVM_TO_KVM` 취소 후 scheduler가 자동 `RUNNING`으로 복귀
+8. 취소 Run은 `CANCELED`를 유지하고 내부 recovery Run만 Full Reseed producer가 됨
+9. systemd 종료와 terminal 기록 사이에 로컬 reconcile이 실행돼도 `command=stop` 보류 유지
 10. 전송이 이미 terminal이고 live scheduler/worker가 없으면 그 부재를 drain 경계로 사용해
     STOP generation을 로컬 ACK하고 즉시 `CANCELED`로 종결
 
@@ -113,9 +121,9 @@ VMware 전송 경로에는 영향이 없고, 이미 종료된 제어 주체에 �
 | 취소 반응 | 전송 완료 뒤 STOP ACK | scheduler cgroup 선점 종료 |
 | FTCTL 상태 | `CANCELED / COPYING` 충돌 | drain 확인 뒤 terminal `CANCELED` |
 | Cloud 상태 | 요청 수락을 terminal로 오인 가능 | terminal 증거 확인 전 `CANCEL_REQUESTED` |
-| 자동 복구 | 운영자 취소도 장애로 보고 재시작 | 취소 보류는 제외하고 UI 복구만 허용 |
-| 로컬 reconcile | 지연된 status의 `RUNNING`을 보고 재시작 | 내구성 control의 `stop`을 우선해 재시작 금지 |
+| 자동 복구 | 취소가 지속 보호까지 영구 정지 | 취소 Run 종결 후 별도 내부 Run으로 보호 자동 복구 |
+| 로컬 reconcile | 취소한 Cloud Run을 재사용하거나 영구 정지 | drain 중 `stop` 우선, terminal 후 recovery Run 우선 |
 | 대상 기준선 | 부분 덮어쓰기 여부 미표시 | baseline 무효와 Full Reseed 필요 명시 |
-| 복구 | STOPPED 상태에서 거절 | 취소 복구 계약일 때만 제한적으로 재시작 |
+| 복구 | 운영자가 별도 복구 메뉴를 실행해야 함 | remote KVM은 자동 복구, 실패 시 수동 복구 제공 |
 | terminal one-shot 취소 | 종료된 worker의 ACK를 기다려 pending | live owner 부재를 drain으로 인정하고 로컬 STOP ACK |
 | 성공 경로 | 전송 코드와 제어 코드가 결합 | 검증된 전송은 유지하고 제어 경계만 보강 |
