@@ -925,3 +925,55 @@ current sequence whenever it is equal to or newer than the Cloud generation.
 | Existing runtime | Requires another action or DB repair | `dr-status` safely reconstructs and repairs the floor |
 | Concurrency | Read and write can race with scheduler updates | A Plan-scoped authority-sequence lock serializes the max update |
 | Regression boundary | Relaxing the Cloud guard could weaken proven routes | Cloud guard remains strict; existing VMware and forward-copy contracts are unchanged |
+## 34. Remote-source Failback commit handoff
+
+### Problem observed on 2026-08-26
+
+For a cross-site `KVM_TO_KVM` Plan controlled from the target site, reverse
+transfer and source VM promotion completed, but Failback remained in
+`COMMIT_VERIFYING`.
+
+The target-side Agent started a local forward scheduler during
+`dr-failback-commit`. The existing remote-source ownership rule then stopped
+that scheduler because only the source-side Agent may produce forward Cycles.
+Cloud waited for target-side commit acknowledgement before asking the remote
+source Agent to resume, so no owner could create the required first durable
+forward Cycle.
+
+The same run also showed that the CLI authority floor was applied to the
+scheduler sequence file but was overwritten by an empty value while the Run
+state was initialized.
+
+### Required ownership contract
+
+For `KVM_TO_KVM` with `schedulerTransitionScope=REMOTE_SOURCE`:
+
+1. The target-side Agent owns reverse transfer, target shutdown evidence, and
+   durable source-authority commit acknowledgement.
+2. The target-side Agent must not start a forward scheduler after Failback.
+3. Cloud transitions the session to `PROTECTION_RESUMING` after the durable
+   target-side acknowledgement.
+4. Cloud starts the Plan-owned target export and resumes the source-side Agent
+   scheduler with the Failback baseline, minimum checkpoint, and global
+   authority sequence floor.
+5. Failback is terminal only after the source-side status reports a durable
+   checkpoint at or above `minimumCompletedCheckpointSequence`.
+
+VMware-origin and local single-site scheduler behavior remain unchanged.
+
+### State preservation
+
+`cloud_authority_sequence_floor` is immutable operation evidence. Run
+initialization must prefer the current Run value supplied by the CLI, then the
+previous Plan status, and finally an authority specification. An empty prior
+status value must never erase a non-empty command value.
+
+### AS-IS / TO-BE
+
+| Area | AS-IS | TO-BE |
+| --- | --- | --- |
+| Target Agent commit | Starts a local forward scheduler that is immediately suppressed | Durably ACKs authority commit without starting a local scheduler |
+| Source Agent resume | Runs only after a target-side post-Cycle ACK that cannot occur | Runs immediately after durable authority ACK |
+| Resume contract | Baseline/minimum checkpoint only | Baseline/minimum checkpoint plus global authority floor |
+| Run evidence | CLI floor can be overwritten with empty prior status | Non-empty Run floor is preserved |
+| Terminal gate | Target scheduler and source scheduler ownership are mixed | Source durable Cycle is the final Failback gate |

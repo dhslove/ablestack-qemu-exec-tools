@@ -365,7 +365,9 @@ PY
       authority_source="status-compat"
     fi
   fi
-  authority_sequence_floor="$(ftctl_dr_runtime_state_get_from_path "${prior_status_path}" "cloud_authority_sequence_floor")"
+  authority_sequence_floor="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "cloud_authority_sequence_floor")"
+  [[ -n "${authority_sequence_floor}" ]] || \
+    authority_sequence_floor="$(ftctl_dr_runtime_state_get_from_path "${prior_status_path}" "cloud_authority_sequence_floor")"
 
   if [[ -n "${authority_spec_path}" && -f "${authority_spec_path}" ]]; then
     local expected_side spec_generation spec_sequence_floor spec_checkpoint spec_power spec_promotion spec_session
@@ -6594,7 +6596,7 @@ ftctl_dr_runtime_reconcile_failback_commit() {
   active_path="$(ftctl_dr_runtime_active_failback_session_path "${plan}")"
   control_path="$(ftctl_dr_scheduler_control_path "${plan}")"
   ack_path="$(ftctl_dr_scheduler_control_ack_path "${plan}")"
-  [[ -f "${run_path}" && -f "${commit_path}" && -f "${control_path}" && -f "${ack_path}" ]] || return 1
+  [[ -f "${run_path}" && -f "${commit_path}" ]] || return 1
 
   ftctl_dr_scheduler_lock_acquire "${plan}" "failback-commit" 206 \
     "${FTCTL_DR_TRANSITION_LOCK_TIMEOUT_SEC}" "reconcile:${run}" || return $?
@@ -6626,6 +6628,20 @@ ftctl_dr_runtime_reconcile_failback_commit() {
         || "${target_power_state}" != "POWERED_OFF" ]]; then
     ftctl_dr_scheduler_lock_release "${plan}" "failback-commit" 206
     return 79
+  fi
+
+  if ftctl_dr_runtime_ack_remote_source_failback_commit \
+      "${plan}" "${run}" "${run_path}" "${status_path}" "${commit_path}" \
+      "${session_id}" "${checkpoint_sequence}" "${authority_generation}" \
+      "${baseline_generation}" "${evidence_run}" "${contract_version}" \
+      "${commit_attempt_id}" "${commit_envelope_sha256}"; then
+    ftctl_dr_scheduler_lock_release "${plan}" "failback-commit" 206
+    return 0
+  fi
+
+  if [[ ! -f "${control_path}" || ! -f "${ack_path}" ]]; then
+    ftctl_dr_scheduler_lock_release "${plan}" "failback-commit" 206
+    return 1
   fi
 
   control_generation="$(ftctl_state_read_kv "${control_path}" "generation" 2>/dev/null || true)"
@@ -6837,6 +6853,51 @@ ftctl_dr_runtime_failback_requires_vcenter_guest_heartbeat() {
   [[ "${provider_pair}" == *_TO_VMWARE || -z "${provider_pair}" ]]
 }
 
+ftctl_dr_runtime_ack_remote_source_failback_commit() {
+  local plan="${1-}" run="${2-}" run_path="${3-}" status_path="${4-}" commit_path="${5-}"
+  local session_id="${6-}" checkpoint_sequence="${7-}" authority_generation="${8-}"
+  local baseline_generation="${9-}" evidence_run="${10-}" contract_version="${11-}"
+  local commit_attempt_id="${12-}" commit_envelope_sha256="${13-}" now profile_file worker_role
+  local session_path active_path boot_validation_state
+
+  profile_file="$(ftctl_dr_runtime_profile_path "${plan}")"
+  ftctl_dr_runtime_remote_source_transition "${profile_file}" || return 1
+  worker_role="$(ftctl_dr_runtime_local_worker_role "${plan}")"
+  [[ "${worker_role}" == "target" ]] || return 1
+
+  now="$(ftctl_now_iso8601)"
+  ftctl_state_write_kv_all "${commit_path}" \
+    "version=3" "plan=${plan}" "run=${run}" "session_id=${session_id}" \
+    "checkpoint_sequence=${checkpoint_sequence}" "authority_generation=${authority_generation}" \
+    "baseline_generation=${baseline_generation}" "evidence_run=${evidence_run}" \
+    "contract_version=${contract_version}" "commit_attempt_id=${commit_attempt_id}" \
+    "commit_envelope_sha256=${commit_envelope_sha256}" \
+    "phase=ACKNOWLEDGED" "outcome=ACKNOWLEDGED" \
+    "scheduler_transition_scope=REMOTE_SOURCE" \
+    "updated_at=${now}" || return 2
+  ftctl_dr_runtime_path_set "${run_path}" \
+    "state=READY" "step=remote-source-protection-resume-pending" "progress=90" \
+    "failback_phase=PROTECTION_RESUMING" "cloud_lifecycle_state=PROTECTION_RESUMING" \
+    "active_side=SOURCE" "source_power_state=POWERED_ON" "target_power_state=POWERED_OFF" \
+    "engine_ack_state=ACKNOWLEDGED" "engine_ack_at=${now}" \
+    "failback_commit_outcome=ACKNOWLEDGED" "failback_commit_phase=ACKNOWLEDGED" \
+    "failback_commit_dispatch_state=ACKNOWLEDGED" \
+    "scheduler_state=STOPPED" "scheduler_desired_state=STOPPED" \
+    "scheduler_health=SUPPRESSED" "replication_activity=STOPPED" \
+    "retryable=false" "retry_after_sec=" "error_code=" "error_message=" \
+    "updated_at=${now}" || return 2
+  cp -f "${run_path}" "${status_path}" || return 2
+  chmod 0644 "${status_path}" 2>/dev/null || true
+  session_path="$(ftctl_dr_runtime_failback_session_path "${plan}" "${run}")"
+  active_path="$(ftctl_dr_runtime_active_failback_session_path "${plan}")"
+  boot_validation_state="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "boot_validation_state")"
+  ftctl_dr_runtime_update_failback_session_commit_ack "${session_path}" "${active_path}" \
+    "${authority_generation}" "${boot_validation_state}" "${now}" "0" "0" || return 2
+  ftctl_log_event "dr-runtime" "dr.failback.commit.remote-source" "ok" "" "" \
+    "plan=${plan} run=${run} session=${session_id} checkpoint=${checkpoint_sequence} authority=${authority_generation}"
+  return 0
+}
+
 ftctl_dr_runtime_failback_commit() {
   local plan="${1-}" run="${2-}" session_id="${3-}" checkpoint_sequence="${4-}"
   local authority_generation="${5-}" target_power_state="${6-}" source_power_state="${7-}"
@@ -7011,6 +7072,15 @@ ftctl_dr_runtime_failback_commit() {
     "immediate_cycle_pending=${force_immediate_cycle}" \
     "source_power_state=${source_power_state}" "target_power_state=${target_power_state}" \
     "updated_at=$(ftctl_now_iso8601)" || return 2
+  if ftctl_dr_runtime_ack_remote_source_failback_commit \
+      "${plan}" "${run}" "${run_path}" "${status_path}" "${commit_path}" \
+      "${session_id}" "${checkpoint_sequence}" "${authority_generation}" \
+      "${baseline_generation}" "${evidence_run}" "${contract_version}" \
+      "${commit_attempt_id}" "${commit_envelope_sha256}"; then
+    [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_state_json \
+      "dr-failback-commit" "ok" "${plan}" "${run}" "${run_path}" "0"
+    return 0
+  fi
   if [[ "${force_immediate_cycle}" == "true" || "${force_immediate_cycle}" == "1" ]]; then
     ftctl_dr_scheduler_seed_resume_checkpoint "${plan}" \
       "${resume_baseline_checkpoint_sequence}" "${minimum_completed_checkpoint_sequence}" "${run}" || rc=$?
@@ -7346,7 +7416,7 @@ ftctl_dr_runtime_capabilities() {
       first="0"
       printf '"%s"' "$(ftctl__json_escape "${command}")"
     done
-    printf '],"supported_features":["async-run","status-projection","status-scope-v2","target-materialized-notify","target-materialized-idempotent","target-materialization-manifest-v2","target-resource-ownership-generation-v1","hardware-contract-projection","control-protocol-v2","control-protocol-v3","control-protocol-v4","dr-site-agent-rbd-transport-v1","dr-reverse-site-agent-rbd-transport-v1","dr-scheduler-singleton-v1","dr-scheduler-self-owner-repair-v1","dr-scheduler-systemd-unit-v1","dr-sync-recover-v1","dr-local-reconcile-fence-v1","dr-checkpoint-producer-v1","dr-nbd-deterministic-drain-v1","dr-nbd-cleanup-recovery-v1","dr-plan-authority-snapshot-v1","dr-failover-authority-snapshot-v1","dr-completed-cycle-evidence-v2","dr-failover-abort-v1","dr-failover-cutover-reverse-baseline-v1","dr-transition-preflight-v1","dr-transition-preflight-v2","dr-reverse-preflight-v2","dr-reverse-evidence-publication-v1","dr-reverse-rbd-snapshot-readonly-v1","dr-terminal-causality-v1","dr-requested-cycle-terminal-v1","dr-failback-resume-terminal-v1","dr-worker-journal-v1","dr-live-transfer-progress-v1","dr-runtime-reconciliation-v1","dr-release-tombstone-v1","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","guest-preparation-v1","guest-preparation-v2","test-domain-lifecycle-v1","test-artifact-lifecycle-v2","cloud-managed-test-vm-v1","cutover-ready-v1","cutover-manifest-v2","cutover-preflight-v1","cloud-cutover-commit-v1","cloud-cutover-commit-envelope-v2","cloud-cutover-commit-journal-v2","cloud-cutover-commit-status-v1","cloud-failback-lifecycle-v1","dr-failback-commit-journal-v1","dr-failback-commit-journal-v2","dr-failback-commit-envelope-v1","dr-failback-commit-journal-v3","dr-failback-late-ack-reconcile-v1","dr-failback-rollback-fence-v1"]}\n'
+    printf '],"supported_features":["async-run","status-projection","status-scope-v2","target-materialized-notify","target-materialized-idempotent","target-materialization-manifest-v2","target-resource-ownership-generation-v1","hardware-contract-projection","control-protocol-v2","control-protocol-v3","control-protocol-v4","dr-site-agent-rbd-transport-v1","dr-reverse-site-agent-rbd-transport-v1","dr-remote-source-failback-commit-v1","dr-scheduler-singleton-v1","dr-scheduler-self-owner-repair-v1","dr-scheduler-systemd-unit-v1","dr-sync-recover-v1","dr-local-reconcile-fence-v1","dr-checkpoint-producer-v1","dr-nbd-deterministic-drain-v1","dr-nbd-cleanup-recovery-v1","dr-plan-authority-snapshot-v1","dr-failover-authority-snapshot-v1","dr-completed-cycle-evidence-v2","dr-failover-abort-v1","dr-failover-cutover-reverse-baseline-v1","dr-transition-preflight-v1","dr-transition-preflight-v2","dr-reverse-preflight-v2","dr-reverse-evidence-publication-v1","dr-reverse-rbd-snapshot-readonly-v1","dr-terminal-causality-v1","dr-requested-cycle-terminal-v1","dr-failback-resume-terminal-v1","dr-worker-journal-v1","dr-live-transfer-progress-v1","dr-runtime-reconciliation-v1","dr-release-tombstone-v1","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","guest-preparation-v1","guest-preparation-v2","test-domain-lifecycle-v1","test-artifact-lifecycle-v2","cloud-managed-test-vm-v1","cutover-ready-v1","cutover-manifest-v2","cutover-preflight-v1","cloud-cutover-commit-v1","cloud-cutover-commit-envelope-v2","cloud-cutover-commit-journal-v2","cloud-cutover-commit-status-v1","cloud-failback-lifecycle-v1","dr-failback-commit-journal-v1","dr-failback-commit-journal-v2","dr-failback-commit-envelope-v1","dr-failback-commit-journal-v3","dr-failback-late-ack-reconcile-v1","dr-failback-rollback-fence-v1"]}\n'
     return 0
   fi
 

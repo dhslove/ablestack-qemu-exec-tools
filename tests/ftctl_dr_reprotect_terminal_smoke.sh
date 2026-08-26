@@ -136,6 +136,32 @@ grep -q '^cloud_authority_generation=61$' "${AUTH_RUN_PATH}"
 grep -q '^cloud_authority_sequence_floor=153$' "${AUTH_RUN_PATH}"
 [[ "$(ftctl_dr_scheduler_current_authority_sequence "${AUTH_PLAN}")" == "153" ]]
 
+# A non-empty command floor is operation evidence and must not be erased by an
+# empty previous status or a lower authority specification.
+CLI_PLAN="reprotect-cli-floor-plan"
+CLI_RUN="reprotect-cli-floor-run"
+CLI_DIR="${TMP}/run/dr-runtime/plans/${CLI_PLAN}"
+CLI_STATUS="${CLI_DIR}/status.state"
+CLI_RUN_PATH="${CLI_DIR}/runs/${CLI_RUN}.state"
+CLI_SPEC="${CLI_DIR}/runs/${CLI_RUN}.authority.json"
+mkdir -p "${CLI_DIR}/runs"
+cat > "${CLI_STATUS}" <<EOF
+state=ERROR
+active_side=TARGET
+checkpoint_sequence=7
+cloud_authority_generation=61
+cloud_authority_sequence_floor=
+cloud_cutover_session_id=cutover-61
+target_power_state=POWERED_ON
+target_promotion_state=PROMOTED
+EOF
+printf 'cloud_authority_sequence_floor=676\n' > "${CLI_RUN_PATH}"
+cp "${AUTH_SPEC}" "${CLI_SPEC}"
+ftctl_dr_runtime_capture_authority_context \
+  "${CLI_PLAN}" "${CLI_RUN_PATH}" "${CLI_STATUS}" "${CLI_SPEC}"
+grep -q '^cloud_authority_sequence_floor=676$' "${CLI_RUN_PATH}"
+[[ "$(ftctl_dr_scheduler_current_authority_sequence "${CLI_PLAN}")" == "676" ]]
+
 ftctl_state_set_path "$(ftctl_dr_scheduler_sequence_path "${AUTH_PLAN}")" \
   "plan_cycle_sequence=7" \
   "authority_sequence=41"

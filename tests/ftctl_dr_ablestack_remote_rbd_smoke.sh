@@ -394,6 +394,50 @@ ftctl_dr_scheduler_systemd_available() { return 1; }
 ftctl_dr_scheduler_reconcile_plan "${role_plan}"
 [[ "$(ftctl_dr_runtime_state_get_from_path "${role_plan_dir}/status.state" scheduler_health)" == "SUPPRESSED" ]]
 
+# Remote-source Failback acknowledges authority on the target worker without
+# starting a scheduler there. Commit-status reconciliation must recover an
+# already submitted pre-patch journal without a control/ack file.
+commit_plan="plan-remote-failback-commit"
+commit_run="run-remote-failback-commit"
+commit_session="session-remote-failback-commit"
+commit_plan_dir="$(ftctl_dr_runtime_plan_dir "${commit_plan}")"
+ftctl_dr_runtime_ensure_plan_dirs "${commit_plan}"
+jq --arg plan "${commit_plan}" '.planUuid=$plan' "${plan_owner_profile}" > "${commit_plan_dir}/profile.json"
+ftctl_dr_runtime_record_worker_role "${commit_plan}" target
+commit_run_path="$(ftctl_dr_runtime_run_path "${commit_plan}" "${commit_run}")"
+commit_status_path="$(ftctl_dr_runtime_status_path "${commit_plan}")"
+commit_journal_path="$(ftctl_dr_runtime_failback_commit_state_path "${commit_plan}" "${commit_run}")"
+mkdir -p "$(dirname "${commit_journal_path}")"
+cat > "${commit_run_path}" <<EOF
+state=SYNCING
+failback_session_id=${commit_session}
+boot_validation_state=READY
+EOF
+cp "${commit_run_path}" "${commit_status_path}"
+cat > "${commit_journal_path}" <<EOF
+version=3
+plan=${commit_plan}
+run=${commit_run}
+session_id=${commit_session}
+checkpoint_sequence=12
+authority_generation=676
+baseline_generation=11
+evidence_run=reverse-run
+contract_version=DR_FAILBACK_COMMIT_V1
+commit_attempt_id=attempt-1
+commit_envelope_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+phase=SCHEDULER_RESUMING
+outcome=UNKNOWN
+source_power_state=POWERED_ON
+target_power_state=POWERED_OFF
+EOF
+ftctl_dr_runtime_reconcile_failback_commit "${commit_plan}" "${commit_run}" "${commit_session}"
+[[ "$(ftctl_state_read_kv "${commit_journal_path}" phase)" == "ACKNOWLEDGED" ]]
+[[ "$(ftctl_state_read_kv "${commit_journal_path}" scheduler_transition_scope)" == "REMOTE_SOURCE" ]]
+[[ "$(ftctl_dr_runtime_state_get_from_path "${commit_run_path}" active_side)" == "SOURCE" ]]
+[[ "$(ftctl_dr_runtime_state_get_from_path "${commit_run_path}" scheduler_health)" == "SUPPRESSED" ]]
+[[ "$(ftctl_dr_runtime_state_get_from_path "${commit_run_path}" failback_phase)" == "PROTECTION_RESUMING" ]]
+
 invalid_profile="${TMP}/invalid-plan-owner-profile.json"
 jq '.request.checkpointPlanUuid="wrong-plan"' "${plan_owner_profile}" > "${invalid_profile}"
 ftctl_dr_runtime_ensure_plan_dirs invalid-plan
