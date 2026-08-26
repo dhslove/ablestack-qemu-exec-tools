@@ -6,11 +6,14 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "${tmp}"' EXIT
 
 FTCTL_RUN_DIR="${tmp}/run"
-export FTCTL_RUN_DIR
+FTCTL_STATE_DIR="${tmp}/state"
+export FTCTL_RUN_DIR FTCTL_STATE_DIR
 
+# Match the production loader order so runtime state reads exercise the real
+# key-value parser instead of silently falling back to empty values.
+source "${ROOT}/lib/ftctl/state.sh"
 source "${ROOT}/lib/ftctl/dr_runtime.sh"
 
-ftctl_state_vm_key() { printf '%s\n' "${1-}"; }
 ftctl_ensure_dir() { mkdir -p "${1-}"; }
 ftctl_now_iso8601() { printf '2026-08-26T18:30:00+09:00\n'; }
 ftctl_dr_runtime_require_plan() { return 0; }
