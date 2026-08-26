@@ -129,6 +129,25 @@ VMware 전송 경로에는 영향이 없고, 이미 종료된 제어 주체에 �
 테스트에서 이를 생성 함수처럼 mock하면 실환경 실패를 숨기므로, 스모크 테스트도 미존재 파일
 갱신은 실패하도록 유지하고 표준 writer 호출을 검증한다.
 
+## 4.3 자동복구 실패 후 수동 복구 계약
+
+이전 패키지나 일시적인 파일 시스템 오류로 자동 recovery queue 생성이 실패하면 상태는
+`control_state=STOPPED`, `scheduler_recovery_state=FAILED`로 남을 수 있다. 이 상태에서도
+`reseed_reason=OPERATOR_CANCELED_TRANSFER`가 보존돼 있으면 사용자가 실행한
+`복제 서비스 복구`는 같은 Full Reseed 복구 계약을 재시도해야 한다.
+
+수동 복구가 허용되는 조건은 다음과 같다.
+
+- 활성 측이 `TARGET`이 아니고 계획 상태가 `FAILED_OVER`가 아님
+- `control_state=STOPPED`
+- `scheduler_recovery_state`가 `REQUIRED` 또는 `FAILED`
+- `reseed_reason=OPERATOR_CANCELED_TRANSFER`
+- 전환 상태가 비활성 terminal 상태
+
+일반 운영 중지, 동기화 일시 중지, 보호 관계 종료는 위 취소 증거를 갖지 않으므로 계속
+`DR_RECOVERY_SUPPRESSED_CONTROL_STATE`로 차단한다. 따라서 복구 허용 범위는 취소 후 기준선이
+무효화된 계획으로 제한되고 기존 pause/release 계약을 변경하지 않는다.
+
 ## 5. AS-IS / TO-BE
 
 | 구분 | AS-IS | TO-BE |
@@ -138,6 +157,7 @@ VMware 전송 경로에는 영향이 없고, 이미 종료된 제어 주체에 �
 | Cloud 상태 | 요청 수락을 terminal로 오인 가능 | terminal 증거 확인 전 `CANCEL_REQUESTED` |
 | 자동 복구 | 취소가 지속 보호까지 영구 정지 | 취소 Run 종결 후 별도 내부 Run으로 보호 자동 복구 |
 | recovery Run 파일 | 갱신 함수가 미존재 파일에서 실패 | 표준 writer로 생성 후 scheduler 필드 갱신 |
+| 자동복구 실패 후 수동 복구 | `FAILED`를 일반 STOP으로 오인해 차단 | 취소 증거가 있는 `REQUIRED/FAILED`만 Full Reseed 복구 허용 |
 | 로컬 reconcile | 취소한 Cloud Run을 재사용하거나 영구 정지 | drain 중 `stop` 우선, terminal 후 recovery Run 우선 |
 | 대상 기준선 | 부분 덮어쓰기 여부 미표시 | baseline 무효와 Full Reseed 필요 명시 |
 | 복구 | 운영자가 별도 복구 메뉴를 실행해야 함 | remote KVM은 자동 복구, 실패 시 수동 복구 제공 |

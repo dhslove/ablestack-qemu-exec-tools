@@ -339,7 +339,7 @@ ftctl_dr_scheduler_recover_nbd_quarantine() {
 
 ftctl_dr_scheduler_recover() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" state_path="${4-}" status_path="${5-}" trigger="${6-MANUAL}"
-  local state active_side control_state transition_state authority_rc=0
+  local state active_side control_state transition_state recovery_state reseed_reason authority_rc=0
   [[ -f "${profile_file}" && -f "${status_path}" ]] || return 2
   # Package replacement or process death can leave status.state owned by an
   # older failover Run. Reconcile only from a newer, fully acknowledged
@@ -355,8 +355,13 @@ ftctl_dr_scheduler_recover() {
   transition_state="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "transition_state")"
   [[ "${active_side^^}" != "TARGET" && "${state}" != "FAILED_OVER" ]] || return 41
   if [[ "${control_state}" == "STOPPED" ]]; then
-    [[ "$(ftctl_dr_runtime_state_get_from_path "${status_path}" scheduler_recovery_state)" == "REQUIRED" \
-      && "$(ftctl_dr_runtime_state_get_from_path "${status_path}" reseed_reason)" == "OPERATOR_CANCELED_TRANSFER" ]] || return 42
+    recovery_state="$(ftctl_dr_runtime_state_get_from_path "${status_path}" scheduler_recovery_state)"
+    reseed_reason="$(ftctl_dr_runtime_state_get_from_path "${status_path}" reseed_reason)"
+    case "${recovery_state}" in
+      REQUIRED|FAILED) ;;
+      *) return 42 ;;
+    esac
+    [[ "${reseed_reason}" == "OPERATOR_CANCELED_TRANSFER" ]] || return 42
     ftctl_dr_scheduler_control_set "${plan}" "run" "cancel-recovery" "${run}" "false" >/dev/null || return $?
     ftctl_state_set_path "$(ftctl_dr_scheduler_sequence_path "${plan}")" \
       "pending_reseed_run=${run}" \
