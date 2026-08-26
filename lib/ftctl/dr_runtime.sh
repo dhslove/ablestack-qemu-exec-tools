@@ -302,7 +302,8 @@ PY
 ftctl_dr_runtime_capture_authority_context() {
   local plan="${1-}" run_path="${2-}" prior_status_path="${3-}" authority_spec_path="${4-}"
   local active_path snapshot_path active_side authority_state checkpoint_sequence
-  local target_power_state target_promotion_state session_id authority_generation authority_source key value
+  local target_power_state target_promotion_state session_id authority_generation authority_sequence_floor authority_source key value
+  local effective_authority_floor
   local -a projection_updates=()
 
   active_path="$(ftctl_dr_runtime_active_failover_session_path "${plan}")"
@@ -364,11 +365,13 @@ PY
       authority_source="status-compat"
     fi
   fi
+  authority_sequence_floor="$(ftctl_dr_runtime_state_get_from_path "${prior_status_path}" "cloud_authority_sequence_floor")"
 
   if [[ -n "${authority_spec_path}" && -f "${authority_spec_path}" ]]; then
-    local expected_side spec_generation spec_checkpoint spec_power spec_promotion spec_session
+    local expected_side spec_generation spec_sequence_floor spec_checkpoint spec_power spec_promotion spec_session
     expected_side="$(ftctl_dr_runtime_profile_value "${authority_spec_path}" "expectedActiveSide" 2>/dev/null || true)"
     spec_generation="$(ftctl_dr_runtime_profile_value "${authority_spec_path}" "authorityGeneration" 2>/dev/null || true)"
+    spec_sequence_floor="$(ftctl_dr_runtime_profile_value "${authority_spec_path}" "authoritySequenceFloor" 2>/dev/null || true)"
     spec_checkpoint="$(ftctl_dr_runtime_profile_value "${authority_spec_path}" "checkpointSequence" 2>/dev/null || true)"
     spec_power="$(ftctl_dr_runtime_profile_value "${authority_spec_path}" "targetPowerState" 2>/dev/null || true)"
     spec_promotion="$(ftctl_dr_runtime_profile_value "${authority_spec_path}" "targetPromotionState" 2>/dev/null || true)"
@@ -403,6 +406,7 @@ PY
       [[ -n "${authority_state}" ]] || authority_state="FAILED_OVER"
     fi
     [[ -n "${authority_generation}" ]] || authority_generation="${spec_generation}"
+    [[ -n "${authority_sequence_floor}" ]] || authority_sequence_floor="${spec_sequence_floor}"
     [[ -n "${checkpoint_sequence}" ]] || checkpoint_sequence="${spec_checkpoint}"
     [[ -n "${target_power_state}" ]] || target_power_state="${spec_power}"
     [[ -n "${target_promotion_state}" ]] || target_promotion_state="${spec_promotion}"
@@ -419,10 +423,16 @@ PY
     "target_power_state=${target_power_state}" \
     "target_promotion_state=${target_promotion_state}" \
     "cloud_cutover_session_id=${session_id}" \
-    "cloud_authority_generation=${authority_generation}" || return $?
+    "cloud_authority_generation=${authority_generation}" \
+    "cloud_authority_sequence_floor=${authority_sequence_floor}" || return $?
 
-  if [[ "${authority_generation}" =~ ^[0-9]+$ ]]; then
-    ftctl_dr_scheduler_floor_authority_sequence "${plan}" "${authority_generation}" >/dev/null || return $?
+  effective_authority_floor="${authority_generation}"
+  if [[ "${authority_sequence_floor}" =~ ^[0-9]+$ ]] && \
+      { [[ ! "${effective_authority_floor}" =~ ^[0-9]+$ ]] || (( authority_sequence_floor > effective_authority_floor )); }; then
+    effective_authority_floor="${authority_sequence_floor}"
+  fi
+  if [[ "${effective_authority_floor}" =~ ^[0-9]+$ ]]; then
+    ftctl_dr_scheduler_floor_authority_sequence "${plan}" "${effective_authority_floor}" >/dev/null || return $?
   fi
 
   # Preserve the last completed replication cycle as one Plan-owned
@@ -3814,7 +3824,7 @@ ftctl_dr_runtime_emit_state_json() {
   local worker_journal_path terminal_journal_path progress_journal_path actual_worker_start_ticks heartbeat_age progress_updated_epoch progress_age
   local runtime_generation scheduler_pid_alive baseline_state reseed_reason consecutive_automatic_reseed_count
   local control_protocol_version control_generation control_ack_generation control_state cycle_state
-  local scheduler_session_uuid scheduler_lease_epoch authority_sequence plan_cycle_sequence scheduler_health
+  local scheduler_session_uuid scheduler_lease_epoch authority_sequence plan_cycle_sequence scheduler_health effective_status_authority_floor
   local resume_baseline_checkpoint_sequence minimum_completed_checkpoint_sequence immediate_cycle_pending immediate_cycle_owner_run scheduler_immediate_cycle_owner_run
   local replication_activity protection_state resource_disposition active_worker_run_uuid active_worker_pid active_worker_start_ticks
   local worker_heartbeat_at control_request_run_uuid scheduler_control_request_run_uuid owner_matched
@@ -3853,7 +3863,7 @@ ftctl_dr_runtime_emit_state_json() {
   local failover_manifest_path failover_checkpoint_path failover_requested_at restore_point_locked_at
   local target_promote_started_at target_power_on_at failover_completed_at rto_actual_seconds
   local active_side target_power_state target_promotion_state failover_worker_pid
-  local boot_validation_state cloud_cutover_session_id cloud_authority_generation engine_ack_state engine_ack_at
+  local boot_validation_state cloud_cutover_session_id cloud_authority_generation cloud_authority_sequence_floor engine_ack_state engine_ack_at
   local guest_prep_state guest_family guestprep_manifest_path manifest_schema_version manifest_sha256
   local guestprep_checkpoint_sequence source_fence_state scheduler_recovery_state
   local test_domain_name test_domain_state test_boot_validation_mode
@@ -4152,9 +4162,15 @@ ftctl_dr_runtime_emit_state_json() {
     owner_matched="false"
   fi
   cloud_authority_generation="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "cloud_authority_generation")"
-  if [[ "${cloud_authority_generation}" =~ ^[0-9]+$ ]]; then
+  cloud_authority_sequence_floor="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "cloud_authority_sequence_floor")"
+  effective_status_authority_floor="${cloud_authority_generation}"
+  if [[ "${cloud_authority_sequence_floor}" =~ ^[0-9]+$ ]] && \
+      { [[ ! "${effective_status_authority_floor}" =~ ^[0-9]+$ ]] || (( cloud_authority_sequence_floor > effective_status_authority_floor )); }; then
+    effective_status_authority_floor="${cloud_authority_sequence_floor}"
+  fi
+  if [[ "${effective_status_authority_floor}" =~ ^[0-9]+$ ]]; then
     authority_sequence="$(ftctl_dr_scheduler_floor_authority_sequence \
-      "${plan}" "${cloud_authority_generation}")" || \
+      "${plan}" "${effective_status_authority_floor}")" || \
       authority_sequence="$(ftctl_dr_scheduler_current_authority_sequence "${plan}")"
   else
     authority_sequence="$(ftctl_dr_scheduler_current_authority_sequence "${plan}")"
@@ -4429,6 +4445,7 @@ PY
   boot_validation_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "boot_validation_state")"
   cloud_cutover_session_id="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "cloud_cutover_session_id")"
   cloud_authority_generation="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "cloud_authority_generation")"
+  cloud_authority_sequence_floor="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "cloud_authority_sequence_floor")"
   engine_ack_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "engine_ack_state")"
   engine_ack_at="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "engine_ack_at")"
   failover_worker_pid="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "failover_worker_pid")"
@@ -4866,6 +4883,7 @@ PY
   ftctl_dr_runtime_json_string_field "boot_validation_state" "${boot_validation_state}"
   ftctl_dr_runtime_json_string_field "cloud_cutover_session_id" "${cloud_cutover_session_id}"
   ftctl_dr_runtime_json_number_field "cloud_authority_generation" "${cloud_authority_generation}"
+  ftctl_dr_runtime_json_number_field "cloud_authority_sequence_floor" "${cloud_authority_sequence_floor}"
   ftctl_dr_runtime_json_string_field "engine_ack_state" "${engine_ack_state}"
   ftctl_dr_runtime_json_string_field "engine_ack_at" "${engine_ack_at}"
   ftctl_dr_runtime_json_number_field "failover_worker_pid" "${failover_worker_pid}"
@@ -5208,6 +5226,7 @@ ftctl_dr_runtime_mark_worker_terminal() {
 ftctl_dr_runtime_action() {
   local action="${1-}" plan="${2-}" run="${3-}" profile_file="${4-}" role="${5-}" mode="${6-}" restore_point="${7-}" force="${8-0}" dry_run="${9-0}" wait_value="${10-}" json="${11-0}" artifact_spec_file="${12-}" authority_spec_file="${13-}"
   local force_immediate_cycle="${14-false}"
+  local authority_sequence_floor="${15-}"
   local state_tuple state step progress run_path status_path external_ref rc error_code
   local target_vm_id target_external_ref checkpoint_lease_path test_sequence persisted_artifact_spec="" persisted_authority_spec=""
   local release_authority_side="" release_authority_generation="" release_resource_disposition="RETAIN_OPERATIONAL_VM"
@@ -5215,6 +5234,14 @@ ftctl_dr_runtime_action() {
 
   ftctl_dr_runtime_require_plan "${plan}" || return 2
   ftctl_dr_runtime_require_run "${run}" || return 2
+  if [[ -n "${authority_sequence_floor}" && ! "${authority_sequence_floor}" =~ ^[0-9]+$ ]]; then
+    [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_error_json "${action}" "${plan}" "${run}" \
+      "authority_sequence_floor_invalid" "authority sequence floor must be a non-negative integer" 2
+    return 2
+  fi
+  if [[ "${authority_sequence_floor}" =~ ^[0-9]+$ ]]; then
+    ftctl_dr_scheduler_floor_authority_sequence "${plan}" "${authority_sequence_floor}" >/dev/null || return $?
+  fi
   if [[ -n "${profile_file}" ]]; then
     ftctl_dr_runtime_save_profile "${plan}" "${profile_file}" || {
       [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_error_json "${action}" "${plan}" "${run}" "profile_invalid" "profile JSON is missing or invalid" 2
@@ -5260,6 +5287,10 @@ ftctl_dr_runtime_action() {
     fi
   fi
   ftctl_dr_runtime_write_state "${run_path}" "${plan}" "${run}" "${action}" "${state}" "${step}" "${progress}" "${external_ref}" ""
+  if [[ "${authority_sequence_floor}" =~ ^[0-9]+$ ]]; then
+    ftctl_dr_runtime_path_set "${run_path}" \
+      "cloud_authority_sequence_floor=${authority_sequence_floor}" || return $?
+  fi
   case "${action}" in
     dr-failover|dr-failback|dr-reprotect)
       ftctl_dr_runtime_capture_authority_context "${plan}" "${run_path}" "${status_path}" "${persisted_authority_spec}" || {

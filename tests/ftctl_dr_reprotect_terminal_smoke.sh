@@ -109,8 +109,8 @@ cat > "${AUTH_STATUS}" <<EOF
 state=ERROR
 active_side=TARGET
 checkpoint_sequence=7
-cloud_authority_generation=336
-cloud_cutover_session_id=cutover-336
+cloud_authority_generation=61
+cloud_cutover_session_id=cutover-61
 target_power_state=POWERED_ON
 target_promotion_state=PROMOTED
 EOF
@@ -118,9 +118,10 @@ touch "${AUTH_RUN_PATH}"
 cat > "${AUTH_SPEC}" <<EOF
 {
   "expectedActiveSide": "TARGET",
-  "authorityGeneration": 336,
+  "authorityGeneration": 61,
+  "authoritySequenceFloor": 153,
   "checkpointSequence": 6,
-  "cutoverSessionId": "cutover-336",
+  "cutoverSessionId": "cutover-61",
   "targetPowerState": "POWERED_ON",
   "targetPromotionState": "PROMOTED"
 }
@@ -131,15 +132,16 @@ ftctl_dr_runtime_capture_authority_context \
 grep -q '^authority_state=FAILED_OVER$' "${AUTH_RUN_PATH}"
 grep -q '^active_side=TARGET$' "${AUTH_RUN_PATH}"
 grep -q '^checkpoint_sequence=7$' "${AUTH_RUN_PATH}"
-grep -q '^cloud_authority_generation=336$' "${AUTH_RUN_PATH}"
-[[ "$(ftctl_dr_scheduler_current_authority_sequence "${AUTH_PLAN}")" == "336" ]]
+grep -q '^cloud_authority_generation=61$' "${AUTH_RUN_PATH}"
+grep -q '^cloud_authority_sequence_floor=153$' "${AUTH_RUN_PATH}"
+[[ "$(ftctl_dr_scheduler_current_authority_sequence "${AUTH_PLAN}")" == "153" ]]
 
 ftctl_state_set_path "$(ftctl_dr_scheduler_sequence_path "${AUTH_PLAN}")" \
   "plan_cycle_sequence=7" \
   "authority_sequence=41"
 AUTH_STATUS_JSON="$(bash "${ROOT}/bin/ablestack_vm_ftctl.sh" dr-status \
   --config "${CONFIG}" --plan "${AUTH_PLAN}" --json)"
-jq -e '.cloud_authority_generation == 336 and .authority_sequence == 336' \
+jq -e '.cloud_authority_generation == 61 and .authority_sequence == 153' \
   <<<"${AUTH_STATUS_JSON}" >/dev/null
 
 # A stale target-site scheduler sequence must absorb the committed Cloud

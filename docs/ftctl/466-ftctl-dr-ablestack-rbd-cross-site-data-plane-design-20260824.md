@@ -893,22 +893,25 @@ behavior.
 
 ## 33. Cross-Site Authority Sequence Monotonicity
 
-Cloud authority generation is the immutable control-plane generation for a
-Failover, Reprotect, and Failback chain. Each site also keeps a local FTCTL
-scheduler authority sequence. When control moves to a site whose scheduler has
-an older local sequence, that sequence must absorb the Cloud generation before
-the action starts or status is projected. It must never be allowed to move the
-Cloud protection view backwards.
+Cloud authority generation is the immutable control-plane generation for one
+Failover, Reprotect, and Failback chain. It is not the global scheduler
+authority sequence. Each site keeps a local FTCTL scheduler sequence, while
+Cloud retains the latest accepted sequence across both sites. When control
+moves to a site whose scheduler has an older local sequence, Cloud supplies
+that global value as `authoritySequenceFloor`; FTCTL must absorb it before the
+action starts or status is projected.
 
 FTCTL applies a Plan-scoped, locked max operation:
 
-`effectiveAuthoritySequence = max(localAuthoritySequence, cloudAuthorityGeneration)`
+`effectiveAuthoritySequence = max(localAuthoritySequence, cloudAuthorityGeneration, authoritySequenceFloor)`
 
-The floor is applied when authority context is captured and again while
-`dr-status` reconstructs an existing Run. The status path therefore repairs
-already persisted older site-local sequences without direct Cloud DB changes.
-The update preserves `plan_cycle_sequence` and all other scheduler state. A
-local sequence newer than Cloud remains unchanged.
+The action command carries the floor for every finite DR action. Reprotect also
+stores it in the immutable authority specification. The floor is applied when
+authority context is captured and again while `dr-status` reconstructs an
+existing Run. The status path therefore repairs already persisted older
+site-local sequences without direct Cloud DB changes. The update preserves
+`plan_cycle_sequence` and all other scheduler state. A newer local sequence is
+never rewound.
 
 This is a shared monotonicity invariant, not a route-specific status
 relaxation. VMware and established forward replication paths retain their
@@ -916,8 +919,9 @@ current sequence whenever it is equal to or newer than the Cloud generation.
 
 | Area | AS-IS | TO-BE |
 | --- | --- | --- |
-| Target-site scheduler | Can publish a site-local sequence below Cloud generation | Atomically floors the local sequence at the Cloud generation |
+| Authority inputs | Cutover generation is reused as the global sequence | Generation and global sequence floor are separate fields |
+| Target-site scheduler | Can publish `61` after Cloud already accepted `153` | Atomically floors the local sequence at `max(generation, floor)` |
 | Cloud view cache | Correctly rejects the projection as an authority regression | Receives a monotonic sequence and returns to `READY` |
 | Existing runtime | Requires another action or DB repair | `dr-status` safely reconstructs and repairs the floor |
 | Concurrency | Read and write can race with scheduler updates | A Plan-scoped authority-sequence lock serializes the max update |
-| Regression boundary | Relaxing the Cloud guard could weaken VMware safety | Cloud guard remains strict; FTCTL fixes only the producer invariant |
+| Regression boundary | Relaxing the Cloud guard could weaken proven routes | Cloud guard remains strict; existing VMware and forward-copy contracts are unchanged |

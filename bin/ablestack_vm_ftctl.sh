@@ -92,6 +92,7 @@ CLI_RUN=""
 CLI_PROFILE_JSON=""
 CLI_ARTIFACT_SPEC_JSON=""
 CLI_AUTHORITY_SPEC_JSON=""
+CLI_AUTHORITY_SEQUENCE_FLOOR=""
 CLI_RESTORE_POINT=""
 CLI_EVENTS_OFFSET=""
 CLI_EVENTS_LIMIT="20"
@@ -338,6 +339,8 @@ Global options:
                      Cloud-provided FTCTL_DR test artifact locator contract
       --authority-spec-json PATH
                      Cloud-provided FTCTL_DR committed authority contract
+      --authority-sequence-floor N
+                     Monotonic Cloud authority sequence lower bound
       --restore-point ID
       --events-offset N
       --events-limit N
@@ -738,6 +741,10 @@ parse_args() {
         CLI_MINIMUM_COMPLETED_CHECKPOINT_SEQUENCE="${2-}"
         shift 2
         ;;
+      --authority-sequence-floor)
+        CLI_AUTHORITY_SEQUENCE_FLOOR="${2-}"
+        shift 2
+        ;;
       --force-immediate-cycle)
         CLI_FORCE_IMMEDIATE_CYCLE="true"
         shift
@@ -877,7 +884,8 @@ dispatch() {
     dr-sync-start|dr-sync-recover|dr-sync-pause|dr-sync-resume|dr-test-failover|dr-test-cleanup|dr-test-prepare|dr-test-artifact-cleanup|dr-failover|dr-failback|dr-reprotect|dr-release)
       ftctl_dr_runtime_action "${CLI_COMMAND}" "${CLI_PLAN}" "${CLI_RUN}" "${CLI_PROFILE_JSON}" "${CLI_ROLE}" \
         "${CLI_MODE}" "${CLI_RESTORE_POINT}" "${CLI_FORCE}" "${CLI_DRY_RUN}" "${CLI_WAIT_VALUE}" "${CLI_JSON}" \
-        "${CLI_ARTIFACT_SPEC_JSON}" "${CLI_AUTHORITY_SPEC_JSON}" "${CLI_FORCE_IMMEDIATE_CYCLE}"
+        "${CLI_ARTIFACT_SPEC_JSON}" "${CLI_AUTHORITY_SPEC_JSON}" "${CLI_FORCE_IMMEDIATE_CYCLE}" \
+        "${CLI_AUTHORITY_SEQUENCE_FLOOR}"
       ;;
     dr-scheduler-run)
       ftctl_dr_scheduler_run_from_launch "${CLI_PLAN}" "${CLI_JSON}"
