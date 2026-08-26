@@ -71,7 +71,17 @@ ftctl_dr_runtime_profile_value() {
     transport.mode) printf 'site-agent-nbd\n' ;;
   esac
 }
-ftctl_dr_runtime_path_set() { local path="${1-}"; shift; printf '%s\n' "$@" >> "${path}"; }
+ftctl_dr_runtime_write_state() {
+  local path="${1-}" plan="${2-}" run="${3-}" action="${4-}" state="${5-}" step="${6-}" progress="${7-}"
+  printf 'plan=%s\nrun=%s\naction=%s\nstate=%s\nstep=%s\nprogress=%s\n' \
+    "${plan}" "${run}" "${action}" "${state}" "${step}" "${progress}" > "${path}"
+}
+ftctl_dr_runtime_path_set() {
+  local path="${1-}"
+  shift
+  [[ -f "${path}" ]] || return 1
+  printf '%s\n' "$@" >> "${path}"
+}
 ftctl_state_set_path() { local path="${1-}"; shift; printf '%s\n' "$@" > "${path}"; }
 ftctl_log_event() { :; }
 ftctl_dr_runtime_state_get_from_path() {
@@ -96,6 +106,8 @@ grep -q '^pending_reseed_request_bound=false$' "${tmp}/sequence.state"
 grep -q '^requested_cycle_state=PENDING$' "${tmp}/sequence.state"
 grep -q 'scheduler_desired_state=RUNNING' "${tmp}/cancel.state"
 grep -q 'scheduler_recovery_run_uuid=recovery-run-1' "${tmp}/cancel.state"
+grep -q '^action=dr-scheduler-run$' "${tmp}/recovery-run-1.state"
+grep -q '^state=READY$' "${tmp}/recovery-run-1.state"
 grep -q '^scheduler_recovery_parent_run_uuid=run-1$' "${tmp}/recovery-run-1.state"
 
 echo 'ftctl DR active cancel recovery smoke: PASS'

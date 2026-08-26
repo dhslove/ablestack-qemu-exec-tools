@@ -1223,13 +1223,12 @@ ftctl_dr_scheduler_queue_cancel_recovery() {
   driver="$(ftctl_dr_runtime_state_get_from_path "${status_path}" driver)"
   driver_state="$(ftctl_dr_runtime_state_get_from_path "${status_path}" driver_state)"
 
+  # A recovery Run has a new UUID, so its state file does not exist yet.
+  # Initialize it through the canonical writer before applying scheduler-only
+  # fields. ftctl_dr_runtime_path_set intentionally updates existing files.
+  ftctl_dr_runtime_write_state "${recovery_path}" "${plan}" "${recovery_run}" \
+    "dr-scheduler-run" "READY" "cancel-recovery-pending" "0" "${recovery_run}" "" || return $?
   ftctl_dr_runtime_path_set "${recovery_path}" \
-    "plan=${plan}" \
-    "run=${recovery_run}" \
-    "action=dr-scheduler-run" \
-    "state=READY" \
-    "step=cancel-recovery-pending" \
-    "progress=0" \
     "accepted=true" \
     "control_request_run_uuid=" \
     "driver=${driver}" \
