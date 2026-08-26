@@ -1804,7 +1804,9 @@ ftctl_dr_ablestack_site_agent_incremental_once() {
     host="$(ftctl_dr_ablestack_export_value "${disk_map}" "${device}" host)"
     port="$(ftctl_dr_ablestack_export_value "${disk_map}" "${device}" port)"
     name="$(ftctl_dr_ablestack_export_value "${disk_map}" "${device}" name)"
-    [[ -n "${host}" && "${port}" =~ ^[0-9]+$ && -n "${name}" ]] || return 94
+    # A missing Plan-owned export is a retryable control-plane contract gap,
+    # not evidence that a local kernel NBD device is busy.
+    [[ -n "${host}" && "${port}" =~ ^[0-9]+$ && -n "${name}" ]] || return 100
     ftctl_dr_ablestack_target_export_reachable "${host}" "${port}" || return 100
     rbd snap rm "${source_spec}@${current}" >/dev/null 2>&1 || true
     rbd snap create "${source_spec}@${current}" || return $?

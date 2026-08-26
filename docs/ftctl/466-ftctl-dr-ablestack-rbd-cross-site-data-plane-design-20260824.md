@@ -859,3 +859,34 @@ VMware CBT/VDDK behavior, or Cloud authority generation.
 | Failed retry state | Prior `ERROR` is reused as authority state | Accepted Cloud contract normalizes authority to `FAILED_OVER` |
 | Split-brain guard | Equality failure can mask the real conflict | Active side and generation remain strict; lower runtime sequence is rejected |
 | Regression | Export fix exposes a new retry-only failure | Smoke covers newer-runtime acceptance and stale-runtime rejection |
+
+## 32. Pause and Resume Forward Export Contract
+
+The ordinary UI `RESUME_SYNC` action and the post-Failback protection resume
+must use the same remote `KVM_TO_KVM` transport contract. Resuming only the
+source scheduler is unsafe because a pause or profile replacement can leave
+`transport.mode=site-agent-nbd` with no typed target export endpoints.
+
+Cloud therefore reconciles the Plan-owned target export before every remote
+SOURCE resume, injects the returned `host`, `port`, `name`, and `uri` values
+into the immutable profile, and only then dispatches `RESUME_SYNC` to the
+source Agent. FTCTL accepts the profile as the source of truth for that
+control generation.
+
+If the profile has no export endpoint, FTCTL returns `100` and keeps the same
+Cycle in retryable `WAITING_RESOURCE / DR_TARGET_EXPORT_UNAVAILABLE`. It must
+not return `94`, quarantine an NBD device, or publish durable-target cleanup
+evidence because no kernel NBD ownership was observed. Return code `94`
+remains reserved for an actually busy or quarantined local NBD device.
+
+This rule is gated to remote `KVM_TO_KVM` with `site-agent-nbd`. VMware VDDK,
+CBT, local RBD, and already-valid site-agent profiles retain their existing
+behavior.
+
+| Area | AS-IS | TO-BE |
+| --- | --- | --- |
+| UI resume | Source scheduler can receive a profile with empty exports | Target export is reconciled before source resume |
+| Missing endpoint | Misreported as `DR_NBD_DEVICE_BUSY` | Retryable `DR_TARGET_EXPORT_UNAVAILABLE` |
+| Cycle identity | Failed retry can create operator repair state | Same pending Cycle is retried with resource backoff |
+| NBD quarantine | Triggered without kernel ownership evidence | Used only for observed local NBD cleanup failure |
+| Regression scope | Shared resume edits can affect VMware | Branch is limited to remote KVM-to-KVM site-agent transport |
