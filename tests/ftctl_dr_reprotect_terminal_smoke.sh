@@ -93,6 +93,8 @@ export FTCTL_STATE_DIR="${TMP}/run/state"
 source "${ROOT}/lib/ftctl/common.sh"
 # shellcheck source=../lib/ftctl/state.sh
 source "${ROOT}/lib/ftctl/state.sh"
+# shellcheck source=../lib/ftctl/dr_scheduler.sh
+source "${ROOT}/lib/ftctl/dr_scheduler.sh"
 # shellcheck source=../lib/ftctl/dr_runtime.sh
 source "${ROOT}/lib/ftctl/dr_runtime.sh"
 
@@ -130,6 +132,30 @@ grep -q '^authority_state=FAILED_OVER$' "${AUTH_RUN_PATH}"
 grep -q '^active_side=TARGET$' "${AUTH_RUN_PATH}"
 grep -q '^checkpoint_sequence=7$' "${AUTH_RUN_PATH}"
 grep -q '^cloud_authority_generation=336$' "${AUTH_RUN_PATH}"
+[[ "$(ftctl_dr_scheduler_current_authority_sequence "${AUTH_PLAN}")" == "336" ]]
+
+ftctl_state_set_path "$(ftctl_dr_scheduler_sequence_path "${AUTH_PLAN}")" \
+  "plan_cycle_sequence=7" \
+  "authority_sequence=41"
+AUTH_STATUS_JSON="$(bash "${ROOT}/bin/ablestack_vm_ftctl.sh" dr-status \
+  --config "${CONFIG}" --plan "${AUTH_PLAN}" --json)"
+jq -e '.cloud_authority_generation == 336 and .authority_sequence == 336' \
+  <<<"${AUTH_STATUS_JSON}" >/dev/null
+
+# A stale target-site scheduler sequence must absorb the committed Cloud
+# generation, while a newer local sequence must never move backwards.
+ftctl_state_set_path "$(ftctl_dr_scheduler_sequence_path "${AUTH_PLAN}")" \
+  "plan_cycle_sequence=7" \
+  "authority_sequence=400"
+ftctl_dr_runtime_capture_authority_context \
+  "${AUTH_PLAN}" "${AUTH_RUN_PATH}" "${AUTH_STATUS}" "${AUTH_SPEC}"
+[[ "$(ftctl_dr_scheduler_current_authority_sequence "${AUTH_PLAN}")" == "400" ]]
+
+for _ in $(seq 1 20); do
+  (ftctl_dr_scheduler_next_authority_sequence "${AUTH_PLAN}" >/dev/null) &
+done
+wait
+[[ "$(ftctl_dr_scheduler_current_authority_sequence "${AUTH_PLAN}")" == "420" ]]
 
 sed -i 's/^checkpoint_sequence=7$/checkpoint_sequence=5/' "${AUTH_STATUS}"
 if ftctl_dr_runtime_capture_authority_context \

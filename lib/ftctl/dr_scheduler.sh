@@ -574,6 +574,30 @@ ftctl_dr_scheduler_current_authority_sequence() {
   printf '%s\n' "${sequence}"
 }
 
+ftctl_dr_scheduler_floor_authority_sequence() {
+  local plan="${1-}" floor="${2-}" sequence_path current cycle_sequence rc=0
+  local lock_fd=206
+  [[ -n "${plan}" && "${floor}" =~ ^[0-9]+$ ]] || return 2
+
+  ftctl_dr_scheduler_lock_acquire "${plan}" "authority-sequence" "${lock_fd}" 5 \
+    "authority-floor:${floor}" || return $?
+  sequence_path="$(ftctl_dr_scheduler_sequence_path "${plan}")"
+  current="$(ftctl_dr_scheduler_current_authority_sequence "${plan}")"
+  if (( current < floor )); then
+    cycle_sequence="$(ftctl_state_read_kv "${sequence_path}" "plan_cycle_sequence" 2>/dev/null || true)"
+    [[ "${cycle_sequence}" =~ ^[0-9]+$ ]] || cycle_sequence=0
+    ftctl_state_set_path "${sequence_path}" \
+      "plan_cycle_sequence=${cycle_sequence}" \
+      "authority_sequence=${floor}" \
+      "authority_floor_source=cloud" \
+      "authority_floor_updated_at=$(ftctl_now_iso8601)" || rc=$?
+    (( rc == 0 )) && current="${floor}"
+  fi
+  ftctl_dr_scheduler_lock_release "${plan}" "authority-sequence" "${lock_fd}"
+  (( rc == 0 )) || return "${rc}"
+  printf '%s\n' "${current}"
+}
+
 ftctl_dr_scheduler_current_plan_sequence() {
   local plan="${1-}" sequence
   sequence="$(ftctl_state_read_kv "$(ftctl_dr_scheduler_sequence_path "${plan}")" "plan_cycle_sequence" 2>/dev/null || true)"
@@ -582,7 +606,10 @@ ftctl_dr_scheduler_current_plan_sequence() {
 }
 
 ftctl_dr_scheduler_next_authority_sequence() {
-  local plan="${1-}" sequence_path cycle_sequence authority_sequence
+  local plan="${1-}" sequence_path cycle_sequence authority_sequence rc=0
+  local lock_fd=206
+  ftctl_dr_scheduler_lock_acquire "${plan}" "authority-sequence" "${lock_fd}" 5 \
+    "authority-next" || return $?
   sequence_path="$(ftctl_dr_scheduler_sequence_path "${plan}")"
   ftctl_ensure_dir "$(dirname "${sequence_path}")" "0755"
   cycle_sequence="$(ftctl_state_read_kv "${sequence_path}" "plan_cycle_sequence" 2>/dev/null || true)"
@@ -591,19 +618,26 @@ ftctl_dr_scheduler_next_authority_sequence() {
   authority_sequence=$((authority_sequence + 1))
   ftctl_state_set_path "${sequence_path}" \
     "plan_cycle_sequence=${cycle_sequence}" \
-    "authority_sequence=${authority_sequence}"
+    "authority_sequence=${authority_sequence}" || rc=$?
+  ftctl_dr_scheduler_lock_release "${plan}" "authority-sequence" "${lock_fd}"
+  (( rc == 0 )) || return "${rc}"
   printf '%s\n' "${authority_sequence}"
 }
 
 ftctl_dr_scheduler_record_plan_sequence() {
-  local plan="${1-}" cycle_sequence="${2-}" sequence_path authority_sequence
+  local plan="${1-}" cycle_sequence="${2-}" sequence_path authority_sequence rc=0
+  local lock_fd=206
+  ftctl_dr_scheduler_lock_acquire "${plan}" "authority-sequence" "${lock_fd}" 5 \
+    "authority-record:${cycle_sequence}" || return $?
   sequence_path="$(ftctl_dr_scheduler_sequence_path "${plan}")"
   ftctl_ensure_dir "$(dirname "${sequence_path}")" "0755"
   authority_sequence="$(ftctl_dr_scheduler_current_authority_sequence "${plan}")"
   authority_sequence=$((authority_sequence + 1))
   ftctl_state_set_path "${sequence_path}" \
     "plan_cycle_sequence=${cycle_sequence}" \
-    "authority_sequence=${authority_sequence}"
+    "authority_sequence=${authority_sequence}" || rc=$?
+  ftctl_dr_scheduler_lock_release "${plan}" "authority-sequence" "${lock_fd}"
+  (( rc == 0 )) || return "${rc}"
   printf '%s\n' "${authority_sequence}"
 }
 

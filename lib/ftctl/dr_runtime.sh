@@ -421,6 +421,10 @@ PY
     "cloud_cutover_session_id=${session_id}" \
     "cloud_authority_generation=${authority_generation}" || return $?
 
+  if [[ "${authority_generation}" =~ ^[0-9]+$ ]]; then
+    ftctl_dr_scheduler_floor_authority_sequence "${plan}" "${authority_generation}" >/dev/null || return $?
+  fi
+
   # Preserve the last completed replication cycle as one Plan-owned
   # projection when an operation Run is initialized from a fresh state file.
   # Otherwise failback/reprotect can replace status.state with a Run that has
@@ -4147,7 +4151,14 @@ ftctl_dr_runtime_emit_state_json() {
     scheduler_health="STOPPED"
     owner_matched="false"
   fi
-  authority_sequence="$(ftctl_dr_scheduler_current_authority_sequence "${plan}")"
+  cloud_authority_generation="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "cloud_authority_generation")"
+  if [[ "${cloud_authority_generation}" =~ ^[0-9]+$ ]]; then
+    authority_sequence="$(ftctl_dr_scheduler_floor_authority_sequence \
+      "${plan}" "${cloud_authority_generation}")" || \
+      authority_sequence="$(ftctl_dr_scheduler_current_authority_sequence "${plan}")"
+  else
+    authority_sequence="$(ftctl_dr_scheduler_current_authority_sequence "${plan}")"
+  fi
   plan_cycle_sequence="$(ftctl_state_read_kv "$(ftctl_dr_scheduler_sequence_path "${plan}")" "plan_cycle_sequence" 2>/dev/null || true)"
   resume_baseline_checkpoint_sequence="$(ftctl_state_read_kv "$(ftctl_dr_scheduler_sequence_path "${plan}")" "resume_baseline_checkpoint_sequence" 2>/dev/null || true)"
   minimum_completed_checkpoint_sequence="$(ftctl_state_read_kv "$(ftctl_dr_scheduler_sequence_path "${plan}")" "minimum_completed_checkpoint_sequence" 2>/dev/null || true)"

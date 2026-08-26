@@ -890,3 +890,34 @@ behavior.
 | Cycle identity | Failed retry can create operator repair state | Same pending Cycle is retried with resource backoff |
 | NBD quarantine | Triggered without kernel ownership evidence | Used only for observed local NBD cleanup failure |
 | Regression scope | Shared resume edits can affect VMware | Branch is limited to remote KVM-to-KVM site-agent transport |
+
+## 33. Cross-Site Authority Sequence Monotonicity
+
+Cloud authority generation is the immutable control-plane generation for a
+Failover, Reprotect, and Failback chain. Each site also keeps a local FTCTL
+scheduler authority sequence. When control moves to a site whose scheduler has
+an older local sequence, that sequence must absorb the Cloud generation before
+the action starts or status is projected. It must never be allowed to move the
+Cloud protection view backwards.
+
+FTCTL applies a Plan-scoped, locked max operation:
+
+`effectiveAuthoritySequence = max(localAuthoritySequence, cloudAuthorityGeneration)`
+
+The floor is applied when authority context is captured and again while
+`dr-status` reconstructs an existing Run. The status path therefore repairs
+already persisted older site-local sequences without direct Cloud DB changes.
+The update preserves `plan_cycle_sequence` and all other scheduler state. A
+local sequence newer than Cloud remains unchanged.
+
+This is a shared monotonicity invariant, not a route-specific status
+relaxation. VMware and established forward replication paths retain their
+current sequence whenever it is equal to or newer than the Cloud generation.
+
+| Area | AS-IS | TO-BE |
+| --- | --- | --- |
+| Target-site scheduler | Can publish a site-local sequence below Cloud generation | Atomically floors the local sequence at the Cloud generation |
+| Cloud view cache | Correctly rejects the projection as an authority regression | Receives a monotonic sequence and returns to `READY` |
+| Existing runtime | Requires another action or DB repair | `dr-status` safely reconstructs and repairs the floor |
+| Concurrency | Read and write can race with scheduler updates | A Plan-scoped authority-sequence lock serializes the max update |
+| Regression boundary | Relaxing the Cloud guard could weaken VMware safety | Cloud guard remains strict; FTCTL fixes only the producer invariant |
