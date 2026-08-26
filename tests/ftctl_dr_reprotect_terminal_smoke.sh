@@ -83,4 +83,59 @@ jq -e '.terminal_authoritative == true
   and .worker_state == "TERMINAL_PUBLISHED"
   and .runtime_endpoints_drained == true' <<<"${terminal_status_json}" >/dev/null
 
+# A failed Reprotect may have durably advanced the reverse checkpoint before a
+# later transport failure. Retrying with the same committed Cloud authority is
+# valid when the FTCTL checkpoint is newer, but a stale lower checkpoint must
+# still fail closed.
+export FTCTL_RUN_DIR="${TMP}/run"
+export FTCTL_STATE_DIR="${TMP}/run/state"
+# shellcheck source=../lib/ftctl/common.sh
+source "${ROOT}/lib/ftctl/common.sh"
+# shellcheck source=../lib/ftctl/state.sh
+source "${ROOT}/lib/ftctl/state.sh"
+# shellcheck source=../lib/ftctl/dr_runtime.sh
+source "${ROOT}/lib/ftctl/dr_runtime.sh"
+
+AUTH_PLAN="reprotect-authority-plan"
+AUTH_RUN="reprotect-authority-run"
+AUTH_DIR="${TMP}/run/dr-runtime/plans/${AUTH_PLAN}"
+AUTH_STATUS="${AUTH_DIR}/status.state"
+AUTH_RUN_PATH="${AUTH_DIR}/runs/${AUTH_RUN}.state"
+AUTH_SPEC="${AUTH_DIR}/runs/${AUTH_RUN}.authority.json"
+mkdir -p "${AUTH_DIR}/runs"
+cat > "${AUTH_STATUS}" <<EOF
+state=ERROR
+active_side=TARGET
+checkpoint_sequence=7
+cloud_authority_generation=336
+cloud_cutover_session_id=cutover-336
+target_power_state=POWERED_ON
+target_promotion_state=PROMOTED
+EOF
+touch "${AUTH_RUN_PATH}"
+cat > "${AUTH_SPEC}" <<EOF
+{
+  "expectedActiveSide": "TARGET",
+  "authorityGeneration": 336,
+  "checkpointSequence": 6,
+  "cutoverSessionId": "cutover-336",
+  "targetPowerState": "POWERED_ON",
+  "targetPromotionState": "PROMOTED"
+}
+EOF
+
+ftctl_dr_runtime_capture_authority_context \
+  "${AUTH_PLAN}" "${AUTH_RUN_PATH}" "${AUTH_STATUS}" "${AUTH_SPEC}"
+grep -q '^authority_state=FAILED_OVER$' "${AUTH_RUN_PATH}"
+grep -q '^active_side=TARGET$' "${AUTH_RUN_PATH}"
+grep -q '^checkpoint_sequence=7$' "${AUTH_RUN_PATH}"
+grep -q '^cloud_authority_generation=336$' "${AUTH_RUN_PATH}"
+
+sed -i 's/^checkpoint_sequence=7$/checkpoint_sequence=5/' "${AUTH_STATUS}"
+if ftctl_dr_runtime_capture_authority_context \
+    "${AUTH_PLAN}" "${AUTH_RUN_PATH}" "${AUTH_STATUS}" "${AUTH_SPEC}"; then
+  echo "ERROR: stale FTCTL checkpoint was accepted" >&2
+  exit 1
+fi
+
 echo "ftctl DR reprotect terminal smoke: PASS"

@@ -832,3 +832,30 @@ the terminal worker state or make Cloud wait indefinitely.
 | Status merge | Stale worker journal may report RUNNING beside terminal ERROR | Terminal journal owns terminal worker state and liveness |
 | Data path | Risk of broad rewrite | Valid site-agent and local RBD success paths are unchanged |
 | Tests | Reprotect terminal smoke only | Missing-export contract plus valid-export regression coverage |
+
+## 31. Reprotect retry authority checkpoint monotonicity
+
+The Cloud cutover session identifies the immutable authority commit that made
+the target site active. A failed Reprotect can write and verify a newer reverse
+checkpoint before a later transport or publication step fails. That newer
+checkpoint does not create a new VM authority generation and must not make a
+retry of the same committed target authority look like split brain.
+
+FTCTL therefore compares the runtime checkpoint and Cloud authority checkpoint
+monotonically. The runtime checkpoint may be equal to or newer than the Cloud
+commit checkpoint. A lower runtime checkpoint remains a hard
+`DR_AUTHORITY_CONTEXT_CONFLICT`, as do an active-side or authority-generation
+mismatch. Once the immutable Cloud contract is accepted, the Run records
+`authority_state=FAILED_OVER` independently from an earlier operation's
+`state=ERROR`; operation outcome is not authority state.
+
+This retry rule is scoped to authority capture for Failover, Reprotect, and
+Failback commands. It does not change checkpoint production, RBD transfer,
+VMware CBT/VDDK behavior, or Cloud authority generation.
+
+| Area | AS-IS | TO-BE |
+| --- | --- | --- |
+| Checkpoint comparison | Requires exact equality | Accepts runtime checkpoint greater than or equal to committed checkpoint |
+| Failed retry state | Prior `ERROR` is reused as authority state | Accepted Cloud contract normalizes authority to `FAILED_OVER` |
+| Split-brain guard | Equality failure can mask the real conflict | Active side and generation remain strict; lower runtime sequence is rejected |
+| Regression | Export fix exposes a new retry-only failure | Smoke covers newer-runtime acceptance and stale-runtime rejection |

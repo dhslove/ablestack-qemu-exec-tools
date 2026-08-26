@@ -381,12 +381,27 @@ PY
       rm -f "${snapshot_path}" 2>/dev/null || true
       return 79
     fi
-    if [[ -n "${checkpoint_sequence}" && -n "${spec_checkpoint}" && "${checkpoint_sequence}" != "${spec_checkpoint}" ]]; then
-      rm -f "${snapshot_path}" 2>/dev/null || true
-      return 79
+    if [[ -n "${checkpoint_sequence}" && -n "${spec_checkpoint}" ]]; then
+      if [[ "${checkpoint_sequence}" =~ ^[0-9]+$ && "${spec_checkpoint}" =~ ^[0-9]+$ ]]; then
+        if (( checkpoint_sequence < spec_checkpoint )); then
+          rm -f "${snapshot_path}" 2>/dev/null || true
+          return 79
+        fi
+      elif [[ "${checkpoint_sequence}" != "${spec_checkpoint}" ]]; then
+        rm -f "${snapshot_path}" 2>/dev/null || true
+        return 79
+      fi
     fi
     [[ -n "${active_side}" ]] || active_side="${expected_side}"
-    [[ -n "${authority_state}" ]] || authority_state="FAILED_OVER"
+    # Operation status can be ERROR after a failed Reprotect while TARGET
+    # authority remains committed. Once Cloud's immutable authority contract
+    # matches the active side and generation, normalize the authority state
+    # independently from that earlier operation result.
+    if [[ "${expected_side}" == "TARGET" ]]; then
+      authority_state="FAILED_OVER"
+    else
+      [[ -n "${authority_state}" ]] || authority_state="FAILED_OVER"
+    fi
     [[ -n "${authority_generation}" ]] || authority_generation="${spec_generation}"
     [[ -n "${checkpoint_sequence}" ]] || checkpoint_sequence="${spec_checkpoint}"
     [[ -n "${target_power_state}" ]] || target_power_state="${spec_power}"
