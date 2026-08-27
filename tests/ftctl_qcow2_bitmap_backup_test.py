@@ -1,0 +1,95 @@
+#!/usr/bin/env python3
+import argparse
+import importlib.util
+import pathlib
+import tempfile
+import unittest
+
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+SPEC = importlib.util.spec_from_file_location(
+    "qcow2_bitmap_backup", ROOT / "lib" / "ftctl" / "qcow2_bitmap_backup.py")
+MODULE = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(MODULE)
+
+
+class FakeClient:
+    def __init__(self, bitmap=None):
+        self.calls = []
+        self.bitmap = bitmap
+        self.query_jobs_count = 0
+
+    def execute(self, command, arguments=None):
+        self.calls.append((command, arguments))
+        if command == "query-named-block-nodes":
+            node = {
+                "node-name": "libvirt-2-format",
+                "drv": "qcow2",
+                "active": True,
+                "file": "/mnt/glue-gfs/source",
+                "image": {"filename": "/mnt/glue-gfs/source"},
+            }
+            if self.bitmap is not None:
+                node["dirty-bitmaps"] = [self.bitmap]
+            return [node]
+        if command == "query-jobs":
+            self.query_jobs_count += 1
+            return [{
+                "id": "job-1", "status": "concluded",
+                "current-progress": 1048576, "total-progress": 1048576,
+            }]
+        return {}
+
+
+def args(mode, progress_path):
+    return argparse.Namespace(
+        domain="i-2-13-VM", source_path="/mnt/glue-gfs/source",
+        target_host="10.10.31.2", target_port=12000, target_export="dr-sda",
+        bitmap="ftctl-dr-plan-sda", mode=mode, job_id="job-1",
+        target_node="ftctl-target-sda", virtual_size=1048576, timeout=2,
+        poll_interval=0, granularity=65536, bandwidth_limit_mbps=0,
+        progress_path=progress_path, cycle_sequence=7, disk_index=1, disk_count=1,
+        uri="qemu:///system", virsh="virsh",
+    )
+
+
+class Qcow2BitmapBackupTest(unittest.TestCase):
+    def test_full_seed_creates_persistent_bitmap_before_backup(self):
+        with tempfile.TemporaryDirectory() as temp:
+            client = FakeClient()
+            result = MODULE.run_backup(args("full", str(pathlib.Path(temp) / "progress.json")), client)
+
+        commands = [command for command, _ in client.calls]
+        self.assertLess(commands.index("block-dirty-bitmap-add"), commands.index("blockdev-backup"))
+        backup = next(value for command, value in client.calls if command == "blockdev-backup")
+        self.assertEqual("full", backup["sync"])
+        self.assertNotIn("bitmap", backup)
+        self.assertEqual("FULL_RESEED", result["mode"])
+
+    def test_incremental_uses_existing_bitmap_and_clears_on_success_only(self):
+        with tempfile.TemporaryDirectory() as temp:
+            client = FakeClient({"name": "ftctl-dr-plan-sda", "count": 4096, "recording": True})
+            result = MODULE.run_backup(args("incremental", str(pathlib.Path(temp) / "progress.json")), client)
+
+        backup = next(value for command, value in client.calls if command == "blockdev-backup")
+        self.assertEqual("incremental", backup["sync"])
+        self.assertEqual("ftctl-dr-plan-sda", backup["bitmap"])
+        self.assertEqual("on-success", backup["bitmap-mode"])
+        self.assertEqual(4096, result["changedBytes"])
+        self.assertNotIn("block-dirty-bitmap-clear", [command for command, _ in client.calls])
+
+    def test_inconsistent_bitmap_is_rejected_before_target_attach(self):
+        client = FakeClient({"name": "ftctl-dr-plan-sda", "inconsistent": True})
+        with self.assertRaises(MODULE.BackupError):
+            MODULE.run_backup(args("incremental", ""), client)
+        self.assertNotIn("blockdev-add", [command for command, _ in client.calls])
+
+    def test_incremental_without_bitmap_requires_full_reseed(self):
+        client = FakeClient()
+        with self.assertRaises(MODULE.BaselineUnavailable):
+            MODULE.run_backup(args("incremental", ""), client)
+        self.assertNotIn("blockdev-add", [command for command, _ in client.calls])
+
+
+if __name__ == "__main__":
+    unittest.main()

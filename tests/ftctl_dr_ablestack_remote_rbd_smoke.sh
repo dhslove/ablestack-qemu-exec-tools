@@ -465,7 +465,8 @@ ftctl_dr_ablestack_target_export_reconcile_all 0
 grep -q 'DR_TARGET_EXPORT_UNAVAILABLE' "${ROOT}/lib/ftctl/dr_scheduler.sh"
 grep -q 'pending_resource_sequence=${sequence}' "${ROOT}/lib/ftctl/dr_scheduler.sh"
 grep -q 'rc.*100' "${ROOT}/lib/ftctl/dr_scheduler.sh"
-grep -A20 'ftctl_dr_ablestack_site_agent_incremental_once()' "${ROOT}/lib/ftctl/dr_ablestack.sh" \
-  | grep -q 'return 100'
+awk '/^ftctl_dr_ablestack_site_agent_incremental_once\(\)/ { inside=1 }
+     inside { print }
+     inside && /^}/ { exit }' "${ROOT}/lib/ftctl/dr_ablestack.sh" | grep -q 'return 100'
 
 echo "ftctl DR ABLESTACK remote RBD smoke: PASS"

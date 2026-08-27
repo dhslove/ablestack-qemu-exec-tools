@@ -803,7 +803,7 @@ ftctl_dr_ablestack_target_export_resolve_profile() {
 
 ftctl_dr_ablestack_target_export_start() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" json="${4-0}"
-  local disk_map manifest host count disk_json device target_path target_type size_bytes target_format spec uri
+  local disk_map manifest host count disk_json device target_path target_type size_bytes target_format spec uri target_backend
   local port name pid_file current_pid unit_name out="" err="" rc=0 records ready reverse_requested reverse_profile
   [[ -n "${plan}" && -n "${run}" ]] || return 2
   ftctl_dr_ablestack_target_export_resolve_profile "${plan}" "${profile_file}" profile_file || return $?
@@ -830,18 +830,35 @@ ftctl_dr_ablestack_target_export_start() {
     target_type="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" targetType)"
     target_format="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" targetFormat)"
     size_bytes="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" sizeBytes)"
-    if [[ "${target_type}" != "rbd" || ! "${size_bytes}" =~ ^[1-9][0-9]*$ ]]; then
+    if [[ ! "${size_bytes}" =~ ^[1-9][0-9]*$ ]]; then
       ftctl_dr_ablestack_target_export_abort "${records}" "${manifest}"
       return 32
     fi
-    if ! ftctl_dr_ablestack_prepare_rbd_target "${target_path}" "${size_bytes}"; then
-      ftctl_dr_ablestack_target_export_abort "${records}" "${manifest}"
-      return 34
-    fi
-    if ! ftctl_dr_ablestack_rbd_spec_from_path "${target_path}" spec; then
-      ftctl_dr_ablestack_target_export_abort "${records}" "${manifest}"
-      return 35
-    fi
+    case "${target_type}:${target_format}" in
+      rbd:raw|rbd:)
+        if ! ftctl_dr_ablestack_prepare_rbd_target "${target_path}" "${size_bytes}"; then
+          ftctl_dr_ablestack_target_export_abort "${records}" "${manifest}"
+          return 34
+        fi
+        if ! ftctl_dr_ablestack_rbd_spec_from_path "${target_path}" spec; then
+          ftctl_dr_ablestack_target_export_abort "${records}" "${manifest}"
+          return 35
+        fi
+        target_format="raw"
+        target_backend="rbd:${spec}"
+        ;;
+      file:qcow2)
+        if ! ftctl_dr_ablestack_prepare_file_target "${target_path}" "${target_format}" "${size_bytes}"; then
+          ftctl_dr_ablestack_target_export_abort "${records}" "${manifest}"
+          return 34
+        fi
+        target_backend="${target_path}"
+        ;;
+      *)
+        ftctl_dr_ablestack_target_export_abort "${records}" "${manifest}"
+        return 32
+        ;;
+    esac
     name="dr-${plan//[^A-Za-z0-9]/}-${device//[^A-Za-z0-9]/}"
     pid_file="/run/ablestack-vm-ftctl/nbd-${plan//[^A-Za-z0-9]/}-${device//[^A-Za-z0-9]/}.pid"
     unit_name="$(ftctl_dr_ablestack_target_export_unit_name "${plan}" "${device}")"
@@ -867,12 +884,12 @@ ftctl_dr_ablestack_target_export_start() {
           --property=Restart=on-failure --property=RestartSec=2s --property=TimeoutStopSec=15s \
           qemu-nbd --persistent --shared=8 --cache=none --aio=io_uring \
           --bind "${host}" --port "${port}" --export-name "${name}" --format "${target_format:-raw}" \
-          --pid-file "${pid_file}" "rbd:${spec}" || true
+          --pid-file "${pid_file}" "${target_backend}" || true
       else
         ftctl_cmd_run "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC:-30}" out err rc -- \
           qemu-nbd --fork --persistent --shared=8 --cache=none --aio=io_uring \
           --bind "${host}" --port "${port}" --export-name "${name}" --format "${target_format:-raw}" \
-          --pid-file "${pid_file}" "rbd:${spec}" || true
+          --pid-file "${pid_file}" "${target_backend}" || true
       fi
       if [[ "${rc}" != "0" ]]; then
         printf '%s\n' "${err}" >&2
@@ -896,9 +913,9 @@ ftctl_dr_ablestack_target_export_start() {
       fi
     fi
     uri="nbd://${host}:${port}/${name}"
-    python3 - "${records}" "${device}" "${host}" "${port}" "${name}" "${uri}" "${target_path}" "${pid_file}" "${unit_name}" <<'PY'
+    python3 - "${records}" "${device}" "${host}" "${port}" "${name}" "${uri}" "${target_path}" "${pid_file}" "${unit_name}" "${target_type}" "${target_format}" <<'PY'
 import json,sys
-record = dict(zip(("device","host","port","name","uri","targetPath","pidFile","unitName"), sys.argv[2:]))
+record = dict(zip(("device","host","port","name","uri","targetPath","pidFile","unitName","targetType","targetFormat"), sys.argv[2:]))
 record["port"] = int(record["port"])
 with open(sys.argv[1], "a", encoding="utf-8") as fh:
     fh.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
@@ -1233,6 +1250,56 @@ ftctl_dr_ablestack_source_size_bytes() {
   printf -v "${out_var}" '%s' "${size}"
 }
 
+ftctl_dr_ablestack_qcow2_push_provider() {
+  local disk_map="${1-}" disk_json source_type source_format target_type target_format count=0
+  [[ -s "${disk_map}" ]] || return 1
+  while IFS= read -r disk_json; do
+    source_type="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" sourceType)"
+    source_format="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" sourceFormat)"
+    target_type="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" targetType)"
+    target_format="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" targetFormat)"
+    [[ "${source_type}" == "file" && "${source_format}" == "qcow2" \
+       && "${target_type}" == "file" && "${target_format}" == "qcow2" ]] || return 1
+    count=$((count + 1))
+  done < <(ftctl_dr_ablestack_disk_rows "${disk_map}")
+  (( count > 0 ))
+}
+
+ftctl_dr_ablestack_qcow2_bitmap_name() {
+  local plan="${1-}" device="${2-}" checksum
+  checksum="$(printf '%s' "${plan}:${device}" | cksum | awk '{print $1}')"
+  printf 'ftctl-dr-%s-%s\n' "${checksum}" "$(ftctl_dr_runtime_key "${device}")"
+}
+
+ftctl_dr_ablestack_qcow2_push_disk() {
+  local plan="${1-}" run="${2-}" sequence="${3-}" mode="${4-}" vm_name="${5-}" disk_map="${6-}" disk_json="${7-}"
+  local disk_index="${8-1}" disk_count="${9-1}" out_var="${10-}"
+  local device source_path size_bytes host port name bitmap job_id target_node output="" rc=0 bandwidth
+  device="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" device)"
+  source_path="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" sourcePath)"
+  size_bytes="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" sizeBytes)"
+  host="$(ftctl_dr_ablestack_export_value "${disk_map}" "${device}" host)"
+  port="$(ftctl_dr_ablestack_export_value "${disk_map}" "${device}" port)"
+  name="$(ftctl_dr_ablestack_export_value "${disk_map}" "${device}" name)"
+  [[ -n "${vm_name}" && -n "${source_path}" && "${size_bytes}" =~ ^[1-9][0-9]*$ ]] || return 32
+  [[ -n "${host}" && "${port}" =~ ^[1-9][0-9]*$ && -n "${name}" ]] || return 100
+  ftctl_dr_ablestack_target_export_reachable "${host}" "${port}" || return 100
+  bitmap="$(ftctl_dr_ablestack_qcow2_bitmap_name "${plan}" "${device}")"
+  job_id="ftctl-dr-$(printf '%s' "${run}:${device}" | cksum | awk '{print $1}')"
+  target_node="ftctl-dr-target-$(printf '%s' "${plan}:${device}" | cksum | awk '{print $1}')"
+  bandwidth="${FTCTL_DR_BANDWIDTH_LIMIT_MBPS:-0}"
+  [[ "${bandwidth}" =~ ^[0-9]+$ ]] || bandwidth=0
+  output="$(python3 "${FTCTL_LIB_BASE}/ftctl/qcow2_bitmap_backup.py" \
+    --domain "${vm_name}" --source-path "${source_path}" \
+    --target-host "${host}" --target-port "${port}" --target-export "${name}" \
+    --bitmap "${bitmap}" --mode "${mode}" --job-id "${job_id}" --target-node "${target_node}" \
+    --virtual-size "${size_bytes}" --timeout "${FTCTL_DR_FULL_SEED_TIMEOUT_SEC:-3600}" \
+    --bandwidth-limit-mbps "${bandwidth}" --progress-path "${FTCTL_DR_TRANSFER_PROGRESS_PATH:-}" \
+    --cycle-sequence "${sequence:-0}" --disk-index "${disk_index}" --disk-count "${disk_count}")" || rc=$?
+  [[ "${rc}" == "0" ]] || return "${rc}"
+  [[ -z "${out_var}" ]] || printf -v "${out_var}" '%s' "${output}"
+}
+
 ftctl_dr_ablestack_prepare_file_target() {
   local target_path="${1-}" target_format="${2-}" size_bytes="${3-}"
   local out="" err="" rc=0 current_format="" current_size=""
@@ -1553,6 +1620,7 @@ ftctl_dr_ablestack_full_seed_once() {
   local disk_json device source_path target_path source_format target_format size_bytes source_type target_type resolved_size target_uri
   local out="" err="" rc=0 source_at target_at source_epoch target_epoch rpo="0"
   local remote_transport="0" remote_path="" export_name="" export_port="" export_host="" vm_name=""
+  local qcow2_push_provider="0" disk_count="0" disk_index=0 backup_result=""
 
   ftctl_dr_ablestack_prepare_targets "${plan}" "${run}" "${profile_file}" "${disk_map}" "${manifest_path}" "${checkpoint_path}" || return $?
   local site_agent_transport="0"
@@ -1564,8 +1632,13 @@ ftctl_dr_ablestack_full_seed_once() {
   fi
   vm_name="$(ftctl_dr_ablestack_json_field "${disk_map}" source.instanceName 2>/dev/null || true)"
   [[ -n "${vm_name}" ]] || vm_name="dr-${plan}"
+  disk_count="$(ftctl_dr_ablestack_disk_count "${disk_map}")" || return $?
+  if [[ "${site_agent_transport}" == "1" ]] && ftctl_dr_ablestack_qcow2_push_provider "${disk_map}"; then
+    qcow2_push_provider="1"
+  fi
   source_at="$(ftctl_now_iso8601)"
   while IFS= read -r disk_json; do
+    disk_index=$((disk_index + 1))
     device="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" device)"
     source_path="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" sourcePath)"
     target_path="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" targetPath)"
@@ -1600,9 +1673,16 @@ ftctl_dr_ablestack_full_seed_once() {
     out=""
     err=""
     rc=0
-    ftctl_cmd_run "${FTCTL_DR_FULL_SEED_TIMEOUT_SEC:-3600}" out err rc -- \
-      qemu-img convert --force-share -p -n -S "${FTCTL_THIN_SPARSE_SIZE:-4k}" \
-      -f "${source_format}" -O "${target_format}" "${source_path}" "${target_uri}" || true
+    if [[ "${qcow2_push_provider}" == "1" ]]; then
+      backup_result=""
+      ftctl_dr_ablestack_qcow2_push_disk "${plan}" "${run}" "${cycle_sequence}" full "${vm_name}" \
+        "${disk_map}" "${disk_json}" "${disk_index}" "${disk_count}" backup_result || rc=$?
+      out="${backup_result}"
+    else
+      ftctl_cmd_run "${FTCTL_DR_FULL_SEED_TIMEOUT_SEC:-3600}" out err rc -- \
+        qemu-img convert --force-share -p -n -S "${FTCTL_THIN_SPARSE_SIZE:-4k}" \
+        -f "${source_format}" -O "${target_format}" "${source_path}" "${target_uri}" || true
+    fi
     : "${out}${err}${resolved_size}"
     if [[ "${remote_transport}" == "1" && "${site_agent_transport}" != "1" ]]; then
       ftctl_dr_ablestack_remote_nbd_stop "${vm_name}" "${device}" "${export_port}" || true
@@ -1620,7 +1700,7 @@ ftctl_dr_ablestack_full_seed_once() {
   ftctl_dr_ablestack_write_checkpoint "${disk_map}" "${manifest_path}" "${checkpoint_path}" "TARGET_READY" \
     "${source_at}" "${target_at}" "${rpo}" "${requested_mode}" "${effective_mode}" false \
     "" "${reseed_reason}" "${cycle_sequence}" 0 0 || return $?
-  if [[ "${remote_transport}" == "1" ]]; then
+  if [[ "${remote_transport}" == "1" && "${qcow2_push_provider}" != "1" ]]; then
     if [[ "${site_agent_transport}" == "1" ]]; then
       ftctl_dr_ablestack_initialize_source_baselines "${plan}" "${run}" "${disk_map}" || return $?
     else
@@ -1787,11 +1867,46 @@ ftctl_dr_ablestack_incremental_once() {
     "${sequence}" 0 0 || return $?
 }
 
+ftctl_dr_ablestack_qcow2_incremental_once() {
+  local plan="${1-}" run="${2-}" profile_file="${3-}" disk_map="${4-}" manifest_path="${5-}" checkpoint_path="${6-}" sequence="${7-}"
+  local disk_json vm_name result changed_bytes total_changed_bytes=0 started_at completed_at disk_count disk_index=0 rc=0
+  ftctl_dr_ablestack_canonicalize_profile "${profile_file}" "${disk_map}" || return $?
+  ftctl_dr_ablestack_site_agent_transport_load "${disk_map}" || return 90
+  ftctl_dr_ablestack_qcow2_push_provider "${disk_map}" || return 90
+  vm_name="$(ftctl_dr_ablestack_json_field "${disk_map}" source.instanceName 2>/dev/null || true)"
+  [[ -n "${vm_name}" ]] || return 32
+  disk_count="$(ftctl_dr_ablestack_disk_count "${disk_map}")" || return $?
+  started_at="$(ftctl_now_iso8601)"
+  while IFS= read -r disk_json; do
+    disk_index=$((disk_index + 1))
+    result=""
+    rc=0
+    ftctl_dr_ablestack_qcow2_push_disk "${plan}" "${run}" "${sequence}" incremental "${vm_name}" \
+      "${disk_map}" "${disk_json}" "${disk_index}" "${disk_count}" result || rc=$?
+    [[ "${rc}" == "0" ]] || return "${rc}"
+    changed_bytes="$(python3 -c 'import json,sys; print(int(json.loads(sys.argv[1]).get("changedBytes",0)))' "${result}" 2>/dev/null || printf '0')"
+    [[ "${changed_bytes}" =~ ^[0-9]+$ ]] || changed_bytes=0
+    total_changed_bytes=$((total_changed_bytes + changed_bytes))
+    ftctl_log_event "dr-runtime" "dr.ablestack.incremental_disk" "ok" "" "" \
+      "plan=${plan} run=${run} device=$(ftctl_dr_ablestack_disk_json_field "${disk_json}" device) bytes=${changed_bytes} transport=site-agent-qcow2-bitmap"
+  done < <(ftctl_dr_ablestack_disk_rows "${disk_map}")
+  completed_at="$(ftctl_now_iso8601)"
+  ftctl_dr_ablestack_write_manifest "${disk_map}" "${manifest_path}.records.jsonl" "${manifest_path}" "incremental-complete" || return $?
+  ftctl_dr_ablestack_write_checkpoint "${disk_map}" "${manifest_path}" "${checkpoint_path}" "TARGET_READY" \
+    "${started_at}" "${completed_at}" "0" CBT_INCREMENTAL CBT_INCREMENTAL true "${total_changed_bytes}" "" \
+    "${sequence}" "${disk_count}" "${disk_count}" || return $?
+}
+
 ftctl_dr_ablestack_site_agent_incremental_once() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" disk_map="${4-}" manifest_path="${5-}" checkpoint_path="${6-}" sequence="${7-}"
   local disk_json device source_path source_spec baseline previous current host port name diff_json changed_bytes total_changed_bytes="0" started_at completed_at disk_count
   ftctl_dr_ablestack_canonicalize_profile "${profile_file}" "${disk_map}" || return $?
   ftctl_dr_ablestack_site_agent_transport_load "${disk_map}" || return 90
+  if ftctl_dr_ablestack_qcow2_push_provider "${disk_map}"; then
+    ftctl_dr_ablestack_qcow2_incremental_once "${plan}" "${run}" "${profile_file}" "${disk_map}" \
+      "${manifest_path}" "${checkpoint_path}" "${sequence}"
+    return $?
+  fi
   current="$(ftctl_dr_ablestack_snapshot_name "${plan}" "${sequence}")"
   started_at="$(ftctl_now_iso8601)"
   while IFS= read -r disk_json; do
