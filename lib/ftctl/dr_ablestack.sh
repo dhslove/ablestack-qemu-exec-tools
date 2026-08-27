@@ -405,6 +405,39 @@ with open(tmp, "w", encoding="utf-8") as fh:
     fh.write("\n")
 os.replace(tmp, out_path)
 PY
+  ftctl_dr_ablestack_normalize_local_source_formats "${out_path}" || return $?
+}
+
+ftctl_dr_ablestack_normalize_local_source_formats() {
+  local disk_map="${1-}" source_provider direction transport_mode index source_path source_type source_format detected_format="" tmp=""
+  [[ -s "${disk_map}" ]] || return 2
+  source_provider="$(jq -r '.sourceProvider // ""' "${disk_map}" 2>/dev/null || true)"
+  direction="$(jq -r '.direction // ""' "${disk_map}" 2>/dev/null || true)"
+  transport_mode="$(jq -r '.transport.mode // ""' "${disk_map}" 2>/dev/null || true)"
+  [[ "${source_provider}" == "ABLESTACK" ]] || return 0
+  case "${direction}" in
+    KVM_TO_KVM|ABLESTACK_TO_ABLESTACK|"") ;;
+    *) return 0 ;;
+  esac
+  [[ "${transport_mode}" == "site-agent-nbd" || "${transport_mode}" == "remote-nbd" || "${transport_mode}" == "local" ]] || return 0
+
+  while IFS=$'\t' read -r index source_path source_type source_format; do
+    [[ "${index}" =~ ^[0-9]+$ && "${source_type}" == "file" && -z "${source_format}" && -n "${source_path}" ]] || continue
+    [[ -e "${source_path}" ]] || continue
+    detected_format=""
+    ftctl_dr_ablestack_qemu_info_value "${source_path}" "format" detected_format || return $?
+    case "${detected_format}" in
+      qcow2|raw) ;;
+      *) return 32 ;;
+    esac
+    tmp="${disk_map}.format.$$"
+    jq --argjson index "${index}" --arg format "${detected_format}" \
+      '.disks[$index].sourceFormat = $format' "${disk_map}" > "${tmp}" || {
+        rm -f "${tmp}"
+        return 1
+      }
+    mv -f "${tmp}" "${disk_map}"
+  done < <(jq -r '.disks | to_entries[] | [.key, (.value.sourcePath // ""), (.value.sourceType // ""), (.value.sourceFormat // "")] | @tsv' "${disk_map}")
 }
 
 ftctl_dr_ablestack_disk_count() {

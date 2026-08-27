@@ -36,6 +36,7 @@ jobs:
       - name: FTCTL ABLESTACK SharedMountPoint qcow2 transport smoke
         run: |
           bash tests/ftctl_dr_ablestack_qcow2_shared_smoke.sh
+          bash tests/ftctl_dr_ablestack_seed_retry_smoke.sh
 
       - name: FTCTL DR cancel terminal immutability smoke
         run: |

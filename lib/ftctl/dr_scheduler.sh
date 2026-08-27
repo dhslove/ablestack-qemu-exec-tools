@@ -1564,7 +1564,7 @@ ftctl_dr_scheduler_driver_name() {
 }
 
 ftctl_dr_scheduler_cycle_type() {
-  local sequence="${1-}" source_provider="${2-}" state_path="${3-}" disk_map=""
+  local sequence="${1-}" source_provider="${2-}" state_path="${3-}" disk_map="" latest_completed_sequence=""
   local target_provider="${4-}" plan="${5-}" baseline=""
   if [[ "${source_provider}" == "ABLESTACK" && "${target_provider}" == "VMWARE" ]]; then
     baseline="$(ftctl_dr_kvm_vmware_baseline_path "${plan}" 2>/dev/null || true)"
@@ -1572,6 +1572,13 @@ ftctl_dr_scheduler_cycle_type() {
       printf 'full-reverse-seed\n'
     else
       printf 'reverse-incremental\n'
+    fi
+  elif [[ "${source_provider}" == "ABLESTACK" && "${target_provider}" == "ABLESTACK" ]]; then
+    latest_completed_sequence="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "latest_completed_checkpoint_sequence" 2>/dev/null || true)"
+    if [[ ! "${latest_completed_sequence}" =~ ^[1-9][0-9]*$ ]]; then
+      printf 'full-seed\n'
+    else
+      printf 'incremental\n'
     fi
   elif [[ "${sequence}" == "1" ]]; then
     printf 'full-seed\n'
@@ -1704,7 +1711,7 @@ ftctl_dr_scheduler_iso_from_epoch() {
 ftctl_dr_scheduler_worker() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" state_path="${4-}" status_path="${5-}"
   local pid_path restore_points_path interval max_cycles sequence=0 command cycle_type source_provider target_provider driver
-  local output rc manifest_path checkpoint_path source_at target_at rpo now error_code error_message data_commit_state cycle_retry_mode checkpoint_ref
+  local output rc manifest_path checkpoint_path source_at target_at rpo now error_code error_message failed_component data_commit_state cycle_retry_mode checkpoint_ref
   local requested_mode effective_mode automatic_reseed mode_decision_code reseed_reason invalid_baseline_disk_count
   local incremental_verified metrics_estimated virtual_bytes changed_bytes source_read_bytes target_written_bytes transfer_payload_bytes changed_extent_count duration_ms throughput_bps baseline_generation cycle_token cycle_metrics_path
   local nbd_teardown_state nbd_teardown_started_at_ms nbd_teardown_completed_at_ms nbd_teardown_duration_ms
@@ -2265,6 +2272,12 @@ ftctl_dr_scheduler_worker() {
         66) error_code="DR_UNSUPPORTED_DIRECTION" ;;
         *) error_code="DR_REPLICATION_CYCLE_FAILED" ;;
       esac
+      failed_component="vmware-mover"
+      if [[ "${source_provider}" == "ABLESTACK" && "${target_provider}" == "ABLESTACK" ]]; then
+        failed_component="ablestack-replication-mover"
+      elif [[ "${source_provider}" == "ABLESTACK" && "${target_provider}" == "VMWARE" ]]; then
+        failed_component="kvm-vddk-writer"
+      fi
       case "${error_code}" in
         DR_CBT_METRICS_INVALID)
           error_message="Disk data was copied, but the cycle metrics could not be validated"
@@ -2322,7 +2335,7 @@ ftctl_dr_scheduler_worker() {
         "owner_matched=false" \
         "error_code=${error_code}" \
         "error_message=${error_message}" \
-        "failed_component=vmware-mover" \
+        "failed_component=${failed_component}" \
         "data_commit_state=${data_commit_state}" \
         "data_copied=$([[ "${data_commit_state}" == "DATA_COPIED_METADATA_FAILED" || "${data_commit_state}" == "LOCAL_COMMIT_FAILED" ]] && printf true || printf false)" \
         "metadata_committed=false" \

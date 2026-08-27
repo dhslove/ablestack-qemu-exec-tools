@@ -13,6 +13,13 @@ ftctl_dr_runtime_plan_dir() { printf '%s/runtime/%s\n' "${TMP}" "$(ftctl_dr_runt
 ftctl_state_write_json_file() { printf '%s\n' "$2" > "$1"; }
 ftctl_state_write_kv_all() { :; }
 ftctl_state_read_kv() { :; }
+ftctl_cmd_run() {
+  local _timeout="$1" out_var="$2" err_var="$3" rc_var="$4"
+  shift 5
+  printf -v "${out_var}" '%s' '{"format":"qcow2","virtual-size":1073741824}'
+  printf -v "${err_var}" '%s' ''
+  printf -v "${rc_var}" '%s' '0'
+}
 
 # shellcheck source=../lib/ftctl/dr_ablestack.sh
 source "${ROOT}/lib/ftctl/dr_ablestack.sh"
@@ -53,6 +60,29 @@ with open(sys.argv[1], encoding="utf-8") as fh:
 assert disk["sourceType"] == "file"
 assert disk["targetFormat"] == "qcow2"
 PY
+
+missing_format_profile="${TMP}/profile-missing-format.json"
+missing_format_canonical="${TMP}/canonical-missing-format.json"
+touch "${TMP}/source-volume"
+jq --arg path "${TMP}/source-volume" '.mapping.disks[0].sourcePath=$path | del(.mapping.disks[0].sourceFormat)' \
+  "${profile}" > "${missing_format_profile}"
+ftctl_dr_ablestack_canonicalize_profile "${missing_format_profile}" "${missing_format_canonical}"
+ftctl_dr_ablestack_qcow2_push_provider "${missing_format_canonical}"
+jq -e '.disks[0].sourceFormat == "qcow2"' "${missing_format_canonical}" >/dev/null
+
+remote_source_profile="${TMP}/profile-remote-source.json"
+remote_source_canonical="${TMP}/canonical-remote-source.json"
+jq '.mapping.disks[0] |= (.sourcePath="/mnt/glue-gfs/not-mounted-on-target" | del(.sourceFormat))' \
+  "${profile}" > "${remote_source_profile}"
+ftctl_dr_ablestack_canonicalize_profile "${remote_source_profile}" "${remote_source_canonical}"
+jq -e '.disks[0].sourceFormat == "" and .disks[0].sourceType == "file"' "${remote_source_canonical}" >/dev/null
+
+rbd_profile="${TMP}/profile-rbd.json"
+rbd_canonical="${TMP}/canonical-rbd.json"
+jq '.mapping.disks[0] |= (.sourcePath="rbd:rbd/source" | .sourceType="rbd" | .sourceFormat="raw" | .targetPath="rbd:rbd/target" | .targetType="rbd" | .targetFormat="raw")' "${profile}" > "${rbd_profile}"
+ftctl_dr_ablestack_canonicalize_profile "${rbd_profile}" "${rbd_canonical}"
+jq -e '.disks[0].sourceFormat == "raw" and .disks[0].sourceType == "rbd"' "${rbd_canonical}" >/dev/null
+! ftctl_dr_ablestack_qcow2_push_provider "${rbd_canonical}"
 
 grep -q 'file:qcow2)' "${ROOT}/lib/ftctl/dr_ablestack.sh"
 grep -q 'qcow2_bitmap_backup.py' "${ROOT}/lib/ftctl/dr_ablestack.sh"
