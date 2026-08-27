@@ -82,6 +82,27 @@ enter the qcow2 bitmap provider.
 - `file` target: absolute SharedMountPoint path, qcow2 format, and valid size.
 
 The file target is created with `qemu-img create -f qcow2` only when absent.
+
+## Test failover artifact isolation
+
+A SharedMountPoint target remains opened by the target-side replication writer.
+`qemu-img create -b <target>` is therefore both lock-sensitive and unsafe for a
+long-running test: later replication writes could change the backing data seen
+by the test VM.
+
+For `provider=FILE`, test failover now uses the following contract after the
+scheduler pause and durable-checkpoint lease have completed:
+
+1. Open the durable target read-only with `qemu-img info --force-share`.
+2. Create an independent sparse qcow2 copy with
+   `qemu-img convert --force-share -f <format> -O qcow2 -S 4k`.
+3. Validate the copy with `qemu-img check -q`.
+4. Publish a `qcow2-copy` artifact and attach only that path to the Cloud test
+   VM.
+5. Delete only the independent copy during Test Cleanup.
+
+The live durable target is never used as a mutable backing file. RBD continues
+to use its validated snapshot/clone path unchanged.
 Existing files are format- and size-validated. The export manifest records
 `targetType` and `targetFormat` so Cloud and the source Agent can reject stale
 or mismatched exports.

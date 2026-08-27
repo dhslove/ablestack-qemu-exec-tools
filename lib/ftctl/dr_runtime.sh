@@ -2298,7 +2298,7 @@ def cleanup_records():
                 subprocess.run(["rbd", "snap", "rm", snap_ref], check=False,
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         path = str(record.get("path") or "")
-        if record.get("type") == "qcow2-overlay" and path and os.path.isfile(path):
+        if record.get("type") in ("qcow2-overlay", "qcow2-copy") and path and os.path.isfile(path):
             os.unlink(path)
 
 def fail(code, message):
@@ -2375,22 +2375,30 @@ else:
             if not os.path.isabs(target_path) or not os.path.isfile(target_path):
                 fail(53, f"file-backed target does not exist: {target_path}")
             if not qemu_img:
-                fail(46, "qemu-img is required to create ABLESTACK test overlays")
-            overlay_path = os.path.join(artifacts_dir, f"{device}.qcow2")
-            command = [qemu_img, "create", "-f", "qcow2", "-F", target_format, "-b", target_path, overlay_path]
+                fail(46, "qemu-img is required to create ABLESTACK test copies")
+            copy_path = os.path.join(artifacts_dir, f"{device}.qcow2")
+            command = [
+                qemu_img, "convert", "--force-share", "-f", target_format,
+                "-O", "qcow2", "-S", "4k", target_path, copy_path,
+            ]
             try:
-                subprocess.run([qemu_img, "info", target_path], check=True,
+                # The durable target remains attached to the paused replication
+                # writer. Force-share is read-only here; the independent copy
+                # prevents later replication writes from changing a test VM.
+                subprocess.run([qemu_img, "info", "--force-share", target_path], check=True,
                                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
                 subprocess.run(command, check=True)
+                subprocess.run([qemu_img, "check", "-q", copy_path], check=True,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
             except subprocess.CalledProcessError as exc:
                 stderr = (exc.stderr or "").strip() if isinstance(exc.stderr, str) else ""
-                fail(46, f"file-backed test overlay failed for {target_path}: {stderr or exc}")
+                fail(46, f"file-backed test copy failed for {target_path}: {stderr or exc}")
             records.append({
                 "device": disk.get("device") or f"disk{index}",
                 "state": "CREATED",
-                "type": "qcow2-overlay",
-                "backing": target_path,
-                "path": overlay_path,
+                "type": "qcow2-copy",
+                "source": target_path,
+                "path": copy_path,
                 "sizeBytes": disk.get("sizeBytes") or disk.get("capacityBytes") or 0,
                 "command": command,
             })

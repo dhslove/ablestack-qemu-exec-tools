@@ -7703,9 +7703,13 @@ selftest_case_dr_runtime_test_failover_cleanup() {
   cat > "${fakebin}/qemu-img" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "${call_log}"
-[[ "\${1-}" == "info" ]] && exit 0
-target="\${@: -1}"
-: > "\${target}"
+case "\${1-}" in
+  info|check) exit 0 ;;
+  convert)
+    target="\${@: -1}"
+    : > "\${target}"
+    ;;
+esac
 EOF
   chmod +x "${fakebin}/qemu-img"
   : > "${SELFTEST_ROOT}/target/root.qcow2"
@@ -7796,9 +7800,12 @@ EOF
   artifact_dir="${SELFTEST_ROOT}/run/dr-runtime/plans/${plan}/test-sessions/run-test-session-artifacts"
   selftest_assert_file_contains "${session_path}" '"networkMode":"isolated"'
   selftest_assert_file_contains "${session_path}" '"checkpointSequence":2'
-  selftest_assert_file_contains "${session_path}" '"type":"qcow2-overlay"'
-  selftest_assert_file_contains "${call_log}" "create -f qcow2 -F qcow2 -b ${SELFTEST_ROOT}/target/root.qcow2 ${artifact_dir}/vda.qcow2"
-  [[ -f "${artifact_dir}/vda.qcow2" ]] || selftest_fail "test overlay should be created"
+  selftest_assert_file_contains "${session_path}" '"type":"qcow2-copy"'
+  selftest_assert_file_not_contains "${session_path}" '"backing"'
+  selftest_assert_file_contains "${call_log}" "info --force-share ${SELFTEST_ROOT}/target/root.qcow2"
+  selftest_assert_file_contains "${call_log}" "convert --force-share -f qcow2 -O qcow2 -S 4k ${SELFTEST_ROOT}/target/root.qcow2 ${artifact_dir}/vda.qcow2"
+  selftest_assert_file_contains "${call_log}" "check -q ${artifact_dir}/vda.qcow2"
+  [[ -f "${artifact_dir}/vda.qcow2" ]] || selftest_fail "independent test copy should be created"
 
   out="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-status \
     --config "${SELFTEST_CONFIG}" \
