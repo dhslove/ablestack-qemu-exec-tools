@@ -1586,7 +1586,14 @@ ftctl_dr_ablestack_full_seed_transferred_bytes() {
   local result_json="${1-}" fallback_bytes="${2-0}" transferred_bytes=""
   if [[ -n "${result_json}" ]]; then
     transferred_bytes="$(python3 -c \
-      'import json,sys; value=json.loads(sys.argv[1]).get("changedBytes"); print(value if isinstance(value,int) and value >= 0 else "")' \
+      'import json,sys
+value=json.loads(sys.argv[1])
+mode=str(value.get("mode") or "").upper()
+fields=("targetWrittenBytes","sourceReadBytes","bytesProcessed","transferPayloadBytes","changedBytes") if mode in ("FULL_SEED","FULL_RESEED") else ("changedBytes",)
+values=[value.get(field) for field in fields]
+positive=next((item for item in values if isinstance(item,int) and item > 0), None)
+nonnegative=next((item for item in values if isinstance(item,int) and item >= 0), None)
+print(positive if positive is not None else nonnegative if nonnegative is not None else "")' \
       "${result_json}" 2>/dev/null || true)"
   fi
   [[ "${transferred_bytes}" =~ ^[0-9]+$ ]] || transferred_bytes="${fallback_bytes}"

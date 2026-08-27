@@ -85,6 +85,8 @@ jq -e '.disks[0].sourceFormat == "raw" and .disks[0].sourceType == "rbd"' "${rbd
 ! ftctl_dr_ablestack_qcow2_push_provider "${rbd_canonical}"
 
 [[ "$(ftctl_dr_ablestack_full_seed_transferred_bytes '{"changedBytes":4096}' 8192)" == "4096" ]]
+[[ "$(ftctl_dr_ablestack_full_seed_transferred_bytes '{"mode":"FULL_RESEED","changedBytes":0,"bytesProcessed":16384,"sourceReadBytes":16384,"targetWrittenBytes":16384}' 8192)" == "16384" ]]
+[[ "$(ftctl_dr_ablestack_full_seed_transferred_bytes '{"mode":"FULL_RESEED","changedBytes":0,"bytesProcessed":0,"targetWrittenBytes":0}' 8192)" == "0" ]]
 [[ "$(ftctl_dr_ablestack_full_seed_transferred_bytes '{}' 8192)" == "8192" ]]
 [[ "$(ftctl_dr_ablestack_full_seed_transferred_bytes 'invalid-json' 8192)" == "8192" ]]
 [[ "$(ftctl_dr_ablestack_incremental_effective_mode 0)" == "NO_CHANGE" ]]
