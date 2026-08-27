@@ -61,6 +61,22 @@ assert disk["sourceType"] == "file"
 assert disk["targetFormat"] == "qcow2"
 PY
 
+relative_target_profile="${TMP}/profile-relative-target.json"
+relative_target_canonical="${TMP}/canonical-relative-target.json"
+jq '.mapping.disks[0] |= (.targetPath="target-volume" | .targetStoragePath="/mnt/glue-gfs" | .targetStorageType="SharedMountPoint")' \
+  "${profile}" > "${relative_target_profile}"
+ftctl_dr_ablestack_canonicalize_profile "${relative_target_profile}" "${relative_target_canonical}"
+jq -e '.disks[0].targetPath == "/mnt/glue-gfs/target-volume"' "${relative_target_canonical}" >/dev/null
+
+traversal_target_profile="${TMP}/profile-traversal-target.json"
+traversal_target_canonical="${TMP}/canonical-traversal-target.json"
+jq '.mapping.disks[0] |= (.targetPath="../outside" | .targetStoragePath="/mnt/glue-gfs" | .targetStorageType="SharedMountPoint")' \
+  "${profile}" > "${traversal_target_profile}"
+if ftctl_dr_ablestack_canonicalize_profile "${traversal_target_profile}" "${traversal_target_canonical}" 2>/dev/null; then
+  echo "[ERR] SharedMountPoint traversal target was accepted" >&2
+  exit 1
+fi
+
 missing_format_profile="${TMP}/profile-missing-format.json"
 missing_format_canonical="${TMP}/canonical-missing-format.json"
 touch "${TMP}/source-volume"

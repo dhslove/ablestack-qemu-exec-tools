@@ -180,6 +180,22 @@ def derive_target_path(target_name, storage_ref, storage_path, krbd_path, pool_t
         return join_path(storage_text, name, suffix)
     return ""
 
+def resolve_shared_mount_target_path(target_path, storage_path, pool_type):
+    target_text = str(target_path or "").strip()
+    if str(pool_type or "").strip().upper() != "SHAREDMOUNTPOINT" or not target_text:
+        return target_text
+    root = os.path.normpath(str(storage_path or "").strip())
+    if not os.path.isabs(root):
+        raise ValueError("SharedMountPoint target storage path must be absolute")
+    candidate = os.path.normpath(target_text) if os.path.isabs(target_text) else os.path.normpath(os.path.join(root, target_text))
+    try:
+        inside_root = os.path.commonpath((root, candidate)) == root
+    except ValueError:
+        inside_root = False
+    if not os.path.isabs(candidate) or not inside_root or candidate == root:
+        raise ValueError("SharedMountPoint target path escapes the configured storage root")
+    return candidate
+
 def first_networks(*values):
     out = []
     for value in values:
@@ -241,6 +257,7 @@ def normalize_disk(item, index):
         derived_target_path = derive_target_path(target_name, target_storage_ref, target_storage_path, target_storage_krbd_path, target_storage_type)
         if derived_target_path:
             target_path = derived_target_path
+    target_path = resolve_shared_mount_target_path(target_path, target_storage_path, target_storage_type)
     device = first_str(
         value_at(item, "device", "targetDevice", "diskTarget", "sourceDevice"),
         value_at(source, "device", "targetDevice"),
