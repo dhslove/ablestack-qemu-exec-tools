@@ -84,6 +84,26 @@ ftctl_dr_ablestack_canonicalize_profile "${rbd_profile}" "${rbd_canonical}"
 jq -e '.disks[0].sourceFormat == "raw" and .disks[0].sourceType == "rbd"' "${rbd_canonical}" >/dev/null
 ! ftctl_dr_ablestack_qcow2_push_provider "${rbd_canonical}"
 
+[[ "$(ftctl_dr_ablestack_full_seed_transferred_bytes '{"changedBytes":4096}' 8192)" == "4096" ]]
+[[ "$(ftctl_dr_ablestack_full_seed_transferred_bytes '{}' 8192)" == "8192" ]]
+[[ "$(ftctl_dr_ablestack_full_seed_transferred_bytes 'invalid-json' 8192)" == "8192" ]]
+
+checkpoint_manifest="${TMP}/full-seed-manifest.json"
+checkpoint_path="${TMP}/full-seed-checkpoint.json"
+jq '{planUuid,runUuid:"run-full-seed",disks}' "${canonical}" > "${checkpoint_manifest}"
+ftctl_dr_ablestack_write_checkpoint "${canonical}" "${checkpoint_manifest}" "${checkpoint_path}" \
+  TARGET_READY 2026-08-28T00:00:00Z 2026-08-28T00:00:10Z 10 \
+  FULL_SEED FULL_SEED false 1073741824 '' 1 0 0
+jq -e '.changedBytes == 1073741824
+  and .sourceReadBytes == 1073741824
+  and .targetWrittenBytes == 1073741824
+  and .transferPayloadBytes == 1073741824
+  and .cycleToken == "plan-qcow2:1"
+  and .cycleCommitState == "LOCAL_DURABLE"' "${checkpoint_path}" >/dev/null
+
+grep -q 'total_transferred_bytes' "${ROOT}/lib/ftctl/dr_ablestack.sh"
+grep -q '"${total_transferred_bytes}" "${reseed_reason}"' "${ROOT}/lib/ftctl/dr_ablestack.sh"
+
 grep -q 'file:qcow2)' "${ROOT}/lib/ftctl/dr_ablestack.sh"
 grep -q 'qcow2_bitmap_backup.py' "${ROOT}/lib/ftctl/dr_ablestack.sh"
 grep -q 'ftctl_dr_ablestack_qcow2_incremental_once' "${ROOT}/lib/ftctl/dr_ablestack.sh"

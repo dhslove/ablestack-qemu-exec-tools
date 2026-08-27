@@ -1582,6 +1582,18 @@ os.replace(tmp, checkpoint_path)
 PY
 }
 
+ftctl_dr_ablestack_full_seed_transferred_bytes() {
+  local result_json="${1-}" fallback_bytes="${2-0}" transferred_bytes=""
+  if [[ -n "${result_json}" ]]; then
+    transferred_bytes="$(python3 -c \
+      'import json,sys; value=json.loads(sys.argv[1]).get("changedBytes"); print(value if isinstance(value,int) and value >= 0 else "")' \
+      "${result_json}" 2>/dev/null || true)"
+  fi
+  [[ "${transferred_bytes}" =~ ^[0-9]+$ ]] || transferred_bytes="${fallback_bytes}"
+  [[ "${transferred_bytes}" =~ ^[0-9]+$ ]] || transferred_bytes="0"
+  printf '%s\n' "${transferred_bytes}"
+}
+
 ftctl_dr_ablestack_prepare_targets() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" disk_map="${4-}" manifest_path="${5-}" checkpoint_path="${6-}"
   local records_path count disk_json device source_path target_path source_format target_format size_bytes source_type target_type resolved_size
@@ -1654,6 +1666,7 @@ ftctl_dr_ablestack_full_seed_once() {
   local out="" err="" rc=0 source_at target_at source_epoch target_epoch rpo="0"
   local remote_transport="0" remote_path="" export_name="" export_port="" export_host="" vm_name=""
   local qcow2_push_provider="0" disk_count="0" disk_index=0 backup_result=""
+  local disk_transferred_bytes="0" total_transferred_bytes="0"
 
   ftctl_dr_ablestack_prepare_targets "${plan}" "${run}" "${profile_file}" "${disk_map}" "${manifest_path}" "${checkpoint_path}" || return $?
   local site_agent_transport="0"
@@ -1721,6 +1734,8 @@ ftctl_dr_ablestack_full_seed_once() {
       ftctl_dr_ablestack_remote_nbd_stop "${vm_name}" "${device}" "${export_port}" || true
     fi
     [[ "${rc}" == "0" ]] || return "${rc}"
+    disk_transferred_bytes="$(ftctl_dr_ablestack_full_seed_transferred_bytes "${backup_result}" "${resolved_size}")"
+    total_transferred_bytes=$((total_transferred_bytes + disk_transferred_bytes))
   done < <(ftctl_dr_ablestack_disk_rows "${disk_map}")
 
   target_at="$(ftctl_now_iso8601)"
@@ -1732,7 +1747,7 @@ ftctl_dr_ablestack_full_seed_once() {
   ftctl_dr_ablestack_write_manifest "${disk_map}" "${manifest_path}.records.jsonl" "${manifest_path}" "full-seed-complete" || return $?
   ftctl_dr_ablestack_write_checkpoint "${disk_map}" "${manifest_path}" "${checkpoint_path}" "TARGET_READY" \
     "${source_at}" "${target_at}" "${rpo}" "${requested_mode}" "${effective_mode}" false \
-    "" "${reseed_reason}" "${cycle_sequence}" 0 0 || return $?
+    "${total_transferred_bytes}" "${reseed_reason}" "${cycle_sequence}" 0 0 || return $?
   if [[ "${remote_transport}" == "1" && "${qcow2_push_provider}" != "1" ]]; then
     if [[ "${site_agent_transport}" == "1" ]]; then
       ftctl_dr_ablestack_initialize_source_baselines "${plan}" "${run}" "${disk_map}" || return $?
