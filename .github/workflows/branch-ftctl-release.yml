@@ -112,6 +112,32 @@ jobs:
           bash tests/ftctl_dr_cancel_terminal_immutability_smoke.sh
           make ftctl-rpm
 
+          rpm_path=$(find build/rpm-ftctl -type f -name 'ablestack_vm_ftctl-*.rpm' -print -quit)
+          if [ -z "$rpm_path" ]; then
+            echo "::error::FTCTL RPM was not produced"
+            exit 1
+          fi
+          verify_root=$(mktemp -d)
+          trap 'rm -rf "$verify_root"' EXIT
+          (
+            cd "$verify_root"
+            rpm2cpio "$GITHUB_WORKSPACE/$rpm_path" | cpio -idm --quiet
+          )
+          for script in dr_runtime.sh dr_scheduler.sh; do
+            packaged="$verify_root/usr/local/lib/ablestack-qemu-exec-tools/ftctl/$script"
+            source="lib/ftctl/$script"
+            if ! cmp -s "$source" "$packaged"; then
+              echo "::error::Packaged $script does not match the checked-out source"
+              sha256sum "$source" "$packaged" || true
+              exit 1
+            fi
+          done
+          sha256sum \
+            lib/ftctl/dr_runtime.sh \
+            lib/ftctl/dr_scheduler.sh \
+            "$verify_root/usr/local/lib/ablestack-qemu-exec-tools/ftctl/dr_runtime.sh" \
+            "$verify_root/usr/local/lib/ablestack-qemu-exec-tools/ftctl/dr_scheduler.sh"
+
       - name: Create FTCTL RPM repo
         shell: bash
         run: |
