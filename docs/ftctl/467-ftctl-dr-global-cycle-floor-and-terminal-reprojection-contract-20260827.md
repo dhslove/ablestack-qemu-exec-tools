@@ -44,9 +44,10 @@ scripts and emits a sequence at or above the authority floor.
 
 - Run the requested-cycle terminal journal smoke test.
 - Run the global authority sequence floor smoke coverage.
-- Extract the built RPM and byte-compare `dr_runtime.sh` and
-  `dr_scheduler.sh` with the checked-out source. The workflow must fail on any
-  mismatch even when the RPM version string is unchanged.
+- Extract the built RPM, verify the Rocky RPM shebang normalization to
+  `/usr/bin/bash`, and byte-compare the remaining `dr_runtime.sh` and
+  `dr_scheduler.sh` bodies with the checked-out source. The workflow must fail
+  on any logic mismatch even when the RPM version string is unchanged.
 - Verify release tombstone and baseline action contract tests remain unchanged.
 - After package deployment, verify all compute hosts report the same package
   version and `dr_runtime.sh`/`dr_scheduler.sh` hashes.

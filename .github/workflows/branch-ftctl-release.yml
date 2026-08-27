@@ -126,8 +126,13 @@ jobs:
           for script in dr_runtime.sh dr_scheduler.sh; do
             packaged="$verify_root/usr/local/lib/ablestack-qemu-exec-tools/ftctl/$script"
             source="lib/ftctl/$script"
-            if ! cmp -s "$source" "$packaged"; then
-              echo "::error::Packaged $script does not match the checked-out source"
+            if [ "$(head -n 1 "$packaged")" != '#!/usr/bin/bash' ]; then
+              echo "::error::Packaged $script has an unexpected interpreter"
+              head -n 1 "$packaged"
+              exit 1
+            fi
+            if ! cmp -s <(tail -n +2 "$source") <(tail -n +2 "$packaged"); then
+              echo "::error::Packaged $script body does not match the checked-out source"
               sha256sum "$source" "$packaged" || true
               exit 1
             fi
