@@ -1873,7 +1873,7 @@ ftctl_dr_ablestack_apply_incremental_nbd() {
 ftctl_dr_ablestack_incremental_once() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" disk_map="${4-}" manifest_path="${5-}" checkpoint_path="${6-}" sequence="${7-}"
   local disk_json device source_path target_path source_spec target_spec baseline previous current host user ssh_host ssh_port ssh_port_args identity_args
-  local out="" err="" rc=0 changed_bytes="0" total_changed_bytes="0" started_at completed_at
+  local out="" err="" rc=0 changed_bytes="0" total_changed_bytes="0" started_at completed_at effective_mode
   ftctl_dr_ablestack_canonicalize_profile "${profile_file}" "${disk_map}" || return $?
   ftctl_dr_ablestack_remote_transport_load "${disk_map}" || return 90
   ftctl_blockcopy_remote_target_host_user host user || return 2
@@ -1909,15 +1909,26 @@ ftctl_dr_ablestack_incremental_once() {
       "plan=${plan} run=${run} device=${device} from=${previous} to=${current} bytes=${changed_bytes}"
   done < <(ftctl_dr_ablestack_disk_rows "${disk_map}")
   completed_at="$(ftctl_now_iso8601)"
+  effective_mode="$(ftctl_dr_ablestack_incremental_effective_mode "${total_changed_bytes}")"
   ftctl_dr_ablestack_write_manifest "${disk_map}" "${manifest_path}.records.jsonl" "${manifest_path}" "incremental-complete" || return $?
   ftctl_dr_ablestack_write_checkpoint "${disk_map}" "${manifest_path}" "${checkpoint_path}" "TARGET_READY" \
-    "${started_at}" "${completed_at}" "0" CBT_INCREMENTAL CBT_INCREMENTAL true "${total_changed_bytes}" "" \
+    "${started_at}" "${completed_at}" "0" CBT_INCREMENTAL "${effective_mode}" true "${total_changed_bytes}" "" \
     "${sequence}" 0 0 || return $?
+}
+
+ftctl_dr_ablestack_incremental_effective_mode() {
+  local changed_bytes="${1-0}"
+  [[ "${changed_bytes}" =~ ^[0-9]+$ ]] || changed_bytes=0
+  if [[ "${changed_bytes}" == "0" ]]; then
+    printf 'NO_CHANGE\n'
+  else
+    printf 'CBT_INCREMENTAL\n'
+  fi
 }
 
 ftctl_dr_ablestack_qcow2_incremental_once() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" disk_map="${4-}" manifest_path="${5-}" checkpoint_path="${6-}" sequence="${7-}"
-  local disk_json vm_name result changed_bytes total_changed_bytes=0 started_at completed_at disk_count disk_index=0 rc=0
+  local disk_json vm_name result changed_bytes total_changed_bytes=0 started_at completed_at disk_count disk_index=0 rc=0 effective_mode
   ftctl_dr_ablestack_canonicalize_profile "${profile_file}" "${disk_map}" || return $?
   ftctl_dr_ablestack_site_agent_transport_load "${disk_map}" || return 90
   ftctl_dr_ablestack_qcow2_push_provider "${disk_map}" || return 90
@@ -1939,15 +1950,16 @@ ftctl_dr_ablestack_qcow2_incremental_once() {
       "plan=${plan} run=${run} device=$(ftctl_dr_ablestack_disk_json_field "${disk_json}" device) bytes=${changed_bytes} transport=site-agent-qcow2-bitmap"
   done < <(ftctl_dr_ablestack_disk_rows "${disk_map}")
   completed_at="$(ftctl_now_iso8601)"
+  effective_mode="$(ftctl_dr_ablestack_incremental_effective_mode "${total_changed_bytes}")"
   ftctl_dr_ablestack_write_manifest "${disk_map}" "${manifest_path}.records.jsonl" "${manifest_path}" "incremental-complete" || return $?
   ftctl_dr_ablestack_write_checkpoint "${disk_map}" "${manifest_path}" "${checkpoint_path}" "TARGET_READY" \
-    "${started_at}" "${completed_at}" "0" CBT_INCREMENTAL CBT_INCREMENTAL true "${total_changed_bytes}" "" \
+    "${started_at}" "${completed_at}" "0" CBT_INCREMENTAL "${effective_mode}" true "${total_changed_bytes}" "" \
     "${sequence}" "${disk_count}" "${disk_count}" || return $?
 }
 
 ftctl_dr_ablestack_site_agent_incremental_once() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" disk_map="${4-}" manifest_path="${5-}" checkpoint_path="${6-}" sequence="${7-}"
-  local disk_json device source_path source_spec baseline previous current host port name diff_json changed_bytes total_changed_bytes="0" started_at completed_at disk_count
+  local disk_json device source_path source_spec baseline previous current host port name diff_json changed_bytes total_changed_bytes="0" started_at completed_at disk_count effective_mode
   ftctl_dr_ablestack_canonicalize_profile "${profile_file}" "${disk_map}" || return $?
   ftctl_dr_ablestack_site_agent_transport_load "${disk_map}" || return 90
   if ftctl_dr_ablestack_qcow2_push_provider "${disk_map}"; then
@@ -1993,9 +2005,10 @@ ftctl_dr_ablestack_site_agent_incremental_once() {
   done < <(ftctl_dr_ablestack_disk_rows "${disk_map}")
   completed_at="$(ftctl_now_iso8601)"
   disk_count="$(ftctl_dr_ablestack_disk_count "${disk_map}")" || return $?
+  effective_mode="$(ftctl_dr_ablestack_incremental_effective_mode "${total_changed_bytes}")"
   ftctl_dr_ablestack_write_manifest "${disk_map}" "${manifest_path}.records.jsonl" "${manifest_path}" "incremental-complete" || return $?
   ftctl_dr_ablestack_write_checkpoint "${disk_map}" "${manifest_path}" "${checkpoint_path}" "TARGET_READY" \
-    "${started_at}" "${completed_at}" "0" CBT_INCREMENTAL CBT_INCREMENTAL true "${total_changed_bytes}" "" \
+    "${started_at}" "${completed_at}" "0" CBT_INCREMENTAL "${effective_mode}" true "${total_changed_bytes}" "" \
     "${sequence}" "${disk_count}" "${disk_count}" || return $?
 }
 

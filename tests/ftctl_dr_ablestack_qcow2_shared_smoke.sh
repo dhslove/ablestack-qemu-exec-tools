@@ -87,6 +87,9 @@ jq -e '.disks[0].sourceFormat == "raw" and .disks[0].sourceType == "rbd"' "${rbd
 [[ "$(ftctl_dr_ablestack_full_seed_transferred_bytes '{"changedBytes":4096}' 8192)" == "4096" ]]
 [[ "$(ftctl_dr_ablestack_full_seed_transferred_bytes '{}' 8192)" == "8192" ]]
 [[ "$(ftctl_dr_ablestack_full_seed_transferred_bytes 'invalid-json' 8192)" == "8192" ]]
+[[ "$(ftctl_dr_ablestack_incremental_effective_mode 0)" == "NO_CHANGE" ]]
+[[ "$(ftctl_dr_ablestack_incremental_effective_mode 4096)" == "CBT_INCREMENTAL" ]]
+[[ "$(ftctl_dr_ablestack_incremental_effective_mode invalid)" == "NO_CHANGE" ]]
 
 checkpoint_manifest="${TMP}/full-seed-manifest.json"
 checkpoint_path="${TMP}/full-seed-checkpoint.json"
@@ -107,6 +110,7 @@ grep -q '"${total_transferred_bytes}" "${reseed_reason}"' "${ROOT}/lib/ftctl/dr_
 grep -q 'file:qcow2)' "${ROOT}/lib/ftctl/dr_ablestack.sh"
 grep -q 'qcow2_bitmap_backup.py' "${ROOT}/lib/ftctl/dr_ablestack.sh"
 grep -q 'ftctl_dr_ablestack_qcow2_incremental_once' "${ROOT}/lib/ftctl/dr_ablestack.sh"
+grep -q 'effective_mode="$(ftctl_dr_ablestack_incremental_effective_mode "${total_changed_bytes}")"' "${ROOT}/lib/ftctl/dr_ablestack.sh"
 grep -q 'rbd export-diff --from-snap' "${ROOT}/lib/ftctl/dr_ablestack.sh"
 
 python3 "${ROOT}/tests/ftctl_qcow2_bitmap_backup_test.py"
