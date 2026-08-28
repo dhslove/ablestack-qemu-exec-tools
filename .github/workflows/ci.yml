@@ -35,6 +35,7 @@ jobs:
 
       - name: FTCTL ABLESTACK SharedMountPoint qcow2 transport smoke
         run: |
+          python3 -m unittest tests.ftctl_qcow2_bitmap_baseline_test
           bash tests/ftctl_dr_ablestack_qcow2_shared_smoke.sh
           bash tests/ftctl_dr_ablestack_seed_retry_smoke.sh
 

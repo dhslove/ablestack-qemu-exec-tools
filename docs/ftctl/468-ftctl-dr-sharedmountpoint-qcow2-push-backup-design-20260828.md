@@ -345,3 +345,41 @@ failed test session is cleaned and no lease references it.
 This hardening is intentionally scoped to SharedMountPoint FILE checkpoints.
 The validated RBD clone and VMware/VDDK paths do not call this publisher and
 remain behaviorally unchanged.
+
+## SharedMountPoint cutover reverse baseline contract (2026-08-29)
+
+An actual FILE-provider Failover must establish the reverse incremental
+baseline before Cloud starts the promoted target VM. The former implementation
+called the RBD snapshot baseline helper unconditionally from
+`dr-target-export-stop`; a SharedMountPoint qcow2 path therefore returned exit
+32 after the writer was drained and left the Cloud Run at `final-delta-apply`.
+
+The provider-specific contract is now:
+
+1. Canonicalize a relative Cloud volume path beneath the source
+   `SharedMountPoint` storage root. Paths outside that root are rejected.
+2. Stop the Plan-owned NBD export and prove that the promoted qcow2 has no
+   writable file descriptor.
+3. Add or verify one persistent, enabled QEMU dirty bitmap whose identity is
+   derived from `(plan, disk)`. The operation is idempotent for projection
+   retries.
+4. Persist the reverse baseline state only after every disk has a valid qcow2
+   container and matching bitmap granularity.
+5. Permit Cloud target-VM start and authority commit only after this barrier.
+   Writes made after promotion are then accumulated by the embedded bitmap and
+   are eligible for incremental reprotect/failback.
+6. `dr-reverse-preflight` reports `QCOW2_INCREMENTAL` only when the retained
+   source file and every persistent bitmap pass validation. Missing or
+   inconsistent evidence requires a full reseed; it must not be labelled as an
+   RBD baseline.
+
+RBD disks continue to use the established paired snapshot baseline functions.
+`TEST_FAILOVER` continues to skip reverse-baseline preparation. No FILE helper
+is reachable from VMware/VDDK or RBD provider dispatch.
+
+| Area | AS-IS | TO-BE |
+| --- | --- | --- |
+| provider dispatch | every cutover uses RBD snapshots | RBD snapshots or FILE persistent bitmap |
+| relative source locator | unresolved Cloud volume path | canonical path below SharedMountPoint root |
+| retry | repeated exit 32 after export drain | idempotent bitmap verification and completion |
+| failback mode | RBD label or full seed | `QCOW2_INCREMENTAL` with durable bitmap evidence |

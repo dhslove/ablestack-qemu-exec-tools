@@ -93,6 +93,19 @@ jq '.mapping.disks[0] |= (.sourcePath="/mnt/glue-gfs/not-mounted-on-target" | de
 ftctl_dr_ablestack_canonicalize_profile "${remote_source_profile}" "${remote_source_canonical}"
 jq -e '.disks[0].sourceFormat == "" and .disks[0].sourceType == "file"' "${remote_source_canonical}" >/dev/null
 
+reverse_relative_profile="${TMP}/profile-reverse-relative.json"
+reverse_relative_canonical="${TMP}/canonical-reverse-relative.json"
+jq '.source.storagePath="/mnt/glue-gfs"
+  | .source.storagePoolType="SharedMountPoint"
+  | .mapping.disks[0].sourcePath="rocky9-vm-dr-disk-0"' \
+  "${profile}" > "${reverse_relative_profile}"
+ftctl_dr_ablestack_canonicalize_profile "${reverse_relative_profile}" "${reverse_relative_canonical}"
+jq -e '.source.storagePath == "/mnt/glue-gfs"
+  and .source.storagePoolType == "SharedMountPoint"
+  and .disks[0].sourcePath == "/mnt/glue-gfs/rocky9-vm-dr-disk-0"' \
+  "${reverse_relative_canonical}" >/dev/null
+ftctl_dr_ablestack_qcow2_push_provider "${reverse_relative_canonical}"
+
 rbd_profile="${TMP}/profile-rbd.json"
 rbd_canonical="${TMP}/canonical-rbd.json"
 jq '.mapping.disks[0] |= (.sourcePath="rbd:rbd/source" | .sourceType="rbd" | .sourceFormat="raw" | .targetPath="rbd:rbd/target" | .targetType="rbd" | .targetFormat="raw")' "${profile}" > "${rbd_profile}"

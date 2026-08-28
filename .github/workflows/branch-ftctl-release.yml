@@ -107,7 +107,9 @@ jobs:
         run: |
           set -euo pipefail
           tests/ftctl_dr_release_tombstone_smoke.sh
-          python3 -m unittest tests.ftctl_qcow2_checkpoint_test
+          python3 -m unittest \
+            tests.ftctl_qcow2_checkpoint_test \
+            tests.ftctl_qcow2_bitmap_baseline_test
           bash tests/ftctl_dr_scheduler_nbd_recovery_smoke.sh
           bash tests/ftctl_dr_ablestack_remote_rbd_smoke.sh
           bash tests/ftctl_dr_ablestack_qcow2_shared_smoke.sh
@@ -126,11 +128,13 @@ jobs:
             cd "$verify_root"
             rpm2cpio "$GITHUB_WORKSPACE/$rpm_path" | cpio -idm --quiet
           )
-          for script in dr_runtime.sh dr_scheduler.sh qcow2_checkpoint.py; do
+          for script in dr_runtime.sh dr_scheduler.sh qcow2_checkpoint.py qcow2_bitmap_baseline.py; do
             packaged="$verify_root/usr/local/lib/ablestack-qemu-exec-tools/ftctl/$script"
             source="lib/ftctl/$script"
             expected_interpreter='#!/usr/bin/bash'
-            [ "$script" != 'qcow2_checkpoint.py' ] || expected_interpreter='#!/usr/bin/python3'
+            case "$script" in
+              *.py) expected_interpreter='#!/usr/bin/python3' ;;
+            esac
             if [ "$(head -n 1 "$packaged")" != "$expected_interpreter" ]; then
               echo "::error::Packaged $script has an unexpected interpreter"
               head -n 1 "$packaged"
@@ -146,9 +150,11 @@ jobs:
             lib/ftctl/dr_runtime.sh \
             lib/ftctl/dr_scheduler.sh \
             lib/ftctl/qcow2_checkpoint.py \
+            lib/ftctl/qcow2_bitmap_baseline.py \
             "$verify_root/usr/local/lib/ablestack-qemu-exec-tools/ftctl/dr_runtime.sh" \
             "$verify_root/usr/local/lib/ablestack-qemu-exec-tools/ftctl/dr_scheduler.sh" \
-            "$verify_root/usr/local/lib/ablestack-qemu-exec-tools/ftctl/qcow2_checkpoint.py"
+            "$verify_root/usr/local/lib/ablestack-qemu-exec-tools/ftctl/qcow2_checkpoint.py" \
+            "$verify_root/usr/local/lib/ablestack-qemu-exec-tools/ftctl/qcow2_bitmap_baseline.py"
 
       - name: Create FTCTL RPM repo
         shell: bash

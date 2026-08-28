@@ -328,6 +328,7 @@ def normalize_pair(source_item, target_item, index):
 source = obj(profile.get("source"))
 target = obj(profile.get("target"))
 mapping = obj(profile.get("mapping"))
+mapping_source = obj(mapping.get("source"))
 mapping_target = obj(mapping.get("target"))
 transport = obj(profile.get("transport"))
 transport_exports = []
@@ -376,6 +377,22 @@ else:
                 idx,
             ))
 
+source_storage_path = first_str(
+    source.get("storagePath"), mapping_source.get("storagePath"),
+    mapping_source.get("sourceStoragePath"),
+)
+source_storage_type = first_str(
+    source.get("storagePoolType"), mapping_source.get("storagePoolType"),
+    mapping_source.get("sourceStorageType"),
+)
+if source_storage_type.upper() == "SHAREDMOUNTPOINT":
+    for disk in disks:
+        if disk.get("sourceType") == "file" and disk.get("sourcePath"):
+            disk["sourcePath"] = resolve_shared_mount_target_path(
+                disk["sourcePath"], source_storage_path, source_storage_type)
+            if not disk.get("sourceFormat"):
+                disk["sourceFormat"] = infer_format(disk["sourcePath"], "file")
+
 out = {
     "planUuid": profile.get("planUuid", ""),
     "runUuid": profile.get("runUuid", ""),
@@ -388,6 +405,8 @@ out = {
         "externalRef": first_str(source.get("externalRef"), source.get("vmUuid"), source.get("vmId")),
         "instanceName": first_str(source.get("instanceName"), obj(source.get("hardware")).get("instanceName")),
         "hostUuid": first_str(source.get("hostUuid"), obj(source.get("hardware")).get("sourceHostUuid")),
+        "storagePath": source_storage_path,
+        "storagePoolType": source_storage_type,
     },
     "target": {
         "siteId": first_str(target.get("siteId"), mapping_target.get("siteId")),
@@ -1004,6 +1023,10 @@ ftctl_dr_ablestack_reverse_baseline_state_path() {
 ftctl_dr_ablestack_source_baselines_ready() {
   local plan="${1-}" disk_map="${2-}" disk_json device source_path source_spec baseline snap
   [[ -n "${plan}" && -s "${disk_map}" ]] || return 1
+  if ftctl_dr_ablestack_qcow2_push_provider "${disk_map}"; then
+    ftctl_dr_ablestack_qcow2_source_baselines_ready "${plan}" "${disk_map}"
+    return $?
+  fi
   while IFS= read -r disk_json; do
     device="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" device)"
     source_path="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" sourcePath)"
@@ -1015,6 +1038,49 @@ ftctl_dr_ablestack_source_baselines_ready() {
     rbd snap ls --format json "${source_spec}" 2>/dev/null \
       | jq -e --arg snap "${snap}" 'any(.[]; .name == $snap)' >/dev/null || return 1
   done < <(ftctl_dr_ablestack_disk_rows "${disk_map}")
+}
+
+ftctl_dr_ablestack_qcow2_bitmap_baseline_path() {
+  local plan="${1-}" device="${2-}"
+  printf '%s/baseline-%s.bitmap\n' "$(ftctl_dr_ablestack_checkpoint_dir "${plan}")" "$(ftctl_dr_runtime_key "${device}")"
+}
+
+ftctl_dr_ablestack_qcow2_source_baselines_ready() {
+  local plan="${1-}" disk_map="${2-}" root disk_json device source_path bitmap baseline recorded
+  root="$(ftctl_dr_ablestack_json_field "${disk_map}" source.storagePath 2>/dev/null || true)"
+  [[ -n "${root}" && "${root}" == /* ]] || return 1
+  while IFS= read -r disk_json; do
+    device="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" device)"
+    source_path="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" sourcePath)"
+    bitmap="$(ftctl_dr_ablestack_qcow2_bitmap_name "${plan}" "${device}")"
+    baseline="$(ftctl_dr_ablestack_qcow2_bitmap_baseline_path "${plan}" "${device}")"
+    recorded="$(head -n 1 "${baseline}" 2>/dev/null || true)"
+    [[ "${recorded}" == "${bitmap}" ]] || return 1
+    python3 "${FTCTL_LIB_BASE}/ftctl/qcow2_bitmap_baseline.py" \
+      --path "${source_path}" --storage-root "${root}" --bitmap "${bitmap}" \
+      --granularity "${FTCTL_DR_QCOW2_BITMAP_GRANULARITY:-65536}" --check-only \
+      >/dev/null 2>&1 || return 1
+  done < <(ftctl_dr_ablestack_disk_rows "${disk_map}")
+}
+
+ftctl_dr_ablestack_initialize_qcow2_source_baselines() {
+  local plan="${1-}" sequence="${2-}" disk_map="${3-}" root disk_json device source_path bitmap baseline tmp
+  : "${sequence}"
+  root="$(ftctl_dr_ablestack_json_field "${disk_map}" source.storagePath 2>/dev/null || true)"
+  [[ -n "${root}" && "${root}" == /* ]] || return 32
+  while IFS= read -r disk_json; do
+    device="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" device)"
+    source_path="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" sourcePath)"
+    bitmap="$(ftctl_dr_ablestack_qcow2_bitmap_name "${plan}" "${device}")"
+    python3 "${FTCTL_LIB_BASE}/ftctl/qcow2_bitmap_baseline.py" \
+      --path "${source_path}" --storage-root "${root}" --bitmap "${bitmap}" \
+      --granularity "${FTCTL_DR_QCOW2_BITMAP_GRANULARITY:-65536}" >/dev/null || return $?
+    baseline="$(ftctl_dr_ablestack_qcow2_bitmap_baseline_path "${plan}" "${device}")"
+    tmp="${baseline}.tmp.$$"
+    printf '%s\n' "${bitmap}" > "${tmp}" || return 2
+    mv -f "${tmp}" "${baseline}" || return 2
+  done < <(ftctl_dr_ablestack_disk_rows "${disk_map}")
+  ftctl_dr_ablestack_qcow2_source_baselines_ready "${plan}" "${disk_map}"
 }
 
 ftctl_dr_ablestack_prepare_reverse_baseline() {
@@ -1068,7 +1134,7 @@ ftctl_dr_ablestack_reverse_baseline_status() {
 
 ftctl_dr_ablestack_reverse_preflight() {
   local plan="${1-}" profile_file="${2-}" operation_intent="${3-FAILBACK_FINAL}" requested_mode="${4-AUTO}" json="${5-0}"
-  local disk_map="" disk_json target_path source_spec size_bytes
+  local disk_map="" disk_json source_path target_path source_spec size_bytes source_root="" qcow2_provider="0"
   local rc=0 ready=true baseline_state="FULL_SEED_REQUIRED" effective_mode="FULL_RESEED"
   local decision_code="DR_REVERSE_BASELINE_FULL_SEED_REQUIRED" initial_seed=true
   local source_disk_probe_state="READY" source_disk_count=0 estimated_virtual_bytes=0
@@ -1097,12 +1163,28 @@ ftctl_dr_ablestack_reverse_preflight() {
   fi
 
   if [[ "${rc}" == "0" ]]; then
+    if ftctl_dr_ablestack_qcow2_push_provider "${disk_map}"; then
+      qcow2_provider="1"
+      source_root="$(ftctl_dr_ablestack_json_field "${disk_map}" source.storagePath 2>/dev/null || true)"
+    fi
     while IFS= read -r disk_json; do
+      source_path="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" sourcePath)"
       target_path="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" targetPath)"
       size_bytes="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" sizeBytes)"
       [[ "${size_bytes}" =~ ^[0-9]+$ ]] || size_bytes=0
       estimated_virtual_bytes=$((estimated_virtual_bytes + size_bytes))
-      if ! ftctl_dr_ablestack_rbd_spec_from_path "${target_path}" source_spec \
+      if [[ "${qcow2_provider}" == "1" ]]; then
+        if [[ -z "${source_root}" || ! -f "${source_path}" ]] \
+            || ! qemu-img info --output=json "${source_path}" 2>/dev/null \
+              | jq -e '.format == "qcow2"' >/dev/null; then
+          rc=82
+          ready=false
+          error_code="DR_REVERSE_SOURCE_STORAGE_MISSING"
+          source_disk_probe_state="NOT_READY"
+          break
+        fi
+        target_writer_probe_state="READY"
+      elif ! ftctl_dr_ablestack_rbd_spec_from_path "${target_path}" source_spec \
           || ! rbd info "${source_spec}" >/dev/null 2>&1; then
         rc=82
         ready=false
@@ -1116,8 +1198,13 @@ ftctl_dr_ablestack_reverse_preflight() {
   if [[ "${rc}" == "0" ]]; then
     baseline_state="$(ftctl_dr_ablestack_reverse_baseline_status "${plan}" "" "")"
     if [[ "${baseline_state}" == "READY" ]]; then
-      effective_mode="RBD_INCREMENTAL"
-      decision_code="DR_REVERSE_BASELINE_READY"
+      if [[ "${qcow2_provider}" == "1" ]]; then
+        effective_mode="QCOW2_INCREMENTAL"
+        decision_code="DR_REVERSE_QCOW2_BASELINE_READY"
+      else
+        effective_mode="RBD_INCREMENTAL"
+        decision_code="DR_REVERSE_BASELINE_READY"
+      fi
       initial_seed=false
     fi
   fi
@@ -1839,6 +1926,10 @@ ftctl_dr_ablestack_initialize_baselines() {
 
 ftctl_dr_ablestack_initialize_source_baselines() {
   local plan="${1-}" sequence="${2-}" disk_map="${3-}" snap disk_json device source_path source_spec baseline previous
+  if ftctl_dr_ablestack_qcow2_push_provider "${disk_map}"; then
+    ftctl_dr_ablestack_initialize_qcow2_source_baselines "${plan}" "${sequence}" "${disk_map}"
+    return $?
+  fi
   snap="$(ftctl_dr_ablestack_snapshot_name "${plan}" "${sequence}")"
   while IFS= read -r disk_json; do
     device="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" device)"
