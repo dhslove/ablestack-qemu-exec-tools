@@ -231,3 +231,56 @@ initramfs or Windows WinPE preparation before Cloud materializes the VM.
 Regression coverage must prove that a KVM-to-KVM test session passes preflight
 without a v2k conversion runtime, while a VMware-to-KVM session still fails
 with `DR_GUEST_PREP_V2K_RUNTIME_MISSING` when that runtime is absent.
+
+## 12. Immutable Per-Cycle Checkpoint and Boot-Readiness Contract
+
+The test artifact is a consumer of one durable replication Cycle. It must not
+be copied from the mutable target writer file while that writer is open, even
+with `--force-share`. A qcow2 container check alone cannot prove guest
+filesystem consistency; the failed live test showed valid qcow2 metadata with
+an inconsistent XFS log in `/boot`.
+
+For `KVM_TO_KVM` with `provider=FILE` only, Test Failover therefore uses this
+ordered contract:
+
+1. Cloud pauses the remote source scheduler and waits for its acknowledged
+   idle state.
+2. Cloud stops the Plan-owned target NBD export and waits for the writer to
+   drain.
+3. FTCTL acquires the selected durable checkpoint lease before reading any
+   target disk.
+4. FTCTL seals each selected disk to
+   `<storageRoot>/.ftctl-dr-checkpoints/<plan>/<sequence>/<device>.qcow2`.
+   A temporary file is converted and checked, file and directory data are
+   synced, and only then is it atomically renamed. Metadata binds plan,
+   sequence, checkpoint reference, source path, virtual size, and contract
+   SHA-256.
+5. A disposable overlay backed by the sealed checkpoint is inspected with
+   libguestfs. Filesystem discovery and read-only mount must succeed. Where a
+   journal replay is required, it occurs only in the disposable overlay; the
+   sealed checkpoint is never modified.
+6. The published test disk is a separate writable qcow2 overlay backed by the
+   sealed checkpoint. Cloud may create the test VM only after the integrity
+   state is `PASSED`.
+7. Test Cleanup removes the test overlay and its Cloud VM. Cloud then restores
+   the target export and resumes the remote source scheduler. The sealed Cycle
+   remains available for deterministic retry and is retired only by an
+   explicit retention policy.
+
+The selected sequence in the controller artifact contract, FTCTL session,
+lease, sealed metadata, and UI evidence must be identical. Any mismatch is a
+terminal `DR_TEST_CHECKPOINT_SEQUENCE_MISMATCH`. A failed filesystem probe is
+`DR_TEST_CHECKPOINT_GUEST_FS_INCONSISTENT`; missing inspection tools are
+`DR_TEST_CHECKPOINT_INSPECTOR_UNAVAILABLE`.
+
+RBD and VMware providers do not enter this lifecycle. Their existing
+snapshot/clone and VDDK contracts are unchanged.
+
+| Area | AS-IS | TO-BE |
+| --- | --- | --- |
+| Writer ordering | Copy mutable target, acquire lease later | Pause, drain writer, acquire lease, then seal |
+| Cycle identity | Artifact path is unrelated to checkpoint sequence | Plan/sequence/device is the canonical immutable identity |
+| Test disk | Independent copy of a mutable source | Writable overlay of a sealed checkpoint |
+| Integrity gate | `qemu-img check` only | qcow2 check plus disposable guest-filesystem probe |
+| UI evidence | VM creation can start without checkpoint proof | Sequence, seal, and integrity PASS precede VM creation |
+| Cleanup | Removes only test copy | Removes test overlay, restores export, resumes scheduler |

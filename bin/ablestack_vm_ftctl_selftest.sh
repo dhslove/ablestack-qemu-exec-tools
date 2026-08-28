@@ -6658,6 +6658,7 @@ EOF
   selftest_assert_contains "${capabilities}" '"control-protocol-v4"' "control protocol v4 capability"
   selftest_assert_contains "${capabilities}" '"dr-scheduler-singleton-v1"' "singleton scheduler capability"
   selftest_assert_contains "${capabilities}" '"checkpoint-lease"' "checkpoint lease capability"
+  selftest_assert_contains "${capabilities}" '"file-checkpoint-invariance-v1"' "immutable file checkpoint capability"
 }
 
 selftest_case_dr_ablestack_target_prepare() {
@@ -7698,6 +7699,7 @@ selftest_case_dr_runtime_test_failover_cleanup() {
   local call_log="${SELFTEST_ROOT}/qemu-img-test-session.log"
   local status_path="${plan_dir}/status.state"
   local session_path="" artifact_dir="" guestprep_manifest="" out="" cleanup="" ack_pid=""
+  local scheduler_pid="" scheduler_start_ticks=""
 
   mkdir -p "${plan_dir}/checkpoints" "${plan_dir}/manifests" "${fakebin}" "${SELFTEST_ROOT}/target"
   cat > "${fakebin}/qemu-img" <<EOF
@@ -7712,12 +7714,26 @@ case "\${1-}" in
     target="\${@: -1}"
     truncate -s 4M "\${target}"
     ;;
+  create)
+    target="\${@: -1}"
+    truncate -s 4M "\${target}"
+    ;;
 esac
 EOF
   chmod +x "${fakebin}/qemu-img"
+  cat > "${fakebin}/virt-inspector" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' '<operatingsystems><operatingsystem><name>linux</name></operatingsystem></operatingsystems>'
+EOF
+  cat > "${fakebin}/guestfish" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf '%s\n' '/dev/sda1: /'
+EOF
+  chmod +x "${fakebin}/virt-inspector" "${fakebin}/guestfish"
   truncate -s 4M "${SELFTEST_ROOT}/target/root.qcow2"
   cat > "${artifact_spec}" <<JSON
-{"contractVersion":"3","planUuid":"${plan}","runUuid":"run-test-session","checkpointRef":"ftctl:${plan}:run-sync:2","checkpointSequence":2,"disks":[{"diskIndex":0,"device":"vda","provider":"FILE","canonicalLocator":"file:${SELFTEST_ROOT}/target/root.qcow2","format":"qcow2","sizeBytes":4194304}]}
+{"contractVersion":"3","planUuid":"${plan}","runUuid":"run-test-session","checkpointRef":"ftctl:${plan}:run-sync:2","checkpointSequence":2,"checkpointImmutableRequired":true,"disks":[{"diskIndex":0,"device":"vda","provider":"FILE","canonicalLocator":"file:${SELFTEST_ROOT}/target/root.qcow2","format":"qcow2","sizeBytes":4194304}]}
 JSON
   cat > "${profile}" <<JSON
 {
@@ -7738,6 +7754,8 @@ JSON
   },
   "request": {
     "restorePointRef": "ftctl:${plan}:run-sync:2",
+    "checkpointWriterState": "DRAINED",
+    "checkpointImmutableRequired": true,
     "networkMode": "isolated"
   },
   "policy": {"testExecutionMode": "METADATA_ONLY"},
@@ -7807,16 +7825,20 @@ EOF
   session_path="${SELFTEST_ROOT}/run/dr-runtime/plans/${plan}/test-sessions/run-test-session.json"
   artifact_dir="${SELFTEST_ROOT}/run/dr-runtime/plans/${plan}/test-sessions/run-test-session-artifacts"
   local shared_artifact="${SELFTEST_ROOT}/target/ftctl-dr-test-run-test-session-vda.qcow2"
+  local sealed_checkpoint="${SELFTEST_ROOT}/target/.ftctl-dr-checkpoints/${plan}/2/vda.qcow2"
   selftest_assert_file_contains "${session_path}" '"networkMode":"isolated"'
   selftest_assert_file_contains "${session_path}" '"checkpointSequence":2'
-  selftest_assert_file_contains "${session_path}" '"type":"qcow2-copy"'
-  selftest_assert_file_not_contains "${session_path}" '"backing"'
-  selftest_assert_file_contains "${call_log}" "info --force-share ${SELFTEST_ROOT}/target/root.qcow2"
-  selftest_assert_file_contains "${call_log}" "convert --force-share -f qcow2 -O qcow2 -S 4k ${SELFTEST_ROOT}/target/root.qcow2 ${shared_artifact}"
+  selftest_assert_file_contains "${session_path}" '"type":"qcow2-checkpoint-overlay"'
+  selftest_assert_file_contains "${session_path}" '"checkpointSealState":"SEALED"'
+  selftest_assert_file_contains "${session_path}" '"checkpointIntegrityState":"PASSED"'
+  selftest_assert_file_contains "${call_log}" "info --output=json ${SELFTEST_ROOT}/target/root.qcow2"
+  selftest_assert_file_contains "${call_log}" "convert -f qcow2 -O qcow2 -S 4k ${SELFTEST_ROOT}/target/root.qcow2"
+  selftest_assert_file_contains "${call_log}" "create -f qcow2 -F qcow2 -b ${sealed_checkpoint} ${shared_artifact}"
   selftest_assert_file_contains "${call_log}" "check -q ${shared_artifact}"
   selftest_assert_file_contains "${session_path}" '"ownedByFtctl":true'
   selftest_assert_file_contains "${session_path}" "\"storageRoot\":\"${SELFTEST_ROOT}/target\""
   [[ -f "${shared_artifact}" ]] || selftest_fail "independent test copy should be created in the Cloud storage root"
+  [[ -f "${sealed_checkpoint}" ]] || selftest_fail "immutable per-Cycle checkpoint should be sealed"
 
   guestprep_manifest="${artifact_dir}/guestprep-contract.json"
   python3 "${LIB_BASE}/ftctl/guestprep_manifest.py" build-test \
@@ -7824,9 +7846,9 @@ EOF
     --domain "ftctl-dr-test-${plan}" \
     --output "${guestprep_manifest}"
   python3 "${LIB_BASE}/ftctl/guestprep_manifest.py" validate --manifest "${guestprep_manifest}"
-  selftest_assert_eq "$(jq -r '.target.storage.type' "${guestprep_manifest}")" "file" "qcow2-copy guestprep storage"
-  selftest_assert_eq "$(jq -r '.target.format' "${guestprep_manifest}")" "qcow2" "qcow2-copy guestprep format"
-  selftest_assert_eq "$(jq -r '.disks[0].storage.locator' "${guestprep_manifest}")" "${shared_artifact}" "qcow2-copy guestprep locator"
+  selftest_assert_eq "$(jq -r '.target.storage.type' "${guestprep_manifest}")" "file" "checkpoint overlay guestprep storage"
+  selftest_assert_eq "$(jq -r '.target.format' "${guestprep_manifest}")" "qcow2" "checkpoint overlay guestprep format"
+  selftest_assert_eq "$(jq -r '.disks[0].storage.locator' "${guestprep_manifest}")" "${shared_artifact}" "checkpoint overlay guestprep locator"
 
   out="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-status \
     --config "${SELFTEST_CONFIG}" \
@@ -7834,6 +7856,17 @@ EOF
     --json)"
   selftest_assert_contains "${out}" '"state":"TEST_ARTIFACTS_READY"' "status projects artifact-ready state"
   selftest_assert_file_contains "${SELFTEST_ROOT}/run/dr-runtime/plans/${plan}/test-sessions/active.json" '"sessionId":"plan-test-session:run-test-session"'
+
+  bash -c 'while true; do sleep 1; done' -- --plan "${plan}" &
+  scheduler_pid="$!"
+  scheduler_start_ticks="$(ftctl_dr_scheduler_process_start_ticks "${scheduler_pid}")"
+  ftctl_state_write_kv_all "$(ftctl_dr_scheduler_active_pid_path "${plan}")" \
+    "pid=${scheduler_pid}" \
+    "start_ticks=${scheduler_start_ticks}" \
+    "scheduler_session_uuid=${plan}" \
+    "lease_epoch=1" \
+    "worker_run_uuid=run-sync" \
+    "heartbeat_at=$(ftctl_now_iso8601)"
 
   (
     local control_path="" generation="" command="" last_generation=""
@@ -7844,18 +7877,20 @@ EOF
       command="$(ftctl_state_read_kv "${control_path}" command 2>/dev/null || true)"
       if [[ -n "${generation}" && "${generation}" != "${last_generation}" ]]; then
         if [[ "${command}" == "pause" ]]; then
-          ftctl_dr_scheduler_control_ack "${plan}" "${generation}" "PAUSED" "IDLE" "run-test-cleanup"
+          ftctl_dr_scheduler_control_ack "${plan}" "${generation}" "PAUSED" "IDLE" "run-sync" \
+            "${plan}" "1" "${scheduler_pid}" "${scheduler_start_ticks}"
         elif [[ "${command}" == "run" ]]; then
-          ftctl_dr_scheduler_control_ack "${plan}" "${generation}" "RUNNING" "IDLE" "run-test-cleanup"
+          ftctl_dr_scheduler_control_ack "${plan}" "${generation}" "RUNNING" "IDLE" "run-sync" \
+            "${plan}" "1" "${scheduler_pid}" "${scheduler_start_ticks}"
           break
         fi
         last_generation="${generation}"
       fi
       sleep 0.1
     done
-  ) &
+  ) >/dev/null 2>&1 &
   ack_pid="$!"
-  printf '%s\n' "${ack_pid}" > "$(ftctl_dr_scheduler_pid_path "${plan}" run-test-cleanup)"
+  printf '%s\n' "${scheduler_pid}" > "$(ftctl_dr_scheduler_pid_path "${plan}" run-test-cleanup)"
 
   cleanup="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-test-artifact-cleanup \
     --config "${SELFTEST_CONFIG}" \
@@ -7864,6 +7899,8 @@ EOF
     --profile-json "${profile}" \
     --json)"
   wait "${ack_pid}"
+  kill "${scheduler_pid}" 2>/dev/null || true
+  wait "${scheduler_pid}" 2>/dev/null || true
   selftest_assert_contains "${cleanup}" '"state":"READY"' "test cleanup state"
   selftest_assert_contains "${cleanup}" '"step":"test-cleanup-completed"' "test cleanup step"
   selftest_assert_contains "${cleanup}" '"test_session_state":"CLEANED"' "test cleanup session state"
@@ -7893,7 +7930,7 @@ selftest_case_dr_runtime_shared_file_artifact_cleanup() {
   truncate -s 1M "${artifact}"
   truncate -s 1M "${durable}"
   cat > "${active_path}" <<JSON
-{"sessionId":"${plan}:${run}","runUuid":"${run}","testArtifacts":{"state":"CREATED","path":"${session_dir}","count":1,"records":[{"type":"qcow2-copy","state":"CREATED","path":"${artifact}","storageRoot":"${storage_root}","ownedByFtctl":true}]}}
+{"sessionId":"${plan}:${run}","runUuid":"${run}","testArtifacts":{"state":"CREATED","path":"${session_dir}","count":1,"records":[{"type":"qcow2-checkpoint-overlay","state":"CREATED","path":"${artifact}","storageRoot":"${storage_root}","ownedByFtctl":true}]}}
 JSON
   printf 'plan=%s\nrun=%s\n' "${plan}" "${run}" > "${run_path}"
   cp -f "${run_path}" "${status_path}"

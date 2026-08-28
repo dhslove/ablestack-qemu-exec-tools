@@ -419,7 +419,7 @@ def build_test_disks(session):
             if not locator.startswith("rbd:"):
                 fail("DR_TARGET_DISK_LOCATOR_INVALID", f"invalid RBD test artifact: {locator}", 63)
             storage_type, disk_format = "rbd", "raw"
-        elif artifact_type in {"qcow2-overlay", "qcow2-copy"}:
+        elif artifact_type in {"qcow2-overlay", "qcow2-copy", "qcow2-checkpoint-overlay"}:
             if not os.path.isabs(locator):
                 fail("DR_TARGET_DISK_LOCATOR_INVALID", f"invalid file test artifact: {locator}", 63)
             storage_type, disk_format = "file", "qcow2"

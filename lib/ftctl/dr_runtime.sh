@@ -2078,7 +2078,7 @@ if domain_name:
     subprocess.run(["virsh", "undefine", str(domain_name), "--nvram"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     subprocess.run(["virsh", "undefine", str(domain_name)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 for record in artifacts.get("records", []) if isinstance(artifacts, dict) else []:
-    if isinstance(record, dict) and record.get("type") in ("qcow2-overlay", "qcow2-copy"):
+    if isinstance(record, dict) and record.get("type") in ("qcow2-overlay", "qcow2-copy", "qcow2-checkpoint-overlay"):
         path = os.path.abspath(str(record.get("path") or ""))
         storage_root = os.path.abspath(str(record.get("storageRoot") or ""))
         owned = record.get("ownedByFtctl") is True
@@ -2247,17 +2247,19 @@ ftctl_dr_runtime_materialize_test_artifacts() {
   local plan="${1-}" run="${2-}" session_path="${3-}" run_path="${4-}" artifact_spec_path="${5-}"
   local artifacts_dir artifacts_state_path rc=0
   local test_artifacts_state test_artifacts_path test_artifact_count artifact_error_code artifact_error_message
+  local test_checkpoint_seal_state test_checkpoint_integrity_state test_checkpoint_sequence test_checkpoint_path
 
   artifacts_dir="$(ftctl_dr_runtime_test_artifacts_dir "${plan}" "${run}")"
   artifacts_state_path="$(mktemp -t ftctl.dr.test.artifacts.XXXXXX)"
-  python3 - "${session_path}" "${artifacts_dir}" "${artifacts_state_path}" "$(ftctl_now_iso8601)" "${artifact_spec_path}" <<'PY' || rc=$?
+  python3 - "${session_path}" "${artifacts_dir}" "${artifacts_state_path}" "$(ftctl_now_iso8601)" "${artifact_spec_path}" \
+    "${FTCTL_LIB_BASE}/ftctl/qcow2_checkpoint.py" <<'PY' || rc=$?
 import json
 import os
 import shutil
 import subprocess
 import sys
 
-session_path, artifacts_dir, state_path, now, artifact_spec_path = sys.argv[1:6]
+session_path, artifacts_dir, state_path, now, artifact_spec_path, checkpoint_tool = sys.argv[1:7]
 with open(session_path, "r", encoding="utf-8") as fh:
     session = json.load(fh)
 try:
@@ -2307,17 +2309,21 @@ def cleanup_records():
                 subprocess.run(["rbd", "snap", "rm", snap_ref], check=False,
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         path = str(record.get("path") or "")
-        if record.get("type") in ("qcow2-overlay", "qcow2-copy") and path and os.path.isfile(path):
+        if record.get("type") in ("qcow2-overlay", "qcow2-copy", "qcow2-checkpoint-overlay") and path and os.path.isfile(path):
             os.unlink(path)
 
 def fail(code, message):
     cleanup_records()
+    structured_code = ""
+    if str(message).startswith("DR_") and ":" in str(message):
+        structured_code, message = str(message).split(":", 1)
+        message = message.strip()
     session["testArtifacts"] = {
         "state": "FAILED",
         "path": artifacts_dir,
         "count": 0,
         "records": records,
-        "errorCode": "DR_TEST_ARTIFACT_LOCATOR_INVALID" if code == 53 else "DR_TEST_ARTIFACT_PROVIDER_UNSUPPORTED" if code == 54 else "DR_TEST_MATERIALIZATION_FAILED",
+        "errorCode": structured_code or ("DR_TEST_ARTIFACT_LOCATOR_INVALID" if code == 53 else "DR_TEST_ARTIFACT_PROVIDER_UNSUPPORTED" if code == 54 else "DR_TEST_MATERIALIZATION_FAILED"),
         "errorMessage": message,
         "updatedAt": now,
     }
@@ -2378,6 +2384,11 @@ else:
                 fail(46, f"RBD test clone failed for {source_rbd}: {stderr or exc}")
             continue
         if provider == "FILE":
+            request = session.get("request") if isinstance(session.get("request"), dict) else {}
+            if artifact_spec.get("checkpointImmutableRequired") is not True:
+                fail(53, "DR_TEST_CHECKPOINT_CONTRACT_INVALID: immutable FILE checkpoint contract is required")
+            if str(request.get("checkpointWriterState") or "").upper() != "DRAINED":
+                fail(46, "DR_TEST_CHECKPOINT_WRITER_NOT_DRAINED: target checkpoint writer is not drained")
             if not locator.startswith("file:/"):
                 fail(53, f"invalid file locator {locator}; expected file:/absolute/path")
             target_path = locator[5:]
@@ -2402,34 +2413,45 @@ else:
             device_key = safe_key(device) or f"disk{index}"
             copy_name = f"ftctl-dr-test-{run_key}-{device_key}.qcow2"
             copy_path = os.path.join(storage_root, copy_name)
+            restore_point = session.get("restorePoint") if isinstance(session.get("restorePoint"), dict) else {}
+            sequence = restore_point.get("checkpointSequence")
+            checkpoint_ref = str(restore_point.get("ref") or "")
+            artifact_sequence = artifact_spec.get("checkpointSequence")
+            try:
+                sequence = int(sequence)
+                artifact_sequence = int(artifact_sequence)
+            except (TypeError, ValueError):
+                fail(53, "file-backed test artifact requires a positive checkpoint sequence")
+            if sequence <= 0 or sequence != artifact_sequence:
+                fail(53, f"checkpoint sequence mismatch: session={sequence} artifact={artifact_sequence}")
+            if not checkpoint_ref or checkpoint_ref != str(artifact_spec.get("checkpointRef") or ""):
+                fail(53, "checkpoint reference mismatch between session and artifact contract")
             command = [
-                qemu_img, "convert", "--force-share", "-f", target_format,
-                "-O", "qcow2", "-S", "4k", target_path, copy_path,
+                sys.executable, checkpoint_tool,
+                "--plan", str(session.get("planUuid") or ""),
+                "--sequence", str(sequence),
+                "--checkpoint-ref", checkpoint_ref,
+                "--device", str(disk.get("device") or f"disk{index}"),
+                "--source", target_path,
+                "--storage-root", storage_root,
+                "--output", copy_path,
             ]
-            records.append({
+            try:
+                result = subprocess.run(command, check=False, stdout=subprocess.PIPE,
+                                        stderr=subprocess.PIPE, text=True)
+                if result.returncode != 0:
+                    error = json.loads((result.stderr or "").strip().splitlines()[-1])
+                    fail(46, f"{error.get('errorCode')}: {error.get('errorMessage')}")
+                record = json.loads(result.stdout)
+            except (OSError, ValueError, IndexError) as exc:
+                fail(46, f"immutable checkpoint materialization failed for {target_path}: {exc}")
+            record.update({
                 "device": disk.get("device") or f"disk{index}",
-                "state": "CREATING",
-                "type": "qcow2-copy",
                 "source": target_path,
-                "path": copy_path,
-                "storageRoot": storage_root,
-                "ownedByFtctl": True,
                 "sizeBytes": disk.get("sizeBytes") or disk.get("capacityBytes") or 0,
                 "command": command,
             })
-            try:
-                # The durable target remains attached to the paused replication
-                # writer. Force-share is read-only here; the independent copy
-                # prevents later replication writes from changing a test VM.
-                subprocess.run([qemu_img, "info", "--force-share", target_path], check=True,
-                               stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
-                subprocess.run(command, check=True)
-                subprocess.run([qemu_img, "check", "-q", copy_path], check=True,
-                               stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
-            except subprocess.CalledProcessError as exc:
-                stderr = (exc.stderr or "").strip() if isinstance(exc.stderr, str) else ""
-                fail(46, f"file-backed test copy failed for {target_path}: {stderr or exc}")
-            records[-1]["state"] = "CREATED"
+            records.append(record)
             continue
         fail(54, f"unsupported test artifact provider {provider} for disk {index}")
     state = "CREATED" if any(record.get("state") == "CREATED" for record in records) else "NO_MATERIALIZED_DISKS"
@@ -2448,6 +2470,14 @@ with open(state_path, "w", encoding="utf-8") as fh:
     fh.write(f"test_artifacts_state={state}\n")
     fh.write(f"test_artifacts_path={artifacts_dir}\n")
     fh.write(f"test_artifact_count={session['testArtifacts']['count']}\n")
+    sealed = [record for record in records if record.get("checkpointSealState") == "SEALED"]
+    passed = [record for record in records if record.get("checkpointIntegrityState") == "PASSED"]
+    if sealed:
+        fh.write("test_checkpoint_seal_state=SEALED\n")
+        fh.write(f"test_checkpoint_sequence={sealed[0].get('checkpointSequence', '')}\n")
+        fh.write(f"test_checkpoint_path={sealed[0].get('checkpointPath', '')}\n")
+    if passed and len(passed) == len(sealed):
+        fh.write("test_checkpoint_integrity_state=PASSED\n")
 PY
   [[ "${rc}" == "0" ]] || {
     artifact_error_code="$(ftctl_dr_runtime_state_get_from_path "${artifacts_state_path}" "artifact_error_code")"
@@ -2464,12 +2494,20 @@ PY
   test_artifacts_state="$(ftctl_dr_runtime_state_get_from_path "${artifacts_state_path}" "test_artifacts_state")"
   test_artifacts_path="$(ftctl_dr_runtime_state_get_from_path "${artifacts_state_path}" "test_artifacts_path")"
   test_artifact_count="$(ftctl_dr_runtime_state_get_from_path "${artifacts_state_path}" "test_artifact_count")"
+  test_checkpoint_seal_state="$(ftctl_dr_runtime_state_get_from_path "${artifacts_state_path}" "test_checkpoint_seal_state")"
+  test_checkpoint_integrity_state="$(ftctl_dr_runtime_state_get_from_path "${artifacts_state_path}" "test_checkpoint_integrity_state")"
+  test_checkpoint_sequence="$(ftctl_dr_runtime_state_get_from_path "${artifacts_state_path}" "test_checkpoint_sequence")"
+  test_checkpoint_path="$(ftctl_dr_runtime_state_get_from_path "${artifacts_state_path}" "test_checkpoint_path")"
   rm -f "${artifacts_state_path}" 2>/dev/null || true
 
   ftctl_dr_runtime_path_set "${run_path}" \
     "test_artifacts_state=${test_artifacts_state}" \
     "test_artifacts_path=${test_artifacts_path}" \
-    "test_artifact_count=${test_artifact_count}"
+    "test_artifact_count=${test_artifact_count}" \
+    "test_checkpoint_seal_state=${test_checkpoint_seal_state}" \
+    "test_checkpoint_integrity_state=${test_checkpoint_integrity_state}" \
+    "test_checkpoint_sequence=${test_checkpoint_sequence}" \
+    "test_checkpoint_path=${test_checkpoint_path}"
 }
 
 ftctl_dr_runtime_finalize_failover() {
@@ -5481,6 +5519,17 @@ ftctl_dr_runtime_action() {
       ftctl_dr_runtime_prepare_test_session "${plan}" "${run}" "${profile_file}" "${restore_point}" "${run_path}" "${status_path}" \
         "$(ftctl_dr_runtime_artifact_spec_path "${plan}" "${run}")" || rc=$?
       if [[ "${rc}" == "0" ]]; then
+        test_sequence="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "test_restore_point_sequence")"
+        checkpoint_lease_path="$(ftctl_dr_scheduler_checkpoint_lease_acquire "${plan}" "${test_sequence}" "${run}" "$(ftctl_dr_runtime_state_get_from_path "${run_path}" "test_restore_point_ref")")" || rc=$?
+      fi
+      if [[ "${rc}" == "0" ]]; then
+        ftctl_dr_runtime_path_set "${run_path}" \
+          "checkpoint_lease_state=LEASED" \
+          "checkpoint_lease_path=${checkpoint_lease_path}" \
+          "test_checkpoint_sequence=${test_sequence}" \
+          "updated_at=$(ftctl_now_iso8601)" || true
+      fi
+      if [[ "${rc}" == "0" ]]; then
         ftctl_guestprep_preflight_test_session "$(ftctl_dr_runtime_test_session_path "${plan}" "${run}")" "${run_path}" || rc=$?
       fi
       if [[ "${rc}" == "0" ]]; then
@@ -5496,11 +5545,7 @@ ftctl_dr_runtime_action() {
       fi
       if [[ "${rc}" == "0" ]]; then
         cp -f "$(ftctl_dr_runtime_test_session_path "${plan}" "${run}")" "$(ftctl_dr_runtime_active_test_session_path "${plan}")" 2>/dev/null || true
-        test_sequence="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "test_restore_point_sequence")"
-        checkpoint_lease_path="$(ftctl_dr_scheduler_checkpoint_lease_acquire "${plan}" "${test_sequence}" "${run}" "$(ftctl_dr_runtime_state_get_from_path "${run_path}" "test_restore_point_ref")")"
         ftctl_dr_runtime_path_set "${run_path}" \
-          "checkpoint_lease_state=LEASED" \
-          "checkpoint_lease_path=${checkpoint_lease_path}" \
           "test_cleanup_state=PENDING" \
           "cleanup_required=true" \
           "transition_state=TEST_ACTIVE" \
@@ -5519,6 +5564,15 @@ ftctl_dr_runtime_action() {
         [[ "${rc}" == "52" ]] && error_code="DR_TEST_QGA_UNAVAILABLE"
         [[ "${rc}" == "53" ]] && error_code="DR_TEST_ARTIFACT_LOCATOR_INVALID"
         [[ "${rc}" == "54" ]] && error_code="DR_TEST_ARTIFACT_PROVIDER_UNSUPPORTED"
+        if [[ "${rc}" == "46" ]]; then
+          local artifact_runtime_error_code="" artifact_runtime_error_message=""
+          artifact_runtime_error_code="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "error_code")"
+          artifact_runtime_error_message="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "error_message")"
+          if [[ -n "${artifact_runtime_error_code}" ]]; then
+            error_code="${artifact_runtime_error_code}"
+            error_message="${artifact_runtime_error_message}"
+          fi
+        fi
         local manifest_error_code="" manifest_error_message=""
         manifest_error_code="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "guest_manifest_error_code")"
         manifest_error_message="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "guest_manifest_error_message")"
@@ -7472,7 +7526,7 @@ ftctl_dr_runtime_capabilities() {
       first="0"
       printf '"%s"' "$(ftctl__json_escape "${command}")"
     done
-    printf '],"supported_features":["async-run","status-projection","status-scope-v2","target-materialized-notify","target-materialized-idempotent","target-materialization-manifest-v2","target-resource-ownership-generation-v1","hardware-contract-projection","control-protocol-v2","control-protocol-v3","control-protocol-v4","dr-site-agent-rbd-transport-v1","dr-reverse-site-agent-rbd-transport-v1","dr-remote-source-failback-commit-v1","dr-scheduler-singleton-v1","dr-scheduler-self-owner-repair-v1","dr-scheduler-systemd-unit-v1","dr-sync-recover-v1","dr-local-reconcile-fence-v1","dr-checkpoint-producer-v1","dr-nbd-deterministic-drain-v1","dr-nbd-cleanup-recovery-v1","dr-plan-authority-snapshot-v1","dr-failover-authority-snapshot-v1","dr-completed-cycle-evidence-v2","dr-failover-abort-v1","dr-failover-cutover-reverse-baseline-v1","dr-transition-preflight-v1","dr-transition-preflight-v2","dr-reverse-preflight-v2","dr-reverse-evidence-publication-v1","dr-reverse-rbd-snapshot-readonly-v1","dr-terminal-causality-v1","dr-requested-cycle-terminal-v1","dr-failback-resume-terminal-v1","dr-worker-journal-v1","dr-live-transfer-progress-v1","dr-runtime-reconciliation-v1","dr-release-tombstone-v1","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","guest-preparation-v1","guest-preparation-v2","test-domain-lifecycle-v1","test-artifact-lifecycle-v2","cloud-managed-test-vm-v1","cutover-ready-v1","cutover-manifest-v2","cutover-preflight-v1","cloud-cutover-commit-v1","cloud-cutover-commit-envelope-v2","cloud-cutover-commit-journal-v2","cloud-cutover-commit-status-v1","cloud-failback-lifecycle-v1","dr-failback-commit-journal-v1","dr-failback-commit-journal-v2","dr-failback-commit-envelope-v1","dr-failback-commit-journal-v3","dr-failback-late-ack-reconcile-v1","dr-failback-rollback-fence-v1"]}\n'
+    printf '],"supported_features":["async-run","status-projection","status-scope-v2","target-materialized-notify","target-materialized-idempotent","target-materialization-manifest-v2","target-resource-ownership-generation-v1","hardware-contract-projection","control-protocol-v2","control-protocol-v3","control-protocol-v4","dr-site-agent-rbd-transport-v1","dr-reverse-site-agent-rbd-transport-v1","dr-remote-source-failback-commit-v1","dr-scheduler-singleton-v1","dr-scheduler-self-owner-repair-v1","dr-scheduler-systemd-unit-v1","dr-sync-recover-v1","dr-local-reconcile-fence-v1","dr-checkpoint-producer-v1","dr-nbd-deterministic-drain-v1","dr-nbd-cleanup-recovery-v1","dr-plan-authority-snapshot-v1","dr-failover-authority-snapshot-v1","dr-completed-cycle-evidence-v2","dr-failover-abort-v1","dr-failover-cutover-reverse-baseline-v1","dr-transition-preflight-v1","dr-transition-preflight-v2","dr-reverse-preflight-v2","dr-reverse-evidence-publication-v1","dr-reverse-rbd-snapshot-readonly-v1","dr-terminal-causality-v1","dr-requested-cycle-terminal-v1","dr-failback-resume-terminal-v1","dr-worker-journal-v1","dr-live-transfer-progress-v1","dr-runtime-reconciliation-v1","dr-release-tombstone-v1","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","file-checkpoint-invariance-v1","guest-preparation-v1","guest-preparation-v2","test-domain-lifecycle-v1","test-artifact-lifecycle-v2","cloud-managed-test-vm-v1","cutover-ready-v1","cutover-manifest-v2","cutover-preflight-v1","cloud-cutover-commit-v1","cloud-cutover-commit-envelope-v2","cloud-cutover-commit-journal-v2","cloud-cutover-commit-status-v1","cloud-failback-lifecycle-v1","dr-failback-commit-journal-v1","dr-failback-commit-journal-v2","dr-failback-commit-envelope-v1","dr-failback-commit-journal-v3","dr-failback-late-ack-reconcile-v1","dr-failback-rollback-fence-v1"]}\n'
     return 0
   fi
 
