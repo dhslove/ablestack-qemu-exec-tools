@@ -1137,9 +1137,12 @@ ftctl_dr_ablestack_reverse_preflight() {
 }
 
 ftctl_dr_ablestack_target_export_stop() {
-  local plan="${1-}" json="${2-0}" run="${3-}" checkpoint_sequence="${4-}" manifest item stopped=0
-  local reverse_baseline_state="NOT_REQUESTED"
+  local plan="${1-}" json="${2-0}" run="${3-}" checkpoint_sequence="${4-}" profile_file="${5-}"
+  local manifest item stopped=0 action_intent="" reverse_baseline_state="NOT_REQUESTED"
   manifest="$(ftctl_dr_ablestack_export_manifest_path "${plan}")"
+  if [[ -f "${profile_file}" ]]; then
+    action_intent="$(jq -r '.request.actionIntent // empty' "${profile_file}" 2>/dev/null || true)"
+  fi
   ftctl_dr_ablestack_export_persist_intent "${plan}" "${run}" "STOPPED" "" "" "STOPPING" || return $?
   if [[ -f "${manifest}" ]]; then
     while IFS= read -r item; do
@@ -1153,7 +1156,8 @@ PY
 )
     rm -f "${manifest}"
   fi
-  if [[ -n "${run}" && "${checkpoint_sequence}" =~ ^[0-9]+$ ]]; then
+  if [[ ! "${action_intent}" =~ ^TEST_FAILOVER$ ]]
+      && [[ -n "${run}" && "${checkpoint_sequence}" =~ ^[0-9]+$ ]]; then
     ftctl_dr_ablestack_prepare_reverse_baseline "${plan}" "${run}" "${checkpoint_sequence}" || return $?
     reverse_baseline_state="$(ftctl_dr_ablestack_reverse_baseline_status "${plan}" "${run}" "${checkpoint_sequence}")"
   fi

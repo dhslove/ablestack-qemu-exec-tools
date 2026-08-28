@@ -246,7 +246,10 @@ ordered contract:
 1. Cloud pauses the remote source scheduler and waits for its acknowledged
    idle state.
 2. Cloud stops the Plan-owned target NBD export and waits for the writer to
-   drain.
+   drain. This `TEST_FAILOVER` stop is idempotent and never prepares a reverse
+   Failover baseline, even if an older controller supplies a checkpoint
+   sequence. Reverse-baseline preparation remains exclusive to an actual
+   Failover transition.
 3. FTCTL acquires the selected durable checkpoint lease before reading any
    target disk.
 4. FTCTL seals each selected disk to
@@ -284,3 +287,11 @@ snapshot/clone and VDDK contracts are unchanged.
 | Integrity gate | `qemu-img check` only | qcow2 check plus disposable guest-filesystem probe |
 | UI evidence | VM creation can start without checkpoint proof | Sequence, seal, and integrity PASS precede VM creation |
 | Cleanup | Removes only test copy | Removes test overlay, restores export, resumes scheduler |
+
+The action intent is a hard safety boundary. FTCTL reads
+`request.actionIntent` from the command profile before it evaluates a supplied
+checkpoint sequence. `TEST_FAILOVER` returns `STOPPED` after the writer drain
+with `reverse_baseline_state=NOT_REQUESTED`; `FAILOVER` preserves the existing
+sequence-bound reverse-baseline behavior. This prevents immutable-checkpoint
+preparation from being rejected by an unrelated RBD reverse-baseline probe and
+does not alter the validated RBD or VMware transfer paths.

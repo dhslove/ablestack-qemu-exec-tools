@@ -337,6 +337,13 @@ reverse_map="$(ftctl_state_read_kv "${reverse_state}" disk_map_path)"
 [[ "$(jq -r '.disks[0].sourcePath' "${reverse_map}")" == "rbd:rbd/target-image" ]]
 [[ "$(jq -r '.disks[0].targetPath' "${reverse_map}")" == "rbd:rbd/source-image" ]]
 
+test_failover_profile="${TMP}/test-failover-profile.json"
+printf '%s\n' '{"request":{"actionIntent":"TEST_FAILOVER"}}' > "${test_failover_profile}"
+test_failover_stop="$(ftctl_dr_ablestack_target_export_stop plan-test 1 run-test 33 "${test_failover_profile}")"
+[[ "${test_failover_stop}" == *'"result":"ok"'* ]]
+[[ "${test_failover_stop}" == *'"reverse_baseline_state":"NOT_REQUESTED"'* ]]
+[[ ! -e "$(ftctl_dr_ablestack_reverse_baseline_state_path plan-test)" ]]
+
 reverse_preflight="$(ftctl_dr_ablestack_reverse_preflight plan-reverse "${reverse_profile_source}" FAILBACK_FINAL AUTO 1)"
 jq -e '.ready == true
   and .effective_mode == "RBD_INCREMENTAL"

@@ -904,7 +904,8 @@ dispatch() {
       ;;
     dr-target-export-stop)
       ftctl_dr_runtime_record_export_worker_role "${CLI_PLAN}" "${CLI_ROLE:-target}"
-      ftctl_dr_ablestack_target_export_stop "${CLI_PLAN}" "${CLI_JSON}" "${CLI_RUN}" "${CLI_CHECKPOINT_SEQUENCE}"
+      ftctl_dr_ablestack_target_export_stop "${CLI_PLAN}" "${CLI_JSON}" "${CLI_RUN}" "${CLI_CHECKPOINT_SEQUENCE}" \
+        "${CLI_PROFILE_JSON}"
       ;;
     dr-cutover-commit)
       ftctl_dr_runtime_record_worker_role "${CLI_PLAN}" "${CLI_ROLE}"
