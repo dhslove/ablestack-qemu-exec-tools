@@ -7717,7 +7717,7 @@ EOF
   chmod +x "${fakebin}/qemu-img"
   truncate -s 4M "${SELFTEST_ROOT}/target/root.qcow2"
   cat > "${artifact_spec}" <<JSON
-{"contractVersion":"3","planUuid":"${plan}","runUuid":"run-test-session","checkpointRef":"ftctl:${plan}:run-sync:2","checkpointSequence":2,"disks":[{"diskIndex":0,"device":"vda","provider":"FILE","canonicalLocator":"file:${SELFTEST_ROOT}/target/root.qcow2","format":"qcow2"}]}
+{"contractVersion":"3","planUuid":"${plan}","runUuid":"run-test-session","checkpointRef":"ftctl:${plan}:run-sync:2","checkpointSequence":2,"disks":[{"diskIndex":0,"device":"vda","provider":"FILE","canonicalLocator":"file:${SELFTEST_ROOT}/target/root.qcow2","format":"qcow2","sizeBytes":4194304}]}
 JSON
   cat > "${profile}" <<JSON
 {
