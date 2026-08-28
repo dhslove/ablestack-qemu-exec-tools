@@ -1156,8 +1156,7 @@ PY
 )
     rm -f "${manifest}"
   fi
-  if [[ ! "${action_intent}" =~ ^TEST_FAILOVER$ ]]
-      && [[ -n "${run}" && "${checkpoint_sequence}" =~ ^[0-9]+$ ]]; then
+  if [[ ! "${action_intent}" =~ ^TEST_FAILOVER$ && -n "${run}" && "${checkpoint_sequence}" =~ ^[0-9]+$ ]]; then
     ftctl_dr_ablestack_prepare_reverse_baseline "${plan}" "${run}" "${checkpoint_sequence}" || return $?
     reverse_baseline_state="$(ftctl_dr_ablestack_reverse_baseline_status "${plan}" "${run}" "${checkpoint_sequence}")"
   fi
