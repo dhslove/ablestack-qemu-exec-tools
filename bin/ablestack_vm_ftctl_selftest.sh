@@ -7707,12 +7707,12 @@ case "\${1-}" in
   info|check) exit 0 ;;
   convert)
     target="\${@: -1}"
-    : > "\${target}"
+    truncate -s 4M "\${target}"
     ;;
 esac
 EOF
   chmod +x "${fakebin}/qemu-img"
-  : > "${SELFTEST_ROOT}/target/root.qcow2"
+  truncate -s 4M "${SELFTEST_ROOT}/target/root.qcow2"
   cat > "${artifact_spec}" <<JSON
 {"contractVersion":"3","planUuid":"${plan}","runUuid":"run-test-session","checkpointRef":"ftctl:${plan}:run-sync:2","checkpointSequence":2,"disks":[{"diskIndex":0,"device":"vda","provider":"FILE","canonicalLocator":"file:${SELFTEST_ROOT}/target/root.qcow2","format":"qcow2"}]}
 JSON
