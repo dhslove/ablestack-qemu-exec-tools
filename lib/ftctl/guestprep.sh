@@ -69,6 +69,60 @@ ftctl_guestprep_preflight_fail() {
   return "${rc}"
 }
 
+ftctl_guestprep_conversion_required() {
+  local session_path="${1-}" direction source_provider target_provider
+  [[ -n "${session_path}" && -r "${session_path}" ]] || return 0
+  direction="$(jq -r '(.profile.direction // .profile.mapping.direction // "") | ascii_upcase' "${session_path}" 2>/dev/null || true)"
+  source_provider="$(jq -r '(.profile.source.provider // "") | ascii_upcase' "${session_path}" 2>/dev/null || true)"
+  target_provider="$(jq -r '(.profile.target.provider // "") | ascii_upcase' "${session_path}" 2>/dev/null || true)"
+  if [[ "${direction}" == "KVM_TO_KVM" ]]; then
+    return 1
+  fi
+  if [[ "${source_provider}" == "ABLESTACK" && "${target_provider}" == "ABLESTACK" ]]; then
+    return 1
+  fi
+  return 0
+}
+
+ftctl_guestprep_mark_native_compatibility() {
+  local session_path="${1-}" run_path="${2-}" manifest="${3-}" family="${4-unknown}"
+  local state_file
+  state_file="$(mktemp -t ftctl.dr.guestprep-native.XXXXXX)"
+  python3 - "${session_path}" "${state_file}" "${manifest}" "${family}" "$(ftctl_now_iso8601)" <<'PY'
+import json, sys
+session_path, state_path, manifest, family, now = sys.argv[1:6]
+with open(session_path, "r", encoding="utf-8") as fh:
+    session = json.load(fh)
+session["guestPreparation"] = {
+    "state": "SKIPPED",
+    "reason": "NATIVE_COMPATIBILITY_PRESERVED",
+    "family": family,
+    "manifest": manifest,
+    "completedAt": now,
+}
+session["state"] = "TEST_ARTIFACTS_READY"
+with open(session_path, "w", encoding="utf-8") as fh:
+    json.dump(session, fh, sort_keys=True, separators=(",", ":")); fh.write("\n")
+with open(state_path, "w", encoding="utf-8") as fh:
+    fh.write("guest_prep_state=SKIPPED\n")
+    fh.write("guest_prep_reason=NATIVE_COMPATIBILITY_PRESERVED\n")
+    fh.write(f"guest_family={family}\n")
+    fh.write(f"guestprep_manifest_path={manifest}\n")
+PY
+  ftctl_dr_runtime_path_set "${run_path}" \
+    "state=TEST_ARTIFACTS_READY" \
+    "step=test-artifacts-ready" \
+    "progress=100" \
+    "guest_prep_state=SKIPPED" \
+    "guest_prep_reason=NATIVE_COMPATIBILITY_PRESERVED" \
+    "guest_family=$(ftctl_dr_runtime_state_get_from_path "${state_file}" guest_family)" \
+    "guestprep_manifest_path=$(ftctl_dr_runtime_state_get_from_path "${state_file}" guestprep_manifest_path)" \
+    "test_domain_name=" \
+    "test_domain_state=" \
+    "updated_at=$(ftctl_now_iso8601)"
+  rm -f "${state_file}"
+}
+
 ftctl_guestprep_preflight_test_session() {
   local session_path="${1-}" run_path="${2-}"
   local tool profile_path inspection family guest_id firmware secure_boot v2k_dir
@@ -84,13 +138,6 @@ ftctl_guestprep_preflight_test_session() {
       "The guest preparation manifest tool is not installed" 47
     return $?
   fi
-  v2k_dir="$(ftctl_guestprep_v2k_lib_dir || true)"
-  if [[ -z "${v2k_dir}" ]]; then
-    ftctl_guestprep_preflight_fail "${run_path}" "DR_GUEST_PREP_V2K_RUNTIME_MISSING" \
-      "The required v2k guest preparation runtime is not installed" 47
-    return $?
-  fi
-
   profile_path="$(mktemp -t ftctl.dr.guestprep.profile.XXXXXX)"
   jq -c '.profile // {}' "${session_path}" > "${profile_path}" 2>/dev/null || {
     rm -f "${profile_path}"
@@ -115,7 +162,15 @@ ftctl_guestprep_preflight_test_session() {
       "The source guest operating system could not be resolved" 48
     return $?
   fi
-  if [[ "${family}" == "windows" ]]; then
+  if ftctl_guestprep_conversion_required "${session_path}"; then
+    v2k_dir="$(ftctl_guestprep_v2k_lib_dir || true)"
+    if [[ -z "${v2k_dir}" ]]; then
+      ftctl_guestprep_preflight_fail "${run_path}" "DR_GUEST_PREP_V2K_RUNTIME_MISSING" \
+        "The required v2k guest preparation runtime is not installed" 47
+      return $?
+    fi
+  fi
+  if ftctl_guestprep_conversion_required "${session_path}" && [[ "${family}" == "windows" ]]; then
     winpe_iso="${FTCTL_DR_WINPE_ISO:-/usr/share/ablestack/v2k/winpe/winpe-ablestack-v2k-amd64.iso}"
     virtio_iso="${FTCTL_DR_VIRTIO_ISO:-/usr/share/virtio-win/virtio-win.iso}"
     if [[ ! -r "${winpe_iso}" || ! -s "${winpe_iso}" ]]; then
@@ -266,9 +321,13 @@ PY
   ftctl_guestprep_write_manifest "${session_path}" "${manifest}" "${artifact_name}" "${run_path}" || return $?
   [[ "$(jq -r '.disks | length' "${manifest}" 2>/dev/null || echo 0)" -gt 0 ]] || return 46
 
+  family="$(ftctl_guestprep_detect_family "${manifest}")"
+  if ! ftctl_guestprep_conversion_required "${session_path}"; then
+    ftctl_guestprep_mark_native_compatibility "${session_path}" "${run_path}" "${manifest}" "${family}"
+    return $?
+  fi
   v2k_dir="$(ftctl_guestprep_v2k_lib_dir || true)"
   [[ -n "${v2k_dir}" ]] || return 47
-  family="$(ftctl_guestprep_detect_family "${manifest}")"
   case "${family}" in
     linux)
       env V2K_LIB_DIR="${v2k_dir}" V2K_WORKDIR="${artifacts_dir}" V2K_MANIFEST="${manifest}" V2K_JSON_OUT=1 \
@@ -330,18 +389,20 @@ ftctl_guestprep_prepare_and_start() {
   v2k_dir="$(ftctl_guestprep_v2k_lib_dir || true)"
   [[ -n "${v2k_dir}" ]] || return 47
   family="$(ftctl_guestprep_detect_family "${manifest}")"
-  case "${family}" in
-    linux)
-      env V2K_LIB_DIR="${v2k_dir}" V2K_WORKDIR="${artifacts_dir}" V2K_MANIFEST="${manifest}" V2K_JSON_OUT=1 \
-        bash -c 'source "$1/engine.sh"; v2k_linux_bootstrap_initramfs "$2"' _ "${v2k_dir}" "${manifest}" || rc=$?
-      ;;
-    windows)
-      env V2K_LIB_DIR="${v2k_dir}" V2K_WORKDIR="${artifacts_dir}" V2K_MANIFEST="${manifest}" V2K_JSON_OUT=1 \
-        bash -c 'source "$1/engine.sh"; v2k_cloud_windows_winpe_bootstrap "${FTCTL_DR_WINPE_ISO:-/usr/share/ablestack/v2k/winpe/winpe-ablestack-v2k-amd64.iso}" "${FTCTL_DR_VIRTIO_ISO:-/usr/share/virtio-win/virtio-win.iso}" "${FTCTL_DR_WINPE_TIMEOUT:-900}"' _ "${v2k_dir}" || rc=$?
-      ;;
-    *) return 48 ;;
-  esac
-  [[ "${rc}" == "0" ]] || return 49
+  if ftctl_guestprep_conversion_required "${session_path}"; then
+    case "${family}" in
+      linux)
+        env V2K_LIB_DIR="${v2k_dir}" V2K_WORKDIR="${artifacts_dir}" V2K_MANIFEST="${manifest}" V2K_JSON_OUT=1 \
+          bash -c 'source "$1/engine.sh"; v2k_linux_bootstrap_initramfs "$2"' _ "${v2k_dir}" "${manifest}" || rc=$?
+        ;;
+      windows)
+        env V2K_LIB_DIR="${v2k_dir}" V2K_WORKDIR="${artifacts_dir}" V2K_MANIFEST="${manifest}" V2K_JSON_OUT=1 \
+          bash -c 'source "$1/engine.sh"; v2k_cloud_windows_winpe_bootstrap "${FTCTL_DR_WINPE_ISO:-/usr/share/ablestack/v2k/winpe/winpe-ablestack-v2k-amd64.iso}" "${FTCTL_DR_VIRTIO_ISO:-/usr/share/virtio-win/virtio-win.iso}" "${FTCTL_DR_WINPE_TIMEOUT:-900}"' _ "${v2k_dir}" || rc=$?
+        ;;
+      *) return 48 ;;
+    esac
+    [[ "${rc}" == "0" ]] || return 49
+  fi
 
   env V2K_LIB_DIR="${v2k_dir}" V2K_WORKDIR="${artifacts_dir}" V2K_MANIFEST="${manifest}" \
     bash -c 'source "$1/engine.sh"; v2k_cutover_prepare_rbd_mappings "$2"; xml="$(v2k_target_generate_libvirt_xml "$2")"; v2k_target_undefine_libvirt "$(jq -r .target.libvirt.name "$2")"; v2k_target_define_libvirt "$xml"; v2k_target_start_vm "$2"' \

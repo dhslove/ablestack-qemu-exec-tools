@@ -209,3 +209,25 @@ unchanged.
 | Existing providers | Shared helper risks broad behavior changes | RBD and VMware contracts remain unchanged |
 | SharedMountPoint locator | Runtime-private `/run/...` copy is invisible to the libvirt storage pool | Copy resides in the validated pool root and is imported by its absolute path |
 | FILE cleanup | Session directory cleanup cannot remove a pool-root artifact safely | Exact owned file is removed using root, prefix, and ownership guards |
+
+## 11. Native KVM Guest Compatibility Contract
+
+SharedMountPoint qcow2 Test Failover for `KVM_TO_KVM` preserves the source
+guest's native KVM compatibility. FTCTL still builds and validates the
+guest-preparation manifest and validates every independent test artifact, but
+it does not run the VMware-to-KVM initramfs or WinPE conversion routines.
+
+The runtime records `guest_prep_state=SKIPPED` and
+`guest_prep_reason=NATIVE_COMPATIBILITY_PRESERVED`. Cloud may then import the
+validated absolute qcow2 artifact and own test VM creation and boot validation.
+The `VMWARE_TO_KVM` path remains unchanged and must continue to run the Linux
+initramfs or Windows WinPE preparation before Cloud materializes the VM.
+
+| Provider path | Guest preparation |
+| --- | --- |
+| VMware to KVM | Required; existing v2k conversion path |
+| ABLESTACK KVM to KVM | Skipped after manifest and artifact validation |
+
+Regression coverage must prove that a KVM-to-KVM test session passes preflight
+without a v2k conversion runtime, while a VMware-to-KVM session still fails
+with `DR_GUEST_PREP_V2K_RUNTIME_MISSING` when that runtime is absent.
