@@ -7731,6 +7731,7 @@ JSON
     "provider": "ABLESTACK",
     "driver": "ABLESTACK",
     "zoneId": "zone-1",
+    "storagePath": "${SELFTEST_ROOT}/target",
     "storageRef": "${SELFTEST_ROOT}/target",
     "serviceOfferingId": "service-offering-1",
     "networks": [{"networkId": "network-1"}]
@@ -7805,14 +7806,17 @@ EOF
   selftest_assert_contains "${out}" '"test_artifact_count":1' "test artifact count"
   session_path="${SELFTEST_ROOT}/run/dr-runtime/plans/${plan}/test-sessions/run-test-session.json"
   artifact_dir="${SELFTEST_ROOT}/run/dr-runtime/plans/${plan}/test-sessions/run-test-session-artifacts"
+  local shared_artifact="${SELFTEST_ROOT}/target/ftctl-dr-test-run-test-session-vda.qcow2"
   selftest_assert_file_contains "${session_path}" '"networkMode":"isolated"'
   selftest_assert_file_contains "${session_path}" '"checkpointSequence":2'
   selftest_assert_file_contains "${session_path}" '"type":"qcow2-copy"'
   selftest_assert_file_not_contains "${session_path}" '"backing"'
   selftest_assert_file_contains "${call_log}" "info --force-share ${SELFTEST_ROOT}/target/root.qcow2"
-  selftest_assert_file_contains "${call_log}" "convert --force-share -f qcow2 -O qcow2 -S 4k ${SELFTEST_ROOT}/target/root.qcow2 ${artifact_dir}/vda.qcow2"
-  selftest_assert_file_contains "${call_log}" "check -q ${artifact_dir}/vda.qcow2"
-  [[ -f "${artifact_dir}/vda.qcow2" ]] || selftest_fail "independent test copy should be created"
+  selftest_assert_file_contains "${call_log}" "convert --force-share -f qcow2 -O qcow2 -S 4k ${SELFTEST_ROOT}/target/root.qcow2 ${shared_artifact}"
+  selftest_assert_file_contains "${call_log}" "check -q ${shared_artifact}"
+  selftest_assert_file_contains "${session_path}" '"ownedByFtctl":true'
+  selftest_assert_file_contains "${session_path}" "\"storageRoot\":\"${SELFTEST_ROOT}/target\""
+  [[ -f "${shared_artifact}" ]] || selftest_fail "independent test copy should be created in the Cloud storage root"
 
   guestprep_manifest="${artifact_dir}/guestprep-contract.json"
   python3 "${LIB_BASE}/ftctl/guestprep_manifest.py" build-test \
@@ -7822,7 +7826,7 @@ EOF
   python3 "${LIB_BASE}/ftctl/guestprep_manifest.py" validate --manifest "${guestprep_manifest}"
   selftest_assert_eq "$(jq -r '.target.storage.type' "${guestprep_manifest}")" "file" "qcow2-copy guestprep storage"
   selftest_assert_eq "$(jq -r '.target.format' "${guestprep_manifest}")" "qcow2" "qcow2-copy guestprep format"
-  selftest_assert_eq "$(jq -r '.disks[0].storage.locator' "${guestprep_manifest}")" "${artifact_dir}/vda.qcow2" "qcow2-copy guestprep locator"
+  selftest_assert_eq "$(jq -r '.disks[0].storage.locator' "${guestprep_manifest}")" "${shared_artifact}" "qcow2-copy guestprep locator"
 
   out="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-status \
     --config "${SELFTEST_CONFIG}" \
@@ -7866,6 +7870,42 @@ EOF
   selftest_assert_contains "${cleanup}" '"test_artifacts_state":"CLEANED"' "test artifact cleanup state"
   [[ ! -e "${SELFTEST_ROOT}/run/dr-runtime/plans/${plan}/test-sessions/active.json" ]] || selftest_fail "active test session should be removed"
   [[ ! -d "${artifact_dir}" ]] || selftest_fail "test artifact directory should be removed"
+  [[ ! -e "${shared_artifact}" ]] || selftest_fail "Cloud-visible test artifact should be removed"
+}
+
+selftest_case_dr_runtime_shared_file_artifact_cleanup() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR cleanup removes only its owned SharedMountPoint test copy"
+
+  local plan="plan-shared-artifact-cleanup"
+  local run="run-shared-artifact-cleanup"
+  local plan_dir="${SELFTEST_ROOT}/run/dr-runtime/plans/${plan}"
+  local session_dir="${plan_dir}/test-sessions/${run}-artifacts"
+  local active_path="${plan_dir}/test-sessions/active.json"
+  local session_path="${plan_dir}/test-sessions/${run}.json"
+  local run_path="${plan_dir}/runs/${run}.state"
+  local status_path="${plan_dir}/status.state"
+  local storage_root="${SELFTEST_ROOT}/shared-pool"
+  local artifact="${storage_root}/ftctl-dr-test-${run}-vda.qcow2"
+  local durable="${storage_root}/durable-replica.qcow2"
+
+  mkdir -p "${session_dir}" "${plan_dir}/runs" "${storage_root}"
+  truncate -s 1M "${artifact}"
+  truncate -s 1M "${durable}"
+  cat > "${active_path}" <<JSON
+{"sessionId":"${plan}:${run}","runUuid":"${run}","testArtifacts":{"state":"CREATED","path":"${session_dir}","count":1,"records":[{"type":"qcow2-copy","state":"CREATED","path":"${artifact}","storageRoot":"${storage_root}","ownedByFtctl":true}]}}
+JSON
+  printf 'plan=%s\nrun=%s\n' "${plan}" "${run}" > "${run_path}"
+  cp -f "${run_path}" "${status_path}"
+
+  ftctl_dr_runtime_cleanup_test_session "${plan}" "${run}" "${run_path}" "${status_path}"
+
+  [[ ! -e "${artifact}" ]] || selftest_fail "owned SharedMountPoint test copy should be removed"
+  [[ -e "${durable}" ]] || selftest_fail "durable replica must not be removed"
+  [[ ! -d "${session_dir}" ]] || selftest_fail "runtime artifact directory should be removed"
+  [[ ! -e "${active_path}" ]] || selftest_fail "active test session should be removed"
+  selftest_assert_file_contains "${session_path}" '"state":"CLEANED"'
+  selftest_assert_file_contains "${session_path}" '"ownedByFtctl":true'
 }
 
 selftest_case_dr_scheduler_resume_recovers_missing_worker() {
@@ -10586,6 +10626,7 @@ selftest_main() {
   selftest_case_dr_guestprep_manifest_preserves_vmware_boot_contract
   selftest_case_dr_cutover_manifest_v2_normalizes_runtime_disk_map
   selftest_case_dr_runtime_test_failover_cleanup
+  selftest_case_dr_runtime_shared_file_artifact_cleanup
   selftest_case_dr_scheduler_resume_recovers_missing_worker
   selftest_case_dr_scheduler_systemd_launch_contract
   selftest_case_dr_vmware_canonical_profile_preserves_committed_baseline

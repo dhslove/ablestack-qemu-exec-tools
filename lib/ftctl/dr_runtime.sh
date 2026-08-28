@@ -2078,6 +2078,13 @@ if domain_name:
     subprocess.run(["virsh", "undefine", str(domain_name), "--nvram"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     subprocess.run(["virsh", "undefine", str(domain_name)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 for record in artifacts.get("records", []) if isinstance(artifacts, dict) else []:
+    if isinstance(record, dict) and record.get("type") in ("qcow2-overlay", "qcow2-copy"):
+        path = os.path.abspath(str(record.get("path") or ""))
+        storage_root = os.path.abspath(str(record.get("storageRoot") or ""))
+        owned = record.get("ownedByFtctl") is True
+        if (owned and path and storage_root and os.path.dirname(path) == storage_root
+                and os.path.basename(path).startswith("ftctl-dr-test-") and os.path.isfile(path)):
+            os.unlink(path)
     if not isinstance(record, dict) or record.get("type") != "rbd-clone":
         continue
     mapped = record.get("mappedDevice")
@@ -2378,11 +2385,38 @@ else:
                 fail(53, f"file-backed target does not exist: {target_path}")
             if not qemu_img:
                 fail(46, "qemu-img is required to create ABLESTACK test copies")
-            copy_path = os.path.join(artifacts_dir, f"{device}.qcow2")
+            storage_root = str(target.get("storagePath") or "").strip()
+            if not storage_root:
+                storage_root = os.path.dirname(os.path.abspath(target_path))
+            storage_root = os.path.abspath(storage_root)
+            target_abs = os.path.abspath(target_path)
+            if not os.path.isdir(storage_root):
+                fail(53, f"file-backed target storage root does not exist: {storage_root}")
+            try:
+                target_in_storage = os.path.commonpath([target_abs, storage_root]) == storage_root
+            except ValueError:
+                target_in_storage = False
+            if not target_in_storage:
+                fail(53, f"file-backed target escapes storage root: {target_path}")
+            run_key = safe_key(session.get("runUuid") or now) or "run"
+            device_key = safe_key(device) or f"disk{index}"
+            copy_name = f"ftctl-dr-test-{run_key}-{device_key}.qcow2"
+            copy_path = os.path.join(storage_root, copy_name)
             command = [
                 qemu_img, "convert", "--force-share", "-f", target_format,
                 "-O", "qcow2", "-S", "4k", target_path, copy_path,
             ]
+            records.append({
+                "device": disk.get("device") or f"disk{index}",
+                "state": "CREATING",
+                "type": "qcow2-copy",
+                "source": target_path,
+                "path": copy_path,
+                "storageRoot": storage_root,
+                "ownedByFtctl": True,
+                "sizeBytes": disk.get("sizeBytes") or disk.get("capacityBytes") or 0,
+                "command": command,
+            })
             try:
                 # The durable target remains attached to the paused replication
                 # writer. Force-share is read-only here; the independent copy
@@ -2395,15 +2429,7 @@ else:
             except subprocess.CalledProcessError as exc:
                 stderr = (exc.stderr or "").strip() if isinstance(exc.stderr, str) else ""
                 fail(46, f"file-backed test copy failed for {target_path}: {stderr or exc}")
-            records.append({
-                "device": disk.get("device") or f"disk{index}",
-                "state": "CREATED",
-                "type": "qcow2-copy",
-                "source": target_path,
-                "path": copy_path,
-                "sizeBytes": disk.get("sizeBytes") or disk.get("capacityBytes") or 0,
-                "command": command,
-            })
+            records[-1]["state"] = "CREATED"
             continue
         fail(54, f"unsupported test artifact provider {provider} for disk {index}")
     state = "CREATED" if any(record.get("state") == "CREATED" for record in records) else "NO_MATERIALIZED_DISKS"

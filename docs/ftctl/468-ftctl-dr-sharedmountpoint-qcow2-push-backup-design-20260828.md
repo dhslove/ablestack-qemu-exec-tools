@@ -97,9 +97,16 @@ scheduler pause and durable-checkpoint lease have completed:
 2. Create an independent sparse qcow2 copy with
    `qemu-img convert --force-share -f <format> -O qcow2 -S 4k`.
 3. Validate the copy with `qemu-img check -q`.
-4. Publish a `qcow2-copy` artifact and attach only that path to the Cloud test
-   VM.
-5. Delete only the independent copy during Test Cleanup.
+4. For a Cloud-managed file pool, place the copy directly under the validated
+   target `storagePath`. The Plan/Run-owned filename starts with
+   `ftctl-dr-test-`; this makes the artifact discoverable as a libvirt volume
+   after the SharedMountPoint pool refresh. Runtime-private paths under `/run`
+   must never be published as Cloud disk locators.
+5. Publish the absolute `qcow2-copy` path together with `storageRoot` and
+   `ownedByFtctl=true`, and attach only that path to the Cloud test VM.
+6. Delete only the owned independent copy during Test Cleanup. Cleanup accepts
+   an external file only when its parent is exactly `storageRoot`, its basename
+   has the FTCTL test prefix, and the ownership flag is true.
 
 The live durable target is never used as a mutable backing file. RBD continues
 to use its validated snapshot/clone path unchanged.
@@ -200,3 +207,5 @@ unchanged.
 | Shell error propagation | Collapses manifest exit 63 into exit 47 | Preserves structured code, message, and original exit code |
 | Cloud/UI evidence | Accepted Run can hide a later FTCTL terminal error | Exact terminal evidence is available for asynchronous projection |
 | Existing providers | Shared helper risks broad behavior changes | RBD and VMware contracts remain unchanged |
+| SharedMountPoint locator | Runtime-private `/run/...` copy is invisible to the libvirt storage pool | Copy resides in the validated pool root and is imported by its absolute path |
+| FILE cleanup | Session directory cleanup cannot remove a pool-root artifact safely | Exact owned file is removed using root, prefix, and ownership guards |
