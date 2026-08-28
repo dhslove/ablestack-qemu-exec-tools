@@ -5493,6 +5493,13 @@ ftctl_dr_runtime_action() {
         [[ "${rc}" == "52" ]] && error_code="DR_TEST_QGA_UNAVAILABLE"
         [[ "${rc}" == "53" ]] && error_code="DR_TEST_ARTIFACT_LOCATOR_INVALID"
         [[ "${rc}" == "54" ]] && error_code="DR_TEST_ARTIFACT_PROVIDER_UNSUPPORTED"
+        local manifest_error_code="" manifest_error_message=""
+        manifest_error_code="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "guest_manifest_error_code")"
+        manifest_error_message="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "guest_manifest_error_message")"
+        if [[ -n "${manifest_error_code}" ]]; then
+          error_code="${manifest_error_code}"
+          error_message="${manifest_error_message}"
+        fi
         if [[ "${rc}" == "47" || "${rc}" == "48" ]]; then
           error_code="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "guest_preflight_error_code")"
           error_message="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "guest_preflight_error_message")"

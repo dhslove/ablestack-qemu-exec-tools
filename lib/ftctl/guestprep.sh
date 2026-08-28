@@ -32,14 +32,28 @@ ftctl_guestprep_v2k_lib_dir() {
 }
 
 ftctl_guestprep_write_manifest() {
-  local session_path="${1-}" manifest_path="${2-}" test_domain_name="${3-}"
-  local tool
+  local session_path="${1-}" manifest_path="${2-}" test_domain_name="${3-}" run_path="${4-}"
+  local tool output="" rc=0 error_code="" error_message=""
   tool="$(ftctl_guestprep_manifest_tool || true)"
   [[ -n "${tool}" ]] || return 47
-  python3 "${tool}" build-test \
+  output="$(python3 "${tool}" build-test \
     --session "${session_path}" \
     --domain "${test_domain_name}" \
-    --output "${manifest_path}"
+    --output "${manifest_path}" 2>&1)" || rc=$?
+  if [[ "${rc}" != "0" ]]; then
+    error_code="$(jq -r 'select(type == "object") | .errorCode // empty' <<<"${output}" 2>/dev/null || true)"
+    error_message="$(jq -r 'select(type == "object") | .message // empty' <<<"${output}" 2>/dev/null || true)"
+    if [[ -n "${run_path}" && -f "${run_path}" ]]; then
+      ftctl_dr_runtime_path_set "${run_path}" \
+        "guest_manifest_error_code=${error_code}" \
+        "guest_manifest_error_message=${error_message}" \
+        "guest_manifest_exit_code=${rc}" \
+        "updated_at=$(ftctl_now_iso8601)" || true
+    fi
+    [[ -z "${output}" ]] || printf '%s\n' "${output}" >&2
+    return "${rc}"
+  fi
+  return 0
 }
 
 ftctl_guestprep_preflight_fail() {
@@ -249,7 +263,7 @@ PY
   artifact_name="ftctl-dr-artifact-$(ftctl_dr_runtime_key "${plan}")-$(ftctl_dr_runtime_key "${run}")"
   artifact_name="${artifact_name:0:62}"
   manifest="${artifacts_dir}/guestprep-manifest.json"
-  ftctl_guestprep_write_manifest "${session_path}" "${manifest}" "${artifact_name}" || return 47
+  ftctl_guestprep_write_manifest "${session_path}" "${manifest}" "${artifact_name}" "${run_path}" || return $?
   [[ "$(jq -r '.disks | length' "${manifest}" 2>/dev/null || echo 0)" -gt 0 ]] || return 46
 
   v2k_dir="$(ftctl_guestprep_v2k_lib_dir || true)"
@@ -310,7 +324,7 @@ ftctl_guestprep_prepare_and_start() {
   domain="ftctl-dr-test-$(ftctl_dr_runtime_key "${plan}")-$(ftctl_dr_runtime_key "${run}")"
   domain="${domain:0:62}"
   manifest="${artifacts_dir}/guestprep-manifest.json"
-  ftctl_guestprep_write_manifest "${session_path}" "${manifest}" "${domain}" || return 47
+  ftctl_guestprep_write_manifest "${session_path}" "${manifest}" "${domain}" "${run_path}" || return $?
   [[ "$(jq -r '.disks | length' "${manifest}" 2>/dev/null || echo 0)" -gt 0 ]] || return 46
 
   v2k_dir="$(ftctl_guestprep_v2k_lib_dir || true)"

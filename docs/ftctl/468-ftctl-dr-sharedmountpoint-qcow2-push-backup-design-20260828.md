@@ -171,3 +171,32 @@ preflight cleanup path.
 | Full seed consistency | `qemu-img --force-share` read of live file | QEMU push backup point-in-time job |
 | Target ownership | Ambiguous before materialization | Cloud-owned file, volume, and VM throughout |
 | Test object | New plan could hide old mapping defects | Existing plan UUID only |
+
+## 10. Test Artifact Consumer and Terminal Error Contract
+
+The SharedMountPoint Test Failover producer publishes an independent
+`qcow2-copy`. The guest-preparation manifest consumer must recognize that
+artifact as the canonical immutable file-backed test disk. It applies the same
+absolute-path, positive-size, `file/qcow2` validation used for a validated
+file artifact; it must not reinterpret the copy as an overlay or enter an RBD
+locator path.
+
+Manifest construction failures are authoritative FTCTL operation failures.
+The manifest helper's structured `errorCode`, `message`, and exit code are
+written to the owning Run before the shell action terminates. The outer Test
+Failover action preserves those fields instead of replacing them with the
+generic guest-runtime error. Cloud can therefore project the exact terminal
+failure and the UI can show the actionable cause while remaining asynchronous.
+
+Regression coverage consumes the `qcow2-copy` session emitted by the existing
+Test Failover materialization self-test and builds a real guest-preparation
+manifest from it. Existing `rbd-clone` and `qcow2-overlay` validation remains
+unchanged.
+
+| Area | AS-IS | TO-BE |
+| --- | --- | --- |
+| FILE artifact producer | Publishes `qcow2-copy` | Unchanged |
+| Guest-preparation consumer | Rejects `qcow2-copy` as unsupported | Accepts an absolute, positive-size `file/qcow2` copy |
+| Shell error propagation | Collapses manifest exit 63 into exit 47 | Preserves structured code, message, and original exit code |
+| Cloud/UI evidence | Accepted Run can hide a later FTCTL terminal error | Exact terminal evidence is available for asynchronous projection |
+| Existing providers | Shared helper risks broad behavior changes | RBD and VMware contracts remain unchanged |

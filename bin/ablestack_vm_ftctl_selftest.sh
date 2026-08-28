@@ -7697,7 +7697,7 @@ selftest_case_dr_runtime_test_failover_cleanup() {
   local fakebin="${SELFTEST_ROOT}/fakebin"
   local call_log="${SELFTEST_ROOT}/qemu-img-test-session.log"
   local status_path="${plan_dir}/status.state"
-  local session_path="" artifact_dir="" out="" cleanup="" ack_pid=""
+  local session_path="" artifact_dir="" guestprep_manifest="" out="" cleanup="" ack_pid=""
 
   mkdir -p "${plan_dir}/checkpoints" "${plan_dir}/manifests" "${fakebin}" "${SELFTEST_ROOT}/target"
   cat > "${fakebin}/qemu-img" <<EOF
@@ -7738,6 +7738,10 @@ JSON
   },
   "policy": {"testExecutionMode": "METADATA_ONLY"},
   "mapping": {
+    "source": {
+      "hardware": {"firmware": "efi", "secureBoot": false, "cpu": 2, "memoryMb": 4096},
+      "workload": {"name": "rocky9-vm", "guestFamily": "linux", "guestId": "rockylinux9_64Guest"}
+    },
     "disks": [
       {"device": "vda", "sourcePath": "/src/root.qcow2", "targetPath": "${SELFTEST_ROOT}/target/root.qcow2", "targetFormat": "qcow2"}
     ]
@@ -7806,6 +7810,16 @@ EOF
   selftest_assert_file_contains "${call_log}" "convert --force-share -f qcow2 -O qcow2 -S 4k ${SELFTEST_ROOT}/target/root.qcow2 ${artifact_dir}/vda.qcow2"
   selftest_assert_file_contains "${call_log}" "check -q ${artifact_dir}/vda.qcow2"
   [[ -f "${artifact_dir}/vda.qcow2" ]] || selftest_fail "independent test copy should be created"
+
+  guestprep_manifest="${artifact_dir}/guestprep-contract.json"
+  python3 "${LIB_BASE}/ftctl/guestprep_manifest.py" build-test \
+    --session "${session_path}" \
+    --domain "ftctl-dr-test-${plan}" \
+    --output "${guestprep_manifest}"
+  python3 "${LIB_BASE}/ftctl/guestprep_manifest.py" validate --manifest "${guestprep_manifest}"
+  selftest_assert_eq "$(jq -r '.target.storage.type' "${guestprep_manifest}")" "file" "qcow2-copy guestprep storage"
+  selftest_assert_eq "$(jq -r '.target.format' "${guestprep_manifest}")" "qcow2" "qcow2-copy guestprep format"
+  selftest_assert_eq "$(jq -r '.disks[0].storage.locator' "${guestprep_manifest}")" "${artifact_dir}/vda.qcow2" "qcow2-copy guestprep locator"
 
   out="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-status \
     --config "${SELFTEST_CONFIG}" \
