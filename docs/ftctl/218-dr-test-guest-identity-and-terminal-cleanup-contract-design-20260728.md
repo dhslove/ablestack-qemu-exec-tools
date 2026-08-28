@@ -438,3 +438,36 @@ installed-file marker/hash verification.
 | terminal worker | 사망 PID + RUNNING 가능 | FAILED + exit code |
 | 오류 표현 | unsupported로 오분류 | unresolved와 runtime unavailable 분리 |
 | 배포 일치 | source/install drift 탐지 없음 | SHA256 provenance gate |
+
+## 14. Guest preparation preflight evidence contract
+
+Test Failover must not collapse every guest preparation prerequisite failure
+into `DR_GUEST_PREP_RUNTIME_UNAVAILABLE`. Before any test disk is copied or a
+Cloud test VM is created, FTCTL records a structured preflight result in the
+owning Run and exposes it through `dr-status`.
+
+Required fields are `guest_preflight_state`,
+`guest_preflight_error_code`, and `guest_preflight_error_message`. The
+specific error code is also promoted to the Run-level `error_code` so Cloud
+and the UI display the same cause.
+
+| Code | Meaning |
+| --- | --- |
+| `DR_GUEST_PREP_SESSION_MISSING` | selected test session is absent or unreadable |
+| `DR_GUEST_PREP_MANIFEST_TOOL_MISSING` | `guestprep_manifest.py` is not installed |
+| `DR_GUEST_PREP_V2K_RUNTIME_MISSING` | required v2k runtime scripts are not installed |
+| `DR_GUEST_PREP_PROFILE_INVALID` | session profile is malformed |
+| `DR_GUEST_OS_UNRESOLVED` | source guest identity cannot be resolved |
+| `DR_GUEST_PREP_WINPE_ISO_MISSING` | required Windows WinPE ISO is absent |
+| `DR_GUEST_PREP_VIRTIO_ISO_MISSING` | required Windows virtio ISO is absent |
+
+Linux plans never require either Windows ISO. A Rocky Linux SharedMountPoint
+plan with a valid profile, manifest tool, and v2k runtime must pass preflight
+without ISO files. Test artifact materialization remains after this barrier.
+
+| Area | AS-IS | TO-BE |
+| --- | --- | --- |
+| FTCTL failure | generic exit 47 | exact prerequisite code and message |
+| Cloud projection | generic runtime/ISO message | preserves FTCTL error code and message |
+| UI | accepted request later becomes an opaque failure | shows the exact failed prerequisite in execution history |
+| Regression | Linux can be confused with Windows ISO readiness | Linux no-ISO, missing-v2k, and malformed-profile smoke cases |

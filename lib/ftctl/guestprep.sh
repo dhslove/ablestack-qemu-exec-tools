@@ -42,24 +42,53 @@ ftctl_guestprep_write_manifest() {
     --output "${manifest_path}"
 }
 
+ftctl_guestprep_preflight_fail() {
+  local run_path="${1-}" error_code="${2-DR_GUEST_PREP_RUNTIME_UNAVAILABLE}"
+  local error_message="${3-Guest preparation preflight failed}" rc="${4-47}"
+  if [[ -n "${run_path}" && -f "${run_path}" ]]; then
+    ftctl_dr_runtime_path_set "${run_path}" \
+      "guest_preflight_state=ERROR" \
+      "guest_preflight_error_code=${error_code}" \
+      "guest_preflight_error_message=${error_message}" \
+      "updated_at=$(ftctl_now_iso8601)" || true
+  fi
+  return "${rc}"
+}
+
 ftctl_guestprep_preflight_test_session() {
   local session_path="${1-}" run_path="${2-}"
   local tool profile_path inspection family guest_id firmware secure_boot v2k_dir
   local winpe_iso virtio_iso
-  [[ -n "${session_path}" && -f "${session_path}" ]] || return 47
+  if [[ -z "${session_path}" || ! -r "${session_path}" ]]; then
+    ftctl_guestprep_preflight_fail "${run_path}" "DR_GUEST_PREP_SESSION_MISSING" \
+      "The selected test session is missing or unreadable" 47
+    return $?
+  fi
   tool="$(ftctl_guestprep_manifest_tool || true)"
-  [[ -n "${tool}" ]] || return 47
+  if [[ -z "${tool}" ]]; then
+    ftctl_guestprep_preflight_fail "${run_path}" "DR_GUEST_PREP_MANIFEST_TOOL_MISSING" \
+      "The guest preparation manifest tool is not installed" 47
+    return $?
+  fi
   v2k_dir="$(ftctl_guestprep_v2k_lib_dir || true)"
-  [[ -n "${v2k_dir}" ]] || return 47
+  if [[ -z "${v2k_dir}" ]]; then
+    ftctl_guestprep_preflight_fail "${run_path}" "DR_GUEST_PREP_V2K_RUNTIME_MISSING" \
+      "The required v2k guest preparation runtime is not installed" 47
+    return $?
+  fi
 
   profile_path="$(mktemp -t ftctl.dr.guestprep.profile.XXXXXX)"
   jq -c '.profile // {}' "${session_path}" > "${profile_path}" 2>/dev/null || {
     rm -f "${profile_path}"
-    return 47
+    ftctl_guestprep_preflight_fail "${run_path}" "DR_GUEST_PREP_PROFILE_INVALID" \
+      "The test session does not contain a valid guest preparation profile" 47
+    return $?
   }
   inspection="$(python3 "${tool}" inspect --profile "${profile_path}" 2>/dev/null)" || {
     rm -f "${profile_path}"
-    return 48
+    ftctl_guestprep_preflight_fail "${run_path}" "DR_GUEST_OS_UNRESOLVED" \
+      "The source guest operating system could not be resolved" 48
+    return $?
   }
   rm -f "${profile_path}"
 
@@ -67,15 +96,29 @@ ftctl_guestprep_preflight_test_session() {
   guest_id="$(jq -r '.guestId // empty' <<< "${inspection}" 2>/dev/null || true)"
   firmware="$(jq -r '.firmware // empty' <<< "${inspection}" 2>/dev/null || true)"
   secure_boot="$(jq -r '.secureBoot // false' <<< "${inspection}" 2>/dev/null || true)"
-  [[ "${family}" == "linux" || "${family}" == "windows" ]] || return 48
+  if [[ "${family}" != "linux" && "${family}" != "windows" ]]; then
+    ftctl_guestprep_preflight_fail "${run_path}" "DR_GUEST_OS_UNRESOLVED" \
+      "The source guest operating system could not be resolved" 48
+    return $?
+  fi
   if [[ "${family}" == "windows" ]]; then
     winpe_iso="${FTCTL_DR_WINPE_ISO:-/usr/share/ablestack/v2k/winpe/winpe-ablestack-v2k-amd64.iso}"
     virtio_iso="${FTCTL_DR_VIRTIO_ISO:-/usr/share/virtio-win/virtio-win.iso}"
-    [[ -r "${winpe_iso}" && -s "${winpe_iso}" ]] || return 47
-    [[ -r "${virtio_iso}" && -s "${virtio_iso}" ]] || return 47
+    if [[ ! -r "${winpe_iso}" || ! -s "${winpe_iso}" ]]; then
+      ftctl_guestprep_preflight_fail "${run_path}" "DR_GUEST_PREP_WINPE_ISO_MISSING" \
+        "The Windows guest preparation WinPE ISO is missing or unreadable" 47
+      return $?
+    fi
+    if [[ ! -r "${virtio_iso}" || ! -s "${virtio_iso}" ]]; then
+      ftctl_guestprep_preflight_fail "${run_path}" "DR_GUEST_PREP_VIRTIO_ISO_MISSING" \
+        "The Windows virtio driver ISO is missing or unreadable" 47
+      return $?
+    fi
   fi
   ftctl_dr_runtime_path_set "${run_path}" \
     "guest_preflight_state=READY" \
+    "guest_preflight_error_code=" \
+    "guest_preflight_error_message=" \
     "guest_family=${family}" \
     "guest_id=${guest_id}" \
     "guest_firmware=${firmware}" \

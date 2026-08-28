@@ -2184,6 +2184,7 @@ PY
 ftctl_dr_runtime_finalize_failed_test() {
   local plan="${1-}" run="${2-}" run_path="${3-}" status_path="${4-}"
   local failure_rc="${5-1}" error_code="${6-DR_TEST_FAILOVER_FAILED}" failed_step="${7-test-failed}"
+  local error_message="${8-}"
   local cleanup_rc=0 resume_rc=0 lease_rc=0 sequence lease_owner_run cleanup_state cleanup_required=true
   local transition_scope
 
@@ -2225,6 +2226,7 @@ ftctl_dr_runtime_finalize_failed_test() {
     "cleanup_required=${cleanup_required}" \
     "scheduler_recovery_state=$([[ "${resume_rc}" == "0" ]] && printf RUNNING || printf RECOVERY_FAILED)" \
     "error_code=${error_code}" \
+    "error_message=${error_message}" \
     "updated_at=$(ftctl_now_iso8601)" || true
   cp -f "${run_path}" "${status_path}" 2>/dev/null || true
   chmod 0644 "${status_path}" 2>/dev/null || true
@@ -3874,6 +3876,7 @@ ftctl_dr_runtime_emit_state_json() {
   local target_promote_started_at target_power_on_at failover_completed_at rto_actual_seconds
   local active_side target_power_state target_promotion_state failover_worker_pid
   local boot_validation_state cloud_cutover_session_id cloud_authority_generation cloud_authority_sequence_floor engine_ack_state engine_ack_at
+  local guest_preflight_state guest_preflight_error_code guest_preflight_error_message
   local guest_prep_state guest_family guestprep_manifest_path manifest_schema_version manifest_sha256
   local guestprep_checkpoint_sequence source_fence_state scheduler_recovery_state
   local test_domain_name test_domain_state test_boot_validation_mode
@@ -4426,6 +4429,9 @@ PY
   test_artifact_count="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "test_artifact_count")"
   test_cleanup_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "test_cleanup_state")"
   cleanup_required="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "cleanup_required")"
+  guest_preflight_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "guest_preflight_state")"
+  guest_preflight_error_code="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "guest_preflight_error_code")"
+  guest_preflight_error_message="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "guest_preflight_error_message")"
   guest_prep_state="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "guest_prep_state")"
   guest_family="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "guest_family")"
   guestprep_manifest_path="$(ftctl_dr_runtime_state_get_from_path "${state_path}" "guestprep_manifest_path")"
@@ -4864,6 +4870,9 @@ PY
   ftctl_dr_runtime_json_number_field "test_artifact_count" "${test_artifact_count}"
   ftctl_dr_runtime_json_string_field "test_cleanup_state" "${test_cleanup_state}"
   ftctl_dr_runtime_json_boolean_field "cleanup_required" "${cleanup_required:-false}" || return $?
+  ftctl_dr_runtime_json_string_field "guest_preflight_state" "${guest_preflight_state}"
+  ftctl_dr_runtime_json_string_field "guest_preflight_error_code" "${guest_preflight_error_code}"
+  ftctl_dr_runtime_json_string_field "guest_preflight_error_message" "${guest_preflight_error_message}"
   ftctl_dr_runtime_json_string_field "guest_prep_state" "${guest_prep_state}"
   ftctl_dr_runtime_json_string_field "guest_family" "${guest_family}"
   ftctl_dr_runtime_json_string_field "guestprep_manifest_path" "${guestprep_manifest_path}"
@@ -5237,7 +5246,7 @@ ftctl_dr_runtime_action() {
   local action="${1-}" plan="${2-}" run="${3-}" profile_file="${4-}" role="${5-}" mode="${6-}" restore_point="${7-}" force="${8-0}" dry_run="${9-0}" wait_value="${10-}" json="${11-0}" artifact_spec_file="${12-}" authority_spec_file="${13-}"
   local force_immediate_cycle="${14-false}"
   local authority_sequence_floor="${15-}"
-  local state_tuple state step progress run_path status_path external_ref rc error_code
+  local state_tuple state step progress run_path status_path external_ref rc error_code error_message
   local target_vm_id target_external_ref checkpoint_lease_path test_sequence persisted_artifact_spec="" persisted_authority_spec=""
   local release_authority_side="" release_authority_generation="" release_resource_disposition="RETAIN_OPERATIONAL_VM"
   local remote_source_transition=0
@@ -5473,6 +5482,7 @@ ftctl_dr_runtime_action() {
       fi
       if [[ "${rc}" != "0" ]]; then
         error_code="DR_RESTORE_POINT_NOT_FOUND"
+        error_message=""
         [[ "${rc}" == "45" ]] && error_code="DR_TARGET_NOT_READY"
         [[ "${rc}" == "46" ]] && error_code="DR_TEST_MATERIALIZATION_FAILED"
         [[ "${rc}" == "47" ]] && error_code="DR_GUEST_PREP_RUNTIME_UNAVAILABLE"
@@ -5483,11 +5493,16 @@ ftctl_dr_runtime_action() {
         [[ "${rc}" == "52" ]] && error_code="DR_TEST_QGA_UNAVAILABLE"
         [[ "${rc}" == "53" ]] && error_code="DR_TEST_ARTIFACT_LOCATOR_INVALID"
         [[ "${rc}" == "54" ]] && error_code="DR_TEST_ARTIFACT_PROVIDER_UNSUPPORTED"
+        if [[ "${rc}" == "47" || "${rc}" == "48" ]]; then
+          error_code="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "guest_preflight_error_code")"
+          error_message="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "guest_preflight_error_message")"
+          [[ -n "${error_code}" ]] || error_code="$([[ "${rc}" == "47" ]] && printf DR_GUEST_PREP_RUNTIME_UNAVAILABLE || printf DR_GUEST_OS_UNRESOLVED)"
+        fi
         local failed_step="test-session-restore-point-missing"
         [[ "${rc}" == "46" ]] && failed_step="test-materialization-failed"
         [[ "${rc}" -ge 47 ]] && failed_step="test-guest-preparation-failed"
         ftctl_dr_runtime_finalize_failed_test "${plan}" "${run}" "${run_path}" "${status_path}" \
-          "${rc}" "${error_code}" "${failed_step}"
+          "${rc}" "${error_code}" "${failed_step}" "${error_message}"
         ftctl_log_event "dr-runtime" "dr.test.failover" "fail" "" "${error_code}" \
           "plan=${plan} run=${run} restore_point=${restore_point:-} rc=${rc}"
         if [[ "${json}" == "1" ]]; then
