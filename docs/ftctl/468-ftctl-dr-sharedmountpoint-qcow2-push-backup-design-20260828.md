@@ -383,3 +383,13 @@ is reachable from VMware/VDDK or RBD provider dispatch.
 | relative source locator | unresolved Cloud volume path | canonical path below SharedMountPoint root |
 | retry | repeated exit 32 after export drain | idempotent bitmap verification and completion |
 | failback mode | RBD label or full seed | `QCOW2_INCREMENTAL` with durable bitmap evidence |
+
+### Package deployment firewall invariant
+
+Installing or upgrading FTCTL must not call `firewall-cmd --reload`. A reload
+removes libvirt's dynamic `libvirt-out` and per-interface filter chains while
+existing guests continue to run, causing the next promoted VM start to fail.
+The package helper writes the permanent service definition and applies the
+service, or its explicit ports when the runtime definition is not yet known,
+to active zones without reloading firewalld. The no-reload smoke test is a
+release gate.

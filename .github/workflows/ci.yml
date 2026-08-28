@@ -25,6 +25,10 @@ jobs:
         run: |
           tests/ftctl_dr_release_tombstone_smoke.sh
 
+      - name: FTCTL firewalld no-reload regression gate
+        run: |
+          bash tests/ftctl_firewalld_no_reload_smoke.sh
+
       - name: FTCTL scheduler NBD recovery smoke
         run: |
           bash tests/ftctl_dr_scheduler_nbd_recovery_smoke.sh

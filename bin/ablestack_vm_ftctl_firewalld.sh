@@ -17,9 +17,9 @@
 
 set -euo pipefail
 
-CONFIG_PATH="/etc/ablestack/ablestack-vm-ftctl.conf"
+CONFIG_PATH="${FTCTL_CONFIG_PATH:-/etc/ablestack/ablestack-vm-ftctl.conf}"
 SERVICE_NAME="ablestack-vm-ftctl-remote-nbd"
-SERVICE_DIR="/etc/firewalld/services"
+SERVICE_DIR="${FTCTL_FIREWALLD_SERVICE_DIR:-/etc/firewalld/services}"
 SERVICE_PATH="${SERVICE_DIR}/${SERVICE_NAME}.xml"
 ACTION="${1-apply}"
 
@@ -89,18 +89,48 @@ add_service_to_zone() {
   [[ -n "${zone}" ]] || return 0
   firewall-cmd --permanent --zone="${zone}" --add-service="${SERVICE_NAME}" >/dev/null 2>&1 || true
   if firewalld_running; then
-    firewall-cmd --zone="${zone}" --add-service="${SERVICE_NAME}" >/dev/null 2>&1 || true
+    if firewall-cmd --get-services 2>/dev/null | tr ' ' '\n' | grep -qx "${SERVICE_NAME}"; then
+      firewall-cmd --zone="${zone}" --add-service="${SERVICE_NAME}" >/dev/null 2>&1 || true
+    else
+      add_runtime_ports_to_zone "${zone}"
+    fi
   fi
+}
+
+service_ports() {
+  printf '%s\n' \
+    "${FTCTL_XCOLO_PROXY_PORT}/tcp" \
+    "${FTCTL_XCOLO_MIGRATE_PORT}/tcp" \
+    "${FTCTL_XCOLO_MIRROR_PORT}/tcp" \
+    "${FTCTL_XCOLO_COMPARE_PORT}/tcp" \
+    "${FTCTL_REMOTE_NBD_PORT_BASE}-${range_end}/tcp" \
+    "${FTCTL_XCOLO_AUTO_PORT_BASE}-${xcolo_auto_range_end}/tcp" \
+    "${FTCTL_XCOLO_AUTO_MIGRATE_PORT_BASE}-${xcolo_auto_migrate_range_end}/tcp" \
+    "${FTCTL_REMOTE_NBD_AUTO_PORT_BASE}-${remote_nbd_auto_range_end}/tcp"
+}
+
+add_runtime_ports_to_zone() {
+  local zone="${1-}" port
+  [[ -n "${zone}" ]] || return 0
+  while IFS= read -r port; do
+    firewall-cmd --zone="${zone}" --add-port="${port}" >/dev/null 2>&1 || true
+  done < <(service_ports)
+}
+
+remove_runtime_ports_from_zone() {
+  local zone="${1-}" port
+  [[ -n "${zone}" ]] || return 0
+  while IFS= read -r port; do
+    firewall-cmd --zone="${zone}" --remove-port="${port}" >/dev/null 2>&1 || true
+  done < <(service_ports)
 }
 
 apply_service() {
   write_service_file
   if command -v firewall-cmd >/dev/null 2>&1; then
-    firewall-cmd --reload >/dev/null 2>&1 || true
     while IFS= read -r zone; do
       add_service_to_zone "${zone}"
     done < <(firewalld_target_zones)
-    firewall-cmd --reload >/dev/null 2>&1 || true
   fi
   echo "[INFO] Firewalld service ensured: ${SERVICE_NAME} (legacy x-colo ${FTCTL_XCOLO_PROXY_PORT},${FTCTL_XCOLO_MIGRATE_PORT},${FTCTL_XCOLO_MIRROR_PORT},${FTCTL_XCOLO_COMPARE_PORT}/tcp; auto x-colo ${FTCTL_XCOLO_AUTO_PORT_BASE}-${xcolo_auto_range_end}/tcp; auto migrate ${FTCTL_XCOLO_AUTO_MIGRATE_PORT_BASE}-${xcolo_auto_migrate_range_end}/tcp; remote-nbd ${FTCTL_REMOTE_NBD_PORT_BASE}-${range_end},${FTCTL_REMOTE_NBD_AUTO_PORT_BASE}-${remote_nbd_auto_range_end}/tcp)"
 }
@@ -109,8 +139,10 @@ remove_service() {
   if command -v firewall-cmd >/dev/null 2>&1; then
     firewall-cmd --permanent --remove-service="${SERVICE_NAME}" >/dev/null 2>&1 || true
     if firewalld_running; then
-      firewall-cmd --remove-service="${SERVICE_NAME}" >/dev/null 2>&1 || true
-      firewall-cmd --reload >/dev/null 2>&1 || true
+      while IFS= read -r zone; do
+        firewall-cmd --zone="${zone}" --remove-service="${SERVICE_NAME}" >/dev/null 2>&1 || true
+        remove_runtime_ports_from_zone "${zone}"
+      done < <(firewalld_target_zones)
     fi
   fi
   rm -f "${SERVICE_PATH}" >/dev/null 2>&1 || true

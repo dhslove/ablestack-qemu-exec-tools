@@ -107,6 +107,7 @@ jobs:
         run: |
           set -euo pipefail
           tests/ftctl_dr_release_tombstone_smoke.sh
+          bash tests/ftctl_firewalld_no_reload_smoke.sh
           python3 -m unittest \
             tests.ftctl_qcow2_checkpoint_test \
             tests.ftctl_qcow2_bitmap_baseline_test
