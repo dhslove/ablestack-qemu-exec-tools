@@ -7704,7 +7704,10 @@ selftest_case_dr_runtime_test_failover_cleanup() {
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "${call_log}"
 case "\${1-}" in
-  info|check) exit 0 ;;
+  info)
+    printf '%s\n' '{"format":"qcow2","virtual-size":4194304}'
+    ;;
+  check) exit 0 ;;
   convert)
     target="\${@: -1}"
     truncate -s 4M "\${target}"
