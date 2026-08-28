@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from xml.etree import ElementTree
 
 
 class CheckpointError(RuntimeError):
@@ -109,8 +110,86 @@ def check_image(qemu_img, path):
         raise CheckpointError("DR_TEST_CHECKPOINT_QCOW2_INVALID", detail)
 
 
+def compare_images(qemu_img, source, source_format, checkpoint):
+    result = subprocess.run(
+        [qemu_img, "compare", "-f", str(source_format or "qcow2"), "-F", "qcow2",
+         str(source), str(checkpoint)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "checkpoint differs from drained target").strip()
+        raise CheckpointError("DR_TEST_CHECKPOINT_CONTENT_MISMATCH", detail)
+
+
+def writable_holders(path):
+    expected = path.resolve(strict=True)
+    holders = []
+    proc_root = Path("/proc")
+    if not proc_root.is_dir():
+        return holders
+    for process in proc_root.iterdir():
+        if not process.name.isdigit():
+            continue
+        try:
+            descriptors = list((process / "fd").iterdir())
+        except OSError:
+            continue
+        for descriptor in descriptors:
+            try:
+                if descriptor.resolve(strict=True) != expected:
+                    continue
+                flags_text = (process / "fdinfo" / descriptor.name).read_text(encoding="utf-8")
+                flags_line = next((line for line in flags_text.splitlines() if line.startswith("flags:")), "")
+                flags = int(flags_line.split()[1], 8) if flags_line else 0
+                if flags & os.O_ACCMODE not in (os.O_WRONLY, os.O_RDWR):
+                    continue
+                command = (process / "comm").read_text(encoding="utf-8").strip()
+                holders.append(f"pid={process.name} command={command or 'unknown'} fd={descriptor.name}")
+            except (OSError, ValueError):
+                continue
+    return holders
+
+
+def ensure_source_quiescent(source):
+    holders = writable_holders(source)
+    if holders:
+        raise CheckpointError(
+            "DR_TEST_CHECKPOINT_WRITER_NOT_DRAINED",
+            "drained target still has writable holders: " + "; ".join(holders[:4]),
+        )
+
+
+def strict_guest_command(command):
+    result = subprocess.run(
+        command,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    detail = "\n".join(part for part in (result.stderr.strip(), result.stdout.strip()) if part)
+    lowered = detail.lower()
+    unsafe_markers = (
+        "some filesystems could not be mounted",
+        "structure needs cleaning",
+        "mount exited with status",
+        "input/output error",
+        "filesystem is inconsistent",
+    )
+    if result.returncode != 0 or any(marker in lowered for marker in unsafe_markers):
+        raise CheckpointError(
+            "DR_TEST_CHECKPOINT_GUEST_FS_INCONSISTENT",
+            detail or "guest filesystem inspection failed",
+        )
+    return result.stdout
+
+
 def seal(args):
     qemu_img = require_tool("qemu-img")
+    copy_tool = require_tool("cp")
     source, root = canonical_under(args.source, args.storage_root, must_exist=True)
     if not source.is_file():
         raise CheckpointError("DR_TEST_CHECKPOINT_CONTRACT_INVALID", f"target file does not exist: {source}")
@@ -125,9 +204,18 @@ def seal(args):
     checkpoint = checkpoint_dir / f"{device}.qcow2"
     metadata_path = checkpoint.with_suffix(".json")
 
+    ensure_source_quiescent(source)
+    fsync_path(source)
+    fsync_path(source.parent)
     source_info = image_info(qemu_img, source, force_share=False)
+    if source_info.get("format") != "qcow2":
+        raise CheckpointError(
+            "DR_TEST_CHECKPOINT_CONTRACT_INVALID",
+            f"SharedMountPoint checkpoint source must be qcow2, got {source_info.get('format') or 'unknown'}",
+        )
+    source_stat = source.stat()
     expected = {
-        "version": 1,
+        "version": 2,
         "planUuid": args.plan,
         "checkpointSequence": sequence,
         "checkpointRef": args.checkpoint_ref,
@@ -135,6 +223,8 @@ def seal(args):
         "sourcePath": str(source),
         "sourceFormat": source_info.get("format"),
         "virtualSize": source_info.get("virtual-size"),
+        "sourceFileSize": source_stat.st_size,
+        "sourceMtimeNs": source_stat.st_mtime_ns,
     }
     expected["contractSha256"] = contract_digest(expected)
 
@@ -146,6 +236,8 @@ def seal(args):
         if actual != expected:
             raise CheckpointError("DR_TEST_CHECKPOINT_SEQUENCE_MISMATCH", "immutable checkpoint metadata does not match request")
         check_image(qemu_img, checkpoint)
+        compare_images(qemu_img, source, source_info.get("format"), checkpoint)
+        probe_checkpoint(qemu_img, checkpoint, checkpoint_dir)
         return checkpoint, metadata_path, expected, True
 
     fd, temp_name = tempfile.mkstemp(prefix=f".{device}.", suffix=".tmp", dir=checkpoint_dir)
@@ -155,8 +247,7 @@ def seal(args):
     metadata_temp = metadata_path.with_name(f".{metadata_path.name}.{os.getpid()}.tmp")
     try:
         result = subprocess.run(
-            [qemu_img, "convert", "-f", str(source_info.get("format") or "qcow2"),
-             "-O", "qcow2", "-S", "4k", str(source), str(temp_path)],
+            [copy_tool, "--reflink=auto", "--sparse=always", "--", str(source), str(temp_path)],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -165,9 +256,11 @@ def seal(args):
         if result.returncode != 0:
             raise CheckpointError(
                 "DR_TEST_CHECKPOINT_SEAL_FAILED",
-                (result.stderr or result.stdout or "qemu-img convert failed").strip(),
+                (result.stderr or result.stdout or "qcow2 container copy failed").strip(),
             )
         check_image(qemu_img, temp_path)
+        compare_images(qemu_img, source, source_info.get("format"), temp_path)
+        probe_checkpoint(qemu_img, temp_path, checkpoint_dir)
         fsync_path(temp_path)
         os.replace(temp_path, checkpoint)
         with metadata_temp.open("w", encoding="utf-8") as handle:
@@ -203,13 +296,23 @@ def create_overlay(qemu_img, backing, output):
 def probe_checkpoint(qemu_img, checkpoint, checkpoint_dir):
     virt_inspector = require_tool("virt-inspector")
     guestfish = require_tool("guestfish")
+    virt_cat = require_tool("virt-cat")
+    virt_ls = require_tool("virt-ls")
     probe = checkpoint_dir / f".probe-{os.getpid()}.qcow2"
     try:
         create_overlay(qemu_img, checkpoint, probe)
-        inspection = run([virt_inspector, "-a", str(probe)])
+        inspection = strict_guest_command([virt_inspector, "-a", str(probe)])
         if "<operatingsystem>" not in inspection:
             raise CheckpointError("DR_TEST_CHECKPOINT_GUEST_FS_INCONSISTENT", "no bootable operating system was discovered")
-        run([guestfish, "--rw", "-a", str(probe), "-i"], input_text="mountpoints\n")
+        strict_guest_command([guestfish, "--ro", "-a", str(probe), "-i", "mountpoints"])
+        try:
+            root = ElementTree.fromstring(inspection)
+            guest_name = str(root.findtext(".//name") or "").lower()
+        except ElementTree.ParseError as exc:
+            raise CheckpointError("DR_TEST_CHECKPOINT_GUEST_FS_INCONSISTENT", "invalid virt-inspector output") from exc
+        if guest_name == "linux":
+            strict_guest_command([virt_cat, "-a", str(probe), "/etc/fstab"])
+            strict_guest_command([virt_ls, "-a", str(probe), "-l", "/boot"])
     finally:
         if probe.exists():
             probe.unlink()
@@ -218,7 +321,6 @@ def probe_checkpoint(qemu_img, checkpoint, checkpoint_dir):
 def execute(args):
     checkpoint, metadata_path, metadata, reused = seal(args)
     qemu_img = require_tool("qemu-img")
-    probe_checkpoint(qemu_img, checkpoint, checkpoint.parent)
     output, root = canonical_under(args.output, args.storage_root, must_exist=False)
     output.parent.mkdir(parents=True, exist_ok=True)
     create_overlay(qemu_img, checkpoint, output)

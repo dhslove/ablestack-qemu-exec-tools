@@ -295,3 +295,53 @@ with `reverse_baseline_state=NOT_REQUESTED`; `FAILOVER` preserves the existing
 sequence-bound reverse-baseline behavior. This prevents immutable-checkpoint
 preparation from being rejected by an unrelated RBD reverse-baseline probe and
 does not alter the validated RBD or VMware transfer paths.
+
+## Checkpoint publication invariance hardening (2026-08-29)
+
+The first UI retest exposed a gap in the earlier seal contract. The Cloud Run,
+test session, qcow2 container check, OS discovery, and power-state validation
+all succeeded, but the guest entered emergency mode. Direct inspection proved
+that the sealed checkpoint had an inconsistent `/boot` XFS filesystem while a
+fresh QMP backup of the source and the drained canonical target mounted
+normally. The sealed image also differed from the canonical target beginning
+at byte offset 69632.
+
+For `provider=FILE` the following conditions are now publication barriers:
+
+1. The target canonical file has no local writable file descriptor. The
+   controller's `DRAINED` claim is necessary but is not accepted as sufficient
+   evidence by itself.
+2. File and parent-directory data are synchronized before source metadata is
+   captured.
+3. Because this path is qcow2 to qcow2, the qcow2 container is copied into an
+   unpublished temporary file with sparse/reflink preservation. Image-format
+   conversion is forbidden at this checkpoint boundary.
+4. `qemu-img check` must pass and `qemu-img compare` must prove byte-for-byte
+   equivalence with the drained canonical target.
+5. A disposable overlay is inspected before the immutable file is published.
+   Linux guests must permit read-only inspection of `/etc/fstab` and `/boot`;
+   mount warnings such as `Structure needs cleaning` are terminal integrity
+   failures.
+6. Only after every gate passes are the checkpoint and its version-2 metadata
+   atomically published. Metadata binds source file size and nanosecond mtime
+   in addition to the existing Plan, sequence, reference, path, format, and
+   virtual-size contract.
+7. Reuse of an existing per-cycle checkpoint repeats the content comparison
+   and guest-filesystem gate. Metadata equality alone never authorizes reuse.
+
+The immutable path remains
+`.ftctl-dr-checkpoints/<plan>/<sequence>/<device>.qcow2`. A failed temporary
+checkpoint is removed before returning an error; a previously published but
+invalid checkpoint is not silently overwritten. It is retired only after the
+failed test session is cleaned and no lease references it.
+
+| Condition | Error |
+| --- | --- |
+| canonical target still writable | `DR_TEST_CHECKPOINT_WRITER_NOT_DRAINED` |
+| copied guest-visible bytes differ | `DR_TEST_CHECKPOINT_CONTENT_MISMATCH` |
+| guest filesystem mount or inspection fails | `DR_TEST_CHECKPOINT_GUEST_FS_INCONSISTENT` |
+| same sequence resolves to changed source metadata | `DR_TEST_CHECKPOINT_SEQUENCE_MISMATCH` |
+
+This hardening is intentionally scoped to SharedMountPoint FILE checkpoints.
+The validated RBD clone and VMware/VDDK paths do not call this publisher and
+remain behaviorally unchanged.
