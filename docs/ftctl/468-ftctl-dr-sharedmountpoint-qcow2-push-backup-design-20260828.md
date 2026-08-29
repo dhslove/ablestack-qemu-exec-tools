@@ -438,6 +438,25 @@ same validation at execution to protect against a rolling upgrade between menu
 render and submission. Package creation runs the advertised-version smoke plus
 the existing VMware-to-RBD, remote RBD-to-RBD, and SharedMountPoint gates.
 
+## Live reverse-source preflight contract (2026-08-29)
+
+After failover, the promoted SharedMountPoint qcow2 is normally opened for
+write by the running target VM. Failback readiness therefore must not use a
+metadata probe that requires an exclusive or shared write lock.
+
+1. Verify that the canonical source locator is an existing regular file below
+   the declared SharedMountPoint root.
+2. Read its format through the common bounded
+   `qemu-img info --force-share --output=json` helper.
+3. Report `DR_REVERSE_SOURCE_STORAGE_MISSING` only when the file is absent or
+   inaccessible. A live-writer lock is not missing storage.
+4. Reject an accessible non-qcow2 file as an incompatible reverse source; do
+   not silently reinterpret it as qcow2.
+
+This preflight is the read-only capability gate used before the Failback menu
+submits a Run. The execution path repeats the same invariant as a final TOCTOU
+guard. VMware and RBD locators keep their existing provider-specific probes.
+
 ### Plan authority projection invariant
 
 An accepted authority contract is operation evidence and Plan capability

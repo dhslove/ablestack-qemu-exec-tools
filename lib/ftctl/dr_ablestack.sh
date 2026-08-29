@@ -1134,7 +1134,7 @@ ftctl_dr_ablestack_reverse_baseline_status() {
 
 ftctl_dr_ablestack_reverse_preflight() {
   local plan="${1-}" profile_file="${2-}" operation_intent="${3-FAILBACK_FINAL}" requested_mode="${4-AUTO}" json="${5-0}"
-  local disk_map="" disk_json source_path target_path source_spec size_bytes source_root="" qcow2_provider="0"
+  local disk_map="" disk_json source_path target_path source_spec size_bytes source_root="" qcow2_provider="0" observed_format=""
   local rc=0 ready=true baseline_state="FULL_SEED_REQUIRED" effective_mode="FULL_RESEED"
   local decision_code="DR_REVERSE_BASELINE_FULL_SEED_REQUIRED" initial_seed=true
   local source_disk_probe_state="READY" source_disk_count=0 estimated_virtual_bytes=0
@@ -1174,9 +1174,10 @@ ftctl_dr_ablestack_reverse_preflight() {
       [[ "${size_bytes}" =~ ^[0-9]+$ ]] || size_bytes=0
       estimated_virtual_bytes=$((estimated_virtual_bytes + size_bytes))
       if [[ "${qcow2_provider}" == "1" ]]; then
+        observed_format=""
         if [[ -z "${source_root}" || ! -f "${source_path}" ]] \
-            || ! qemu-img info --output=json "${source_path}" 2>/dev/null \
-              | jq -e '.format == "qcow2"' >/dev/null; then
+            || ! ftctl_dr_ablestack_qemu_info_value "${source_path}" format observed_format \
+            || [[ "${observed_format}" != "qcow2" ]]; then
           rc=82
           ready=false
           error_code="DR_REVERSE_SOURCE_STORAGE_MISSING"

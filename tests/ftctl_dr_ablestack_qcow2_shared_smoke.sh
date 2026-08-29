@@ -16,6 +16,7 @@ ftctl_state_read_kv() { :; }
 ftctl_cmd_run() {
   local _timeout="$1" out_var="$2" err_var="$3" rc_var="$4"
   shift 5
+  printf '%s\n' "$*" >> "${TMP}/cmd-run.log"
   printf -v "${out_var}" '%s' '{"format":"qcow2","virtual-size":1073741824}'
   printf -v "${err_var}" '%s' ''
   printf -v "${rc_var}" '%s' '0'
@@ -105,6 +106,24 @@ jq -e '.source.storagePath == "/mnt/glue-gfs"
   and .disks[0].sourcePath == "/mnt/glue-gfs/rocky9-vm-dr-disk-0"' \
   "${reverse_relative_canonical}" >/dev/null
 ftctl_dr_ablestack_qcow2_push_provider "${reverse_relative_canonical}"
+
+# A promoted SharedMountPoint qcow2 remains locked by the running VM. Reverse
+# preflight must use the shared-safe metadata probe instead of reporting the
+# existing source file as missing.
+reverse_live_profile="${TMP}/profile-reverse-live.json"
+reverse_live_source="${TMP}/live-source-volume"
+touch "${reverse_live_source}"
+jq --arg root "${TMP}" --arg path "${reverse_live_source}" \
+  '.source.storagePath=$root
+  | .source.storagePoolType="SharedMountPoint"
+  | .mapping.disks[0] |= (.sourcePath=$path | .sourceFormat="qcow2")' \
+  "${profile}" > "${reverse_live_profile}"
+: > "${TMP}/cmd-run.log"
+reverse_live_preflight="$(ftctl_dr_ablestack_reverse_preflight plan-reverse-live "${reverse_live_profile}" FAILBACK_FINAL AUTO 1)"
+jq -e '.ready == true
+  and .source_disk_probe_state == "READY"
+  and .effective_mode == "FULL_RESEED"' <<< "${reverse_live_preflight}" >/dev/null
+grep -q 'qemu-img info --force-share --output=json' "${TMP}/cmd-run.log"
 
 rbd_profile="${TMP}/profile-rbd.json"
 rbd_canonical="${TMP}/canonical-rbd.json"
