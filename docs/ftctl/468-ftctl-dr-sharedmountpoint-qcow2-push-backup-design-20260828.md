@@ -459,6 +459,12 @@ for this check. The original `sourcePath` may be absent after loss of the
 original site and must not block Failback. This is the same locator invariant
 used by the RBD branch and the runtime reverse-profile builder.
 
+Provider selection follows the same authority boundary. Forward qcow2 transfer
+requires both source and target capabilities, while reverse preflight classifies
+the promoted source exclusively from `targetType=file` and
+`targetFormat=qcow2`. A missing original file must not erase the retained target
+format and route the check through the RBD probe.
+
 This preflight is the read-only capability gate used before the Failback menu
 submits a Run. The execution path repeats the same invariant as a final TOCTOU
 guard. VMware and RBD locators keep their existing provider-specific probes.

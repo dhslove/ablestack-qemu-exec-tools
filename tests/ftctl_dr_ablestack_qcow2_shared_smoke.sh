@@ -119,8 +119,12 @@ jq --arg root "${TMP}" --arg path "${reverse_live_source}" \
   | .target.storagePath=$root
   | .target.storagePoolType="SharedMountPoint"
   | .mapping.disks[0] |= (.sourcePath=($root + "/missing-original-source")
-      | .sourceFormat="qcow2" | .targetPath=$path | .targetFormat="qcow2")' \
+      | del(.sourceFormat) | .targetPath=$path | .targetFormat="qcow2")' \
   "${profile}" > "${reverse_live_profile}"
+reverse_live_canonical="${TMP}/canonical-reverse-live.json"
+ftctl_dr_ablestack_canonicalize_profile "${reverse_live_profile}" "${reverse_live_canonical}"
+! ftctl_dr_ablestack_qcow2_push_provider "${reverse_live_canonical}"
+ftctl_dr_ablestack_qcow2_reverse_source_provider "${reverse_live_canonical}"
 : > "${TMP}/cmd-run.log"
 reverse_live_preflight="$(ftctl_dr_ablestack_reverse_preflight plan-reverse-live "${reverse_live_profile}" FAILBACK_FINAL AUTO 1)"
 jq -e '.ready == true

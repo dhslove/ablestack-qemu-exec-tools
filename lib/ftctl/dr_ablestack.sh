@@ -1163,7 +1163,7 @@ ftctl_dr_ablestack_reverse_preflight() {
   fi
 
   if [[ "${rc}" == "0" ]]; then
-    if ftctl_dr_ablestack_qcow2_push_provider "${disk_map}"; then
+    if ftctl_dr_ablestack_qcow2_reverse_source_provider "${disk_map}"; then
       qcow2_provider="1"
       reverse_source_root="$(ftctl_dr_ablestack_json_field "${profile_file}" target.storagePath 2>/dev/null || true)"
       [[ -n "${reverse_source_root}" ]] \
@@ -1405,6 +1405,18 @@ ftctl_dr_ablestack_qcow2_push_provider() {
     target_format="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" targetFormat)"
     [[ "${source_type}" == "file" && "${source_format}" == "qcow2" \
        && "${target_type}" == "file" && "${target_format}" == "qcow2" ]] || return 1
+    count=$((count + 1))
+  done < <(ftctl_dr_ablestack_disk_rows "${disk_map}")
+  (( count > 0 ))
+}
+
+ftctl_dr_ablestack_qcow2_reverse_source_provider() {
+  local disk_map="${1-}" disk_json target_type target_format count=0
+  [[ -s "${disk_map}" ]] || return 1
+  while IFS= read -r disk_json; do
+    target_type="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" targetType)"
+    target_format="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" targetFormat)"
+    [[ "${target_type}" == "file" && "${target_format}" == "qcow2" ]] || return 1
     count=$((count + 1))
   done < <(ftctl_dr_ablestack_disk_rows "${disk_map}")
   (( count > 0 ))
