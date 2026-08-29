@@ -1410,6 +1410,95 @@ ftctl_dr_ablestack_qcow2_push_provider() {
   (( count > 0 ))
 }
 
+ftctl_dr_ablestack_rebind_live_qcow2_sources() {
+  local plan="${1-}" disk_map="${2-}" source_provider source_driver vm_name
+  local qmp_path tmp_path result="" rebound_count="0"
+  [[ -n "${plan}" && -s "${disk_map}" ]] || return 2
+
+  source_provider="$(ftctl_dr_ablestack_json_field "${disk_map}" sourceProvider 2>/dev/null || true)"
+  source_driver="$(ftctl_dr_ablestack_json_field "${disk_map}" sourceDriver 2>/dev/null || true)"
+  [[ "${source_provider}" == "ABLESTACK" && "${source_driver}" == "KVM_QMP" ]] || return 0
+  ftctl_dr_ablestack_qcow2_push_provider "${disk_map}" || return 0
+
+  vm_name="$(ftctl_dr_ablestack_json_field "${disk_map}" source.instanceName 2>/dev/null || true)"
+  [[ -n "${vm_name}" ]] || return 32
+  qmp_path="$(mktemp "${TMPDIR:-/tmp}/ftctl-dr-qcow2-nodes.XXXXXX.json")" || return 2
+  tmp_path="${disk_map}.live-source.$$"
+  trap 'rm -f -- "${qmp_path:-}" "${tmp_path:-}"; trap - RETURN' RETURN
+
+  if ! virsh -c "${FTCTL_PROFILE_PRIMARY_URI:-qemu:///system}" qemu-monitor-command "${vm_name}" --pretty \
+      '{"execute":"query-named-block-nodes"}' > "${qmp_path}" 2>/dev/null; then
+    return 101
+  fi
+
+  result="$(python3 - "${disk_map}" "${qmp_path}" "${tmp_path}" <<'PY'
+import json
+import os
+import sys
+
+disk_map_path, qmp_path, output_path = sys.argv[1:4]
+with open(disk_map_path, "r", encoding="utf-8") as fh:
+    disk_map = json.load(fh)
+with open(qmp_path, "r", encoding="utf-8") as fh:
+    response = json.load(fh)
+
+nodes = response.get("return") if isinstance(response, dict) else None
+if not isinstance(nodes, list):
+    raise SystemExit("QMP named block node response is invalid")
+
+candidates = []
+for node in nodes:
+    if not isinstance(node, dict) or node.get("drv") != "qcow2" or node.get("active") is not True:
+        continue
+    path = str((node.get("image") or {}).get("filename") or node.get("file") or "").strip()
+    if path and os.path.isabs(path):
+        candidates.append((os.path.normpath(path), int((node.get("image") or {}).get("virtual-size") or 0)))
+
+rebound = []
+for disk in disk_map.get("disks") or []:
+    if str(disk.get("sourceType") or "").lower() != "file" or str(disk.get("sourceFormat") or "").lower() != "qcow2":
+        continue
+    configured = os.path.normpath(str(disk.get("sourcePath") or "").strip())
+    exact = [item for item in candidates if item[0] == configured]
+    if exact:
+        continue
+    identity = str(disk.get("device") or "").strip()
+    expected_size = int(disk.get("sizeBytes") or 0)
+    matches = []
+    for path, size in candidates:
+        base = os.path.basename(path)
+        identity_match = identity and (base == identity or base.startswith(identity + "-"))
+        size_match = expected_size <= 0 or size <= 0 or size == expected_size
+        if identity_match and size_match:
+            matches.append((path, size))
+    if len(matches) != 1:
+        raise SystemExit(f"active qcow2 source path was not uniquely resolved for {identity or configured}")
+    live_path = matches[0][0]
+    rebound.append((identity, configured, live_path))
+    disk["sourcePath"] = live_path
+    disk["sourceType"] = "file"
+    disk["sourceFormat"] = "qcow2"
+
+with open(output_path, "w", encoding="utf-8") as fh:
+    json.dump(disk_map, fh, sort_keys=True, separators=(",", ":"))
+    fh.write("\n")
+print(len(rebound))
+for identity, old_path, live_path in rebound:
+    print(f"{identity}\t{old_path}\t{live_path}")
+PY
+)" || return 32
+
+  mv -f "${tmp_path}" "${disk_map}" || return 2
+  rebound_count="$(head -n 1 <<< "${result}")"
+  if [[ "${rebound_count}" =~ ^[1-9][0-9]*$ ]]; then
+    while IFS=$'\t' read -r device old_path live_path; do
+      [[ -n "${device}${old_path}${live_path}" ]] || continue
+      ftctl_log_event "dr-runtime" "dr.ablestack.qcow2_source_rebound" "ok" "" "" \
+        "plan=${plan} device=${device} configured=${old_path} live=${live_path}"
+    done < <(tail -n +2 <<< "${result}")
+  fi
+}
+
 ftctl_dr_ablestack_qcow2_reverse_source_provider() {
   local disk_map="${1-}" disk_json target_type target_format count=0
   [[ -s "${disk_map}" ]] || return 1
@@ -1731,6 +1820,7 @@ ftctl_dr_ablestack_prepare_targets() {
   local source_at remote_transport="0"
 
   ftctl_dr_ablestack_canonicalize_profile "${profile_file}" "${disk_map}" || return $?
+  ftctl_dr_ablestack_rebind_live_qcow2_sources "${plan}" "${disk_map}" || return $?
   if ftctl_dr_ablestack_remote_transport_load "${disk_map}" ||
      ftctl_dr_ablestack_site_agent_transport_load "${disk_map}"; then
     remote_transport="1"
@@ -2065,6 +2155,7 @@ ftctl_dr_ablestack_qcow2_incremental_once() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" disk_map="${4-}" manifest_path="${5-}" checkpoint_path="${6-}" sequence="${7-}"
   local disk_json vm_name result changed_bytes total_changed_bytes=0 started_at completed_at disk_count disk_index=0 rc=0 effective_mode
   ftctl_dr_ablestack_canonicalize_profile "${profile_file}" "${disk_map}" || return $?
+  ftctl_dr_ablestack_rebind_live_qcow2_sources "${plan}" "${disk_map}" || return $?
   ftctl_dr_ablestack_site_agent_transport_load "${disk_map}" || return 90
   ftctl_dr_ablestack_qcow2_push_provider "${disk_map}" || return 90
   vm_name="$(ftctl_dr_ablestack_json_field "${disk_map}" source.instanceName 2>/dev/null || true)"

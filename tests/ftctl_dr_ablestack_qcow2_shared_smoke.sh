@@ -62,6 +62,50 @@ assert disk["sourceType"] == "file"
 assert disk["targetFormat"] == "qcow2"
 PY
 
+# A canceled failover can restore the source VM on its durable volume after a
+# temporary clone overlay has been removed. Rebind only the ABLESTACK KVM_QMP
+# qcow2 source whose stable volume identity uniquely matches the live QMP node.
+live_volume_uuid="86ad3ac3-3552-4889-a5da-7eab4c10a7a5"
+stale_source_profile="${TMP}/profile-stale-source.json"
+stale_source_canonical="${TMP}/canonical-stale-source.json"
+jq --arg device "${live_volume_uuid}" \
+   --arg stale "/mnt/glue-gfs/clone/overlay/${live_volume_uuid}-old-overlay" \
+  '.source.driver="KVM_QMP"
+  | .mapping.disks[0].device=$device
+  | .mapping.disks[0].sourcePath=$stale' \
+  "${profile}" > "${stale_source_profile}"
+ftctl_dr_ablestack_canonicalize_profile "${stale_source_profile}" "${stale_source_canonical}"
+virsh() {
+  cat <<EOF
+{"return":[
+  {"node-name":"libvirt-pflash0-format","drv":"qcow2","active":true,"image":{"filename":"/usr/share/edk2/ovmf/OVMF_CODE.secboot.fd","virtual-size":3653632}},
+  {"node-name":"libvirt-2-format","drv":"qcow2","active":true,"image":{"filename":"/mnt/glue-gfs/${live_volume_uuid}","virtual-size":1073741824}}
+]}
+EOF
+}
+ftctl_dr_ablestack_rebind_live_qcow2_sources plan-qcow2 "${stale_source_canonical}"
+jq -e --arg live "/mnt/glue-gfs/${live_volume_uuid}" \
+  '.disks[0].sourcePath == $live and .disks[0].sourceFormat == "qcow2"' \
+  "${stale_source_canonical}" >/dev/null
+
+ambiguous_source_canonical="${TMP}/canonical-ambiguous-source.json"
+cp "${stale_source_canonical}" "${ambiguous_source_canonical}"
+jq --arg stale "/mnt/glue-gfs/clone/overlay/${live_volume_uuid}-old-overlay" \
+  '.disks[0].sourcePath=$stale' "${ambiguous_source_canonical}" > "${ambiguous_source_canonical}.tmp"
+mv "${ambiguous_source_canonical}.tmp" "${ambiguous_source_canonical}"
+virsh() {
+  cat <<EOF
+{"return":[
+  {"node-name":"libvirt-2-format","drv":"qcow2","active":true,"image":{"filename":"/mnt/glue-gfs/${live_volume_uuid}","virtual-size":1073741824}},
+  {"node-name":"libvirt-3-format","drv":"qcow2","active":true,"image":{"filename":"/mnt/glue-gfs/${live_volume_uuid}-other","virtual-size":1073741824}}
+]}
+EOF
+}
+if ftctl_dr_ablestack_rebind_live_qcow2_sources plan-qcow2 "${ambiguous_source_canonical}" 2>/dev/null; then
+  echo "[ERR] ambiguous live qcow2 source identity was accepted" >&2
+  exit 1
+fi
+
 relative_target_profile="${TMP}/profile-relative-target.json"
 relative_target_canonical="${TMP}/canonical-relative-target.json"
 jq '.mapping.disks[0] |= (.targetPath="target-volume" | .targetStoragePath="/mnt/glue-gfs" | .targetStorageType="SharedMountPoint")' \

@@ -525,3 +525,42 @@ materialized VM Detail manifest before allowing test failover or failover to
 cross the boot gate. This keeps the existing VMware-to-RBD transport and
 RBD-to-RBD checkpoint contracts unchanged while applying one VM metadata rule
 to both SharedMountPoint qcow2 and RBD ABLESTACK targets.
+
+## Canceled Failover Source Rebinding Contract
+
+A canceled `KVM_TO_KVM` Failover restores source authority before replication
+resumes. Cloud may legitimately restart that VM on its durable Cloud volume
+after removing the temporary clone overlay that was active when the Plan
+profile was captured. The stable disk identity is the Cloud volume UUID; an
+overlay pathname is observation data and is not durable identity.
+
+Before every SharedMountPoint qcow2 full or incremental transfer, FTCTL now
+reconciles the canonical disk map with the running source domain:
+
+1. The gate applies only to `sourceProvider=ABLESTACK`,
+   `sourceDriver=KVM_QMP`, and `file/qcow2 -> file/qcow2`. VMware and RBD
+   dispatch never enter it.
+2. FTCTL reads active qcow2 nodes through QMP without modifying the disk graph.
+3. The configured path is retained when it is still the unique active node.
+4. If that path disappeared, FTCTL may rebind only to one active qcow2 node
+   whose basename carries the same Cloud volume UUID and whose virtual size
+   matches the Plan disk contract.
+5. No match or more than one match fails closed before a bitmap or target write
+   is started. Path guessing by disk order is forbidden.
+6. The per-cycle disk map is updated atomically and the old and live paths are
+   recorded as runtime evidence. The stale profile remains immutable input.
+7. A missing dirty bitmap after source restart causes one normal automatic
+   full reseed on the rebound durable volume. That successful job establishes
+   the new persistent bitmap; subsequent cycles return to incremental mode.
+
+The canceled operation's failed manual `FULL_RESEED` record remains terminal
+history and is not replayed merely because the scheduler restarts. Recovery is
+owned by the current scheduler Run and its new Cycle sequence.
+
+| Area | AS-IS | TO-BE |
+| --- | --- | --- |
+| Source locator after cancel | Deleted overlay remains in the profile | Stable volume UUID resolves the unique active QMP node |
+| Full reseed | Fails before transfer with a stale pathname | Rebinds first, then establishes a bitmap on the durable source |
+| Incremental baseline | Missing bitmap becomes a restart loop | One controlled reseed followed by incremental cycles |
+| Ambiguous identity | Could tempt positional disk matching | Fails closed before any target write |
+| Existing providers | Shared recovery code could alter them | VMware and RBD paths bypass this gate |
