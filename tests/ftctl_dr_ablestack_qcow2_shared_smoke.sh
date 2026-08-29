@@ -72,7 +72,8 @@ jq --arg device "${live_volume_uuid}" \
    --arg stale "/mnt/glue-gfs/clone/overlay/${live_volume_uuid}-old-overlay" \
   '.source.driver="KVM_QMP"
   | .mapping.disks[0].device=$device
-  | .mapping.disks[0].sourcePath=$stale' \
+  | .mapping.disks[0].sourcePath=$stale
+  | del(.mapping.disks[0].sourceFormat)' \
   "${profile}" > "${stale_source_profile}"
 ftctl_dr_ablestack_canonicalize_profile "${stale_source_profile}" "${stale_source_canonical}"
 virsh() {

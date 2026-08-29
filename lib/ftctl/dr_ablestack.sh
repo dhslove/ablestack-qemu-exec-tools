@@ -1418,7 +1418,11 @@ ftctl_dr_ablestack_rebind_live_qcow2_sources() {
   source_provider="$(ftctl_dr_ablestack_json_field "${disk_map}" sourceProvider 2>/dev/null || true)"
   source_driver="$(ftctl_dr_ablestack_json_field "${disk_map}" sourceDriver 2>/dev/null || true)"
   [[ "${source_provider}" == "ABLESTACK" && "${source_driver}" == "KVM_QMP" ]] || return 0
-  ftctl_dr_ablestack_qcow2_push_provider "${disk_map}" || return 0
+  jq -e '.disks | length > 0 and all(.[];
+      (.sourceType // "" | ascii_downcase) == "file"
+      and ((.sourceFormat // "" | ascii_downcase) == "" or (.sourceFormat // "" | ascii_downcase) == "qcow2")
+      and (.targetType // "" | ascii_downcase) == "file"
+      and (.targetFormat // "" | ascii_downcase) == "qcow2")' "${disk_map}" >/dev/null 2>&1 || return 0
 
   vm_name="$(ftctl_dr_ablestack_json_field "${disk_map}" source.instanceName 2>/dev/null || true)"
   [[ -n "${vm_name}" ]] || return 32
@@ -1456,11 +1460,14 @@ for node in nodes:
 
 rebound = []
 for disk in disk_map.get("disks") or []:
-    if str(disk.get("sourceType") or "").lower() != "file" or str(disk.get("sourceFormat") or "").lower() != "qcow2":
+    source_format = str(disk.get("sourceFormat") or "").lower()
+    if str(disk.get("sourceType") or "").lower() != "file" or source_format not in ("", "qcow2"):
         continue
     configured = os.path.normpath(str(disk.get("sourcePath") or "").strip())
     exact = [item for item in candidates if item[0] == configured]
     if exact:
+        disk["sourceType"] = "file"
+        disk["sourceFormat"] = "qcow2"
         continue
     identity = str(disk.get("device") or "").strip()
     expected_size = int(disk.get("sizeBytes") or 0)
