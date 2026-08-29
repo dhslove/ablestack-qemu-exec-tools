@@ -14,6 +14,8 @@ export FTCTL_PROFILE_DIR="${TMP}/profiles"
 source "${ROOT}/lib/ftctl/common.sh"
 # shellcheck source=../lib/ftctl/state.sh
 source "${ROOT}/lib/ftctl/state.sh"
+# shellcheck source=../lib/ftctl/logging.sh
+source "${ROOT}/lib/ftctl/logging.sh"
 # shellcheck source=../lib/ftctl/dr_runtime.sh
 source "${ROOT}/lib/ftctl/dr_runtime.sh"
 

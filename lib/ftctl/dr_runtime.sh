@@ -305,7 +305,8 @@ ftctl_dr_runtime_capture_authority_context() {
   local plan="${1-}" run_path="${2-}" prior_status_path="${3-}" authority_spec_path="${4-}"
   local active_path snapshot_path active_side authority_state checkpoint_sequence
   local target_power_state target_promotion_state session_id authority_generation authority_sequence_floor authority_source key value
-  local effective_authority_floor
+  local effective_authority_floor prior_authority_generation prior_authority_floor
+  local projected_authority_generation projected_authority_floor
   local -a projection_updates=()
 
   active_path="$(ftctl_dr_runtime_active_failover_session_path "${plan}")"
@@ -437,6 +438,31 @@ PY
   fi
   if [[ "${effective_authority_floor}" =~ ^[0-9]+$ ]]; then
     ftctl_dr_scheduler_floor_authority_sequence "${plan}" "${effective_authority_floor}" >/dev/null || return $?
+  fi
+
+  # Authority accepted for an operation is also Plan-owned capability evidence.
+  # Keep it monotonic in status.state so plan-scoped preflight and dr-status do
+  # not fall back to a stale scheduler sequence after the operation Run exits.
+  if [[ -n "${prior_status_path}" ]]; then
+    prior_authority_generation="$(ftctl_dr_runtime_state_get_from_path \
+      "${prior_status_path}" "cloud_authority_generation")"
+    prior_authority_floor="$(ftctl_dr_runtime_state_get_from_path \
+      "${prior_status_path}" "cloud_authority_sequence_floor")"
+    projected_authority_generation="${authority_generation}"
+    projected_authority_floor="${authority_sequence_floor}"
+    if [[ "${prior_authority_generation}" =~ ^[0-9]+$ ]] && \
+        { [[ ! "${projected_authority_generation}" =~ ^[0-9]+$ ]] || \
+          (( prior_authority_generation > projected_authority_generation )); }; then
+      projected_authority_generation="${prior_authority_generation}"
+    fi
+    if [[ "${prior_authority_floor}" =~ ^[0-9]+$ ]] && \
+        { [[ ! "${projected_authority_floor}" =~ ^[0-9]+$ ]] || \
+          (( prior_authority_floor > projected_authority_floor )); }; then
+      projected_authority_floor="${prior_authority_floor}"
+    fi
+    ftctl_dr_runtime_path_set "${prior_status_path}" \
+      "cloud_authority_generation=${projected_authority_generation}" \
+      "cloud_authority_sequence_floor=${projected_authority_floor}" || return $?
   fi
 
   # Preserve the last completed replication cycle as one Plan-owned

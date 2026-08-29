@@ -437,3 +437,17 @@ Cloud may cache the response briefly for menu rendering, but FTCTL repeats the
 same validation at execution to protect against a rolling upgrade between menu
 render and submission. Package creation runs the advertised-version smoke plus
 the existing VMware-to-RBD, remote RBD-to-RBD, and SharedMountPoint gates.
+
+### Plan authority projection invariant
+
+An accepted authority contract is operation evidence and Plan capability
+evidence at the same time. FTCTL persists `cloud_authority_generation` and
+`cloud_authority_sequence_floor` in both the operation Run and the Plan status,
+using a monotonic maximum so a delayed or retried command cannot lower either
+value. Plan-scoped `dr-status` and Cloud pre-action capability evaluation must
+therefore observe the same floor that the execution guard accepted.
+
+This prevents a completed Run from disappearing before menu evaluation and
+making the Plan fall back to an older scheduler sequence. The execution guard
+remains mandatory as a final time-of-check/time-of-use validation, but it is no
+longer the first place where an incompatible action is discovered.
