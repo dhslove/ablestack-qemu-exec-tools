@@ -482,3 +482,18 @@ This prevents a completed Run from disappearing before menu evaluation and
 making the Plan fall back to an older scheduler sequence. The execution guard
 remains mandatory as a final time-of-check/time-of-use validation, but it is no
 longer the first place where an incompatible action is discovered.
+
+## Cloud VM Detail authority boundary
+
+For `KVM_TO_KVM`, Cloud and the source Mold API own VM Detail capture and
+target VM Detail restoration. FTCTL must not infer firmware, TPM, controller,
+or I/O policy from the guest OS and must not translate Cloud's `UEFI` Detail
+into private `bootType` or `bootMode` keys. FTCTL transports and seals disk
+checkpoints; Cloud materializes the VM from the source Detail snapshot.
+
+The only FTCTL-visible requirement is ordering: Cloud completes its read-only
+source Detail preflight before checkpoint consumption, and it verifies the
+materialized VM Detail manifest before allowing test failover or failover to
+cross the boot gate. This keeps the existing VMware-to-RBD transport and
+RBD-to-RBD checkpoint contracts unchanged while applying one VM metadata rule
+to both SharedMountPoint qcow2 and RBD ABLESTACK targets.
