@@ -346,6 +346,34 @@ This hardening is intentionally scoped to SharedMountPoint FILE checkpoints.
 The validated RBD clone and VMware/VDDK paths do not call this publisher and
 remain behaviorally unchanged.
 
+### Windows guest-filesystem probe contract (2026-08-29)
+
+`guestfish -i` is not an authoritative Windows consistency check. On the
+supported EL9 libguestfs stack it can discover a valid Windows NTFS root and
+then return `mount: unsupported filesystem type`, while the same appliance's
+`ntfs-3g` mounts that root read-only and reads the guest successfully. Treating
+that wrapper failure as disk corruption produces a false
+`DR_TEST_CHECKPOINT_GUEST_FS_INCONSISTENT`.
+
+The FILE checkpoint publisher therefore uses OS-specific, read-only evidence:
+
+1. `virt-inspector` must discover exactly one bootable operating-system root.
+2. Linux keeps the automatic read-only mount plus `/etc/fstab` and `/boot`
+   probes.
+3. Windows mounts the discovered root with the appliance's `ntfs-3g -o ro`
+   and requires `Windows/System32/config/SYSTEM` to be readable. No QGA or
+   guest network is required.
+4. A missing filesystem helper or an unsupported appliance filesystem is
+   `DR_TEST_CHECKPOINT_GUEST_FS_DRIVER_UNAVAILABLE`; it is an environment
+   readiness failure, not guest corruption.
+5. Dirty metadata, I/O errors, structure-cleaning requirements, or an unreadable
+   Windows system hive remain
+   `DR_TEST_CHECKPOINT_GUEST_FS_INCONSISTENT`.
+
+The probe runs against a disposable overlay after writer drain, byte comparison,
+and `qemu-img check`, and before any test VM or Cloud volume is created. It
+does not repair the checkpoint and does not infer boot success from QGA.
+
 ## SharedMountPoint cutover reverse baseline contract (2026-08-29)
 
 An actual FILE-provider Failover must establish the reverse incremental

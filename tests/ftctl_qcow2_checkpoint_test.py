@@ -140,6 +140,45 @@ class Qcow2CheckpointTest(unittest.TestCase):
         self.assertFalse(self.output.exists())
 
     @mock.patch.object(MODULE.shutil, "which", side_effect=lambda name: f"/usr/bin/{name}")
+    @mock.patch.object(MODULE.subprocess, "run")
+    def test_windows_probe_mounts_ntfs_root_and_reads_system_hive(self, run_mock, _which):
+        guestfish_inputs = []
+
+        def windows_run(command, **kwargs):
+            if Path(command[0]).name == "virt-inspector":
+                return mock.Mock(
+                    returncode=0,
+                    stdout=("<operatingsystems><operatingsystem><name>windows</name>"
+                            "<root>/dev/sda3</root></operatingsystem></operatingsystems>"),
+                    stderr="",
+                )
+            if Path(command[0]).name == "guestfish":
+                guestfish_inputs.append(kwargs.get("input", ""))
+                return mock.Mock(returncode=0, stdout="", stderr="")
+            return self.fake_run(command, **kwargs)
+
+        run_mock.side_effect = windows_run
+        result = MODULE.execute(self.args)
+
+        self.assertEqual("PASSED", result["checkpointIntegrityState"])
+        self.assertEqual(1, len(guestfish_inputs))
+        self.assertIn("ntfs-3g -o ro /dev/sda3", guestfish_inputs[0])
+        self.assertIn("Windows/System32/config/SYSTEM", guestfish_inputs[0])
+
+    @mock.patch.object(MODULE.subprocess, "run")
+    def test_unsupported_guest_filesystem_driver_is_not_reported_as_corruption(self, run_mock):
+        run_mock.return_value = mock.Mock(
+            returncode=1,
+            stdout="",
+            stderr="libguestfs: error: mount: unsupported filesystem type",
+        )
+
+        with self.assertRaises(MODULE.CheckpointError) as context:
+            MODULE.strict_guest_command(["guestfish", "--ro"])
+
+        self.assertEqual("DR_TEST_CHECKPOINT_GUEST_FS_DRIVER_UNAVAILABLE", context.exception.code)
+
+    @mock.patch.object(MODULE.shutil, "which", side_effect=lambda name: f"/usr/bin/{name}")
     @mock.patch.object(MODULE, "writable_holders", return_value=["pid=4242 command=qemu-kvm fd=17"])
     def test_rejects_checkpoint_while_canonical_target_is_writable(self, _holders, _which):
         with self.assertRaises(MODULE.CheckpointError) as context:

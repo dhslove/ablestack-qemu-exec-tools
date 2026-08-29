@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -162,9 +163,10 @@ def ensure_source_quiescent(source):
         )
 
 
-def strict_guest_command(command):
+def strict_guest_command(command, *, input_text=None):
     result = subprocess.run(
         command,
+        input=input_text,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -172,6 +174,12 @@ def strict_guest_command(command):
     )
     detail = "\n".join(part for part in (result.stderr.strip(), result.stdout.strip()) if part)
     lowered = detail.lower()
+    unavailable_markers = (
+        "unsupported filesystem type",
+        "unknown filesystem type",
+        "ntfs-3g: not found",
+        "mount.ntfs: not found",
+    )
     unsafe_markers = (
         "some filesystems could not be mounted",
         "structure needs cleaning",
@@ -179,12 +187,41 @@ def strict_guest_command(command):
         "input/output error",
         "filesystem is inconsistent",
     )
+    if any(marker in lowered for marker in unavailable_markers):
+        raise CheckpointError(
+            "DR_TEST_CHECKPOINT_GUEST_FS_DRIVER_UNAVAILABLE",
+            detail or "guest filesystem driver is unavailable",
+        )
     if result.returncode != 0 or any(marker in lowered for marker in unsafe_markers):
         raise CheckpointError(
             "DR_TEST_CHECKPOINT_GUEST_FS_INCONSISTENT",
             detail or "guest filesystem inspection failed",
         )
     return result.stdout
+
+
+def windows_root_device(inspection_root):
+    device = str(inspection_root.findtext(".//root") or "").strip()
+    if not re.fullmatch(r"/dev/[A-Za-z0-9._/+:-]+", device):
+        raise CheckpointError(
+            "DR_TEST_CHECKPOINT_GUEST_FS_INCONSISTENT",
+            "Windows root filesystem device could not be determined",
+        )
+    return device
+
+
+def probe_windows_root(guestfish, probe, inspection_root):
+    device = windows_root_device(inspection_root)
+    mountpoint = "/tmp/ftctl-windows-root"
+    shell = (
+        "set -eu; "
+        f"rm -rf {shlex.quote(mountpoint)}; mkdir -p {shlex.quote(mountpoint)}; "
+        f"/usr/bin/ntfs-3g -o ro {shlex.quote(device)} {shlex.quote(mountpoint)}; "
+        f"test -f {shlex.quote(mountpoint + '/Windows/System32/config/SYSTEM')}; "
+        f"umount {shlex.quote(mountpoint)}; rmdir {shlex.quote(mountpoint)}"
+    )
+    script = "run\ndebug sh " + json.dumps(shell) + "\n"
+    strict_guest_command([guestfish, "--ro", "-a", str(probe)], input_text=script)
 
 
 def seal(args):
@@ -304,12 +341,15 @@ def probe_checkpoint(qemu_img, checkpoint, checkpoint_dir):
         inspection = strict_guest_command([virt_inspector, "-a", str(probe)])
         if "<operatingsystem>" not in inspection:
             raise CheckpointError("DR_TEST_CHECKPOINT_GUEST_FS_INCONSISTENT", "no bootable operating system was discovered")
-        strict_guest_command([guestfish, "--ro", "-a", str(probe), "-i", "mountpoints"])
         try:
             root = ElementTree.fromstring(inspection)
             guest_name = str(root.findtext(".//name") or "").lower()
         except ElementTree.ParseError as exc:
             raise CheckpointError("DR_TEST_CHECKPOINT_GUEST_FS_INCONSISTENT", "invalid virt-inspector output") from exc
+        if guest_name == "windows":
+            probe_windows_root(guestfish, probe, root)
+        else:
+            strict_guest_command([guestfish, "--ro", "-a", str(probe), "-i", "mountpoints"])
         if guest_name == "linux":
             strict_guest_command([virt_cat, "-a", str(probe), "/etc/fstab"])
             strict_guest_command([virt_ls, "-a", str(probe), "-l", "/boot"])
