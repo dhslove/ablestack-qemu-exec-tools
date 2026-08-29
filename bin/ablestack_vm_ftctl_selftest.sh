@@ -6659,6 +6659,9 @@ EOF
   selftest_assert_contains "${capabilities}" '"dr-scheduler-singleton-v1"' "singleton scheduler capability"
   selftest_assert_contains "${capabilities}" '"checkpoint-lease"' "checkpoint lease capability"
   selftest_assert_contains "${capabilities}" '"file-checkpoint-invariance-v1"' "immutable file checkpoint capability"
+  selftest_assert_contains "${capabilities}" \
+    '"reprotect_authority_contract_versions":["2026-07-23","2026-08-26"]' \
+    "reprotect authority contracts are advertised from the runtime gate"
 }
 
 selftest_case_dr_ablestack_target_prepare() {

@@ -393,3 +393,33 @@ The package helper writes the permanent service definition and applies the
 service, or its explicit ports when the runtime definition is not yet known,
 to active zones without reloading firewalld. The no-reload smoke test is a
 release gate.
+
+## Reprotect Authority Contract Compatibility (2026-08-29)
+
+The existing 13-to-31 SharedMountPoint plan exposed a rolling contract mismatch
+after Failover. Cloud emitted Reprotect authority contract `2026-08-26`, while
+the FTCTL authority persistence gate accepted only `2026-07-23`. Both versions
+carry the same fields consumed by FTCTL: target active side, authority
+generation, cutover session, checkpoint sequence, and target VM identity.
+
+FTCTL therefore owns one explicit compatible-version list and uses it for both
+authority persistence and the `dr-capabilities` response. The older value
+remains accepted for previously validated VMware/RBD and RBD/RBD plans, while
+the newer value allows the current Cloud producer to reach the same strict
+field validation. Cloud must select a writer version advertised by the
+coordinator before dispatch. Unknown versions remain rejected with exit code
+79. This change does not alter checkpoint selection, qcow2 bitmap baseline,
+transfer ordering, target materialization, or authority generation.
+
+| Area | AS-IS | TO-BE |
+|---|---|---|
+| FTCTL contract gate | Parser owns an isolated literal | One runtime list drives parser and capabilities |
+| Existing plans | Depend on the old literal | Old literal remains valid |
+| Current Cloud | Reprotect rejected before authority capture | New literal reaches the same field checks |
+| Unknown contract | Rejected | Still rejected fail-closed |
+
+The release gate must consume the advertised list, exercise every supported
+version and reject one unsupported version before packaging. It must also run
+the VMware-to-RBD action contract and ABLESTACK RBD-to-RBD reverse transport
+smokes. Runtime PASS still requires the existing 31 UI plan to complete
+Reprotect and then Failback; unit acceptance alone is insufficient.

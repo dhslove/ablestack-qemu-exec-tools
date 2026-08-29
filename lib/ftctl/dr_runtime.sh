@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------
+
+FTCTL_DR_REPROTECT_AUTHORITY_CONTRACT_VERSIONS="${FTCTL_DR_REPROTECT_AUTHORITY_CONTRACT_VERSIONS:-2026-07-23,2026-08-26}"
 # Copyright 2026 ABLECLOUD
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -782,19 +784,28 @@ ftctl_dr_runtime_save_authority_spec() {
   [[ -n "${spec_file}" && -f "${spec_file}" ]] || return 2
   out_path="$(ftctl_dr_runtime_authority_spec_path "${plan}" "${run}")"
   ftctl_dr_runtime_ensure_plan_dirs "${plan}"
-  python3 - "${spec_file}" "${plan}" "${run}" <<'PY' || return $?
+  python3 - "${spec_file}" "${plan}" "${run}" \
+    "${FTCTL_DR_REPROTECT_AUTHORITY_CONTRACT_VERSIONS}" <<'PY' || return $?
 import json
 import sys
 
-path, plan, run = sys.argv[1:4]
+path, plan, run, supported_csv = sys.argv[1:5]
 try:
     with open(path, "r", encoding="utf-8") as fh:
         spec = json.load(fh)
 except (OSError, ValueError) as exc:
     sys.stderr.write(f"ERROR: invalid authority spec JSON: {exc}\n")
     sys.exit(79)
-if str(spec.get("contractVersion") or "") != "2026-07-23":
-    sys.stderr.write("ERROR: authority contractVersion 2026-07-23 is required\n")
+contract_version = str(spec.get("contractVersion") or "")
+supported_contract_versions = {
+    item.strip() for item in supported_csv.split(",") if item.strip()
+}
+if contract_version not in supported_contract_versions:
+    sys.stderr.write(
+        "ERROR: authority contractVersion must be one of "
+        + ", ".join(sorted(supported_contract_versions))
+        + "\n"
+    )
     sys.exit(79)
 if spec.get("planUuid") != plan or spec.get("runUuid") != run:
     sys.stderr.write("ERROR: authority spec plan/run correlation mismatch\n")
@@ -7487,6 +7498,7 @@ ftctl_dr_runtime_transition_preflight() {
 ftctl_dr_runtime_capabilities() {
   local json="${1-0}" version="${PROG_VERSION:-unknown}"
   local schema="20260727" action_contract="2026-07-27"
+  local authority_contracts_json
   local commands=(
     "dr-plan-apply"
     "dr-sync-start"
@@ -7518,9 +7530,18 @@ ftctl_dr_runtime_capabilities() {
   )
   local first="1" command
 
+  authority_contracts_json="$(python3 - "${FTCTL_DR_REPROTECT_AUTHORITY_CONTRACT_VERSIONS}" <<'PY'
+import json
+import sys
+
+versions = [item.strip() for item in sys.argv[1].split(",") if item.strip()]
+print(json.dumps(versions, separators=(",", ":")))
+PY
+)"
+
   if [[ "${json}" == "1" ]]; then
-    printf '{"command":"dr-capabilities","result":"ok","ftctl_version":"%s","runtime_schema_version":"%s","action_contract_version":"%s","materialization_contract_version":2,"supported_commands":[' \
-      "$(ftctl__json_escape "${version}")" "$(ftctl__json_escape "${schema}")" "$(ftctl__json_escape "${action_contract}")"
+    printf '{"command":"dr-capabilities","result":"ok","ftctl_version":"%s","runtime_schema_version":"%s","action_contract_version":"%s","materialization_contract_version":2,"reprotect_authority_contract_versions":%s,"supported_commands":[' \
+      "$(ftctl__json_escape "${version}")" "$(ftctl__json_escape "${schema}")" "$(ftctl__json_escape "${action_contract}")" "${authority_contracts_json}"
     for command in "${commands[@]}"; do
       [[ "${first}" == "1" ]] || printf ','
       first="0"
@@ -7530,7 +7551,8 @@ ftctl_dr_runtime_capabilities() {
     return 0
   fi
 
-  printf 'FTCTL_DR capabilities (version=%s schema=%s)\n' "${version}" "${schema}"
+  printf 'FTCTL_DR capabilities (version=%s schema=%s reprotect-authority=%s)\n' \
+    "${version}" "${schema}" "${FTCTL_DR_REPROTECT_AUTHORITY_CONTRACT_VERSIONS}"
   for command in "${commands[@]}"; do
     printf '  %s\n' "${command}"
   done
