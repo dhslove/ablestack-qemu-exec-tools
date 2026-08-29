@@ -423,3 +423,17 @@ version and reject one unsupported version before packaging. It must also run
 the VMware-to-RBD action contract and ABLESTACK RBD-to-RBD reverse transport
 smokes. Runtime PASS still requires the existing 31 UI plan to complete
 Reprotect and then Failback; unit acceptance alone is insufficient.
+
+### Capability publication invariant
+
+`dr-capabilities` is the sole pre-action compatibility contract consumed by
+Cloud. The authority parser and the published
+`reprotect_authority_contract_versions` array are generated from the same
+FTCTL variable, so adding a reader version cannot update one surface while
+leaving the other stale. The Agent wrapper validates only command/spec equality
+and mandatory fields; it does not own another date literal.
+
+Cloud may cache the response briefly for menu rendering, but FTCTL repeats the
+same validation at execution to protect against a rolling upgrade between menu
+render and submission. Package creation runs the advertised-version smoke plus
+the existing VMware-to-RBD, remote RBD-to-RBD, and SharedMountPoint gates.
