@@ -453,6 +453,12 @@ metadata probe that requires an exclusive or shared write lock.
 4. Reject an accessible non-qcow2 file as an incompatible reverse source; do
    not silently reinterpret it as qcow2.
 
+The Cloud/Agent profile remains forward-oriented. Consequently the promoted
+`mapping.disks[].targetPath` below `target.storagePath` is the reverse source
+for this check. The original `sourcePath` may be absent after loss of the
+original site and must not block Failback. This is the same locator invariant
+used by the RBD branch and the runtime reverse-profile builder.
+
 This preflight is the read-only capability gate used before the Failback menu
 submits a Run. The execution path repeats the same invariant as a final TOCTOU
 guard. VMware and RBD locators keep their existing provider-specific probes.

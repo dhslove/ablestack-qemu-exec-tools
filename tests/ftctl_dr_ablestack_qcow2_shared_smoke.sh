@@ -116,7 +116,10 @@ touch "${reverse_live_source}"
 jq --arg root "${TMP}" --arg path "${reverse_live_source}" \
   '.source.storagePath=$root
   | .source.storagePoolType="SharedMountPoint"
-  | .mapping.disks[0] |= (.sourcePath=$path | .sourceFormat="qcow2")' \
+  | .target.storagePath=$root
+  | .target.storagePoolType="SharedMountPoint"
+  | .mapping.disks[0] |= (.sourcePath=($root + "/missing-original-source")
+      | .sourceFormat="qcow2" | .targetPath=$path | .targetFormat="qcow2")' \
   "${profile}" > "${reverse_live_profile}"
 : > "${TMP}/cmd-run.log"
 reverse_live_preflight="$(ftctl_dr_ablestack_reverse_preflight plan-reverse-live "${reverse_live_profile}" FAILBACK_FINAL AUTO 1)"

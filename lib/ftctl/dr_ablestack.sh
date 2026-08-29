@@ -1134,7 +1134,7 @@ ftctl_dr_ablestack_reverse_baseline_status() {
 
 ftctl_dr_ablestack_reverse_preflight() {
   local plan="${1-}" profile_file="${2-}" operation_intent="${3-FAILBACK_FINAL}" requested_mode="${4-AUTO}" json="${5-0}"
-  local disk_map="" disk_json source_path target_path source_spec size_bytes source_root="" qcow2_provider="0" observed_format=""
+  local disk_map="" disk_json source_path target_path source_spec size_bytes reverse_source_root="" qcow2_provider="0" observed_format=""
   local rc=0 ready=true baseline_state="FULL_SEED_REQUIRED" effective_mode="FULL_RESEED"
   local decision_code="DR_REVERSE_BASELINE_FULL_SEED_REQUIRED" initial_seed=true
   local source_disk_probe_state="READY" source_disk_count=0 estimated_virtual_bytes=0
@@ -1165,7 +1165,9 @@ ftctl_dr_ablestack_reverse_preflight() {
   if [[ "${rc}" == "0" ]]; then
     if ftctl_dr_ablestack_qcow2_push_provider "${disk_map}"; then
       qcow2_provider="1"
-      source_root="$(ftctl_dr_ablestack_json_field "${disk_map}" source.storagePath 2>/dev/null || true)"
+      reverse_source_root="$(ftctl_dr_ablestack_json_field "${profile_file}" target.storagePath 2>/dev/null || true)"
+      [[ -n "${reverse_source_root}" ]] \
+        || reverse_source_root="$(ftctl_dr_ablestack_json_field "${disk_map}" target.storagePath 2>/dev/null || true)"
     fi
     while IFS= read -r disk_json; do
       source_path="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" sourcePath)"
@@ -1175,8 +1177,10 @@ ftctl_dr_ablestack_reverse_preflight() {
       estimated_virtual_bytes=$((estimated_virtual_bytes + size_bytes))
       if [[ "${qcow2_provider}" == "1" ]]; then
         observed_format=""
-        if [[ -z "${source_root}" || ! -f "${source_path}" ]] \
-            || ! ftctl_dr_ablestack_qemu_info_value "${source_path}" format observed_format \
+        # The persisted Plan mapping is forward-oriented. During failback the
+        # promoted target disk is the reverse source, matching the RBD branch.
+        if [[ -z "${reverse_source_root}" || ! -f "${target_path}" ]] \
+            || ! ftctl_dr_ablestack_qemu_info_value "${target_path}" format observed_format \
             || [[ "${observed_format}" != "qcow2" ]]; then
           rc=82
           ready=false
