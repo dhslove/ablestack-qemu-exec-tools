@@ -474,6 +474,6 @@ grep -q 'pending_resource_sequence=${sequence}' "${ROOT}/lib/ftctl/dr_scheduler.
 grep -q 'rc.*100' "${ROOT}/lib/ftctl/dr_scheduler.sh"
 awk '/^ftctl_dr_ablestack_site_agent_incremental_once\(\)/ { inside=1 }
      inside { print }
-     inside && /^}/ { exit }' "${ROOT}/lib/ftctl/dr_ablestack.sh" | grep -q 'return 100'
+     inside && /^}/ { exit }' "${ROOT}/lib/ftctl/dr_ablestack.sh" | grep 'return 100' >/dev/null
 
 echo "ftctl DR ABLESTACK remote RBD smoke: PASS"

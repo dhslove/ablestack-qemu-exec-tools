@@ -46,6 +46,20 @@ ftctl_dr_ablestack_checkpoint_path() {
     "$(ftctl_dr_runtime_key "${run:-current}")"
 }
 
+ftctl_dr_ablestack_cutover_source_map_path() {
+  local plan="${1-}" run="${2-}"
+  printf '%s/%s-cutover-source-map.json\n' \
+    "$(ftctl_dr_ablestack_checkpoint_dir "${plan}")" \
+    "$(ftctl_dr_runtime_key "${run:-current}")"
+}
+
+ftctl_dr_ablestack_cutover_quiesce_path() {
+  local plan="${1-}" run="${2-}"
+  printf '%s/%s-cutover-quiesce.state\n' \
+    "$(ftctl_dr_ablestack_checkpoint_dir "${plan}")" \
+    "$(ftctl_dr_runtime_key "${run:-current}")"
+}
+
 ftctl_dr_ablestack_profile_provider() {
   local profile_file="${1-}" endpoint="${2-}"
   ftctl_dr_runtime_profile_value "${profile_file}" "${endpoint}.provider" 2>/dev/null | tr '[:lower:]' '[:upper:]' || true
@@ -1506,8 +1520,190 @@ PY
   fi
 }
 
+ftctl_dr_ablestack_qmp_status() {
+  local vm_name="${1-}" out_var="${2-}" out="" err="" rc=0 parsed_status=""
+  [[ -n "${vm_name}" && -n "${out_var}" ]] || return 2
+  ftctl_cmd_run "${FTCTL_DR_QMP_QUIESCE_TIMEOUT_SEC:-30}" out err rc -- \
+    virsh -c "${FTCTL_PROFILE_PRIMARY_URI:-qemu:///system}" qemu-monitor-command \
+      "${vm_name}" --pretty '{"execute":"query-status"}' || true
+  [[ "${rc}" == "0" ]] || return 101
+  parsed_status="$(jq -r '.return.status // ""' <<< "${out}" 2>/dev/null || true)"
+  [[ -n "${parsed_status}" ]] || return 101
+  printf -v "${out_var}" '%s' "${parsed_status}"
+}
+
+ftctl_dr_ablestack_qmp_lifecycle() {
+  local vm_name="${1-}" command="${2-}" out="" err="" rc=0
+  [[ -n "${vm_name}" && ( "${command}" == "stop" || "${command}" == "cont" ) ]] || return 2
+  ftctl_cmd_run "${FTCTL_DR_QMP_QUIESCE_TIMEOUT_SEC:-30}" out err rc -- \
+    virsh -c "${FTCTL_PROFILE_PRIMARY_URI:-qemu:///system}" qemu-monitor-command \
+      "${vm_name}" --pretty "{\"execute\":\"${command}\"}" || true
+  [[ "${rc}" == "0" ]] || return 101
+  ! jq -e '.error != null' <<< "${out}" >/dev/null 2>&1
+}
+
+ftctl_dr_ablestack_wait_qmp_status() {
+  local vm_name="${1-}" expected="${2-}" timeout_sec="${3-${FTCTL_DR_QMP_QUIESCE_TIMEOUT_SEC:-30}}"
+  local started now status=""
+  [[ -n "${vm_name}" && -n "${expected}" && "${timeout_sec}" =~ ^[1-9][0-9]*$ ]] || return 2
+  started="$(date +%s)"
+  while true; do
+    status=""
+    if ftctl_dr_ablestack_qmp_status "${vm_name}" status && [[ "${status}" == "${expected}" ]]; then
+      return 0
+    fi
+    now="$(date +%s)"
+    (( now - started < timeout_sec )) || return 102
+    sleep 1
+  done
+}
+
+ftctl_dr_ablestack_cutover_quiesce_required() {
+  local profile_file="${1-}"
+  [[ -s "${profile_file}" ]] || return 1
+  jq -e '.request.sourceRuntimeQuiesceRequired == true
+      and (.request.sourceRuntimeQuiesceMode // "") == "QMP_STOP"
+      and ((.request.cutoverRunUuid // "") | length > 0)' \
+    "${profile_file}" >/dev/null 2>&1
+}
+
+ftctl_dr_ablestack_cutover_quiesce_begin() {
+  local plan="${1-}" run="${2-}" profile_file="${3-}" run_path="${4-}" status_path="${5-}"
+  local disk_map frozen_map quiesce_path owner state vm_name qmp_state="" digest tmp now
+  [[ -n "${plan}" && -n "${run}" && -s "${profile_file}" ]] || return 2
+  ftctl_dr_ablestack_cutover_quiesce_required "${profile_file}" || return 0
+
+  disk_map="$(ftctl_dr_ablestack_disk_map_path "${plan}")"
+  frozen_map="$(ftctl_dr_ablestack_cutover_source_map_path "${plan}" "${run}")"
+  quiesce_path="$(ftctl_dr_ablestack_cutover_quiesce_path "${plan}" "${run}")"
+  ftctl_ensure_dir "$(dirname "${frozen_map}")" "0755"
+
+  if [[ -s "${quiesce_path}" ]]; then
+    owner="$(ftctl_state_read_kv "${quiesce_path}" owner_run 2>/dev/null || true)"
+    state="$(ftctl_state_read_kv "${quiesce_path}" state 2>/dev/null || true)"
+    [[ -z "${owner}" || "${owner}" == "${run}" ]] || return 79
+    vm_name="$(ftctl_state_read_kv "${quiesce_path}" vm_name 2>/dev/null || true)"
+    if [[ "${state}" == "PAUSED" ]] && ftctl_dr_ablestack_qmp_status "${vm_name}" qmp_state \
+        && [[ "${qmp_state}" == "paused" ]]; then
+      return 0
+    fi
+  fi
+
+  ftctl_dr_ablestack_prepare_cycle_disk_map "${plan}" "${profile_file}" "${disk_map}" "PRE_CUTOVER_CAPTURE" || return $?
+  ftctl_dr_ablestack_qcow2_push_provider "${disk_map}" || return 90
+  vm_name="$(ftctl_dr_ablestack_json_field "${disk_map}" source.instanceName 2>/dev/null || true)"
+  [[ -n "${vm_name}" ]] || return 32
+  ftctl_dr_ablestack_qmp_status "${vm_name}" qmp_state || return $?
+  [[ "${qmp_state}" == "running" || "${qmp_state}" == "paused" ]] || return 103
+  if [[ "${qmp_state}" == "paused" && ! -s "${quiesce_path}" ]]; then
+    return 103
+  fi
+
+  tmp="${frozen_map}.tmp.$$"
+  cp -f "${disk_map}" "${tmp}" || return 2
+  mv -f "${tmp}" "${frozen_map}" || return 2
+  digest="$(sha256sum "${frozen_map}" | awk '{print $1}')"
+  [[ "${digest}" =~ ^[0-9a-f]{64}$ ]] || return 2
+  now="$(ftctl_now_iso8601)"
+  ftctl_state_write_kv_all "${quiesce_path}" \
+    "plan=${plan}" "owner_run=${run}" "state=QUIESCING" "mode=QMP_STOP" \
+    "vm_name=${vm_name}" "previous_status=${qmp_state}" \
+    "frozen_map_path=${frozen_map}" "frozen_map_sha256=${digest}" \
+    "updated_at=${now}" || return 2
+
+  if [[ "${qmp_state}" != "paused" ]]; then
+    ftctl_dr_ablestack_qmp_lifecycle "${vm_name}" stop || return $?
+  fi
+  if ! ftctl_dr_ablestack_wait_qmp_status "${vm_name}" paused; then
+    ftctl_dr_ablestack_qmp_lifecycle "${vm_name}" cont >/dev/null 2>&1 || true
+    ftctl_state_set_path "${quiesce_path}" "state=FAILED" "updated_at=$(ftctl_now_iso8601)" || true
+    return 104
+  fi
+
+  now="$(ftctl_now_iso8601)"
+  ftctl_state_set_path "${quiesce_path}" "state=PAUSED" "paused_at=${now}" "updated_at=${now}" || return 2
+  if [[ -n "${run_path}" ]]; then
+    ftctl_dr_runtime_path_set "${run_path}" \
+      "source_runtime_quiesce_state=PAUSED" \
+      "source_runtime_quiesce_mode=QMP_STOP" \
+      "source_runtime_quiesce_owner_run=${run}" \
+      "cutover_source_disk_map_path=${frozen_map}" \
+      "cutover_source_disk_map_sha256=${digest}" \
+      "source_runtime_quiesced_at=${now}" || true
+    [[ -n "${status_path}" ]] && cp -f "${run_path}" "${status_path}" 2>/dev/null || true
+  fi
+  ftctl_log_event "dr-runtime" "dr.ablestack.source_quiesce" "ok" "" "" \
+    "plan=${plan} run=${run} vm=${vm_name} mode=QMP_STOP map=${frozen_map} sha256=${digest}"
+}
+
+ftctl_dr_ablestack_cutover_quiesce_release() {
+  local plan="${1-}" run="${2-}" run_path="${3-}" status_path="${4-}"
+  local quiesce_path owner state vm_name qmp_state="" now
+  [[ -n "${plan}" && -n "${run}" ]] || return 2
+  quiesce_path="$(ftctl_dr_ablestack_cutover_quiesce_path "${plan}" "${run}")"
+  [[ -s "${quiesce_path}" ]] || return 0
+  owner="$(ftctl_state_read_kv "${quiesce_path}" owner_run 2>/dev/null || true)"
+  [[ -z "${owner}" || "${owner}" == "${run}" ]] || return 79
+  state="$(ftctl_state_read_kv "${quiesce_path}" state 2>/dev/null || true)"
+  vm_name="$(ftctl_state_read_kv "${quiesce_path}" vm_name 2>/dev/null || true)"
+  if ftctl_dr_ablestack_qmp_status "${vm_name}" qmp_state; then
+    if [[ "${qmp_state}" == "paused" ]]; then
+      ftctl_dr_ablestack_qmp_lifecycle "${vm_name}" cont || return $?
+      ftctl_dr_ablestack_wait_qmp_status "${vm_name}" running || return $?
+      qmp_state="running"
+    fi
+  else
+    qmp_state="domain-absent"
+  fi
+  now="$(ftctl_now_iso8601)"
+  ftctl_state_set_path "${quiesce_path}" \
+    "state=RELEASED" "released_status=${qmp_state}" "released_at=${now}" "updated_at=${now}" || return 2
+  if [[ -n "${run_path}" && -f "${run_path}" ]]; then
+    ftctl_dr_runtime_path_set "${run_path}" \
+      "source_runtime_quiesce_state=RELEASED" \
+      "source_runtime_quiesce_released_at=${now}" || true
+    [[ -n "${status_path}" ]] && cp -f "${run_path}" "${status_path}" 2>/dev/null || true
+  fi
+  ftctl_log_event "dr-runtime" "dr.ablestack.source_quiesce" "ok" "" "" \
+    "plan=${plan} run=${run} vm=${vm_name} action=release result=${qmp_state} previous=${state}"
+}
+
+ftctl_dr_ablestack_load_frozen_cutover_map() {
+  local plan="${1-}" profile_file="${2-}" disk_map="${3-}"
+  local owner frozen_map quiesce_path state recorded_digest actual_digest vm_name qmp_state="" tmp
+  owner="$(jq -r '.request.cutoverRunUuid // ""' "${profile_file}" 2>/dev/null || true)"
+  [[ -n "${owner}" ]] || return 105
+  frozen_map="$(ftctl_dr_ablestack_cutover_source_map_path "${plan}" "${owner}")"
+  quiesce_path="$(ftctl_dr_ablestack_cutover_quiesce_path "${plan}" "${owner}")"
+  [[ -s "${frozen_map}" && -s "${quiesce_path}" ]] || return 105
+  [[ "$(ftctl_state_read_kv "${quiesce_path}" owner_run 2>/dev/null || true)" == "${owner}" ]] || return 79
+  state="$(ftctl_state_read_kv "${quiesce_path}" state 2>/dev/null || true)"
+  [[ "${state}" == "PAUSED" ]] || return 106
+  recorded_digest="$(ftctl_state_read_kv "${quiesce_path}" frozen_map_sha256 2>/dev/null || true)"
+  actual_digest="$(sha256sum "${frozen_map}" | awk '{print $1}')"
+  [[ "${recorded_digest}" =~ ^[0-9a-f]{64}$ && "${actual_digest}" == "${recorded_digest}" ]] || return 107
+  ftctl_dr_ablestack_qcow2_push_provider "${frozen_map}" || return 90
+  vm_name="$(ftctl_state_read_kv "${quiesce_path}" vm_name 2>/dev/null || true)"
+  ftctl_dr_ablestack_qmp_status "${vm_name}" qmp_state || return 101
+  [[ "${qmp_state}" == "paused" ]] || return 106
+  tmp="${disk_map}.frozen.$$"
+  cp -f "${frozen_map}" "${tmp}" || return 2
+  mv -f "${tmp}" "${disk_map}" || return 2
+}
+
 ftctl_dr_ablestack_prepare_cycle_disk_map() {
-  local plan="${1-}" profile_file="${2-}" disk_map="${3-}" rc=0
+  local plan="${1-}" profile_file="${2-}" disk_map="${3-}" cycle_type="${4-}" rc=0 normalized_cycle_type
+  normalized_cycle_type="$(ftctl_dr_ablestack_normalize_cycle_type "${cycle_type}")"
+  if [[ "${normalized_cycle_type}" == "FAILOVER_FINAL" ]] \
+      && ftctl_dr_ablestack_cutover_quiesce_required "${profile_file}"; then
+    ftctl_dr_ablestack_load_frozen_cutover_map "${plan}" "${profile_file}" "${disk_map}" || {
+      rc=$?
+      ftctl_log_event "dr-runtime" "dr.ablestack.disk_map_refresh" "fail" "" "${rc}" \
+        "plan=${plan} stage=load_frozen_cutover_source"
+      return "${rc}"
+    }
+    return 0
+  fi
   ftctl_dr_ablestack_canonicalize_profile "${profile_file}" "${disk_map}" || {
     rc=$?
     ftctl_log_event "dr-runtime" "dr.ablestack.disk_map_refresh" "fail" "" "${rc}" \
@@ -2205,13 +2401,13 @@ ftctl_dr_ablestack_qcow2_incremental_once() {
 }
 
 ftctl_dr_ablestack_site_agent_incremental_once() {
-  local plan="${1-}" run="${2-}" profile_file="${3-}" disk_map="${4-}" manifest_path="${5-}" checkpoint_path="${6-}" sequence="${7-}"
+  local plan="${1-}" run="${2-}" profile_file="${3-}" disk_map="${4-}" manifest_path="${5-}" checkpoint_path="${6-}" sequence="${7-}" cycle_type="${8-}"
   local disk_json device source_path source_spec baseline previous current host port name diff_json changed_bytes total_changed_bytes="0" started_at completed_at disk_count effective_mode
   # Provider dispatch must use the same live source mapping as the transfer.
   # A canceled KVM failover may leave an immutable profile pointing at a
   # deleted overlay while QEMU has resumed on the durable SharedMountPoint
   # volume. Classifying the stale canonical map first misroutes qcow2 to RBD.
-  ftctl_dr_ablestack_prepare_cycle_disk_map "${plan}" "${profile_file}" "${disk_map}" || return $?
+  ftctl_dr_ablestack_prepare_cycle_disk_map "${plan}" "${profile_file}" "${disk_map}" "${cycle_type}" || return $?
   ftctl_dr_ablestack_site_agent_transport_load "${disk_map}" || return 90
   if ftctl_dr_ablestack_qcow2_push_provider "${disk_map}"; then
     ftctl_dr_ablestack_qcow2_incremental_once "${plan}" "${run}" "${profile_file}" "${disk_map}" \
@@ -2291,7 +2487,7 @@ ftctl_dr_ablestack_replication_cycle() {
        ftctl_dr_ablestack_remote_transport_load "${disk_map}" 2>/dev/null; }; then
     local incremental_rc=0
     if ftctl_dr_ablestack_site_agent_transport_load "${disk_map}" 2>/dev/null; then
-      ftctl_dr_ablestack_site_agent_incremental_once "${plan}" "${cycle_run}" "${profile_file}" "${disk_map}" "${manifest_path}" "${checkpoint_path}" "${sequence}" || incremental_rc=$?
+      ftctl_dr_ablestack_site_agent_incremental_once "${plan}" "${cycle_run}" "${profile_file}" "${disk_map}" "${manifest_path}" "${checkpoint_path}" "${sequence}" "${normalized_cycle_type}" || incremental_rc=$?
     else
       ftctl_dr_ablestack_incremental_once "${plan}" "${cycle_run}" "${profile_file}" "${disk_map}" "${manifest_path}" "${checkpoint_path}" "${sequence}" || incremental_rc=$?
     fi

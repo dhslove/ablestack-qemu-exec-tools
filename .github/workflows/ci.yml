@@ -30,6 +30,7 @@ jobs:
           bash tests/ftctl_dr_reprotect_authority_contract_smoke.sh
           bash tests/ftctl_dr_reprotect_terminal_smoke.sh
           bash tests/ftctl_dr_failover_final_checkpoint_smoke.sh
+          bash tests/ftctl_dr_qcow2_cutover_quiesce_smoke.sh
           bash tests/ftctl_dr_guestprep_preflight_smoke.sh
 
       - name: FTCTL firewalld no-reload regression gate

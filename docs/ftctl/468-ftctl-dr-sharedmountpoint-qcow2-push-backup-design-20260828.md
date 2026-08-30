@@ -570,3 +570,38 @@ owned by the current scheduler Run and its new Cycle sequence.
 | Incremental provider dispatch | Classifies the stale canonical map before live rebinding | Rebinds the cycle-local map before choosing qcow2 or RBD transfer |
 | Ambiguous identity | Could tempt positional disk matching | Fails closed before any target write |
 | Existing providers | Shared recovery code could alter them | VMware and RBD paths bypass this gate |
+
+## Planned Failover QMP Quiesce And Frozen Source Map
+
+A planned remote `KVM_TO_KVM` SharedMountPoint failover cannot power off the
+source domain before its final bitmap transfer. The qcow2 provider uses QMP
+`blockdev-backup`; destroying the domain removes both the QMP source node and
+the persistent bitmap access path. It is also unsafe to run the final transfer
+while guest vCPUs can continue writing.
+
+The provider therefore uses a narrow, FILE-only cutover barrier:
+
+1. Cloud starts the Plan-owned target export and pauses/drains the scheduler.
+2. FTCTL canonicalizes the action profile, resolves the current live qcow2
+   source path, and atomically records a Run-owned frozen disk map and SHA-256.
+3. FTCTL issues QMP `stop` and requires `query-status=paused` without destroying
+   the QEMU process.
+4. The `FAILOVER_FINAL` cycle must load the frozen map owned by the same Cloud
+   Run, verify its digest and the paused state, and execute the existing
+   persistent-bitmap incremental backup.
+5. FTCTL leaves the guest paused after `CUTOVER_READY`; Cloud then powers the
+   source off through its owning Mold before any target promotion.
+6. Any pre-commit failure or abort issues QMP `cont` when the source domain is
+   still present. For a remote-source transition, FTCTL acknowledges the abort
+   without starting the scheduler; Cloud confirms source `POWERED_ON` and then
+   sends the existing `RESUME_SYNC` command.
+
+The frozen map is not a fallback to an old profile path. A missing owner,
+digest mismatch, non-qcow2 disk, or non-paused QMP state fails the final
+checkpoint. Normal full seed/incremental cycles continue to rebind the live
+source on every cycle. RBD and VMware providers do not enter this barrier.
+
+Required regression coverage includes successful pause/final/release,
+idempotent owner replay, final-delta rejection without a matching frozen map,
+automatic QMP resume on transfer failure, remote abort without premature
+scheduler start, and unchanged RBD/VMware action contracts.
