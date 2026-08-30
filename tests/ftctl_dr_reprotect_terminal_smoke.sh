@@ -192,4 +192,63 @@ if ftctl_dr_runtime_capture_authority_context \
   exit 1
 fi
 
+# A retry after a partially projected Reprotect adopts an already healthy
+# reverse scheduler only when every same-Plan durable and ownership proof is
+# present. It must not start another full seed.
+ADOPT_PLAN="reprotect-adopt-plan"
+ADOPT_RUN="reprotect-adopt-run"
+ADOPT_DIR="${TMP}/run/dr-runtime/plans/${ADOPT_PLAN}"
+ADOPT_PROFILE="${ADOPT_DIR}/profile.json"
+ADOPT_RUN_PATH="${ADOPT_DIR}/runs/${ADOPT_RUN}.state"
+ADOPT_STATUS="${ADOPT_DIR}/status.state"
+ADOPT_REVERSE_PROFILE="${ADOPT_DIR}/reverse-profiles/original-reprotect.json"
+ADOPT_MANIFEST="${ADOPT_DIR}/manifests/cycle-180.json"
+ADOPT_CHECKPOINT="${ADOPT_DIR}/checkpoints/cycle-180.json"
+mkdir -p "${ADOPT_DIR}/runs" "${ADOPT_DIR}/reprotects" \
+  "${ADOPT_DIR}/reverse-profiles" "${ADOPT_DIR}/manifests" \
+  "${ADOPT_DIR}/checkpoints" "${ADOPT_DIR}/scheduler"
+printf '{}\n' > "${ADOPT_REVERSE_PROFILE}"
+printf '{}\n' > "${ADOPT_MANIFEST}"
+printf '{}\n' > "${ADOPT_CHECKPOINT}"
+cat > "${ADOPT_PROFILE}" <<EOF
+{"planUuid":"${ADOPT_PLAN}","providerPair":"ABLESTACK_TO_ABLESTACK","direction":"KVM_TO_KVM","activeSide":"TARGET"}
+EOF
+cat > "${ADOPT_DIR}/reprotects/active.json" <<EOF
+{"planUuid":"${ADOPT_PLAN}","state":"READY","activeSide":"TARGET","reverseProfilePath":"${ADOPT_REVERSE_PROFILE}","restorePoint":{"checkpointSequence":179}}
+EOF
+cat > "${ADOPT_STATUS}" <<EOF
+latest_completed_checkpoint_sequence=180
+latest_completed_manifest_path=${ADOPT_MANIFEST}
+latest_completed_checkpoint_path=${ADOPT_CHECKPOINT}
+latest_completed_source_checkpoint_at=2026-08-31T01:40:44+09:00
+latest_completed_target_durable_at=2026-08-31T01:40:45+09:00
+EOF
+cat > "${ADOPT_DIR}/scheduler/active.pid" <<EOF
+worker_run_uuid=scheduler-owner-180
+EOF
+cat > "${ADOPT_DIR}/scheduler/control.ack" <<EOF
+state=RUNNING
+request_run_uuid=scheduler-owner-180
+active_worker_run_uuid=scheduler-owner-180
+owner_matched=true
+EOF
+cat > "${ADOPT_DIR}/scheduler/sequence.state" <<EOF
+plan_cycle_sequence=180
+reprotect_baseline_sequence=179
+EOF
+touch "${ADOPT_RUN_PATH}"
+ftctl_dr_scheduler_active_worker_valid() { return 0; }
+ftctl_dr_runtime_adopt_existing_reprotect \
+  "${ADOPT_PLAN}" "${ADOPT_PROFILE}" "${ADOPT_RUN_PATH}" "${ADOPT_STATUS}"
+grep -q '^reprotect_idempotent_adopted=true$' "${ADOPT_RUN_PATH}"
+grep -q '^checkpoint_sequence=180$' "${ADOPT_RUN_PATH}"
+grep -q "^manifest_path=${ADOPT_MANIFEST}$" "${ADOPT_RUN_PATH}"
+
+sed -i 's/^latest_completed_checkpoint_sequence=180$/latest_completed_checkpoint_sequence=178/' "${ADOPT_STATUS}"
+if ftctl_dr_runtime_adopt_existing_reprotect \
+    "${ADOPT_PLAN}" "${ADOPT_PROFILE}" "${ADOPT_RUN_PATH}" "${ADOPT_STATUS}"; then
+  echo "ERROR: stale reverse checkpoint was adopted" >&2
+  exit 1
+fi
+
 echo "ftctl DR reprotect terminal smoke: PASS"

@@ -3623,6 +3623,73 @@ ftctl_dr_runtime_start_failback() {
     "written_at=${now}" || true
 }
 
+ftctl_dr_runtime_adopt_existing_reprotect() {
+  local plan="${1-}" profile_file="${2-}" run_path="${3-}" status_path="${4-}"
+  local active_session ack_path sequence_path provider_pair direction active_side profile_plan
+  local session_plan session_state session_side reverse_profile session_sequence latest_sequence
+  local manifest_path checkpoint_path source_checkpoint_at target_durable_at
+  local ack_state ack_owner ack_worker ack_owner_matched active_worker baseline_sequence
+
+  [[ -n "${plan}" && -f "${profile_file}" && -f "${status_path}" ]] || return 1
+  provider_pair="$(ftctl_dr_runtime_profile_value "${profile_file}" "providerPair" 2>/dev/null || true)"
+  direction="$(ftctl_dr_runtime_profile_value "${profile_file}" "direction" 2>/dev/null || true)"
+  active_side="$(ftctl_dr_runtime_profile_value "${profile_file}" "activeSide" 2>/dev/null || true)"
+  profile_plan="$(ftctl_dr_runtime_profile_value "${profile_file}" "planUuid" 2>/dev/null || true)"
+  [[ "${provider_pair}" == "ABLESTACK_TO_ABLESTACK" && "${direction}" == "KVM_TO_KVM" \
+        && "${active_side}" == "TARGET" && "${profile_plan}" == "${plan}" ]] || return 1
+
+  active_session="$(ftctl_dr_runtime_active_reprotect_session_path "${plan}")"
+  [[ -f "${active_session}" ]] || return 1
+  session_plan="$(jq -r '.planUuid // empty' "${active_session}" 2>/dev/null || true)"
+  session_state="$(jq -r '.state // empty' "${active_session}" 2>/dev/null || true)"
+  session_side="$(jq -r '.activeSide // empty' "${active_session}" 2>/dev/null || true)"
+  reverse_profile="$(jq -r '.reverseProfilePath // empty' "${active_session}" 2>/dev/null || true)"
+  session_sequence="$(jq -r '.restorePoint.checkpointSequence // empty' "${active_session}" 2>/dev/null || true)"
+  [[ "${session_plan}" == "${plan}" && "${session_state}" == "READY" \
+        && "${session_side}" == "TARGET" && -f "${reverse_profile}" \
+        && "${session_sequence}" =~ ^[0-9]+$ ]] || return 1
+
+  ftctl_dr_scheduler_active_worker_valid "${plan}" "" || return 1
+  active_worker="$(ftctl_dr_scheduler_active_value "${plan}" "worker_run_uuid")"
+  ack_path="$(ftctl_dr_scheduler_control_ack_path "${plan}")"
+  ack_state="$(ftctl_state_read_kv "${ack_path}" "state" 2>/dev/null || true)"
+  ack_owner="$(ftctl_state_read_kv "${ack_path}" "request_run_uuid" 2>/dev/null || true)"
+  ack_worker="$(ftctl_state_read_kv "${ack_path}" "active_worker_run_uuid" 2>/dev/null || true)"
+  ack_owner_matched="$(ftctl_state_read_kv "${ack_path}" "owner_matched" 2>/dev/null || true)"
+  [[ "${ack_state}" == "RUNNING" && "${ack_owner_matched}" == "true" \
+        && -n "${active_worker}" && "${ack_owner}" == "${active_worker}" \
+        && "${ack_worker}" == "${active_worker}" ]] || return 1
+
+  sequence_path="$(ftctl_dr_scheduler_sequence_path "${plan}")"
+  baseline_sequence="$(ftctl_state_read_kv "${sequence_path}" "reprotect_baseline_sequence" 2>/dev/null || true)"
+  latest_sequence="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "latest_completed_checkpoint_sequence")"
+  [[ "${baseline_sequence}" =~ ^[0-9]+$ && "${latest_sequence}" =~ ^[0-9]+$ \
+        && "${latest_sequence}" -ge "${baseline_sequence}" \
+        && "${latest_sequence}" -ge "${session_sequence}" ]] || return 1
+
+  manifest_path="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "latest_completed_manifest_path")"
+  checkpoint_path="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "latest_completed_checkpoint_path")"
+  source_checkpoint_at="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "latest_completed_source_checkpoint_at")"
+  target_durable_at="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "latest_completed_target_durable_at")"
+  [[ -f "${manifest_path}" && -f "${checkpoint_path}" && -n "${target_durable_at}" ]] || return 1
+
+  ftctl_dr_runtime_path_set "${run_path}" \
+    "checkpoint_sequence=${latest_sequence}" \
+    "manifest_path=${manifest_path}" \
+    "checkpoint_path=${checkpoint_path}" \
+    "last_source_checkpoint_at=${source_checkpoint_at}" \
+    "last_target_durable_at=${target_durable_at}" \
+    "reverse_profile_path=${reverse_profile}" \
+    "reverse_restore_points_path=$(ftctl_dr_runtime_reverse_restore_points_path "${plan}")" \
+    "replication_direction=${direction}" \
+    "reverse_direction=${direction}" \
+    "provider_pair=${provider_pair}" \
+    "reprotect_idempotent_adopted=true" \
+    "reprotect_adopted_scheduler_run_uuid=${active_worker}" \
+    "reprotect_adopted_at=$(ftctl_now_iso8601)" || return $?
+  return 0
+}
+
 ftctl_dr_runtime_reprotect_worker() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" run_path="${4-}" status_path="${5-}"
   local worker_profile reverse_profile now requested_at completed_at rc=0 error_code
@@ -3685,10 +3752,21 @@ ftctl_dr_runtime_reprotect_worker() {
     "active_side=TARGET" \
     "checkpoint_sequence=${previous_checkpoint_sequence}" \
     "updated_at=${requested_at}" || true
-  cp -f "${run_path}" "${status_path}" 2>/dev/null || true
-
-  ftctl_dr_runtime_build_reverse_profile "${plan}" "${run}" "${worker_profile}" "${reverse_profile}" "reprotect" || rc=$?
-  if [[ "${rc}" == "0" ]]; then
+  if ftctl_dr_runtime_adopt_existing_reprotect "${plan}" "${worker_profile}" "${run_path}" "${status_path}"; then
+    reverse_profile="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "reverse_profile_path")"
+    replication_direction="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "replication_direction")"
+    reverse_direction="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "reverse_direction")"
+    provider_pair="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "provider_pair")"
+    ftctl_dr_runtime_path_set "${run_path}" \
+      "step=reprotect-existing-protection-adopted" \
+      "progress=90" \
+      "updated_at=$(ftctl_now_iso8601)" || true
+    cp -f "${run_path}" "${status_path}" 2>/dev/null || true
+  else
+    cp -f "${run_path}" "${status_path}" 2>/dev/null || true
+    ftctl_dr_runtime_build_reverse_profile "${plan}" "${run}" "${worker_profile}" "${reverse_profile}" "reprotect" || rc=$?
+  fi
+  if [[ "${rc}" == "0" && "$(ftctl_dr_runtime_state_get_from_path "${run_path}" "reprotect_idempotent_adopted")" != "true" ]]; then
     replication_direction="$(ftctl_dr_runtime_profile_value "${reverse_profile}" "direction" 2>/dev/null || true)"
     provider_pair="$(ftctl_dr_runtime_profile_value "${reverse_profile}" "providerPair" 2>/dev/null || true)"
     [[ -n "${provider_pair}" ]] || provider_pair="${replication_direction}"

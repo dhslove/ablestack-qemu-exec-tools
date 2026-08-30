@@ -418,3 +418,23 @@ This rule applies to every provider pair because scheduler ownership is a
 shared control-plane contract; it does not change VMware, RBD, or qcow2 data
 movement. `tests/ftctl_dr_systemd_async_start_smoke.sh` guards the race where
 systemd has accepted the start but the legacy Run PID is intentionally absent.
+## 14.2 Idempotent retry after a live reverse scheduler (2026-08-31)
+
+An `ABLESTACK_TO_ABLESTACK` Reprotect retry may arrive after the previous Run
+created a durable reverse baseline and started continuous reverse protection,
+but before Cloud accepted its terminal projection. Re-running the reverse full
+seed in this state is unnecessary and extends the recovery window.
+
+FTCTL may adopt existing protection only when the current profile belongs to
+the same Plan, is `KVM_TO_KVM`, has `activeSide=TARGET`, the active Reprotect
+session is `READY`, and its reverse profile still exists. The canonical
+scheduler lease must be live, its RUNNING ACK must be owner-matched, and the
+latest completed sequence must be at or beyond both the session and Reprotect
+baseline sequences with existing manifest/checkpoint files.
+
+The retry hydrates its Run from that latest durable Cycle, marks
+`reprotect_idempotent_adopted=true`, rotates scheduler ownership through the
+normal activation and ACK barrier, and writes a fresh authoritative success
+terminal. Missing evidence falls back to the unchanged full-seed path. This is
+deliberately limited to ABLESTACK-to-ABLESTACK so VMware mover behavior and the
+first Reprotect attempt retain their validated contracts.
