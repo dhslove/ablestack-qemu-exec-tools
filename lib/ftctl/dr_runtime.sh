@@ -3628,6 +3628,7 @@ ftctl_dr_runtime_reprotect_worker() {
   local worker_profile reverse_profile now requested_at completed_at rc=0 error_code
   local launch_nonce worker_generation worker_pid worker_start_ticks
   local sequence manifest_path checkpoint_path reverse_restore_points_path reverse_direction replication_direction provider_pair rto_actual_seconds
+  local scheduler_run=""
   local active_side current_state previous_checkpoint_sequence
 
   worker_profile="${profile_file}"
@@ -3779,10 +3780,59 @@ else:
 PY
 )"
   ftctl_dr_runtime_path_set "${run_path}" \
+    "state=RUNNING" \
+    "step=reprotect-scheduler-starting" \
+    "progress=95" \
+    "scheduler_desired_state=RUNNING" \
+    "scheduler_health=RECOVERING" \
+    "updated_at=$(ftctl_now_iso8601)" || true
+  cp -f "${run_path}" "${status_path}" 2>/dev/null || true
+  rc=0
+  FTCTL_DR_REPROTECT_SCHEDULER_RUN=""
+  if command -v ftctl_dr_scheduler_activate_reprotected_profile >/dev/null 2>&1; then
+    ftctl_dr_scheduler_activate_reprotected_profile "${plan}" "${run}" \
+      "$(ftctl_dr_runtime_profile_path "${plan}")" "${run_path}" "${status_path}" || rc=$?
+    scheduler_run="${FTCTL_DR_REPROTECT_SCHEDULER_RUN:-}"
+  else
+    rc=127
+  fi
+  if [[ "${rc}" != "0" || -z "${scheduler_run}" ]]; then
+    completed_at="$(ftctl_now_iso8601)"
+    ftctl_dr_runtime_terminal_journal_write "${plan}" "${run}" "${launch_nonce}" "${worker_generation}" \
+      "FAILED" "${rc}" "DR_REPROTECT_SCHEDULER_START_FAILED" "${completed_at}" || true
+    ftctl_dr_runtime_path_set "${run_path}" \
+      "state=ERROR" \
+      "step=reprotect-scheduler-start-failed" \
+      "progress=100" \
+      "accepted=false" \
+      "active_side=TARGET" \
+      "protection_state=FAILED_OVER_UNPROTECTED" \
+      "scheduler_state=ERROR" \
+      "scheduler_health=ERROR" \
+      "scheduler_desired_state=RUNNING" \
+      "worker_state=TERMINAL_PUBLISHED" \
+      "worker_pid_alive=false" \
+      "worker_exit_code=${rc}" \
+      "terminal_source=ENGINE_TERMINAL" \
+      "terminal_version=1" \
+      "terminal_authoritative=true" \
+      "runtime_endpoints_drained=true" \
+      "error_code=DR_REPROTECT_SCHEDULER_START_FAILED" \
+      "error_message=Reverse protection scheduler did not reach an owned RUNNING state" \
+      "updated_at=${completed_at}" || true
+    cp -f "${run_path}" "${status_path}" 2>/dev/null || true
+    ftctl_log_event "dr-runtime" "dr.reprotect.scheduler" "fail" "" \
+      "DR_REPROTECT_SCHEDULER_START_FAILED" "plan=${plan} run=${run} rc=${rc}"
+    return "${rc}"
+  fi
+  ftctl_dr_runtime_path_set "${run_path}" \
     "state=READY" \
     "step=reprotect-ready" \
     "progress=100" \
-    "scheduler_state=READY" \
+    "scheduler_state=RUNNING" \
+    "scheduler_health=HEALTHY" \
+    "scheduler_desired_state=RUNNING" \
+    "scheduler_owner_run_uuid=${scheduler_run}" \
     "reprotect_session_id=${plan}:${run}" \
     "reprotect_mode=reverse" \
     "reprotect_restore_point_ref=ftctl:${plan}:${sequence}" \
@@ -4021,7 +4071,7 @@ ftctl_dr_runtime_emit_state_json() {
   local source_runtime_quiesced_at source_runtime_quiesce_released_at
   local cutover_source_disk_map_path cutover_source_disk_map_sha256
   local test_domain_name test_domain_state test_boot_validation_mode
-  local failback_session_id failback_mode failback_phase cloud_lifecycle_state
+  local failback_session_id failback_mode failback_phase="" cloud_lifecycle_state
   local failure_phase baseline_file_state source_disk_probe_state source_disk_count target_writer_probe_state
   local operation_intent requested_mode effective_mode mode_decision_code initial_seed_required estimated_virtual_bytes
   local failback_commit_outcome failback_commit_phase rollback_state rollback_generation

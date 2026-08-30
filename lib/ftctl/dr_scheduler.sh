@@ -537,7 +537,7 @@ ftctl_dr_scheduler_active_worker_valid() {
   start_ticks="$(ftctl_dr_scheduler_process_start_ticks "${pid}" 2>/dev/null || true)"
   [[ -n "${recorded_start}" && "${start_ticks}" == "${recorded_start}" ]] || return 1
   [[ -z "${expected_session}" || "${session}" == "${expected_session}" ]] || return 1
-  cmdline="$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null || true)"
+  cmdline="$(cat "/proc/${pid}/cmdline" 2>/dev/null | tr '\0' ' ' || true)"
   [[ "${cmdline}" == *"--plan ${plan}"* ]] || return 1
   return 0
 }
@@ -1460,6 +1460,72 @@ ftctl_dr_scheduler_resume_after_transition() {
     "updated_at=${now}" || true
 }
 
+ftctl_dr_scheduler_activate_reprotected_profile() {
+  local plan="${1-}" reprotect_run="${2-}" profile_file="${3-}" reprotect_path="${4-}" status_path="${5-}"
+  local scheduler_run scheduler_path generation session checkpoint_sequence target_durable_at source_checkpoint_at
+  local sequence_path current_plan_sequence
+
+  [[ -n "${plan}" && -n "${reprotect_run}" && -f "${profile_file}" && -f "${reprotect_path}" ]] || return 2
+  scheduler_run="$(ftctl_dr_runtime_launch_nonce)"
+  [[ -n "${scheduler_run}" ]] || return 2
+  scheduler_path="$(ftctl_dr_runtime_run_path "${plan}" "${scheduler_run}")"
+  checkpoint_sequence="$(ftctl_dr_runtime_state_get_from_path "${reprotect_path}" checkpoint_sequence)"
+  target_durable_at="$(ftctl_dr_runtime_state_get_from_path "${reprotect_path}" last_target_durable_at)"
+  source_checkpoint_at="$(ftctl_dr_runtime_state_get_from_path "${reprotect_path}" last_source_checkpoint_at)"
+  [[ "${checkpoint_sequence}" =~ ^[0-9]+$ ]] || return 2
+  sequence_path="$(ftctl_dr_scheduler_sequence_path "${plan}")"
+  current_plan_sequence="$(ftctl_dr_scheduler_current_plan_sequence "${plan}")"
+  [[ "${current_plan_sequence}" =~ ^[0-9]+$ ]] || current_plan_sequence=0
+  (( current_plan_sequence >= checkpoint_sequence )) || current_plan_sequence="${checkpoint_sequence}"
+
+  ftctl_dr_runtime_write_state "${scheduler_path}" "${plan}" "${scheduler_run}" \
+    "dr-scheduler-run" "READY" "reprotect-scheduler-starting" "100" "${scheduler_run}" "" || return $?
+  ftctl_dr_runtime_path_set "${scheduler_path}" \
+    "accepted=true" \
+    "active_side=TARGET" \
+    "protection_state=READY" \
+    "baseline_state=LOCAL_DURABLE" \
+    "data_commit_state=LOCAL_DURABLE" \
+    "target_durable=true" \
+    "checkpoint_sequence=${checkpoint_sequence}" \
+    "current_checkpoint_sequence=${checkpoint_sequence}" \
+    "current_checkpoint_state=COMPLETED" \
+    "latest_completed_checkpoint_sequence=${checkpoint_sequence}" \
+    "latest_completed_checkpoint_state=READY" \
+    "last_source_checkpoint_at=${source_checkpoint_at}" \
+    "last_target_durable_at=${target_durable_at}" \
+    "latest_completed_source_checkpoint_at=${source_checkpoint_at}" \
+    "latest_completed_target_durable_at=${target_durable_at}" \
+    "reprotect_parent_run_uuid=${reprotect_run}" \
+    "scheduler_desired_state=RUNNING" \
+    "scheduler_health=RECOVERING" \
+    "updated_at=$(ftctl_now_iso8601)" || return $?
+  ftctl_state_set_path "${sequence_path}" \
+    "plan_cycle_sequence=${current_plan_sequence}" \
+    "reprotect_baseline_sequence=${checkpoint_sequence}" \
+    "reprotect_baseline_run_uuid=${reprotect_run}" \
+    "reprotect_baseline_committed_at=$(ftctl_now_iso8601)" || return $?
+
+  generation="$(ftctl_dr_scheduler_control_set "${plan}" "run" "reprotect-complete" "${scheduler_run}" "false")" || return $?
+  ftctl_dr_scheduler_ensure_running "${plan}" "${scheduler_run}" "${profile_file}" \
+    "${scheduler_path}" "${status_path}" || return $?
+  session="$(ftctl_dr_scheduler_session_uuid "${plan}" "${profile_file}")"
+  ftctl_dr_scheduler_wait_for_ack "${plan}" "${generation}" "RUNNING" \
+    "${FTCTL_DR_CONTROL_ACK_TIMEOUT_SEC}" "${scheduler_run}" "${session}" || return $?
+  ftctl_dr_runtime_path_set "${reprotect_path}" \
+    "scheduler_owner_run_uuid=${scheduler_run}" \
+    "scheduler_session_uuid=${session}" \
+    "scheduler_state=RUNNING" \
+    "scheduler_health=HEALTHY" \
+    "scheduler_desired_state=RUNNING" \
+    "control_protocol_version=${FTCTL_DR_CONTROL_PROTOCOL_VERSION}" \
+    "control_generation=${generation}" \
+    "control_ack_generation=${generation}" \
+    "control_state=RUNNING" \
+    "updated_at=$(ftctl_now_iso8601)" || return $?
+  FTCTL_DR_REPROTECT_SCHEDULER_RUN="${scheduler_run}"
+}
+
 ftctl_dr_scheduler_update_state() {
   local state_path="${1-}" status_path="${2-}"
   shift 2
@@ -1728,7 +1794,7 @@ ftctl_dr_scheduler_worker() {
   local pending_cleanup_sequence pending_cleanup_cycle_type pending_cleanup_run pending_cleanup_request_bound
   local pending_reseed_sequence pending_reseed_cycle_type pending_reseed_run pending_reseed_request_bound
   local pending_reseed_reason pending_reseed_attempt automatic_reseed_guard_generation current_baseline_generation
-  local scheduler_code_path scheduler_code_sha256 scheduler_started_at
+  local scheduler_code_path scheduler_code_sha256 scheduler_started_at worker_process_pid
 
   [[ -n "${plan}" && -n "${run}" && -f "${profile_file}" && -f "${state_path}" ]] || return 2
   ftctl_ensure_dir "$(ftctl_dr_scheduler_dir "${plan}")" "0755"
@@ -1747,9 +1813,10 @@ ftctl_dr_scheduler_worker() {
     return 23
   fi
   lease_epoch=$(( $(ftctl_dr_scheduler_current_lease_epoch "${plan}") + 1 ))
-  start_ticks="$(ftctl_dr_scheduler_process_start_ticks "$$" 2>/dev/null || true)"
+  worker_process_pid="${BASHPID:-$$}"
+  start_ticks="$(ftctl_dr_scheduler_process_start_ticks "${worker_process_pid}" 2>/dev/null || true)"
   [[ "${start_ticks}" =~ ^[0-9]+$ ]] || start_ticks=0
-  ftctl_dr_scheduler_write_heartbeat "${plan}" "${session}" "${lease_epoch}" "${run}" "$$" "${start_ticks}"
+  ftctl_dr_scheduler_write_heartbeat "${plan}" "${session}" "${lease_epoch}" "${run}" "${worker_process_pid}" "${start_ticks}"
   pid_path="$(ftctl_dr_scheduler_pid_path "${plan}" "${run}")"
   restore_points_path="$(ftctl_dr_scheduler_restore_points_path "${plan}")"
   sequence_path="$(ftctl_dr_scheduler_sequence_path "${plan}")"
@@ -1771,13 +1838,13 @@ ftctl_dr_scheduler_worker() {
   scheduler_code_sha256="$(sha256sum "${scheduler_code_path}" 2>/dev/null | awk '{print $1}')"
   scheduler_started_at="$(ftctl_now_iso8601)"
 
-  printf '%s\n' "$$" > "${pid_path}"
+  printf '%s\n' "${worker_process_pid}" > "${pid_path}"
   control_generation="$(ftctl_dr_scheduler_control_generation "${plan}")"
   if [[ "$(ftctl_dr_scheduler_control_command "${plan}")" != "run" || ! "${control_generation}" =~ ^[1-9][0-9]*$ ]]; then
     control_generation="$(ftctl_dr_scheduler_control_set "${plan}" "run" "scheduler-start" "${run}")"
   fi
   ftctl_dr_scheduler_control_ack "${plan}" "${control_generation}" "RUNNING" "IDLE" "${run}" \
-    "${session}" "${lease_epoch}" "$$" "${start_ticks}"
+    "${session}" "${lease_epoch}" "${worker_process_pid}" "${start_ticks}"
   authority_sequence="$(ftctl_dr_scheduler_next_authority_sequence "${plan}")"
   now="$(ftctl_now_iso8601)"
   ftctl_dr_scheduler_update_state "${state_path}" "${status_path}" \
@@ -1790,12 +1857,12 @@ ftctl_dr_scheduler_worker() {
     "control_ack_generation=${control_generation}" \
     "control_state=RUNNING" \
     "cycle_state=IDLE" \
-    "worker_pid=$$" \
+    "worker_pid=${worker_process_pid}" \
     "scheduler_session_uuid=${session}" \
     "scheduler_lease_epoch=${lease_epoch}" \
     "authority_sequence=${authority_sequence}" \
     "active_worker_run_uuid=${run}" \
-    "active_worker_pid=$$" \
+    "active_worker_pid=${worker_process_pid}" \
     "active_worker_start_ticks=${start_ticks}" \
     "scheduler_code_path=${scheduler_code_path}" \
     "scheduler_code_sha256=${scheduler_code_sha256}" \
@@ -1824,7 +1891,7 @@ ftctl_dr_scheduler_worker() {
 
   while true; do
     if ! ftctl_dr_scheduler_active_worker_valid "${plan}" "${session}" \
-        && ! ftctl_dr_scheduler_repair_self_ownership "${plan}" "${session}" "${lease_epoch}" "${run}" "$$" "${start_ticks}"; then
+        && ! ftctl_dr_scheduler_repair_self_ownership "${plan}" "${session}" "${lease_epoch}" "${run}" "${worker_process_pid}" "${start_ticks}"; then
       ftctl_dr_scheduler_update_state "${state_path}" "${status_path}" \
         "state=ERROR" \
         "scheduler_state=ERROR" \
@@ -1836,13 +1903,13 @@ ftctl_dr_scheduler_worker() {
         "updated_at=$(ftctl_now_iso8601)" || true
       break
     fi
-    ftctl_dr_scheduler_write_heartbeat "${plan}" "${session}" "${lease_epoch}" "${run}" "$$" "${start_ticks}" || true
+    ftctl_dr_scheduler_write_heartbeat "${plan}" "${session}" "${lease_epoch}" "${run}" "${worker_process_pid}" "${start_ticks}" || true
     command="$(ftctl_dr_scheduler_control_command "${plan}")"
     control_generation="$(ftctl_dr_scheduler_control_value "${plan}" "generation")"
     if [[ "${command}" == "stop" ]]; then
       now="$(ftctl_now_iso8601)"
       ftctl_dr_scheduler_control_ack "${plan}" "${control_generation}" "STOPPED" "IDLE" "${run}" \
-        "${session}" "${lease_epoch}" "$$" "${start_ticks}"
+        "${session}" "${lease_epoch}" "${worker_process_pid}" "${start_ticks}"
       ftctl_dr_scheduler_update_state "${state_path}" "${status_path}" \
         "state=CANCELED" \
         "step=scheduler-stopped" \
@@ -1861,7 +1928,7 @@ ftctl_dr_scheduler_worker() {
     if [[ "${command}" == "pause" ]]; then
       now="$(ftctl_now_iso8601)"
       ftctl_dr_scheduler_control_ack "${plan}" "${control_generation}" "PAUSED" "IDLE" "${run}" \
-        "${session}" "${lease_epoch}" "$$" "${start_ticks}"
+        "${session}" "${lease_epoch}" "${worker_process_pid}" "${start_ticks}"
       ftctl_dr_scheduler_update_state "${state_path}" "${status_path}" \
         "state=PAUSED" \
         "step=sync-paused" \
@@ -1879,7 +1946,7 @@ ftctl_dr_scheduler_worker() {
     fi
 
     ftctl_dr_scheduler_control_ack "${plan}" "${control_generation}" "RUNNING" "IDLE" "${run}" \
-      "${session}" "${lease_epoch}" "$$" "${start_ticks}"
+      "${session}" "${lease_epoch}" "${worker_process_pid}" "${start_ticks}"
     ftctl_dr_scheduler_update_state "${state_path}" "${status_path}" \
       "scheduler_state=RUNNING" \
       "scheduler_health=HEALTHY" \
@@ -2386,7 +2453,7 @@ ftctl_dr_scheduler_worker() {
         "pending_reseed_reason=" \
         "pending_reseed_attempt=0" || true
       rm -f "${pid_path}" 2>/dev/null || true
-      ftctl_dr_scheduler_mark_lease_stopped "${plan}" "${session}" "${lease_epoch}" "${run}" "$$" "${start_ticks}"
+      ftctl_dr_scheduler_mark_lease_stopped "${plan}" "${session}" "${lease_epoch}" "${run}" "${worker_process_pid}" "${start_ticks}"
       flock -u 205 2>/dev/null || true
       exec 205>&-
       return "${rc}"
@@ -2499,7 +2566,7 @@ ftctl_dr_scheduler_worker() {
       "authority_sequence=${authority_sequence}" \
       "plan_cycle_sequence=${sequence}" \
       "active_worker_run_uuid=${run}" \
-      "active_worker_pid=$$" \
+      "active_worker_pid=${worker_process_pid}" \
       "active_worker_start_ticks=${start_ticks}" \
       "worker_heartbeat_at=${now}" \
       "owner_matched=true" \
@@ -2625,7 +2692,7 @@ ftctl_dr_scheduler_worker() {
     ftctl_dr_scheduler_sleep_or_stop "${plan}" "${wait_seconds}" "${control_generation}" || true
   done
 
-  ftctl_dr_scheduler_mark_lease_stopped "${plan}" "${session}" "${lease_epoch}" "${run}" "$$" "${start_ticks}"
+  ftctl_dr_scheduler_mark_lease_stopped "${plan}" "${session}" "${lease_epoch}" "${run}" "${worker_process_pid}" "${start_ticks}"
   rm -f "${pid_path}" "$(ftctl_dr_scheduler_active_pid_path "${plan}")" 2>/dev/null || true
   flock -u 205 2>/dev/null || true
   exec 205>&-

@@ -6373,9 +6373,12 @@ JSON
     --json)"
   selftest_assert_not_contains "${status}" 'plan-foreign' "status excludes foreign plan events"
 
-  ftctl_dr_runtime_path_set "$(ftctl_dr_runtime_run_path plan-step3 run-step3)" \
+  # Completed-cycle metrics are Plan authority fields, while retryability is
+  # scoped to the operation Run returned by this status request.
+  ftctl_dr_runtime_path_set "$(ftctl_dr_runtime_status_path plan-step3)" \
     "latest_completed_incremental_verified=True" \
-    "latest_completed_metrics_estimated=False" \
+    "latest_completed_metrics_estimated=False"
+  ftctl_dr_runtime_path_set "$(ftctl_dr_runtime_run_path plan-step3 run-step3)" \
     "retryable=True"
   status="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-status \
     --config "${SELFTEST_CONFIG}" \
@@ -7417,6 +7420,7 @@ selftest_case_dr_scheduler_ablestack_checkpoint_loop() {
   local profile="${SELFTEST_ROOT}/dr-scheduler-ablestack-profile.json"
   local out="" restore_points="" convert_count=""
   mkdir -p "${fakebin}" "${SELFTEST_ROOT}/src" "${SELFTEST_ROOT}/target"
+  : > "${SELFTEST_ROOT}/src/root.qcow2"
   cat > "${fakebin}/qemu-img" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "${call_log}"
@@ -7436,6 +7440,15 @@ fi
 exit 0
 EOF
   chmod +x "${fakebin}/qemu-img"
+  cat > "${fakebin}/virsh" <<EOF
+#!/usr/bin/env bash
+if [[ "\$*" == *"query-named-block-nodes"* ]]; then
+  printf '{"return":[{"node-name":"libvirt-2-format","drv":"qcow2","active":true,"image":{"filename":"${SELFTEST_ROOT}/src/root.qcow2","virtual-size":1048576}}]}\n'
+  exit 0
+fi
+exit 1
+EOF
+  chmod +x "${fakebin}/virsh"
 
   cat > "${profile}" <<JSON
 {
@@ -7444,7 +7457,7 @@ EOF
   "planUuid": "plan-scheduler-ablestack",
   "runUuid": "run-scheduler-ablestack",
   "direction": "KVM_TO_KVM",
-  "source": {"provider": "ABLESTACK", "driver": "KVM_QMP"},
+  "source": {"provider": "ABLESTACK", "driver": "KVM_QMP", "instanceName": "i-test-scheduler-VM"},
   "target": {
     "provider": "ABLESTACK",
     "driver": "ABLESTACK",
@@ -7453,7 +7466,7 @@ EOF
     "serviceOfferingId": "service-offering-1",
     "networks": [{"networkId": "network-1"}]
   },
-  "schedule": {"intervalSeconds": 0},
+  "schedule": {"intervalSeconds": 1},
   "request": {"maxCycles": 2},
   "mapping": {
     "disks": [
@@ -8016,7 +8029,9 @@ selftest_case_dr_runtime_planned_failover_promotes_latest_checkpoint() {
   local status_path="${plan_dir}/status.state"
   local out="" session_path="" active_path=""
 
-  mkdir -p "${plan_dir}/checkpoints" "${plan_dir}/manifests" "${fakebin}" "${SELFTEST_ROOT}/target"
+  mkdir -p "${plan_dir}/checkpoints" "${plan_dir}/manifests" "${fakebin}" \
+    "${SELFTEST_ROOT}/source" "${SELFTEST_ROOT}/target"
+  : > "${SELFTEST_ROOT}/source/root.qcow2"
   cat > "${fakebin}/qemu-img" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "${call_log}"
@@ -8035,6 +8050,15 @@ case "\${1:-}" in
 esac
 EOF
   chmod +x "${fakebin}/qemu-img"
+  cat > "${fakebin}/virsh" <<EOF
+#!/usr/bin/env bash
+if [[ "\$*" == *"query-named-block-nodes"* ]]; then
+  printf '{"return":[{"node-name":"libvirt-2-format","drv":"qcow2","active":true,"image":{"filename":"${SELFTEST_ROOT}/source/root.qcow2","virtual-size":1048576}}]}\n'
+  exit 0
+fi
+exit 1
+EOF
+  chmod +x "${fakebin}/virsh"
   cat > "${profile}" <<JSON
 {
   "version": 1,
@@ -8042,7 +8066,7 @@ EOF
   "planUuid": "${plan}",
   "runUuid": "run-failover",
   "direction": "KVM_TO_KVM",
-  "source": {"provider": "ABLESTACK", "driver": "KVM_QMP"},
+  "source": {"provider": "ABLESTACK", "driver": "KVM_QMP", "instanceName": "i-test-failover-VM"},
   "target": {
     "provider": "ABLESTACK",
     "driver": "ABLESTACK",
@@ -8057,7 +8081,7 @@ EOF
   },
   "mapping": {
     "disks": [
-      {"device": "vda", "sourcePath": "/src/root.qcow2", "targetPath": "${SELFTEST_ROOT}/target/root.qcow2", "sourceFormat": "qcow2", "targetFormat": "qcow2", "sizeBytes": 1048576, "targetDiskOfferingId": "disk-offering-1"}
+      {"device": "vda", "sourcePath": "${SELFTEST_ROOT}/source/root.qcow2", "targetPath": "${SELFTEST_ROOT}/target/root.qcow2", "sourceFormat": "qcow2", "targetFormat": "qcow2", "sizeBytes": 1048576, "targetDiskOfferingId": "disk-offering-1"}
     ]
   }
 }
@@ -8927,7 +8951,7 @@ EOF
   selftest_assert_contains "${out}" '"active_side":"TARGET"' "reprotect target active"
   selftest_assert_contains "${out}" '"reprotect_mode":"reverse"' "reprotect reverse mode"
   selftest_assert_contains "${out}" '"reprotect_restore_point_sequence":6' "reprotect reverse checkpoint sequence"
-  selftest_assert_contains "${out}" '"reverse_direction":"KVM_TO_KVM"' "reprotect reverse direction"
+  selftest_assert_contains "${out}" '"reverse_direction":"ABLESTACK_TO_ABLESTACK"' "reprotect reverse direction"
   selftest_assert_file_contains "${plan_dir}/runs/run-reprotect.state" "authority_source=failover-session"
   selftest_assert_file_contains "${plan_dir}/runs/run-reprotect.state" "cloud_authority_generation=7"
   selftest_assert_file_contains "${plan_dir}/runs/run-reprotect.authority.json" '"targetInstanceName": "i-2-256-VM"'
@@ -8942,6 +8966,12 @@ EOF
   selftest_assert_file_contains "${session_path}" '"operation":"reprotect"'
   selftest_assert_file_contains "${active_path}" '"activeSide":"TARGET"'
   selftest_assert_file_contains "${active_profile}" '"reverseOf"'
+  selftest_assert_file_contains "${plan_dir}/runs/run-reprotect.state" "scheduler_desired_state=RUNNING"
+  selftest_assert_file_contains "${plan_dir}/scheduler/sequence.state" "reprotect_baseline_sequence=6"
+  local scheduler_owner
+  scheduler_owner="$(ftctl_dr_runtime_state_get_from_path "${plan_dir}/runs/run-reprotect.state" scheduler_owner_run_uuid)"
+  [[ -n "${scheduler_owner}" ]] || selftest_fail "reprotect scheduler owner was not published"
+  selftest_assert_file_contains "${plan_dir}/runs/${scheduler_owner}.state" "active_side=TARGET"
   selftest_assert_file_contains "${call_log}" "convert --force-share -p -n -S"
 
   out="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-status \

@@ -383,5 +383,19 @@ path without publishing its terminal journal, `dr-status --run` may repair only
 a `READY / reprotect-ready / 100%` Run with no error and with both durable files
 present. This read repair must not restart or repeat the reverse transfer.
 
+## 14. 2026-08-31 Continuous reverse protection barrier
+
+A durable reverse seed is necessary but is not sufficient to declare a TARGET
+authority protected. Before publishing a successful Reprotect terminal, FTCTL
+promotes the reverse profile, creates a distinct scheduler-owner Run, starts
+the continuous reverse scheduler, and verifies its lease ownership and control
+ACK. The accepted Reprotect Run remains the finite Cloud operation; the new
+scheduler-owner Run owns subsequent reverse incremental Cycles.
+
+If the reverse scheduler does not reach an owned `RUNNING / HEALTHY` state,
+Reprotect terminates with `DR_REPROTECT_SCHEDULER_START_FAILED`. TARGET remains
+the serving authority and no VM, storage, or network resource is mutated. This
+prevents a one-time reverse seed from being presented as ongoing protection.
+
 Regression coverage is provided by
 `tests/ftctl_dr_reprotect_terminal_smoke.sh`.
