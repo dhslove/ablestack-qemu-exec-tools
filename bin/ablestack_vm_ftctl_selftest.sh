@@ -9908,6 +9908,8 @@ selftest_case_dr_transition_preflight_is_read_only() {
   local plan="plan-transition-preflight"
   local status_path before_sha after_sha out rc=0
   local missing_plan="plan-transition-preflight-missing"
+  local recovery_plan="plan-transition-preflight-reprotect-recovery"
+  local recovery_status recovery_active recovery_authority recovery_sha
   local stderr_path="${SELFTEST_ROOT}/transition-preflight-missing.stderr"
   if ftctl_command_requires_lock "dr-transition-preflight" ""; then
     selftest_fail "DR transition preflight must not use the legacy global lock"
@@ -9939,6 +9941,29 @@ selftest_case_dr_transition_preflight_is_read_only() {
   out="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-transition-preflight --config "${SELFTEST_CONFIG}" --plan "${plan}" --operation reprotect --expected-authority TARGET --authority-generation 8 --json 2>/dev/null)" || rc=$?
   selftest_assert_eq "${rc}" "79" "generation mismatch exit"
   selftest_assert_contains "${out}" '"error_code":"DR_TRANSITION_PREFLIGHT_GENERATION_MISMATCH"' "generation mismatch is typed"
+
+  ftctl_dr_runtime_ensure_plan_dirs "${recovery_plan}"
+  recovery_status="$(ftctl_dr_runtime_status_path "${recovery_plan}")"
+  recovery_active="$(ftctl_dr_runtime_active_reprotect_session_path "${recovery_plan}")"
+  recovery_authority="$(ftctl_dr_runtime_authority_spec_path "${recovery_plan}" "prior-reprotect")"
+  ftctl_dr_runtime_write_state "${recovery_status}" "${recovery_plan}" "scheduler-owner" \
+    "dr-scheduler-run" "READY" "target-checkpoint-ready" "100" "scheduler-owner" ""
+  ftctl_dr_runtime_path_set "${recovery_status}" \
+    "active_side=TARGET" "scheduler_state=RUNNING" "scheduler_health=HEALTHY" \
+    "owner_matched=true" "protection_state=READY"
+  cat > "${recovery_active}" <<EOF
+{"planUuid":"${recovery_plan}","runUuid":"prior-reprotect","state":"READY","activeSide":"TARGET"}
+EOF
+  cat > "${recovery_authority}" <<EOF
+{"expectedActiveSide":"TARGET","authorityGeneration":9,"targetPowerState":"POWERED_ON","sourceFenceState":"ACKNOWLEDGED","sourcePowerState":"POWERED_OFF"}
+EOF
+  recovery_sha="$(sha256sum "${recovery_status}" | awk '{print $1}')"
+  out="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-transition-preflight --config "${SELFTEST_CONFIG}" --plan "${recovery_plan}" --operation reprotect --expected-authority TARGET --authority-generation 9 --json)"
+  selftest_assert_contains "${out}" '"ready":true' "reprotect authority snapshot recovers omitted scheduler projection"
+  selftest_assert_contains "${out}" '"authority_generation":9' "recovered authority generation is reported"
+  selftest_assert_contains "${out}" '"target_power_state":"POWERED_ON"' "recovered target power is reported"
+  selftest_assert_eq "$(sha256sum "${recovery_status}" | awk '{print $1}')" "${recovery_sha}" \
+    "authority recovery remains read-only"
 
   rc=0
   out="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-transition-preflight --config "${SELFTEST_CONFIG}" --plan "${missing_plan}" --operation failback --expected-authority TARGET --authority-generation 7 --json 2>"${stderr_path}")" || rc=$?

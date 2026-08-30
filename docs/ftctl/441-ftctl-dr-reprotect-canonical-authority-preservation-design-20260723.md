@@ -438,3 +438,18 @@ normal activation and ACK barrier, and writes a fresh authoritative success
 terminal. Missing evidence falls back to the unchanged full-seed path. This is
 deliberately limited to ABLESTACK-to-ABLESTACK so VMware mover behavior and the
 first Reprotect attempt retain their validated contracts.
+
+## 14.3 Reprotect scheduler authority inheritance (2026-08-31)
+
+The reverse scheduler created after Reprotect is a new process owner, not a new
+Cloud authority owner. Its state inherits the immutable cutover generation,
+sequence floor, cutover session, target power/promotion, and source isolation
+fields from the accepted Reprotect Run. Scheduler Cycle publication preserves
+these fields.
+
+For already deployed partial Reprotect results, transition preflight may read
+the same Plan's `READY/TARGET` active Reprotect session and immutable authority
+snapshot when the live scheduler is `RUNNING/HEALTHY`, owner-matched, and
+protected. This compatibility recovery is read-only and accepts only an exact
+Cloud generation match. It does not weaken authority validation or change the
+VMware-to-RBD path.

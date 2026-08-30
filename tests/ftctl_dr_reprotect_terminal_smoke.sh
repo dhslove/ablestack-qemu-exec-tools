@@ -251,4 +251,47 @@ if ftctl_dr_runtime_adopt_existing_reprotect \
   exit 1
 fi
 
+# A scheduler activated by a completed Reprotect must retain the immutable
+# Cloud authority snapshot. Older installed schedulers omitted those fields,
+# so transition preflight may recover them read-only from the matching READY
+# Reprotect session while all scheduler ownership proofs remain healthy.
+RECOVERY_PLAN="reprotect-authority-recovery-plan"
+RECOVERY_RUN="prior-reprotect"
+RECOVERY_DIR="${TMP}/run/dr-runtime/plans/${RECOVERY_PLAN}"
+RECOVERY_PROFILE="${RECOVERY_DIR}/profile.json"
+RECOVERY_STATUS="${RECOVERY_DIR}/status.state"
+RECOVERY_ACTIVE="${RECOVERY_DIR}/reprotects/active.json"
+RECOVERY_AUTHORITY="${RECOVERY_DIR}/runs/${RECOVERY_RUN}.authority.json"
+mkdir -p "${RECOVERY_DIR}/runs" "${RECOVERY_DIR}/reprotects"
+printf '{"planUuid":"%s"}\n' "${RECOVERY_PLAN}" > "${RECOVERY_PROFILE}"
+cat > "${RECOVERY_STATUS}" <<EOF
+plan=${RECOVERY_PLAN}
+run=scheduler-owner
+action=dr-scheduler-run
+state=READY
+step=target-checkpoint-ready
+progress=100
+active_side=TARGET
+scheduler_state=RUNNING
+scheduler_health=HEALTHY
+owner_matched=true
+protection_state=READY
+EOF
+cat > "${RECOVERY_ACTIVE}" <<EOF
+{"planUuid":"${RECOVERY_PLAN}","runUuid":"${RECOVERY_RUN}","state":"READY","activeSide":"TARGET"}
+EOF
+cat > "${RECOVERY_AUTHORITY}" <<EOF
+{"expectedActiveSide":"TARGET","authorityGeneration":112,"targetPowerState":"POWERED_ON","sourceFenceState":"VERIFIED","sourcePowerState":"POWERED_OFF"}
+EOF
+RECOVERY_SHA="$(sha256sum "${RECOVERY_STATUS}" | awk '{print $1}')"
+RECOVERY_JSON="$(bash "${ROOT}/bin/ablestack_vm_ftctl.sh" dr-transition-preflight \
+  --config "${CONFIG}" --plan "${RECOVERY_PLAN}" --operation reprotect \
+  --expected-authority TARGET --authority-generation 112 --json)"
+jq -e '.ready == true
+  and .authority_generation == 112
+  and .target_power_state == "POWERED_ON"
+  and .source_fence_state == "VERIFIED"
+  and .source_power_state == "POWERED_OFF"' <<<"${RECOVERY_JSON}" >/dev/null
+[[ "$(sha256sum "${RECOVERY_STATUS}" | awk '{print $1}')" == "${RECOVERY_SHA}" ]]
+
 echo "ftctl DR reprotect terminal smoke: PASS"

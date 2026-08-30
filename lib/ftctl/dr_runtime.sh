@@ -7662,6 +7662,9 @@ ftctl_dr_runtime_transition_preflight() {
   local expected_generation="${4-}" json="${5-0}"
   local status_path active_side="" authority_generation="" target_power_state=""
   local source_fence_state="" source_power_state=""
+  local active_reprotect_path="" reprotect_plan="" reprotect_state="" reprotect_side=""
+  local reprotect_run="" authority_spec_path="" spec_side="" spec_generation=""
+  local scheduler_state="" scheduler_health="" owner_matched="" protection_state=""
   local ready="true" error_code="" message="" retryable="false" checked_at_epoch_ms
 
   ftctl_dr_runtime_require_plan "${plan}" || return 2
@@ -7686,6 +7689,36 @@ ftctl_dr_runtime_transition_preflight() {
     target_power_state="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "target_power_state")"
     source_fence_state="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "source_fence_state")"
     source_power_state="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "source_power_state")"
+    if [[ "${active_side^^}" == "TARGET" \
+          && ( -z "${authority_generation}" || -z "${target_power_state}" \
+            || -z "${source_fence_state}" || -z "${source_power_state}" ) ]]; then
+      active_reprotect_path="$(ftctl_dr_runtime_active_reprotect_session_path "${plan}")"
+      scheduler_state="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "scheduler_state")"
+      scheduler_health="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "scheduler_health")"
+      owner_matched="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "owner_matched")"
+      protection_state="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "protection_state")"
+      if [[ -s "${active_reprotect_path}" && "${scheduler_state}" == "RUNNING" \
+            && "${scheduler_health}" == "HEALTHY" && "${owner_matched}" == "true" \
+            && "${protection_state}" == "READY" ]]; then
+        reprotect_plan="$(jq -r '.planUuid // empty' "${active_reprotect_path}" 2>/dev/null || true)"
+        reprotect_state="$(jq -r '.state // empty' "${active_reprotect_path}" 2>/dev/null || true)"
+        reprotect_side="$(jq -r '.activeSide // empty' "${active_reprotect_path}" 2>/dev/null || true)"
+        reprotect_run="$(jq -r '.runUuid // empty' "${active_reprotect_path}" 2>/dev/null || true)"
+        authority_spec_path="$(ftctl_dr_runtime_authority_spec_path "${plan}" "${reprotect_run}")"
+        if [[ "${reprotect_plan}" == "${plan}" && "${reprotect_state}" == "READY" \
+              && "${reprotect_side}" == "TARGET" && -s "${authority_spec_path}" ]]; then
+          spec_side="$(ftctl_dr_runtime_profile_value "${authority_spec_path}" "expectedActiveSide" 2>/dev/null || true)"
+          spec_generation="$(ftctl_dr_runtime_profile_value "${authority_spec_path}" "authorityGeneration" 2>/dev/null || true)"
+          if [[ "${spec_side}" == "TARGET" && -n "${spec_generation}" \
+                && ( -z "${expected_generation}" || "${spec_generation}" == "${expected_generation}" ) ]]; then
+            [[ -n "${authority_generation}" ]] || authority_generation="${spec_generation}"
+            [[ -n "${target_power_state}" ]] || target_power_state="$(ftctl_dr_runtime_profile_value "${authority_spec_path}" "targetPowerState" 2>/dev/null || true)"
+            [[ -n "${source_fence_state}" ]] || source_fence_state="$(ftctl_dr_runtime_profile_value "${authority_spec_path}" "sourceFenceState" 2>/dev/null || true)"
+            [[ -n "${source_power_state}" ]] || source_power_state="$(ftctl_dr_runtime_profile_value "${authority_spec_path}" "sourcePowerState" 2>/dev/null || true)"
+          fi
+        fi
+      fi
+    fi
     if [[ "${active_side^^}" != "${expected_authority}" ]]; then
       error_code="DR_TRANSITION_PREFLIGHT_AUTHORITY_MISMATCH"
       message="FTCTL authority does not match the Cloud transition authority"

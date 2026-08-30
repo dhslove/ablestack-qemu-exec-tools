@@ -1467,7 +1467,8 @@ ftctl_dr_scheduler_resume_after_transition() {
 ftctl_dr_scheduler_activate_reprotected_profile() {
   local plan="${1-}" reprotect_run="${2-}" profile_file="${3-}" reprotect_path="${4-}" status_path="${5-}"
   local scheduler_run scheduler_path generation session checkpoint_sequence target_durable_at source_checkpoint_at
-  local sequence_path current_plan_sequence
+  local sequence_path current_plan_sequence key value
+  local -a authority_updates=()
 
   [[ -n "${plan}" && -n "${reprotect_run}" && -f "${profile_file}" && -f "${reprotect_path}" ]] || return 2
   scheduler_run="$(ftctl_dr_runtime_launch_nonce)"
@@ -1504,6 +1505,19 @@ ftctl_dr_scheduler_activate_reprotected_profile() {
     "scheduler_desired_state=RUNNING" \
     "scheduler_health=RECOVERING" \
     "updated_at=$(ftctl_now_iso8601)" || return $?
+  for key in \
+    cloud_authority_generation \
+    cloud_authority_sequence_floor \
+    cloud_cutover_session_id \
+    target_power_state \
+    target_promotion_state \
+    source_fence_state \
+    source_power_state; do
+    value="$(ftctl_dr_runtime_state_get_from_path "${reprotect_path}" "${key}")"
+    [[ -n "${value}" ]] && authority_updates+=("${key}=${value}")
+  done
+  (( ${#authority_updates[@]} == 0 )) || \
+    ftctl_dr_runtime_path_set "${scheduler_path}" "${authority_updates[@]}" || return $?
   ftctl_state_set_path "${sequence_path}" \
     "plan_cycle_sequence=${current_plan_sequence}" \
     "reprotect_baseline_sequence=${checkpoint_sequence}" \
