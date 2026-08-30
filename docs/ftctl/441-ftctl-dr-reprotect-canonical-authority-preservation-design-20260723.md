@@ -453,3 +453,10 @@ snapshot when the live scheduler is `RUNNING/HEALTHY`, owner-matched, and
 protected. This compatibility recovery is read-only and accepts only an exact
 Cloud generation match. It does not weaken authority validation or change the
 VMware-to-RBD path.
+
+The canonical Plan profile keeps its configured source-to-target orientation;
+Reprotect must not rewrite that profile merely to express runtime authority.
+Idempotent adoption therefore validates `TARGET` authority from the accepted
+Reprotect Run state, while provider pair, direction, and Plan identity remain
+profile-scoped. This prevents a retry from starting a redundant full reverse
+seed after a healthy reverse scheduler has already advanced durable cycles.

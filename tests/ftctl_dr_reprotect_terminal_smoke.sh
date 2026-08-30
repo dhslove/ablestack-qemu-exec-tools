@@ -211,7 +211,7 @@ printf '{}\n' > "${ADOPT_REVERSE_PROFILE}"
 printf '{}\n' > "${ADOPT_MANIFEST}"
 printf '{}\n' > "${ADOPT_CHECKPOINT}"
 cat > "${ADOPT_PROFILE}" <<EOF
-{"planUuid":"${ADOPT_PLAN}","providerPair":"ABLESTACK_TO_ABLESTACK","direction":"KVM_TO_KVM","activeSide":"TARGET"}
+{"planUuid":"${ADOPT_PLAN}","providerPair":"ABLESTACK_TO_ABLESTACK","direction":"KVM_TO_KVM","activeSide":"SOURCE"}
 EOF
 cat > "${ADOPT_DIR}/reprotects/active.json" <<EOF
 {"planUuid":"${ADOPT_PLAN}","state":"READY","activeSide":"TARGET","reverseProfilePath":"${ADOPT_REVERSE_PROFILE}","restorePoint":{"checkpointSequence":179}}
@@ -236,7 +236,7 @@ cat > "${ADOPT_DIR}/scheduler/sequence.state" <<EOF
 plan_cycle_sequence=180
 reprotect_baseline_sequence=179
 EOF
-touch "${ADOPT_RUN_PATH}"
+printf 'active_side=TARGET\n' > "${ADOPT_RUN_PATH}"
 ftctl_dr_scheduler_active_worker_valid() { return 0; }
 ftctl_dr_runtime_adopt_existing_reprotect \
   "${ADOPT_PLAN}" "${ADOPT_PROFILE}" "${ADOPT_RUN_PATH}" "${ADOPT_STATUS}"

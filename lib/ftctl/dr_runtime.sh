@@ -3625,7 +3625,7 @@ ftctl_dr_runtime_start_failback() {
 
 ftctl_dr_runtime_adopt_existing_reprotect() {
   local plan="${1-}" profile_file="${2-}" run_path="${3-}" status_path="${4-}"
-  local active_session ack_path sequence_path provider_pair direction active_side profile_plan
+  local active_session ack_path sequence_path provider_pair direction authority_side profile_plan
   local session_plan session_state session_side reverse_profile session_sequence latest_sequence
   local manifest_path checkpoint_path source_checkpoint_at target_durable_at
   local ack_state ack_owner ack_worker ack_owner_matched active_worker baseline_sequence
@@ -3633,10 +3633,10 @@ ftctl_dr_runtime_adopt_existing_reprotect() {
   [[ -n "${plan}" && -f "${profile_file}" && -f "${status_path}" ]] || return 1
   provider_pair="$(ftctl_dr_runtime_profile_value "${profile_file}" "providerPair" 2>/dev/null || true)"
   direction="$(ftctl_dr_runtime_profile_value "${profile_file}" "direction" 2>/dev/null || true)"
-  active_side="$(ftctl_dr_runtime_profile_value "${profile_file}" "activeSide" 2>/dev/null || true)"
+  authority_side="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "active_side")"
   profile_plan="$(ftctl_dr_runtime_profile_value "${profile_file}" "planUuid" 2>/dev/null || true)"
   [[ "${provider_pair}" == "ABLESTACK_TO_ABLESTACK" && "${direction}" == "KVM_TO_KVM" \
-        && "${active_side}" == "TARGET" && "${profile_plan}" == "${plan}" ]] || return 1
+        && "${authority_side}" == "TARGET" && "${profile_plan}" == "${plan}" ]] || return 1
 
   active_session="$(ftctl_dr_runtime_active_reprotect_session_path "${plan}")"
   [[ -f "${active_session}" ]] || return 1
