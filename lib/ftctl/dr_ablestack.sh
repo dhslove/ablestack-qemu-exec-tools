@@ -1760,6 +1760,7 @@ ftctl_dr_ablestack_qcow2_push_disk() {
     --bitmap "${bitmap}" --mode "${mode}" --job-id "${job_id}" --target-node "${target_node}" \
     --virtual-size "${size_bytes}" --timeout "${FTCTL_DR_FULL_SEED_TIMEOUT_SEC:-3600}" \
     --bandwidth-limit-mbps "${bandwidth}" --progress-path "${FTCTL_DR_TRANSFER_PROGRESS_PATH:-}" \
+    --plan-uuid "${plan}" --run-uuid "${run}" \
     --cycle-sequence "${sequence:-0}" --disk-index "${disk_index}" --disk-count "${disk_count}")" || rc=$?
   [[ "${rc}" == "0" ]] || return "${rc}"
   [[ -z "${out_var}" ]] || printf -v "${out_var}" '%s' "${output}"

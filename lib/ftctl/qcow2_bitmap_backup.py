@@ -116,7 +116,9 @@ def write_progress(path, args, state, processed, total, changed, started, sample
     remaining = max(total - processed, 0)
     eta = int(remaining / throughput) if throughput > 0 else 0
     atomic_write_json(path, {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
+        "planUuid": args.plan_uuid,
+        "runUuid": args.run_uuid,
         "cycleSequence": args.cycle_sequence,
         "sampleSequence": sample_sequence,
         "state": state,
@@ -240,6 +242,8 @@ def parse_args(argv=None):
     parser.add_argument("--granularity", type=int, default=65536)
     parser.add_argument("--bandwidth-limit-mbps", type=int, default=0)
     parser.add_argument("--progress-path", default="")
+    parser.add_argument("--plan-uuid", default="")
+    parser.add_argument("--run-uuid", default="")
     parser.add_argument("--cycle-sequence", type=int, default=0)
     parser.add_argument("--disk-index", type=int, default=1)
     parser.add_argument("--disk-count", type=int, default=1)

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import importlib.util
+import json
 import pathlib
 import tempfile
 import unittest
@@ -49,6 +50,7 @@ def args(mode, progress_path):
         target_node="ftctl-target-sda", virtual_size=1048576, timeout=2,
         poll_interval=0, granularity=65536, bandwidth_limit_mbps=0,
         progress_path=progress_path, cycle_sequence=7, disk_index=1, disk_count=1,
+        plan_uuid="plan-1", run_uuid="run-1",
         uri="qemu:///system", virsh="virsh",
     )
 
@@ -57,7 +59,9 @@ class Qcow2BitmapBackupTest(unittest.TestCase):
     def test_full_seed_creates_persistent_bitmap_before_backup(self):
         with tempfile.TemporaryDirectory() as temp:
             client = FakeClient()
-            result = MODULE.run_backup(args("full", str(pathlib.Path(temp) / "progress.json")), client)
+            progress_path = pathlib.Path(temp) / "progress.json"
+            result = MODULE.run_backup(args("full", str(progress_path)), client)
+            progress = json.loads(progress_path.read_text(encoding="utf-8"))
 
         commands = [command for command, _ in client.calls]
         self.assertLess(commands.index("block-dirty-bitmap-add"), commands.index("blockdev-backup"))
@@ -65,6 +69,9 @@ class Qcow2BitmapBackupTest(unittest.TestCase):
         self.assertEqual("full", backup["sync"])
         self.assertNotIn("bitmap", backup)
         self.assertEqual("FULL_RESEED", result["mode"])
+        self.assertEqual(2, progress["schemaVersion"])
+        self.assertEqual("plan-1", progress["planUuid"])
+        self.assertEqual("run-1", progress["runUuid"])
 
     def test_incremental_uses_existing_bitmap_and_clears_on_success_only(self):
         with tempfile.TemporaryDirectory() as temp:
