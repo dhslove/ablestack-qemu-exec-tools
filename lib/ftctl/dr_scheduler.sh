@@ -1275,7 +1275,7 @@ ftctl_dr_scheduler_queue_cancel_recovery() {
 
 ftctl_dr_scheduler_ensure_running() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" state_path="${4-}" status_path="${5-}"
-  local pid_path generation now session
+  local pid_path generation now session systemd_launch_expected=0
 
   [[ -n "${plan}" && -n "${run}" && -f "${profile_file}" && -f "${state_path}" ]] || return 2
   session="$(ftctl_dr_scheduler_session_uuid "${plan}" "${profile_file}")"
@@ -1306,12 +1306,16 @@ ftctl_dr_scheduler_ensure_running() {
     "worker_pid=" \
     "updated_at=${now}" || return $?
   rm -f "${pid_path}" 2>/dev/null || true
+  if ftctl_dr_scheduler_systemd_available "${plan}"; then
+    systemd_launch_expected=1
+  fi
   ftctl_dr_scheduler_start "${plan}" "${run}" "${profile_file}" "${state_path}" "${status_path}" "false" || return $?
 
-  # Background start writes the owned PID before returning. A missing PID here
-  # means the profile is not schedulable (or startup was suppressed), so do
-  # not spend the full control ACK timeout pretending recovery is in progress.
-  if [[ ! -s "${pid_path}" ]]; then
+  # The shell-owned background path writes the run PID before returning. The
+  # systemd path uses start --no-block and publishes only the Plan-owned
+  # active.pid after the service acquires its lease, so its missing run PID is
+  # not a startup failure. Let the ownership loop below establish the barrier.
+  if [[ ! -s "${pid_path}" && "${systemd_launch_expected}" != "1" ]]; then
     ftctl_dr_scheduler_update_state "${state_path}" "${status_path}" \
       "scheduler_state=ERROR" \
       "scheduler_pid_alive=false" \

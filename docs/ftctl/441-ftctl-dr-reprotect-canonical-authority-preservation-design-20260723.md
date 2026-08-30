@@ -399,3 +399,22 @@ prevents a one-time reverse seed from being presented as ongoing protection.
 
 Regression coverage is provided by
 `tests/ftctl_dr_reprotect_terminal_smoke.sh`.
+
+### 14.1 systemd asynchronous ownership publication
+
+The systemd scheduler launcher uses `systemctl start --no-block`. It does not
+publish the legacy Run-specific PID file before returning; the service writes
+the canonical Plan-owned `active.pid`, lease, and control ACK after acquiring
+ownership. Therefore a missing Run PID is an immediate failure only for the
+shell-owned background launcher. The systemd path must wait for the canonical
+ownership barrier and may declare success only when all of these agree:
+
+- the Plan scheduler session and lease epoch;
+- `active.pid` process identity and start ticks;
+- the requested control generation and `RUNNING` ACK;
+- the scheduler-owner Run UUID.
+
+This rule applies to every provider pair because scheduler ownership is a
+shared control-plane contract; it does not change VMware, RBD, or qcow2 data
+movement. `tests/ftctl_dr_systemd_async_start_smoke.sh` guards the race where
+systemd has accepted the start but the legacy Run PID is intentionally absent.
