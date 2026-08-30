@@ -1506,6 +1506,22 @@ PY
   fi
 }
 
+ftctl_dr_ablestack_prepare_cycle_disk_map() {
+  local plan="${1-}" profile_file="${2-}" disk_map="${3-}" rc=0
+  ftctl_dr_ablestack_canonicalize_profile "${profile_file}" "${disk_map}" || {
+    rc=$?
+    ftctl_log_event "dr-runtime" "dr.ablestack.disk_map_refresh" "fail" "" "${rc}" \
+      "plan=${plan} stage=canonicalize_profile"
+    return "${rc}"
+  }
+  ftctl_dr_ablestack_rebind_live_qcow2_sources "${plan}" "${disk_map}" || {
+    rc=$?
+    ftctl_log_event "dr-runtime" "dr.ablestack.disk_map_refresh" "fail" "" "${rc}" \
+      "plan=${plan} stage=rebind_live_qcow2_source"
+    return "${rc}"
+  }
+}
+
 ftctl_dr_ablestack_qcow2_reverse_source_provider() {
   local disk_map="${1-}" disk_json target_type target_format count=0
   [[ -s "${disk_map}" ]] || return 1
@@ -1826,8 +1842,7 @@ ftctl_dr_ablestack_prepare_targets() {
   local records_path count disk_json device source_path target_path source_format target_format size_bytes source_type target_type resolved_size
   local source_at remote_transport="0"
 
-  ftctl_dr_ablestack_canonicalize_profile "${profile_file}" "${disk_map}" || return $?
-  ftctl_dr_ablestack_rebind_live_qcow2_sources "${plan}" "${disk_map}" || return $?
+  ftctl_dr_ablestack_prepare_cycle_disk_map "${plan}" "${profile_file}" "${disk_map}" || return $?
   if ftctl_dr_ablestack_remote_transport_load "${disk_map}" ||
      ftctl_dr_ablestack_site_agent_transport_load "${disk_map}"; then
     remote_transport="1"
@@ -2161,8 +2176,7 @@ ftctl_dr_ablestack_incremental_effective_mode() {
 ftctl_dr_ablestack_qcow2_incremental_once() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" disk_map="${4-}" manifest_path="${5-}" checkpoint_path="${6-}" sequence="${7-}"
   local disk_json vm_name result changed_bytes total_changed_bytes=0 started_at completed_at disk_count disk_index=0 rc=0 effective_mode
-  ftctl_dr_ablestack_canonicalize_profile "${profile_file}" "${disk_map}" || return $?
-  ftctl_dr_ablestack_rebind_live_qcow2_sources "${plan}" "${disk_map}" || return $?
+  : "${profile_file}"
   ftctl_dr_ablestack_site_agent_transport_load "${disk_map}" || return 90
   ftctl_dr_ablestack_qcow2_push_provider "${disk_map}" || return 90
   vm_name="$(ftctl_dr_ablestack_json_field "${disk_map}" source.instanceName 2>/dev/null || true)"
@@ -2193,7 +2207,11 @@ ftctl_dr_ablestack_qcow2_incremental_once() {
 ftctl_dr_ablestack_site_agent_incremental_once() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" disk_map="${4-}" manifest_path="${5-}" checkpoint_path="${6-}" sequence="${7-}"
   local disk_json device source_path source_spec baseline previous current host port name diff_json changed_bytes total_changed_bytes="0" started_at completed_at disk_count effective_mode
-  ftctl_dr_ablestack_canonicalize_profile "${profile_file}" "${disk_map}" || return $?
+  # Provider dispatch must use the same live source mapping as the transfer.
+  # A canceled KVM failover may leave an immutable profile pointing at a
+  # deleted overlay while QEMU has resumed on the durable SharedMountPoint
+  # volume. Classifying the stale canonical map first misroutes qcow2 to RBD.
+  ftctl_dr_ablestack_prepare_cycle_disk_map "${plan}" "${profile_file}" "${disk_map}" || return $?
   ftctl_dr_ablestack_site_agent_transport_load "${disk_map}" || return 90
   if ftctl_dr_ablestack_qcow2_push_provider "${disk_map}"; then
     ftctl_dr_ablestack_qcow2_incremental_once "${plan}" "${run}" "${profile_file}" "${disk_map}" \

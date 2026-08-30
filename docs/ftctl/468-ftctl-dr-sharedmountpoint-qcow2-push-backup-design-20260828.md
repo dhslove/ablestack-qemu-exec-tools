@@ -552,6 +552,11 @@ reconciles the canonical disk map with the running source domain:
 7. A missing dirty bitmap after source restart causes one normal automatic
    full reseed on the rebound durable volume. That successful job establishes
    the new persistent bitmap; subsequent cycles return to incremental mode.
+8. Full-seed and incremental dispatch share the same ordering:
+   `canonicalize profile -> rebind live source -> classify provider -> transfer`.
+   Provider classification against the immutable stale profile is forbidden;
+   an extensionless SharedMountPoint qcow2 volume would otherwise be
+   misclassified as an RBD source before QMP can prove its live format.
 
 The canceled operation's failed manual `FULL_RESEED` record remains terminal
 history and is not replayed merely because the scheduler restarts. Recovery is
@@ -562,5 +567,6 @@ owned by the current scheduler Run and its new Cycle sequence.
 | Source locator after cancel | Deleted overlay remains in the profile | Stable volume UUID resolves the unique active QMP node |
 | Full reseed | Fails before transfer with a stale pathname | Rebinds first, then establishes a bitmap on the durable source |
 | Incremental baseline | Missing bitmap becomes a restart loop | One controlled reseed followed by incremental cycles |
+| Incremental provider dispatch | Classifies the stale canonical map before live rebinding | Rebinds the cycle-local map before choosing qcow2 or RBD transfer |
 | Ambiguous identity | Could tempt positional disk matching | Fails closed before any target write |
 | Existing providers | Shared recovery code could alter them | VMware and RBD paths bypass this gate |

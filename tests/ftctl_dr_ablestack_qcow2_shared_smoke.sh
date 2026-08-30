@@ -89,6 +89,23 @@ jq -e --arg live "/mnt/glue-gfs/${live_volume_uuid}" \
   '.disks[0].sourcePath == $live and .disks[0].sourceFormat == "qcow2"' \
   "${stale_source_canonical}" >/dev/null
 
+# The incremental dispatcher must classify the provider only after applying
+# the live QMP source mapping. This is the exact post-cancel contract: the
+# immutable profile has a deleted overlay and no sourceFormat, while QEMU is
+# running from the durable SharedMountPoint qcow2 volume.
+incremental_dispatch_map="${TMP}/canonical-incremental-dispatch.json"
+incremental_dispatch_marker="${TMP}/incremental-qcow2-dispatched"
+ftctl_dr_ablestack_site_agent_transport_load() { return 0; }
+ftctl_dr_ablestack_qcow2_incremental_once() {
+  jq -e --arg live "/mnt/glue-gfs/${live_volume_uuid}" \
+    '.disks[0].sourcePath == $live and .disks[0].sourceFormat == "qcow2"' "$4" >/dev/null
+  : > "${incremental_dispatch_marker}"
+}
+ftctl_dr_ablestack_site_agent_incremental_once plan-qcow2 run-incremental-dispatch \
+  "${stale_source_profile}" "${incremental_dispatch_map}" \
+  "${TMP}/incremental-manifest.json" "${TMP}/incremental-checkpoint.json" 91
+[[ -f "${incremental_dispatch_marker}" ]]
+
 ambiguous_source_canonical="${TMP}/canonical-ambiguous-source.json"
 cp "${stale_source_canonical}" "${ambiguous_source_canonical}"
 jq --arg stale "/mnt/glue-gfs/clone/overlay/${live_volume_uuid}-old-overlay" \
