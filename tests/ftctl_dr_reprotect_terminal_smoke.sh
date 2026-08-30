@@ -211,7 +211,7 @@ printf '{}\n' > "${ADOPT_REVERSE_PROFILE}"
 printf '{}\n' > "${ADOPT_MANIFEST}"
 printf '{}\n' > "${ADOPT_CHECKPOINT}"
 cat > "${ADOPT_PROFILE}" <<EOF
-{"planUuid":"${ADOPT_PLAN}","providerPair":"ABLESTACK_TO_ABLESTACK","direction":"KVM_TO_KVM","activeSide":"SOURCE"}
+{"planUuid":"${ADOPT_PLAN}","direction":"KVM_TO_KVM","activeSide":"SOURCE","source":{"provider":"ABLESTACK"},"target":{"provider":"ABLESTACK"}}
 EOF
 cat > "${ADOPT_DIR}/reprotects/active.json" <<EOF
 {"planUuid":"${ADOPT_PLAN}","state":"READY","activeSide":"TARGET","reverseProfilePath":"${ADOPT_REVERSE_PROFILE}","restorePoint":{"checkpointSequence":179}}

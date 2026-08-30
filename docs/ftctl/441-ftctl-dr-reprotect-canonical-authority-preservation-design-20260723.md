@@ -460,3 +460,6 @@ Idempotent adoption therefore validates `TARGET` authority from the accepted
 Reprotect Run state, while provider pair, direction, and Plan identity remain
 profile-scoped. This prevents a retry from starting a redundant full reverse
 seed after a healthy reverse scheduler has already advanced durable cycles.
+When the canonical profile omits `providerPair`, FTCTL derives it only from the
+typed `source.provider` and `target.provider` fields; it does not infer the
+route from VM names, storage paths, or mutable runtime status.

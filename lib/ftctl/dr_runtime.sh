@@ -3626,12 +3626,20 @@ ftctl_dr_runtime_start_failback() {
 ftctl_dr_runtime_adopt_existing_reprotect() {
   local plan="${1-}" profile_file="${2-}" run_path="${3-}" status_path="${4-}"
   local active_session ack_path sequence_path provider_pair direction authority_side profile_plan
+  local source_provider target_provider
   local session_plan session_state session_side reverse_profile session_sequence latest_sequence
   local manifest_path checkpoint_path source_checkpoint_at target_durable_at
   local ack_state ack_owner ack_worker ack_owner_matched active_worker baseline_sequence
 
   [[ -n "${plan}" && -f "${profile_file}" && -f "${status_path}" ]] || return 1
   provider_pair="$(ftctl_dr_runtime_profile_value "${profile_file}" "providerPair" 2>/dev/null || true)"
+  if [[ -z "${provider_pair}" ]]; then
+    source_provider="$(ftctl_dr_runtime_profile_value "${profile_file}" "source.provider" 2>/dev/null || true)"
+    target_provider="$(ftctl_dr_runtime_profile_value "${profile_file}" "target.provider" 2>/dev/null || true)"
+    if [[ -n "${source_provider}" && -n "${target_provider}" ]]; then
+      provider_pair="${source_provider^^}_TO_${target_provider^^}"
+    fi
+  fi
   direction="$(ftctl_dr_runtime_profile_value "${profile_file}" "direction" 2>/dev/null || true)"
   authority_side="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "active_side")"
   profile_plan="$(ftctl_dr_runtime_profile_value "${profile_file}" "planUuid" 2>/dev/null || true)"
