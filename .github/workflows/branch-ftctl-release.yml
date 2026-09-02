@@ -122,7 +122,17 @@ jobs:
           bash tests/ftctl_dr_ablestack_remote_rbd_smoke.sh
           bash tests/ftctl_dr_ablestack_qcow2_shared_smoke.sh
           bash tests/ftctl_dr_ablestack_seed_retry_smoke.sh
+          bash tests/ftctl_dr_active_cancel_recovery_smoke.sh
+          bash tests/ftctl_dr_cancel_manual_recovery_smoke.sh
           bash tests/ftctl_dr_cancel_terminal_immutability_smoke.sh
+          bash tests/ftctl_dr_fleet_admission_smoke.sh
+          bash tests/ftctl_dr_rpo_deadline_smoke.sh
+          bash tests/ftctl_dr_source_outage_recovery_smoke.sh
+          bash tests/ftctl_dr_vmware_snapshot_cleanup_smoke.sh
+          bash tests/ftctl_dr_vmware_thumbprint_refresh_smoke.sh
+          python3 -m unittest \
+            tests.ftctl_dr_bandwidth_limit_smoke \
+            tests.ftctl_dr_rbd_extent_copy_smoke
           make ftctl-rpm
 
           rpm_path=$(find build/rpm-ftctl -type f -name 'ablestack_vm_ftctl-*.rpm' -print -quit)

@@ -43,6 +43,7 @@ ftctl_dr_runtime_run_path() {
   [[ "${2-}" == "run-1" ]] && printf '%s\n' "${tmp}/run.state" || printf '%s/%s.state\n' "${tmp}" "${2-}"
 }
 ftctl_dr_scheduler_recover() { printf '%s\n' called > "${tmp}/recover.called"; }
+ftctl_dr_runtime_remote_source_transition() { return 1; }
 
 test_control_command=stop
 ftctl_dr_scheduler_reconcile_plan plan-1

@@ -1,5 +1,10 @@
 # FTCTL DR SharedMountPoint QCOW2 Push Backup Design
 
+> Dynamic placement and worker authority are governed by
+> `470-ftctl-dr-dynamic-worker-lease-and-placement-boundary-design-20260903.md`.
+> VM host, coordinator, and transfer worker identities are runtime leases, not
+> durable Plan routing fields.
+
 ## 1. Scope
 
 This design adds the ABLESTACK KVM `qcow2 -> qcow2` data plane for
@@ -44,6 +49,12 @@ chains:
 
 This avoids unmanaged external overlays and preserves Cloud ownership and live
 migration behavior.
+
+The QMP producer resolves the VM's live placement only for the command that
+creates or advances a checkpoint. The transfer stage is independently
+scheduled on an eligible `/mnt/glue-gfs` worker. A stopped VM has no required
+compute host and uses the offline checkpoint path; missing `hostid` must not
+disable synchronization.
 
 ## 3. Provider Boundary
 

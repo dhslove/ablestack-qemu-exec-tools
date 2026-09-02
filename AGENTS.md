@@ -16,6 +16,13 @@
 ## Validated DR Path Regression Gate
 
 - Previously validated DR paths are immutable behavioral contracts. A change to shared runtime status, profile parsing, scheduler, Agent answer, or Cloud projection code must not be treated as isolated to the feature that motivated the change.
+- DR plans must never pin transient virtualization placement as execution authority. VM host, coordinator, and transfer worker identities are runtime observations or leases. Do not persist or reuse `hostid`, `sourceHostUuid`, or `sourceWorkerHostUuid` to gate a future action.
+- User-facing DR plan creation must not require coordinator/source/target worker selection. Cloud schedules eligible workers from live site inventory, Agent health, storage reachability, and resource admission. Manual host constraints are administrator-only preferences, never required bindings.
+- A stopped or migrated VM must not make SharedMountPoint file synchronization unavailable. Resolve the current VM host only for an actual VM-local QMP/lifecycle command; schedule file transfer independently on a storage-capable worker.
+- Disaster Failover, checkpoint-based Test Failover, cleanup, and release must not require source VM, source Agent, or source Mold reachability when target capability and durable recovery evidence satisfy the action contract.
+- VMware source VMs may be powered on or off for protection and Full Seed. A powered-off source with a valid CBT baseline remains eligible for incremental or `NO_CHANGE`; never power it on merely to satisfy DR readiness.
+- Never pin a VMware VM to an observed ESXi host. Re-resolve vCenter placement and disk locators for each capture attempt so vMotion/DRS remains transparent. Select the VDDK KVM worker automatically from the live capable pool.
+- Any change to placement, capability, or Agent routing must test running, stopped, live-migrated, and source-unreachable states across VMware-to-RBD, RBD-to-RBD, and SharedMountPoint qcow2-to-qcow2.
 - Any change to `dr_runtime.sh`, `dr_scheduler.sh`, the FTCTL DR JSON schema, or profile lifecycle must run the release tombstone regression: profile-present status, successful release, profile deletion, profile-missing `dr-status`, runtime status reconstruction from the tombstone, and process-restart status.
 - `set -u` must never make an optional status field fatal. Every field emitted by `dr-status` requires an explicit default before conditional profile or runtime reads.
 - A successful release must preserve VM, storage, network, and authority while converging to `RELEASED / UNPROTECTED / STOPPED`; Cloud must converge to `UNPROTECTED / DISABLED` without direct DB repair.
