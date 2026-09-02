@@ -186,10 +186,14 @@ block checkpoint-based disaster recovery, no command consumes a Plan-persisted
 worker as authority, and all disk sets remain atomic. A failed case blocks RPM
 publication and therefore blocks test-site deployment.
 
-The release workflow runs `bin/ablestack_vm_ftctl_selftest.sh` before every
-provider-specific smoke script. The self-test is the lifecycle contract gate;
-the provider scripts are additional data-path gates and are not substitutes for
-it. RPM construction starts only after both layers pass.
+The release workflow runs `tests/ftctl_dr_full_lifecycle_smoke.sh` before every
+provider-specific smoke script. It executes every `selftest_case_dr_*` case in
+the FTCTL self-test and asserts that representative cases for status/cancel,
+pause/resume control, Full Sync, scheduled incremental sync, Test Failover and
+cleanup, Failover, Failback, Reprotect, and offline reverse preflight exist.
+The provider scripts are additional data-path gates and are not substitutes
+for it. RPM construction starts only after both layers pass. HA/XCOLO tests are
+outside this DR release gate and remain in their own validation workflow.
 
 Self-test cases must mock VM inventory, libvirt, network, and storage evidence
 explicitly. A lifecycle test must never inherit a GitHub runner's empty
