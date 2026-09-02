@@ -2355,6 +2355,9 @@ def fail(code, message):
     if str(message).startswith("DR_") and ":" in str(message):
         structured_code, message = str(message).split(":", 1)
         message = message.strip()
+    message = " ".join(str(message or "").split())
+    if len(message) > 4096:
+        message = message[:4072].rstrip() + " ... [detail truncated]"
     session["testArtifacts"] = {
         "state": "FAILED",
         "path": artifacts_dir,
@@ -2380,6 +2383,84 @@ if target_provider == "VMWARE":
     state = "METADATA_ONLY"
 else:
     qemu_img = shutil.which("qemu-img")
+    all_file_disks = bool(disks) and all(
+        isinstance(disk, dict) and str(disk.get("provider") or "").upper() == "FILE"
+        for disk in disks
+    )
+    if all_file_disks:
+        request = session.get("request") if isinstance(session.get("request"), dict) else {}
+        if artifact_spec.get("checkpointImmutableRequired") is not True:
+            fail(53, "DR_TEST_CHECKPOINT_CONTRACT_INVALID: immutable FILE checkpoint contract is required")
+        if str(request.get("checkpointWriterState") or "").upper() != "DRAINED":
+            fail(46, "DR_TEST_CHECKPOINT_WRITER_NOT_DRAINED: target checkpoint writer is not drained")
+        if not qemu_img:
+            fail(46, "qemu-img is required to create ABLESTACK test copies")
+        restore_point = session.get("restorePoint") if isinstance(session.get("restorePoint"), dict) else {}
+        sequence = restore_point.get("checkpointSequence")
+        artifact_sequence = artifact_spec.get("checkpointSequence")
+        checkpoint_ref = str(restore_point.get("ref") or "")
+        try:
+            sequence = int(sequence)
+            artifact_sequence = int(artifact_sequence)
+        except (TypeError, ValueError):
+            fail(53, "file-backed test artifact requires a positive checkpoint sequence")
+        if sequence <= 0 or sequence != artifact_sequence:
+            fail(53, f"checkpoint sequence mismatch: session={sequence} artifact={artifact_sequence}")
+        if not checkpoint_ref or checkpoint_ref != str(artifact_spec.get("checkpointRef") or ""):
+            fail(53, "checkpoint reference mismatch between session and artifact contract")
+
+        set_disks = []
+        for index, disk in enumerate(disks):
+            locator = str(disk.get("canonicalLocator") or "")
+            device = str(disk.get("device") or f"disk{index}").replace("/", "_").replace(" ", "_")
+            if not locator.startswith("file:/"):
+                fail(53, f"invalid file locator {locator}; expected file:/absolute/path")
+            target_path = locator[5:]
+            if not os.path.isabs(target_path) or not os.path.isfile(target_path):
+                fail(53, f"file-backed target does not exist: {target_path}")
+            storage_root = str(target.get("storagePath") or "").strip()
+            if not storage_root:
+                storage_root = os.path.dirname(os.path.abspath(target_path))
+            storage_root = os.path.abspath(storage_root)
+            target_abs = os.path.abspath(target_path)
+            if not os.path.isdir(storage_root):
+                fail(53, f"file-backed target storage root does not exist: {storage_root}")
+            try:
+                target_in_storage = os.path.commonpath([target_abs, storage_root]) == storage_root
+            except ValueError:
+                target_in_storage = False
+            if not target_in_storage:
+                fail(53, f"file-backed target escapes storage root: {target_path}")
+            run_key = safe_key(session.get("runUuid") or now) or "run"
+            device_key = safe_key(device) or f"disk{index}"
+            set_disks.append({
+                "device": disk.get("device") or f"disk{index}",
+                "source": target_path,
+                "storageRoot": storage_root,
+                "output": os.path.join(storage_root, f"ftctl-dr-test-{run_key}-{device_key}.qcow2"),
+                "sizeBytes": disk.get("sizeBytes") or disk.get("capacityBytes") or 0,
+            })
+        set_request = {
+            "plan": str(session.get("planUuid") or ""),
+            "sequence": sequence,
+            "checkpointRef": checkpoint_ref,
+            "evidencePath": os.path.join(artifacts_dir, "checkpoint-inspection-evidence.json"),
+            "disks": set_disks,
+        }
+        try:
+            result = subprocess.run(
+                [sys.executable, checkpoint_tool, "--set-request", "-"],
+                input=json.dumps(set_request), check=False, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True,
+            )
+            if result.returncode != 0:
+                error = json.loads((result.stderr or "").strip().splitlines()[-1])
+                fail(46, f"{error.get('errorCode')}: {error.get('errorMessage')}")
+            set_result = json.loads(result.stdout)
+            records.extend(set_result.get("records") or [])
+        except (OSError, ValueError, IndexError) as exc:
+            fail(46, f"immutable checkpoint set materialization failed: {exc}")
+        disks = []
     for index, disk in enumerate(disks):
         if not isinstance(disk, dict):
             fail(53, f"artifact disk {index} is not an object")
@@ -7942,6 +8023,31 @@ ftctl_dr_runtime_status() {
       && printf '%s' "${payload}" | python3 -c 'import json,sys; value=json.load(sys.stdin); raise SystemExit(0 if isinstance(value, dict) else 1)' 2>/dev/null; then
       printf '%s\n' "${payload}"
     else
+      local terminal_state terminal_step terminal_progress terminal_error_code terminal_error_message
+      local terminal_cleanup_state terminal_cleanup_required terminal_lease_state terminal_artifacts_state terminal_session_state
+      terminal_state="$(ftctl_dr_runtime_state_get_from_path "${path}" state)"
+      terminal_step="$(ftctl_dr_runtime_state_get_from_path "${path}" step)"
+      terminal_progress="$(ftctl_dr_runtime_state_get_from_path "${path}" progress)"
+      terminal_error_code="$(ftctl_dr_runtime_state_get_from_path "${path}" error_code)"
+      terminal_error_message="$(ftctl_dr_runtime_state_get_from_path "${path}" error_message)"
+      terminal_cleanup_state="$(ftctl_dr_runtime_state_get_from_path "${path}" test_cleanup_state)"
+      terminal_cleanup_required="$(ftctl_dr_runtime_state_get_from_path "${path}" cleanup_required)"
+      terminal_lease_state="$(ftctl_dr_runtime_state_get_from_path "${path}" checkpoint_lease_state)"
+      terminal_artifacts_state="$(ftctl_dr_runtime_state_get_from_path "${path}" test_artifacts_state)"
+      terminal_session_state="$(ftctl_dr_runtime_state_get_from_path "${path}" test_session_state)"
+      [[ "${terminal_progress}" =~ ^[0-9]+$ ]] || terminal_progress=100
+      [[ "${terminal_cleanup_required}" == "true" || "${terminal_cleanup_required}" == "false" ]] || terminal_cleanup_required=true
+      terminal_error_message="${terminal_error_message:0:4096}"
+      if [[ "${terminal_state}" == "ERROR" && -n "${terminal_error_code}" ]]; then
+        printf '{"command":"dr-status","result":"error","plan_uuid":"%s","run_uuid":"%s","state":"ERROR","step":"%s","progress":%s,"accepted":false,"worker_state":"FAILED","terminal_source":"ENGINE_TERMINAL","terminal_version":1,"terminal_authoritative":true,"error_code":"%s","error_message":"%s","test_session_state":"%s","test_artifacts_state":"%s","test_cleanup_state":"%s","cleanup_required":%s,"checkpoint_lease_state":"%s","status_payload_truncated":true,"status_payload_bytes":%s,"events_offset":%s,"events":[],"exit_code":0}\n' \
+          "$(ftctl__json_escape "${plan}")" "$(ftctl__json_escape "${run}")" \
+          "$(ftctl__json_escape "${terminal_step:-operation-failed}")" "${terminal_progress}" \
+          "$(ftctl__json_escape "${terminal_error_code}")" "$(ftctl__json_escape "${terminal_error_message}")" \
+          "$(ftctl__json_escape "${terminal_session_state}")" "$(ftctl__json_escape "${terminal_artifacts_state}")" \
+          "$(ftctl__json_escape "${terminal_cleanup_state}")" "${terminal_cleanup_required}" \
+          "$(ftctl__json_escape "${terminal_lease_state}")" "${payload_bytes:-0}" "$(ftctl_dr_runtime_events_offset "${plan}")"
+        return 0
+      fi
       printf '{"command":"dr-status","result":"error","plan_uuid":"%s","run_uuid":"%s","state":"ERROR","step":"status-validation","progress":0,"accepted":false,"error_code":"DR_STATUS_JSON_INVALID","error_message":"FTCTL DR status failed strict JSON validation","events_offset":%s,"events":[],"exit_code":65}\n' \
         "$(ftctl__json_escape "${plan}")" "$(ftctl__json_escape "${run}")" "$(ftctl_dr_runtime_events_offset "${plan}")"
       return 65

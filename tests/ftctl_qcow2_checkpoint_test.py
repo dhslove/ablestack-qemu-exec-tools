@@ -50,7 +50,13 @@ class Qcow2CheckpointTest(unittest.TestCase):
         if executable == "qemu-img" and command[1] in ("check", "compare"):
             return mock.Mock(returncode=0, stdout="", stderr="")
         if executable == "virt-inspector":
-            return mock.Mock(returncode=0, stdout="<operatingsystems><operatingsystem><name>linux</name></operatingsystem></operatingsystems>", stderr="")
+            return mock.Mock(
+                returncode=0,
+                stdout=("<operatingsystems><operatingsystem><name>linux</name>"
+                        "<mountpoints><mountpoint dev='/dev/sda1'>/</mountpoint></mountpoints>"
+                        "</operatingsystem></operatingsystems>"),
+                stderr="",
+            )
         if executable == "guestfish":
             return mock.Mock(returncode=0, stdout="/dev/sda1: /\n", stderr="")
         if executable == "virt-cat":
@@ -186,6 +192,177 @@ class Qcow2CheckpointTest(unittest.TestCase):
         self.assertEqual("DR_TEST_CHECKPOINT_WRITER_NOT_DRAINED", context.exception.code)
         self.assertIn("qemu-kvm", str(context.exception))
         self.assertFalse(self.output.exists())
+
+    def checkpoint_set_request(self, disk_count=2):
+        disks = []
+        for index in range(disk_count):
+            source = self.source if index == 0 else self.root / f"replica-data-{index}.qcow2"
+            if index > 0:
+                source.write_bytes(f"data-{index}".encode("ascii"))
+            disks.append({
+                "device": f"vd{chr(ord('a') + index)}",
+                "source": str(source),
+                "storageRoot": str(self.root),
+                "output": str(self.root / f"test-disk-{index}.qcow2"),
+                "sizeBytes": 4096 * (index + 1),
+            })
+        return {
+            "plan": self.args.plan,
+            "sequence": self.args.sequence,
+            "checkpointRef": self.args.checkpoint_ref,
+            "evidencePath": str(self.root / "evidence" / "inspection.json"),
+            "disks": disks,
+        }
+
+    @mock.patch.object(MODULE.shutil, "which", side_effect=lambda name: f"/usr/bin/{name}")
+    @mock.patch.object(MODULE.subprocess, "run")
+    def test_multidisk_set_probe_attaches_all_disks_before_publish(self, run_mock, _which):
+        inspector_commands = []
+
+        def multidisk_run(command, **kwargs):
+            if Path(command[0]).name == "virt-inspector":
+                inspector_commands.append(command)
+                return mock.Mock(
+                    returncode=0,
+                    stdout=("<operatingsystems><operatingsystem><name>linux</name>"
+                            "<mountpoints>"
+                            "<mountpoint dev='/dev/ubuntu-vg/ubuntu-lv'>/</mountpoint>"
+                            "<mountpoint dev='/dev/vg_data/lv_data'>/DATA</mountpoint>"
+                            "<mountpoint dev='/dev/sda2'>/boot</mountpoint>"
+                            "</mountpoints></operatingsystem></operatingsystems>"),
+                    stderr="",
+                )
+            if Path(command[0]).name == "virt-cat":
+                return mock.Mock(
+                    returncode=0,
+                    stdout=("/dev/ubuntu-vg/ubuntu-lv / ext4 defaults 0 1\n"
+                            "/dev/vg_data/lv_data /DATA xfs defaults 0 2\n"),
+                    stderr="",
+                )
+            return self.fake_run(command, **kwargs)
+
+        run_mock.side_effect = multidisk_run
+        result = MODULE.execute_set(self.checkpoint_set_request())
+
+        self.assertEqual("PASSED", result["checkpointIntegrityState"])
+        self.assertEqual(2, len(result["records"]))
+        self.assertEqual(2, inspector_commands[0].count("-a"))
+        self.assertIn(".probe-", " ".join(str(item) for item in inspector_commands[0]))
+        self.assertTrue(all(Path(record["path"]).exists() for record in result["records"]))
+        self.assertTrue(Path(result["checkpointSetManifestPath"]).is_file())
+
+    @mock.patch.object(MODULE.shutil, "which", side_effect=lambda name: f"/usr/bin/{name}")
+    @mock.patch.object(MODULE.subprocess, "run")
+    def test_checkpoint_set_supports_all_mapped_disks_without_fixed_limit(self, run_mock, _which):
+        inspector_commands = []
+
+        def all_disk_run(command, **kwargs):
+            if Path(command[0]).name == "virt-inspector":
+                inspector_commands.append(command)
+            return self.fake_run(command, **kwargs)
+
+        run_mock.side_effect = all_disk_run
+        request = self.checkpoint_set_request(disk_count=8)
+        result = MODULE.execute_set(request)
+
+        self.assertEqual(8, len(result["records"]))
+        self.assertEqual(8, inspector_commands[0].count("-a"))
+        manifest = json.loads(Path(result["checkpointSetManifestPath"]).read_text(encoding="utf-8"))
+        self.assertEqual(8, len(manifest["disks"]))
+        self.assertEqual(
+            [disk["device"] for disk in request["disks"]],
+            [record["device"] for record in result["records"]],
+        )
+
+    @mock.patch.object(MODULE.shutil, "which", side_effect=lambda name: f"/usr/bin/{name}")
+    @mock.patch.object(MODULE.subprocess, "run")
+    def test_checkpoint_set_discards_all_four_disks_when_middle_disk_fails(self, run_mock, _which):
+        def failing_middle_disk(command, **kwargs):
+            if (Path(command[0]).name == "qemu-img" and command[1] == "compare"
+                    and any(str(item).endswith("replica-data-2.qcow2") for item in command)):
+                return mock.Mock(returncode=1, stdout="Content mismatch", stderr="")
+            return self.fake_run(command, **kwargs)
+
+        run_mock.side_effect = failing_middle_disk
+        request = self.checkpoint_set_request(disk_count=4)
+
+        with self.assertRaises(MODULE.CheckpointError) as context:
+            MODULE.execute_set(request)
+
+        self.assertEqual("DR_TEST_CHECKPOINT_CONTENT_MISMATCH", context.exception.code)
+        checkpoint_dir = self.root / ".ftctl-dr-checkpoints" / self.args.plan / str(self.args.sequence)
+        self.assertFalse(any(checkpoint_dir.glob("*.qcow2")))
+        self.assertFalse(any(Path(disk["output"]).exists() for disk in request["disks"]))
+
+    @mock.patch.object(MODULE.shutil, "which", side_effect=lambda name: f"/usr/bin/{name}")
+    @mock.patch.object(MODULE.subprocess, "run")
+    def test_multidisk_set_rejects_missing_required_data_mount(self, run_mock, _which):
+        def missing_data_run(command, **kwargs):
+            if Path(command[0]).name == "virt-inspector":
+                return mock.Mock(
+                    returncode=0,
+                    stdout=("<operatingsystems><operatingsystem><name>linux</name>"
+                            "<mountpoints><mountpoint dev='/dev/sda2'>/</mountpoint>"
+                            "</mountpoints></operating-system></operatingsystems>"
+                            .replace("operating-system", "operatingsystem")),
+                    stderr=("libguestfs: error: /dev/mapper/vg_data-lv_data: No such file or directory\n"
+                            "virt-inspector: some filesystems could not be mounted (ignored)"),
+                )
+            if Path(command[0]).name == "virt-cat":
+                return mock.Mock(
+                    returncode=0,
+                    stdout=("/dev/ubuntu-vg/ubuntu-lv / ext4 defaults 0 1\n"
+                            "/dev/vg_data/lv_data /DATA xfs defaults 0 2\n"),
+                    stderr="",
+                )
+            return self.fake_run(command, **kwargs)
+
+        run_mock.side_effect = missing_data_run
+        request = self.checkpoint_set_request()
+        with self.assertRaises(MODULE.CheckpointError) as context:
+            MODULE.execute_set(request)
+
+        self.assertEqual("DR_TEST_CHECKPOINT_GUEST_FS_INCONSISTENT", context.exception.code)
+        self.assertIn("/DATA", str(context.exception))
+        self.assertFalse(any(Path(item["output"]).exists() for item in request["disks"]))
+
+    @mock.patch.object(MODULE.shutil, "which", side_effect=lambda name: f"/usr/bin/{name}")
+    @mock.patch.object(MODULE.subprocess, "run")
+    def test_multidisk_set_allows_missing_nofail_mount(self, run_mock, _which):
+        def nofail_run(command, **kwargs):
+            if Path(command[0]).name == "virt-inspector":
+                return mock.Mock(
+                    returncode=0,
+                    stdout=("<operatingsystems><operatingsystem><name>linux</name>"
+                            "<mountpoints><mountpoint dev='/dev/sda2'>/</mountpoint>"
+                            "</mountpoints></operatingsystem></operatingsystems>"),
+                    stderr="virt-inspector: some filesystems could not be mounted (ignored)",
+                )
+            if Path(command[0]).name == "virt-cat":
+                return mock.Mock(
+                    returncode=0,
+                    stdout=("/dev/sda2 / ext4 defaults 0 1\n"
+                            "UUID=optional /OPTIONAL xfs defaults,nofail 0 2\n"),
+                    stderr="",
+                )
+            return self.fake_run(command, **kwargs)
+
+        run_mock.side_effect = nofail_run
+        result = MODULE.execute_set(self.checkpoint_set_request())
+        self.assertEqual("PASSED", result["checkpointIntegrityState"])
+
+    @mock.patch.object(MODULE.subprocess, "run")
+    def test_guest_error_summary_excludes_large_success_stdout(self, run_mock):
+        run_mock.return_value = mock.Mock(
+            returncode=0,
+            stdout="<xml>" + ("package-description" * 50000) + "</xml>",
+            stderr="some filesystems could not be mounted",
+        )
+        with self.assertRaises(MODULE.CheckpointError) as context:
+            MODULE.strict_guest_command(["virt-inspector", "-a", "root.qcow2"])
+        self.assertEqual("DR_TEST_CHECKPOINT_GUEST_FS_INCONSISTENT", context.exception.code)
+        self.assertLessEqual(len(str(context.exception)), MODULE.MAX_ERROR_MESSAGE_CHARS)
+        self.assertNotIn("package-description", str(context.exception))
 
 
 if __name__ == "__main__":

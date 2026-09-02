@@ -11,6 +11,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from argparse import Namespace
+from datetime import datetime, timezone
 from pathlib import Path
 from xml.etree import ElementTree
 
@@ -19,6 +21,16 @@ class CheckpointError(RuntimeError):
     def __init__(self, code, message):
         super().__init__(message)
         self.code = code
+
+
+MAX_ERROR_MESSAGE_CHARS = 4096
+
+
+def compact_error_detail(value, limit=MAX_ERROR_MESSAGE_CHARS):
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 24)].rstrip() + " ... [detail truncated]"
 
 
 def safe_component(value):
@@ -163,7 +175,39 @@ def ensure_source_quiescent(source):
         )
 
 
-def strict_guest_command(command, *, input_text=None):
+def strict_guest_result(result, *, allow_mount_warnings=False):
+    stderr = (result.stderr or "").strip()
+    stdout = (result.stdout or "").strip()
+    diagnostic = stderr or (stdout if result.returncode != 0 else "")
+    lowered = "\n".join(part for part in (stderr, stdout if result.returncode != 0 else "") if part).lower()
+    unavailable_markers = (
+        "unsupported filesystem type",
+        "unknown filesystem type",
+        "ntfs-3g: not found",
+        "mount.ntfs: not found",
+    )
+    unsafe_markers = (
+        "structure needs cleaning",
+        "mount exited with status",
+        "input/output error",
+        "filesystem is inconsistent",
+    )
+    if not allow_mount_warnings:
+        unsafe_markers += ("some filesystems could not be mounted",)
+    if any(marker in lowered for marker in unavailable_markers):
+        raise CheckpointError(
+            "DR_TEST_CHECKPOINT_GUEST_FS_DRIVER_UNAVAILABLE",
+            compact_error_detail(diagnostic or "guest filesystem driver is unavailable"),
+        )
+    if result.returncode != 0 or any(marker in lowered for marker in unsafe_markers):
+        raise CheckpointError(
+            "DR_TEST_CHECKPOINT_GUEST_FS_INCONSISTENT",
+            compact_error_detail(diagnostic or "guest filesystem inspection failed"),
+        )
+    return result.stdout
+
+
+def strict_guest_command(command, *, input_text=None, allow_mount_warnings=False):
     result = subprocess.run(
         command,
         input=input_text,
@@ -172,32 +216,7 @@ def strict_guest_command(command, *, input_text=None):
         stderr=subprocess.PIPE,
         check=False,
     )
-    detail = "\n".join(part for part in (result.stderr.strip(), result.stdout.strip()) if part)
-    lowered = detail.lower()
-    unavailable_markers = (
-        "unsupported filesystem type",
-        "unknown filesystem type",
-        "ntfs-3g: not found",
-        "mount.ntfs: not found",
-    )
-    unsafe_markers = (
-        "some filesystems could not be mounted",
-        "structure needs cleaning",
-        "mount exited with status",
-        "input/output error",
-        "filesystem is inconsistent",
-    )
-    if any(marker in lowered for marker in unavailable_markers):
-        raise CheckpointError(
-            "DR_TEST_CHECKPOINT_GUEST_FS_DRIVER_UNAVAILABLE",
-            detail or "guest filesystem driver is unavailable",
-        )
-    if result.returncode != 0 or any(marker in lowered for marker in unsafe_markers):
-        raise CheckpointError(
-            "DR_TEST_CHECKPOINT_GUEST_FS_INCONSISTENT",
-            detail or "guest filesystem inspection failed",
-        )
-    return result.stdout
+    return strict_guest_result(result, allow_mount_warnings=allow_mount_warnings)
 
 
 def windows_root_device(inspection_root):
@@ -210,7 +229,14 @@ def windows_root_device(inspection_root):
     return device
 
 
-def probe_windows_root(guestfish, probe, inspection_root):
+def disk_arguments(paths):
+    arguments = []
+    for path in paths:
+        arguments.extend(["-a", str(path)])
+    return arguments
+
+
+def probe_windows_root(guestfish, probes, inspection_root):
     device = windows_root_device(inspection_root)
     mountpoint = "/tmp/ftctl-windows-root"
     shell = (
@@ -221,10 +247,35 @@ def probe_windows_root(guestfish, probe, inspection_root):
         f"umount {shlex.quote(mountpoint)}; rmdir {shlex.quote(mountpoint)}"
     )
     script = "run\ndebug sh " + json.dumps(shell) + "\n"
-    strict_guest_command([guestfish, "--ro", "-a", str(probe)], input_text=script)
+    strict_guest_command([guestfish, "--ro", *disk_arguments(probes)], input_text=script)
 
 
-def seal(args):
+def required_local_mounts(fstab):
+    mounts = []
+    local_prefixes = ("/dev/", "UUID=", "LABEL=", "PARTUUID=", "PARTLABEL=")
+    network_filesystems = {"nfs", "nfs4", "cifs", "smb3", "sshfs", "9p", "ceph", "glusterfs"}
+    for raw_line in str(fstab or "").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        fields = line.split()
+        if len(fields) < 4:
+            continue
+        source, mountpoint, filesystem, options = fields[:4]
+        option_set = {item.strip().lower() for item in options.split(",")}
+        if mountpoint in ("none", "swap") or filesystem.lower() == "swap":
+            continue
+        if {"nofail", "noauto", "_netdev", "x-systemd.automount"} & option_set:
+            continue
+        if filesystem.lower() in network_filesystems or source.startswith("//"):
+            continue
+        if not source.startswith(local_prefixes):
+            continue
+        mounts.append((source, mountpoint.replace("\\040", " ")))
+    return mounts
+
+
+def seal(args, *, probe=True):
     qemu_img = require_tool("qemu-img")
     copy_tool = require_tool("cp")
     source, root = canonical_under(args.source, args.storage_root, must_exist=True)
@@ -274,7 +325,8 @@ def seal(args):
             raise CheckpointError("DR_TEST_CHECKPOINT_SEQUENCE_MISMATCH", "immutable checkpoint metadata does not match request")
         check_image(qemu_img, checkpoint)
         compare_images(qemu_img, source, source_info.get("format"), checkpoint)
-        probe_checkpoint(qemu_img, checkpoint, checkpoint_dir)
+        if probe:
+            probe_checkpoint(qemu_img, checkpoint, checkpoint_dir)
         return checkpoint, metadata_path, expected, True
 
     fd, temp_name = tempfile.mkstemp(prefix=f".{device}.", suffix=".tmp", dir=checkpoint_dir)
@@ -297,7 +349,8 @@ def seal(args):
             )
         check_image(qemu_img, temp_path)
         compare_images(qemu_img, source, source_info.get("format"), temp_path)
-        probe_checkpoint(qemu_img, temp_path, checkpoint_dir)
+        if probe:
+            probe_checkpoint(qemu_img, temp_path, checkpoint_dir)
         fsync_path(temp_path)
         os.replace(temp_path, checkpoint)
         with metadata_temp.open("w", encoding="utf-8") as handle:
@@ -330,32 +383,232 @@ def create_overlay(qemu_img, backing, output):
     check_image(qemu_img, output)
 
 
-def probe_checkpoint(qemu_img, checkpoint, checkpoint_dir):
+def write_probe_evidence(path, command, result):
+    if not path:
+        return
+    evidence = Path(path)
+    evidence.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "version": 1,
+        "capturedAt": datetime.now(timezone.utc).isoformat(),
+        "command": [str(item) for item in command],
+        "returnCode": result.returncode,
+        "stdout": result.stdout or "",
+        "stderr": result.stderr or "",
+    }
+    temporary = evidence.with_name(f".{evidence.name}.{os.getpid()}.tmp")
+    with temporary.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, sort_keys=True, separators=(",", ":"))
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, evidence)
+    fsync_path(evidence.parent)
+
+
+def probe_checkpoint_set(qemu_img, checkpoints, checkpoint_dir, evidence_path=None):
     virt_inspector = require_tool("virt-inspector")
     guestfish = require_tool("guestfish")
     virt_cat = require_tool("virt-cat")
     virt_ls = require_tool("virt-ls")
-    probe = checkpoint_dir / f".probe-{os.getpid()}.qcow2"
+    probes = []
     try:
-        create_overlay(qemu_img, checkpoint, probe)
-        inspection = strict_guest_command([virt_inspector, "-a", str(probe)])
-        if "<operatingsystem>" not in inspection:
-            raise CheckpointError("DR_TEST_CHECKPOINT_GUEST_FS_INCONSISTENT", "no bootable operating system was discovered")
+        for index, checkpoint in enumerate(checkpoints):
+            probe = checkpoint_dir / f".probe-{os.getpid()}-{index}.qcow2"
+            create_overlay(qemu_img, checkpoint, probe)
+            probes.append(probe)
+        inspect_command = [virt_inspector, *disk_arguments(probes)]
+        inspect_result = subprocess.run(
+            inspect_command,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        write_probe_evidence(evidence_path, inspect_command, inspect_result)
+        inspection = strict_guest_result(inspect_result, allow_mount_warnings=True)
         try:
             root = ElementTree.fromstring(inspection)
-            guest_name = str(root.findtext(".//name") or "").lower()
+            operating_systems = root.findall(".//operatingsystem")
         except ElementTree.ParseError as exc:
             raise CheckpointError("DR_TEST_CHECKPOINT_GUEST_FS_INCONSISTENT", "invalid virt-inspector output") from exc
+        if len(operating_systems) != 1:
+            raise CheckpointError(
+                "DR_TEST_CHECKPOINT_GUEST_FS_INCONSISTENT",
+                f"expected one bootable operating system, discovered {len(operating_systems)}",
+            )
+        operating_system = operating_systems[0]
+        guest_name = str(operating_system.findtext("name") or "").lower()
         if guest_name == "windows":
-            probe_windows_root(guestfish, probe, root)
+            probe_windows_root(guestfish, probes, operating_system)
         else:
-            strict_guest_command([guestfish, "--ro", "-a", str(probe), "-i", "mountpoints"])
+            fstab = strict_guest_command(
+                [virt_cat, *disk_arguments(probes), "/etc/fstab"],
+                allow_mount_warnings=True,
+            )
+            discovered_mounts = {
+                str(item.text or "").strip()
+                for item in operating_system.findall(".//mountpoint")
+                if str(item.text or "").strip()
+            }
+            missing_mounts = [
+                (source, mountpoint)
+                for source, mountpoint in required_local_mounts(fstab)
+                if mountpoint not in discovered_mounts
+            ]
+            if missing_mounts:
+                source, mountpoint = missing_mounts[0]
+                raise CheckpointError(
+                    "DR_TEST_CHECKPOINT_GUEST_FS_INCONSISTENT",
+                    f"required local mount {mountpoint} ({source}) was not resolved from the checkpoint disk set",
+                )
         if guest_name == "linux":
-            strict_guest_command([virt_cat, "-a", str(probe), "/etc/fstab"])
-            strict_guest_command([virt_ls, "-a", str(probe), "-l", "/boot"])
+            strict_guest_command(
+                [virt_ls, *disk_arguments(probes), "-l", "/boot"],
+                allow_mount_warnings=True,
+            )
     finally:
-        if probe.exists():
-            probe.unlink()
+        for probe in probes:
+            if probe.exists():
+                probe.unlink()
+
+
+def probe_checkpoint(qemu_img, checkpoint, checkpoint_dir):
+    probe_checkpoint_set(qemu_img, [checkpoint], checkpoint_dir)
+
+
+def checkpoint_set_manifest(checkpoints, metadata, plan, sequence, checkpoint_ref):
+    payload = {
+        "version": 1,
+        "planUuid": plan,
+        "checkpointSequence": sequence,
+        "checkpointRef": checkpoint_ref,
+        "disks": [
+            {
+                "device": item["device"],
+                "checkpointPath": str(checkpoint),
+                "contractSha256": item["contractSha256"],
+            }
+            for checkpoint, item in zip(checkpoints, metadata)
+        ],
+    }
+    payload["contractSha256"] = contract_digest(payload)
+    return payload
+
+
+def execute_set(request):
+    plan = str(request.get("plan") or "")
+    sequence = int(request.get("sequence") or 0)
+    checkpoint_ref = str(request.get("checkpointRef") or "")
+    disks = request.get("disks")
+    evidence_path = str(request.get("evidencePath") or "")
+    if not plan or sequence <= 0 or not checkpoint_ref or not isinstance(disks, list) or not disks:
+        raise CheckpointError("DR_TEST_CHECKPOINT_CONTRACT_INVALID", "checkpoint set request is incomplete")
+    devices = [str(item.get("device") or "") for item in disks if isinstance(item, dict)]
+    outputs = [str(item.get("output") or "") for item in disks if isinstance(item, dict)]
+    if len(devices) != len(disks) or len(set(devices)) != len(devices) or len(set(outputs)) != len(outputs):
+        raise CheckpointError("DR_TEST_CHECKPOINT_CONTRACT_INVALID", "checkpoint set disk identities are not unique")
+
+    storage_roots = []
+    for disk in disks:
+        source, storage_root = canonical_under(
+            disk.get("source"), disk.get("storageRoot"), must_exist=True)
+        ensure_source_quiescent(source)
+        storage_roots.append(storage_root)
+    common_root = storage_roots[0]
+    if any(storage_root != common_root for storage_root in storage_roots):
+        raise CheckpointError("DR_TEST_CHECKPOINT_CONTRACT_INVALID", "checkpoint set spans multiple storage roots")
+
+    qemu_img = require_tool("qemu-img")
+    checkpoints = []
+    metadata_paths = []
+    metadata = []
+    reused = []
+    created_outputs = []
+    newly_sealed = []
+    set_manifest_path = None
+    try:
+        for disk in disks:
+            args = Namespace(
+                plan=plan,
+                sequence=sequence,
+                checkpoint_ref=checkpoint_ref,
+                device=disk.get("device"),
+                source=disk.get("source"),
+                storage_root=disk.get("storageRoot"),
+                output=disk.get("output"),
+            )
+            checkpoint, metadata_path, expected, was_reused = seal(args, probe=False)
+            checkpoints.append(checkpoint)
+            metadata_paths.append(metadata_path)
+            metadata.append(expected)
+            reused.append(was_reused)
+            if not was_reused:
+                newly_sealed.append((checkpoint, metadata_path))
+
+        checkpoint_dir = common_root / ".ftctl-dr-checkpoints" / safe_component(plan) / str(sequence)
+        probe_checkpoint_set(qemu_img, checkpoints, checkpoint_dir, evidence_path=evidence_path)
+
+        set_manifest = checkpoint_set_manifest(checkpoints, metadata, plan, sequence, checkpoint_ref)
+        set_manifest_path = checkpoint_dir / "checkpoint-set.json"
+        temporary_manifest = set_manifest_path.with_name(f".{set_manifest_path.name}.{os.getpid()}.tmp")
+        with temporary_manifest.open("w", encoding="utf-8") as handle:
+            json.dump(set_manifest, handle, sort_keys=True, separators=(",", ":"))
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_manifest, set_manifest_path)
+        fsync_path(checkpoint_dir)
+
+        records = []
+        for disk, checkpoint, metadata_path, expected, was_reused in zip(
+                disks, checkpoints, metadata_paths, metadata, reused):
+            output = Path(str(disk.get("output") or ""))
+            create_overlay(qemu_img, checkpoint, output)
+            created_outputs.append(output)
+            records.append({
+                "device": disk.get("device"),
+                "source": disk.get("source"),
+                "sizeBytes": disk.get("sizeBytes") or 0,
+                "state": "CREATED",
+                "type": "qcow2-checkpoint-overlay",
+                "path": str(output),
+                "storageRoot": str(Path(str(disk.get("storageRoot") or "")).resolve(strict=True)),
+                "ownedByFtctl": True,
+                "checkpointPath": str(checkpoint),
+                "checkpointMetadataPath": str(metadata_path),
+                "checkpointSetManifestPath": str(set_manifest_path),
+                "checkpointEvidencePath": evidence_path,
+                "checkpointSequence": expected["checkpointSequence"],
+                "checkpointRef": expected["checkpointRef"],
+                "checkpointContractSha256": expected["contractSha256"],
+                "checkpointSetContractSha256": set_manifest["contractSha256"],
+                "checkpointSealState": "SEALED",
+                "checkpointIntegrityState": "PASSED",
+                "checkpointReused": was_reused,
+            })
+        return {
+            "state": "CREATED",
+            "type": "qcow2-checkpoint-set",
+            "checkpointSequence": sequence,
+            "checkpointRef": checkpoint_ref,
+            "checkpointSetManifestPath": str(set_manifest_path),
+            "checkpointSetContractSha256": set_manifest["contractSha256"],
+            "checkpointIntegrityState": "PASSED",
+            "records": records,
+        }
+    except Exception:
+        for output in created_outputs:
+            if output.exists():
+                output.unlink()
+        if set_manifest_path and set_manifest_path.exists():
+            set_manifest_path.unlink()
+        for checkpoint, metadata_path in newly_sealed:
+            if checkpoint.exists():
+                checkpoint.unlink()
+            if metadata_path.exists():
+                metadata_path.unlink()
+        raise
 
 
 def execute(args):
@@ -383,25 +636,42 @@ def execute(args):
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--plan", required=True)
-    parser.add_argument("--sequence", required=True, type=int)
-    parser.add_argument("--checkpoint-ref", required=True)
-    parser.add_argument("--device", required=True)
-    parser.add_argument("--source", required=True)
-    parser.add_argument("--storage-root", required=True)
-    parser.add_argument("--output", required=True)
+    parser.add_argument("--set-request")
+    parser.add_argument("--plan")
+    parser.add_argument("--sequence", type=int)
+    parser.add_argument("--checkpoint-ref")
+    parser.add_argument("--device")
+    parser.add_argument("--source")
+    parser.add_argument("--storage-root")
+    parser.add_argument("--output")
     return parser.parse_args()
 
 
 def main():
     try:
-        print(json.dumps(execute(parse_args()), sort_keys=True, separators=(",", ":")))
+        args = parse_args()
+        if args.set_request:
+            if args.set_request == "-":
+                request = json.load(sys.stdin)
+            else:
+                with open(args.set_request, "r", encoding="utf-8") as handle:
+                    request = json.load(handle)
+            result = execute_set(request)
+        else:
+            required = (args.plan, args.sequence, args.checkpoint_ref, args.device,
+                        args.source, args.storage_root, args.output)
+            if any(value is None for value in required):
+                raise CheckpointError("DR_TEST_CHECKPOINT_CONTRACT_INVALID", "single-disk checkpoint request is incomplete")
+            result = execute(args)
+        print(json.dumps(result, sort_keys=True, separators=(",", ":")))
         return 0
     except CheckpointError as exc:
-        print(json.dumps({"state": "FAILED", "errorCode": exc.code, "errorMessage": str(exc)}, sort_keys=True), file=sys.stderr)
+        print(json.dumps({"state": "FAILED", "errorCode": exc.code,
+                          "errorMessage": compact_error_detail(exc)}, sort_keys=True), file=sys.stderr)
         return 46
     except Exception as exc:  # keep an actionable structured failure at the Agent boundary
-        print(json.dumps({"state": "FAILED", "errorCode": "DR_TEST_CHECKPOINT_SEAL_FAILED", "errorMessage": str(exc)}, sort_keys=True), file=sys.stderr)
+        print(json.dumps({"state": "FAILED", "errorCode": "DR_TEST_CHECKPOINT_SEAL_FAILED",
+                          "errorMessage": compact_error_detail(exc)}, sort_keys=True), file=sys.stderr)
         return 46
 
 

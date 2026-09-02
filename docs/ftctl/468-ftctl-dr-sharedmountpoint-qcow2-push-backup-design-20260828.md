@@ -252,19 +252,21 @@ ordered contract:
    Failover transition.
 3. FTCTL acquires the selected durable checkpoint lease before reading any
    target disk.
-4. FTCTL seals each selected disk to
+4. FTCTL seals every mapped disk to
    `<storageRoot>/.ftctl-dr-checkpoints/<plan>/<sequence>/<device>.qcow2`.
    A temporary file is converted and checked, file and directory data are
    synced, and only then is it atomically renamed. Metadata binds plan,
    sequence, checkpoint reference, source path, virtual size, and contract
    SHA-256.
-5. A disposable overlay backed by the sealed checkpoint is inspected with
-   libguestfs. Filesystem discovery and read-only mount must succeed. Where a
-   journal replay is required, it occurs only in the disposable overlay; the
-   sealed checkpoint is never modified.
-6. The published test disk is a separate writable qcow2 overlay backed by the
-   sealed checkpoint. Cloud may create the test VM only after the integrity
-   state is `PASSED`.
+5. One disposable overlay is created for every sealed checkpoint. All overlays
+   are attached to a single libguestfs appliance in the original device order.
+   Filesystem discovery, required local mounts, and read-only access must pass
+   for the complete disk set. Journal replay, when required, is limited to the
+   disposable overlays; sealed checkpoints are never modified.
+6. FTCTL atomically publishes one `checkpoint-set.json` only after every mapped
+   disk passes image and guest-filesystem validation. It then creates all
+   writable test overlays. Cloud may create the test VM only after the set
+   integrity state is `PASSED`; one disk failure discards the complete set.
 7. Test Cleanup removes the test overlay and its Cloud VM. Cloud then restores
    the target export and resumes the remote source scheduler. The sealed Cycle
    remains available for deterministic retry and is retired only by an
@@ -345,6 +347,40 @@ failed test session is cleaned and no lease references it.
 This hardening is intentionally scoped to SharedMountPoint FILE checkpoints.
 The validated RBD clone and VMware/VDDK paths do not call this publisher and
 remain behaviorally unchanged.
+
+### Complete mapped-disk checkpoint set (2026-09-02)
+
+The checkpoint contract has no two-disk special case or fixed disk-count
+limit. The authoritative input is the complete ordered `artifactSpec.disks`
+array. A one-, two-, four-, eight-, or larger-disk VM follows the same rules:
+
+1. The source scheduler is paused and all Plan-owned target writers are drained
+   before any disk is sealed.
+2. Every mapped disk uses the same `checkpointSequence`, `cycleToken`, and
+   checkpoint reference.
+3. Every sealed disk is checked and compared with its drained canonical target.
+4. All disposable overlays are attached to one `virt-inspector` invocation in
+   original device order.
+5. The root disk supplies OS and boot evidence. Other disks supply any required
+   local filesystems referenced by `/etc/fstab`. Missing `nofail`, network, or
+   removable mounts are policy warnings rather than checkpoint corruption.
+6. `checkpoint-set.json` is the publication barrier. Until it is fsynced and
+   renamed, no test overlay is available to Cloud.
+7. Any failure removes every overlay and every checkpoint newly sealed by that
+   request. Previously valid immutable checkpoints are never silently changed.
+
+Large `virt-inspector` XML is retained only in the run-scoped evidence file.
+The runtime status stores a whitespace-normalized error summary of at most 4
+KiB. If the normal status payload exceeds its boundary, `dr-status --run`
+returns a minimal authoritative terminal document containing the original
+error code and cleanup evidence instead of replacing it with
+`DR_STATUS_JSON_INVALID`.
+
+The same cross-disk consistency risk was reviewed for the existing RBD paths.
+VMware to RBD already enters the local scheduler transition before RBD snapshot
+creation. Remote RBD to RBD now uses the same controller-side source pause and
+all-export drain barrier before the existing per-image RBD snapshot/clone code.
+The RBD provider implementation and locator contract remain unchanged.
 
 ### Windows guest-filesystem probe contract (2026-08-29)
 
