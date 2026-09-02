@@ -6835,6 +6835,7 @@ selftest_case_dr_ablestack_full_seed_once() {
   local profile="${SELFTEST_ROOT}/dr-ablestack-full-seed-profile.json"
   local out=""
   mkdir -p "${fakebin}" "${SELFTEST_ROOT}/src" "${SELFTEST_ROOT}/target"
+  : > "${SELFTEST_ROOT}/src/root.qcow2"
   cat > "${fakebin}/qemu-img" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "${call_log}"
