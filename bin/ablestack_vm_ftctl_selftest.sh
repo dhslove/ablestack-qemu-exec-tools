@@ -6964,6 +6964,7 @@ EOF
   "runUuid": "run-vmware-to-kvm-size",
   "direction": "VMWARE_TO_KVM",
   "source": {"provider": "VMWARE", "driver": "VMWARE_CBT"},
+  "policy": {"cbtPolicy": {"required": false}},
   "target": {
     "provider": "ABLESTACK",
     "driver": "ABLESTACK",
