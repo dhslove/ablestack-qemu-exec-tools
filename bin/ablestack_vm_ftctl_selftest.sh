@@ -926,6 +926,7 @@ EOF
   ftctl_profile_load_vm() { :; }
   ftctl_profile_apply_cli() { :; }
   ftctl_profile_validate() { :; }
+  ftctl_inventory_check_vm() { printf '0 0 ok true running\n'; }
   ftctl_orchestrator_probe_peer() { printf -v "$1" '%s' 'host-02'; printf -v "$2" '%s' '10.0.0.12'; printf -v "$3" '%s' 'reachable'; }
   ftctl_blockcopy_rearm() { ftctl_state_set "$1" "protection_state=rearming" "transport_state=rearm_pending" "last_rearm_ts=$(ftctl_now_iso8601)"; }
 

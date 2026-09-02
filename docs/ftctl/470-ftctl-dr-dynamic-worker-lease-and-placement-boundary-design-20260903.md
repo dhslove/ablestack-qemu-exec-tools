@@ -191,6 +191,11 @@ provider-specific smoke script. The self-test is the lifecycle contract gate;
 the provider scripts are additional data-path gates and are not substitutes for
 it. RPM construction starts only after both layers pass.
 
+Self-test cases must mock VM inventory, libvirt, network, and storage evidence
+explicitly. A lifecycle test must never inherit a GitHub runner's empty
+libvirt inventory or wait for a real probe timeout, because that can select an
+unrelated failover branch and make the release gate nondeterministic.
+
 For KVM-to-VMware Failback and Reprotect, `source_domain_probe_state` is
 `NOT_REQUIRED`. The promoted replica's domain may be stopped or absent on the
 worker selected for an offline transfer. Eligibility is derived from the
