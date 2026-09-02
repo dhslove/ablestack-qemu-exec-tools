@@ -10464,9 +10464,9 @@ selftest_case_dr_failback_live_worker_journal_is_read_only() (
   selftest_assert_contains "${output}" '"terminal_authoritative":false' "live transfer has no terminal"
 )
 
-selftest_case_dr_kvm_vmware_reverse_preflight_requires_live_domain() {
+selftest_case_dr_kvm_vmware_reverse_preflight_ignores_domain_runtime() {
   selftest_reset_env
-  selftest_info "FTCTL_DR reverse preflight rejects a missing or stopped KVM source domain"
+  selftest_info "FTCTL_DR reverse preflight uses storage evidence without a live KVM domain"
 
   local profile="${SELFTEST_ROOT}/reverse-live-domain-profile.json"
   local out="" rc=0
@@ -10485,9 +10485,9 @@ selftest_case_dr_kvm_vmware_reverse_preflight_requires_live_domain() {
     command() { return 0; }
     ftctl_dr_kvm_vmware_reverse_preflight plan-domain-missing "${profile}" FAILBACK_FINAL AUTO 1
   ) 2>/dev/null)" || rc=$?
-  selftest_assert_eq "${rc}" "86" "missing KVM source domain is a typed preflight failure"
-  selftest_assert_contains "${out}" '"source_domain_probe_state":"NOT_FOUND"' "missing domain is observable"
-  selftest_assert_contains "${out}" '"error_code":"DR_REVERSE_SOURCE_DOMAIN_NOT_FOUND"' "missing domain error is stable"
+  selftest_assert_eq "${rc}" "0" "missing KVM source domain does not block storage-based reverse preflight"
+  selftest_assert_contains "${out}" '"source_domain_probe_state":"NOT_REQUIRED"' "domain runtime is not a preflight prerequisite"
+  selftest_assert_contains "${out}" '"source_disk_probe_state":"READY"' "RBD storage evidence remains authoritative"
 
   rc=0
   out="$( (
@@ -10509,9 +10509,9 @@ selftest_case_dr_kvm_vmware_reverse_preflight_requires_live_domain() {
     command() { return 0; }
     ftctl_dr_kvm_vmware_reverse_preflight plan-domain-stopped "${profile}" FAILBACK_FINAL AUTO 1
   ) 2>/dev/null)" || rc=$?
-  selftest_assert_eq "${rc}" "87" "stopped KVM source domain is a typed preflight failure"
-  selftest_assert_contains "${out}" '"source_domain_probe_state":"NOT_RUNNING"' "stopped domain is observable"
-  selftest_assert_contains "${out}" '"error_code":"DR_REVERSE_SOURCE_DOMAIN_NOT_RUNNING"' "stopped domain error is stable"
+  selftest_assert_eq "${rc}" "0" "stopped KVM source domain does not block storage-based reverse preflight"
+  selftest_assert_contains "${out}" '"source_domain_probe_state":"NOT_REQUIRED"' "stopped domain is outside the data-path contract"
+  selftest_assert_contains "${out}" '"source_disk_probe_state":"READY"' "RBD storage evidence remains authoritative"
 }
 
 selftest_case_dr_kvm_vmware_canonicalizes_cloud_rbd_volume_identity() {
@@ -10762,7 +10762,7 @@ selftest_main() {
   selftest_case_dr_kvm_vmware_snapshot_attach_is_read_only
   selftest_case_dr_failback_terminal_publication_grace
   selftest_case_dr_failback_live_worker_journal_is_read_only
-  selftest_case_dr_kvm_vmware_reverse_preflight_requires_live_domain
+  selftest_case_dr_kvm_vmware_reverse_preflight_ignores_domain_runtime
   selftest_case_dr_kvm_vmware_canonicalizes_cloud_rbd_volume_identity
   selftest_case_dr_kvm_vmware_refreshes_stale_target_backing
   selftest_case_events_json

@@ -185,3 +185,16 @@ does not make file/block replication unavailable, a missing source does not
 block checkpoint-based disaster recovery, no command consumes a Plan-persisted
 worker as authority, and all disk sets remain atomic. A failed case blocks RPM
 publication and therefore blocks test-site deployment.
+
+The release workflow runs `bin/ablestack_vm_ftctl_selftest.sh` before every
+provider-specific smoke script. The self-test is the lifecycle contract gate;
+the provider scripts are additional data-path gates and are not substitutes for
+it. RPM construction starts only after both layers pass.
+
+For KVM-to-VMware Failback and Reprotect, `source_domain_probe_state` is
+`NOT_REQUIRED`. The promoted replica's domain may be stopped or absent on the
+worker selected for an offline transfer. Eligibility is derived from the
+committed TARGET authority, canonical disk-set mapping, readable source RBD or
+SharedMountPoint artifacts, durable checkpoint/baseline evidence, and a
+writable dynamically resolved VMware target. `virsh dominfo` and `virsh
+domstate` are operation observations only and must never gate reverse transfer.

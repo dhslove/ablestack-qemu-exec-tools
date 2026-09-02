@@ -541,7 +541,7 @@ ftctl_dr_kvm_vmware_reverse_preflight() {
   local plan="${1-}" profile_file="${2-}" operation_intent="${3-FAILBACK_FINAL}" requested_mode="${4-AUTO}" json="${5-0}"
   local map_path="" decision="" rc=0 baseline_state="" effective_mode="" decision_code="" initial_seed=false
   local source_disk_count=0 estimated_virtual_bytes=0
-  local source_domain source_domain_probe_state="READY" source_disk_probe_state="READY" target_writer_probe_state="READY" target_backing_probe_state="NOT_CHECKED" error_code="" ready=true credentials_file
+  local source_domain_probe_state="NOT_REQUIRED" source_disk_probe_state="READY" target_writer_probe_state="READY" target_backing_probe_state="NOT_CHECKED" error_code="" ready=true credentials_file
   [[ -n "${plan}" && -f "${profile_file}" ]] || return 2
   map_path="$(mktemp "${TMPDIR:-/tmp}/ftctl-reverse-map.XXXXXX.json")"
   # RETURN traps survive into the caller unless they clear themselves.
@@ -568,24 +568,6 @@ ftctl_dr_kvm_vmware_reverse_preflight() {
   fi
   source_disk_count="$(jq -r '.disks | length' "${map_path}" 2>/dev/null || printf 0)"
   estimated_virtual_bytes="$(jq -r '[.disks[].virtualBytes // 0] | add // 0' "${map_path}" 2>/dev/null || printf 0)"
-  source_domain="$(jq -r '.sourceDomain // empty' "${map_path}" 2>/dev/null || true)"
-  if [[ "${rc}" == "0" ]]; then
-    if [[ -z "${source_domain}" ]] || ! virsh dominfo "${source_domain}" >/dev/null 2>&1; then
-      source_domain_probe_state="NOT_FOUND"
-      source_disk_probe_state="NOT_CHECKED"
-      ready=false
-      rc=86
-      error_code="DR_REVERSE_SOURCE_DOMAIN_NOT_FOUND"
-    elif [[ "$(virsh domstate "${source_domain}" 2>/dev/null | tr '[:lower:]' '[:upper:]' | tr -d '[:space:]')" != "RUNNING" ]]; then
-      source_domain_probe_state="NOT_RUNNING"
-      source_disk_probe_state="NOT_CHECKED"
-      ready=false
-      rc=87
-      error_code="DR_REVERSE_SOURCE_DOMAIN_NOT_RUNNING"
-    fi
-  else
-    source_domain_probe_state="NOT_CHECKED"
-  fi
   if [[ "${rc}" == "0" ]]; then
     while IFS=$'\t' read -r pool image; do
       if [[ -z "${pool}" || -z "${image}" ]] || ! rbd info "${pool}/${image}" >/dev/null 2>&1; then
