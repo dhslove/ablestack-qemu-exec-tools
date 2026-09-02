@@ -130,9 +130,8 @@ jobs:
           bash tests/ftctl_dr_source_outage_recovery_smoke.sh
           bash tests/ftctl_dr_vmware_snapshot_cleanup_smoke.sh
           bash tests/ftctl_dr_vmware_thumbprint_refresh_smoke.sh
-          python3 -m unittest \
-            tests.ftctl_dr_bandwidth_limit_smoke \
-            tests.ftctl_dr_rbd_extent_copy_smoke
+          python3 tests/ftctl_dr_bandwidth_limit_smoke.py
+          python3 tests/ftctl_dr_rbd_extent_copy_smoke.py
           make ftctl-rpm
 
           rpm_path=$(find build/rpm-ftctl -type f -name 'ablestack_vm_ftctl-*.rpm' -print -quit)
