@@ -164,7 +164,7 @@ ftctl_dr_vmware_write_capability() {
   ftctl_ensure_dir "$(dirname "${out_path}")" "0755"
 
   if [[ "${FTCTL_DR_VMWARE_FORCE_MISSING_VDDK:-0}" == "1" ]]; then
-    :
+    missing_code="DR_MISSING_VDDK"
   elif [[ "${FTCTL_DR_VMWARE_FORCE_VDDK_READY:-0}" == "1" ]]; then
     nbdkit="1"
     nbdkit_vddk="1"
@@ -188,7 +188,9 @@ ftctl_dr_vmware_write_capability() {
   mover_path="$(ftctl_dr_vmware_effective_mover 2>/dev/null || true)"
   [[ -n "${mover_path}" ]] && mover_ready="1"
 
-  if [[ "${vddk_ready}" != "1" ]]; then
+  if [[ -n "${missing_code}" ]]; then
+    :
+  elif [[ "${vddk_ready}" != "1" ]]; then
     if [[ -z "${vddk_libdir}" ]]; then
       missing_code="DR_VDDK_LIBDIR_UNRESOLVED"
     elif [[ "${nbdkit}" == "1" ]]; then
