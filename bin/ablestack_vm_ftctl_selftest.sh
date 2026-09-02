@@ -6677,6 +6677,7 @@ selftest_case_dr_ablestack_target_prepare() {
   local profile="${SELFTEST_ROOT}/dr-ablestack-profile.json"
   local out="" manifest=""
   mkdir -p "${fakebin}" "${SELFTEST_ROOT}/src" "${SELFTEST_ROOT}/target"
+  : > "${SELFTEST_ROOT}/src/root.qcow2"
   cat > "${fakebin}/qemu-img" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "${call_log}"
