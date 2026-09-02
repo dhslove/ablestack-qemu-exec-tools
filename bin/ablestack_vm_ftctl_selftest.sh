@@ -7763,16 +7763,25 @@ case "\${1-}" in
 esac
 EOF
   chmod +x "${fakebin}/qemu-img"
-  cat > "${fakebin}/virt-inspector" <<'EOF'
+cat > "${fakebin}/virt-inspector" <<'EOF'
 #!/usr/bin/env bash
-printf '%s\n' '<operatingsystems><operatingsystem><name>linux</name></operatingsystem></operatingsystems>'
+printf '%s\n' '<operatingsystems><operatingsystem><name>linux</name><mountpoints><mountpoint dev="/dev/sda1">/</mountpoint></mountpoints></operatingsystem></operatingsystems>'
 EOF
   cat > "${fakebin}/guestfish" <<'EOF'
 #!/usr/bin/env bash
 cat >/dev/null
 printf '%s\n' '/dev/sda1: /'
 EOF
-  chmod +x "${fakebin}/virt-inspector" "${fakebin}/guestfish"
+  cat > "${fakebin}/virt-cat" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' 'UUID=root / ext4 defaults 0 1'
+EOF
+  cat > "${fakebin}/virt-ls" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' 'vmlinuz-test'
+EOF
+  chmod +x "${fakebin}/virt-inspector" "${fakebin}/guestfish" \
+    "${fakebin}/virt-cat" "${fakebin}/virt-ls"
   truncate -s 4M "${SELFTEST_ROOT}/target/root.qcow2"
   cat > "${artifact_spec}" <<JSON
 {"contractVersion":"3","planUuid":"${plan}","runUuid":"run-test-session","checkpointRef":"ftctl:${plan}:run-sync:2","checkpointSequence":2,"checkpointImmutableRequired":true,"disks":[{"diskIndex":0,"device":"vda","provider":"FILE","canonicalLocator":"file:${SELFTEST_ROOT}/target/root.qcow2","format":"qcow2","sizeBytes":4194304}]}
