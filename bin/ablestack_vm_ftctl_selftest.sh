@@ -9018,12 +9018,19 @@ EOF
   selftest_assert_contains "${out}" '"active_side":"TARGET"' "reprotect status target active"
 }
 
-selftest_case_dr_scheduler_vmware_requires_mover() {
+selftest_case_dr_vmware_missing_mover_is_rejected_before_scheduler() {
   selftest_reset_env
   selftest_info "FTCTL_DR scheduler VMware path requires a mover"
 
+  local fakebin="${SELFTEST_ROOT}/fakebin"
   local profile="${SELFTEST_ROOT}/dr-scheduler-vmware-no-mover-profile.json"
   local out="" rc=0
+  mkdir -p "${fakebin}"
+  cat > "${fakebin}/qemu-img" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod +x "${fakebin}/qemu-img"
   cat > "${profile}" <<'JSON'
 {
   "version": 1,
@@ -9049,7 +9056,7 @@ selftest_case_dr_scheduler_vmware_requires_mover() {
 }
 JSON
 
-  out="$(FTCTL_DR_VMWARE_FORCE_VDDK_READY=1 FTCTL_DR_SCHEDULER_FOREGROUND=1 bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-sync-start \
+  out="$(FTCTL_DR_VMWARE_FORCE_VDDK_READY=1 FTCTL_DR_VMWARE_MOVER="${fakebin}/missing-mover" PATH="${fakebin}:$PATH" FTCTL_DR_SCHEDULER_FOREGROUND=1 bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-sync-start \
     --config "${SELFTEST_CONFIG}" \
     --plan plan-scheduler-vmware-no-mover \
     --run run-scheduler-vmware-no-mover \
@@ -9062,7 +9069,7 @@ JSON
   selftest_assert_contains "${out}" '"result":"error"' "vmware no mover result"
   selftest_assert_contains "${out}" '"accepted":false' "vmware no mover accepted"
   selftest_assert_contains "${out}" '"state":"ERROR"' "vmware no mover state"
-  selftest_assert_contains "${out}" '"scheduler_state":"ERROR"' "vmware no mover scheduler state"
+  selftest_assert_contains "${out}" '"step":"vmware-capability-missing"' "vmware no mover capability gate"
   selftest_assert_contains "${out}" '"error_code":"DR_VMWARE_MOVER_UNAVAILABLE"' "vmware no mover error code"
 }
 
@@ -10774,7 +10781,7 @@ selftest_main() {
   selftest_case_dr_transition_preflight_is_read_only
   selftest_case_dr_scheduler_wait_is_interrupted_by_new_generation
   selftest_case_dr_runtime_reprotect_starts_reverse_protection_checkpoint
-  selftest_case_dr_scheduler_vmware_requires_mover
+  selftest_case_dr_vmware_missing_mover_is_rejected_before_scheduler
   selftest_case_dr_vmware_cycle_result_contract
   selftest_case_dr_runtime_state_snapshot_consistency
   selftest_case_dr_vmware_direct_target_patch_contract
