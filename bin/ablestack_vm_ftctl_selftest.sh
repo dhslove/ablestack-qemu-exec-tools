@@ -6947,9 +6947,15 @@ selftest_case_dr_ablestack_vmware_source_size_unresolved() {
   selftest_reset_env
   selftest_info "FTCTL_DR ABLESTACK target rejects VMware source disk with unresolved size"
 
+  local fakebin="${SELFTEST_ROOT}/fakebin"
   local profile="${SELFTEST_ROOT}/dr-ablestack-vmware-zero-size-profile.json"
   local out="" rc=0
-  mkdir -p "${SELFTEST_ROOT}/target"
+  mkdir -p "${fakebin}" "${SELFTEST_ROOT}/target"
+  cat > "${fakebin}/qemu-img" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod +x "${fakebin}/qemu-img"
   cat > "${profile}" <<JSON
 {
   "version": 1,
@@ -6974,7 +6980,7 @@ selftest_case_dr_ablestack_vmware_source_size_unresolved() {
 }
 JSON
 
-  out="$(FTCTL_DR_SYNC_FOREGROUND=1 FTCTL_DR_VMWARE_FORCE_VDDK_READY=1 bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-sync-start \
+  out="$(FTCTL_DR_SYNC_FOREGROUND=1 FTCTL_DR_VMWARE_FORCE_VDDK_READY=1 PATH="${fakebin}:$PATH" bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-sync-start \
     --config "${SELFTEST_CONFIG}" \
     --plan plan-vmware-to-kvm-size \
     --run run-vmware-to-kvm-size \
