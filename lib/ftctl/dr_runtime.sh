@@ -2156,9 +2156,9 @@ if artifact_path:
     session_root = os.path.abspath(os.path.dirname(active_path))
     if artifact_abs.startswith(session_root + os.sep) and os.path.isdir(artifact_abs):
         shutil.rmtree(artifact_abs)
-        artifacts["state"] = "CLEANED"
-        artifacts["cleanedAt"] = now
-        session["testArtifacts"] = artifacts
+artifacts["state"] = "CLEANED"
+artifacts["cleanedAt"] = now
+session["testArtifacts"] = artifacts
 os.makedirs(os.path.dirname(session_path), exist_ok=True)
 with open(session_path, "w", encoding="utf-8") as fh:
     json.dump(session, fh, sort_keys=True, separators=(",", ":"))
@@ -8037,6 +8037,13 @@ ftctl_dr_runtime_status() {
       terminal_session_state="$(ftctl_dr_runtime_state_get_from_path "${path}" test_session_state)"
       [[ "${terminal_progress}" =~ ^[0-9]+$ ]] || terminal_progress=100
       [[ "${terminal_cleanup_required}" == "true" || "${terminal_cleanup_required}" == "false" ]] || terminal_cleanup_required=true
+      if [[ -z "${terminal_artifacts_state}" \
+        && "${terminal_session_state}" == "CLEANED" \
+        && "${terminal_cleanup_state}" == "CLEANED" \
+        && "${terminal_cleanup_required}" == "false" \
+        && "${terminal_lease_state}" == "RELEASED" ]]; then
+        terminal_artifacts_state="CLEANED"
+      fi
       terminal_error_message="${terminal_error_message:0:4096}"
       if [[ "${terminal_state}" == "ERROR" && -n "${terminal_error_code}" ]]; then
         printf '{"command":"dr-status","result":"error","plan_uuid":"%s","run_uuid":"%s","state":"ERROR","step":"%s","progress":%s,"accepted":false,"worker_state":"FAILED","terminal_source":"ENGINE_TERMINAL","terminal_version":1,"terminal_authoritative":true,"error_code":"%s","error_message":"%s","test_session_state":"%s","test_artifacts_state":"%s","test_cleanup_state":"%s","cleanup_required":%s,"checkpoint_lease_state":"%s","status_payload_truncated":true,"status_payload_bytes":%s,"events_offset":%s,"events":[],"exit_code":0}\n' \

@@ -376,6 +376,11 @@ returns a minimal authoritative terminal document containing the original
 error code and cleanup evidence instead of replacing it with
 `DR_STATUS_JSON_INVALID`.
 
+Cleanup writes `test_artifacts_state=CLEANED` even when validation fails before
+an artifact list is published. For older terminal runs, `dr-status` repairs a
+missing artifact state only when the session and cleanup states are `CLEANED`,
+the checkpoint lease is `RELEASED`, and `cleanup_required=false`.
+
 The same cross-disk consistency risk was reviewed for the existing RBD paths.
 VMware to RBD already enters the local scheduler transition before RBD snapshot
 creation. Remote RBD to RBD now uses the same controller-side source pause and
