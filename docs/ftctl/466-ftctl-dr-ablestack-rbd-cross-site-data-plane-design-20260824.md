@@ -351,10 +351,10 @@ For that scope FTCTL performs only the engine half of cutover:
    target VM power, boot validation, and matching manifest hash.
 
 The remote source runtime also persists `target_vm_id` and `target_external_ref` from
-the profile so the commit cannot be redirected to another replica. Planned
-failover requires `VERIFIED / POWERED_OFF`; disaster failover accepts only the
-existing explicit `ACKNOWLEDGED / UNKNOWN|UNREACHABLE` contract. Test failover
-never enters this barrier and keeps the source scheduler running.
+the profile so the commit cannot be redirected to another replica. This
+`REMOTE_SOURCE` path is planned-only and requires `VERIFIED / POWERED_OFF`.
+Disaster failover uses the target-side `TARGET_DISASTER` path described below.
+Test failover never enters either barrier and keeps the source scheduler running.
 
 ### 15.1 AS-IS / TO-BE
 
@@ -1003,3 +1003,36 @@ the target Agent. No fallback to a non-owner host is allowed.
 | Active Run | Drains scheduler and endpoints | Existing successful cancellation path is preserved |
 | Partial drain | Generic command failure | Typed retryable `pending` result |
 | Regression | Late UI action can corrupt a valid Full Seed result | Smoke covers terminal immutability and active cancellation |
+
+## 36. Planned and disaster failover execution policy
+
+Failover mode is an immutable Run input. It is resolved once by Cloud and is
+carried to FTCTL as an explicit scheduler transition scope. Provider selection
+does not change this policy.
+
+| Direction | Mode | Executor | Source access | Checkpoint |
+| --- | --- | --- | --- | --- |
+| VMware to KVM | planned | target coordinator | required for final VDDK delta | new final durable checkpoint |
+| VMware to KVM | disaster | target coordinator | forbidden | latest durable checkpoint |
+| KVM to KVM, RBD or file | planned | remote source Agent | required for final delta and quiesce | new final durable checkpoint |
+| KVM to KVM, RBD or file | disaster | target Agent | forbidden | controller-selected latest durable checkpoint |
+
+For KVM disaster failover Cloud stops and seals the target export at the
+selected checkpoint, then dispatches `schedulerTransitionScope=TARGET_DISASTER`
+to the target Agent. FTCTL validates the typed controller checkpoint, publishes
+`CUTOVER_READY / SOURCE`, and waits for Cloud target creation, power, and boot
+evidence before accepting the target-only cutover commit. No remote source
+status, inventory, power, scheduler, or abort call is permitted.
+
+The Plan mapping, VM details, disk order, firmware, CPU, and device attributes
+are immutable protection-contract inputs. Runtime inventory can block a
+planned action, but an action must never rewrite the Plan mapping. Source disk
+topology changes require protection release and a new Plan/full seed.
+
+| Area | AS-IS | TO-BE |
+| --- | --- | --- |
+| KVM disaster routing | Shared the planned remote-source executor | Target-only executor with no source lookup |
+| VM details | Runtime refresh overwrote Plan mapping | Validation-only refresh; mapping remains byte-stable |
+| Target checkpoint | Source journal was implicitly required | Controller checkpoint plus target durability gate |
+| Commit | Source then target for every KVM cutover | Planned keeps source then target; disaster commits target only |
+| Abort | Tried to power/resume an unavailable source | Stops target and preserves checkpoint without source calls |

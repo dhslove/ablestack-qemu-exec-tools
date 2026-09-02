@@ -1260,6 +1260,24 @@ ftctl_dr_runtime_remote_source_transition() {
   ' "${profile_file}" >/dev/null 2>&1
 }
 
+ftctl_dr_runtime_target_disaster_transition() {
+  local profile_file="${1-}"
+  [[ -n "${profile_file}" && -f "${profile_file}" ]] || return 1
+  jq -e '
+    ((.direction // "") | ascii_upcase) == "KVM_TO_KVM"
+    and ((.request.schedulerTransitionScope // "") | ascii_upcase) == "TARGET_DISASTER"
+    and ((.request.mode // "") | ascii_downcase) == "disaster"
+    and ((.request.finalSync // false) == false)
+    and ((.workers.target // "") | length) > 0
+  ' "${profile_file}" >/dev/null 2>&1
+}
+
+ftctl_dr_runtime_cloud_target_transition() {
+  local profile_file="${1-}"
+  ftctl_dr_runtime_remote_source_transition "${profile_file}" \
+    || ftctl_dr_runtime_target_disaster_transition "${profile_file}"
+}
+
 ftctl_dr_runtime_worker_role_path() {
   local plan="${1-}"
   printf '%s/worker-role.state\n' "$(ftctl_dr_runtime_plan_dir "${plan}")"
@@ -2827,7 +2845,13 @@ remote_source_transition = (
     direction == "KVM_TO_KVM"
     and str(request.get("schedulerTransitionScope") or "").upper() == "REMOTE_SOURCE"
 )
-cutover_ready = direction == "VMWARE_TO_KVM" or remote_source_transition
+target_disaster_transition = (
+    direction == "KVM_TO_KVM"
+    and str(request.get("schedulerTransitionScope") or "").upper() == "TARGET_DISASTER"
+    and str(request.get("mode") or "").lower() == "disaster"
+    and request.get("finalSync") is False
+)
+cutover_ready = direction == "VMWARE_TO_KVM" or remote_source_transition or target_disaster_transition
 runtime_state = "CUTOVER_READY" if cutover_ready else "FAILED_OVER"
 active_side = "SOURCE" if cutover_ready else "TARGET"
 target_power_state = "POWERED_OFF" if cutover_ready else "POWER_ON_DELEGATED"
@@ -2836,7 +2860,7 @@ target = profile.get("target") if isinstance(profile.get("target"), dict) else {
 target_vm_id = target.get("vmId")
 target_external_ref = target.get("externalRef") or target.get("uuid") or ""
 manifest_sha256 = str(state.get("manifest_sha256") or "")
-if remote_source_transition:
+if remote_source_transition or target_disaster_transition:
     manifest_payload = {
         "contractVersion": 1,
         "planUuid": plan,
@@ -6509,9 +6533,9 @@ ftctl_dr_runtime_cutover_commit_target_projection() {
   local journal_attempt journal_sha journal_cloud_session reverse_baseline_state unit
 
   profile_file="$(ftctl_dr_runtime_profile_path "${plan}")"
-  ftctl_dr_runtime_remote_source_transition "${profile_file}" || {
+  ftctl_dr_runtime_cloud_target_transition "${profile_file}" || {
     [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_error_json "dr-cutover-commit" "${plan}" "${run}" \
-      "DR_CUTOVER_TARGET_ROLE_INVALID" "target authority projection requires a remote-source KVM profile" 79
+      "DR_CUTOVER_TARGET_ROLE_INVALID" "target authority projection requires a Cloud-managed KVM cutover profile" 79
     return 79
   }
   profile_target_vm_id="$(ftctl_dr_runtime_profile_value "${profile_file}" "target.vmId" 2>/dev/null || true)"
@@ -6671,7 +6695,7 @@ ftctl_dr_runtime_cutover_commit() {
       ;;
   esac
 
-  if [[ "${role,,}" == "target" ]] && ftctl_dr_runtime_remote_source_transition "$(ftctl_dr_runtime_profile_path "${plan}")"; then
+  if [[ "${role,,}" == "target" ]] && ftctl_dr_runtime_cloud_target_transition "$(ftctl_dr_runtime_profile_path "${plan}")"; then
     ftctl_dr_runtime_cutover_commit_target_projection "${plan}" "${run}" "${session_id}" \
       "${checkpoint_sequence}" "${authority_generation}" "${target_power_state}" \
       "${boot_validation_state}" "${json}" "${contract_version}" "${cloud_session_id}" \
@@ -7888,7 +7912,7 @@ PY
       first="0"
       printf '"%s"' "$(ftctl__json_escape "${command}")"
     done
-    printf '],"supported_features":["async-run","status-projection","status-scope-v2","target-materialized-notify","target-materialized-idempotent","target-materialization-manifest-v2","target-resource-ownership-generation-v1","hardware-contract-projection","control-protocol-v2","control-protocol-v3","control-protocol-v4","dr-site-agent-rbd-transport-v1","dr-reverse-site-agent-rbd-transport-v1","dr-remote-source-failback-commit-v1","dr-scheduler-singleton-v1","dr-scheduler-self-owner-repair-v1","dr-scheduler-systemd-unit-v1","dr-sync-recover-v1","dr-local-reconcile-fence-v1","dr-checkpoint-producer-v1","dr-nbd-deterministic-drain-v1","dr-nbd-cleanup-recovery-v1","dr-plan-authority-snapshot-v1","dr-failover-authority-snapshot-v1","dr-completed-cycle-evidence-v2","dr-failover-abort-v1","dr-failover-cutover-reverse-baseline-v1","dr-transition-preflight-v1","dr-transition-preflight-v2","dr-reverse-preflight-v2","dr-reverse-evidence-publication-v1","dr-reverse-rbd-snapshot-readonly-v1","dr-terminal-causality-v1","dr-requested-cycle-terminal-v1","dr-failback-resume-terminal-v1","dr-worker-journal-v1","dr-live-transfer-progress-v1","dr-runtime-reconciliation-v1","dr-release-tombstone-v1","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","file-checkpoint-invariance-v1","dr-file-planned-failover-qmp-quiesce-v1","guest-preparation-v1","guest-preparation-v2","test-domain-lifecycle-v1","test-artifact-lifecycle-v2","cloud-managed-test-vm-v1","cutover-ready-v1","cutover-manifest-v2","cutover-preflight-v1","cloud-cutover-commit-v1","cloud-cutover-commit-envelope-v2","cloud-cutover-commit-journal-v2","cloud-cutover-commit-status-v1","cloud-failback-lifecycle-v1","dr-failback-commit-journal-v1","dr-failback-commit-journal-v2","dr-failback-commit-envelope-v1","dr-failback-commit-journal-v3","dr-failback-late-ack-reconcile-v1","dr-failback-rollback-fence-v1"]}\n'
+    printf '],"supported_features":["async-run","status-projection","status-scope-v2","target-materialized-notify","target-materialized-idempotent","target-materialization-manifest-v2","target-resource-ownership-generation-v1","hardware-contract-projection","control-protocol-v2","control-protocol-v3","control-protocol-v4","dr-site-agent-rbd-transport-v1","dr-target-disaster-promote-v1","dr-reverse-site-agent-rbd-transport-v1","dr-remote-source-failback-commit-v1","dr-scheduler-singleton-v1","dr-scheduler-self-owner-repair-v1","dr-scheduler-systemd-unit-v1","dr-sync-recover-v1","dr-local-reconcile-fence-v1","dr-checkpoint-producer-v1","dr-nbd-deterministic-drain-v1","dr-nbd-cleanup-recovery-v1","dr-plan-authority-snapshot-v1","dr-failover-authority-snapshot-v1","dr-completed-cycle-evidence-v2","dr-failover-abort-v1","dr-failover-cutover-reverse-baseline-v1","dr-transition-preflight-v1","dr-transition-preflight-v2","dr-reverse-preflight-v2","dr-reverse-evidence-publication-v1","dr-reverse-rbd-snapshot-readonly-v1","dr-terminal-causality-v1","dr-requested-cycle-terminal-v1","dr-failback-resume-terminal-v1","dr-worker-journal-v1","dr-live-transfer-progress-v1","dr-runtime-reconciliation-v1","dr-release-tombstone-v1","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","file-checkpoint-invariance-v1","dr-file-planned-failover-qmp-quiesce-v1","guest-preparation-v1","guest-preparation-v2","test-domain-lifecycle-v1","test-artifact-lifecycle-v2","cloud-managed-test-vm-v1","cutover-ready-v1","cutover-manifest-v2","cutover-preflight-v1","cloud-cutover-commit-v1","cloud-cutover-commit-envelope-v2","cloud-cutover-commit-journal-v2","cloud-cutover-commit-status-v1","cloud-failback-lifecycle-v1","dr-failback-commit-journal-v1","dr-failback-commit-journal-v2","dr-failback-commit-envelope-v1","dr-failback-commit-journal-v3","dr-failback-late-ack-reconcile-v1","dr-failback-rollback-fence-v1"]}\n'
     return 0
   fi
 

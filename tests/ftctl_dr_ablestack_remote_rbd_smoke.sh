@@ -309,6 +309,26 @@ ftctl_dr_runtime_finalize_failover plan-owner failover-run "${plan_owner_profile
 [[ "$(ftctl_dr_runtime_state_get_from_path "${failover_run_path}" target_external_ref)" == "target-vm-uuid" ]]
 [[ "$(ftctl_dr_runtime_state_get_from_path "${failover_run_path}" manifest_sha256)" =~ ^[0-9a-f]{64}$ ]]
 
+# Disaster failover is target-owned and must use the controller-selected
+# durable checkpoint without a remote source journal or source worker.
+target_disaster_profile="${TMP}/target-disaster-profile.json"
+jq '.workers={"source":"","coordinator":"target-host","target":"target-host"}
+  | .request.mode="disaster"
+  | .request.finalSync=false
+  | .request.schedulerTransitionScope="TARGET_DISASTER"' \
+  "${plan_owner_profile}" > "${target_disaster_profile}"
+ftctl_dr_runtime_target_disaster_transition "${target_disaster_profile}"
+ftctl_dr_runtime_cloud_target_transition "${target_disaster_profile}"
+disaster_run_path="$(ftctl_dr_runtime_run_path plan-owner disaster-run)"
+printf 'state=READY\nlast_target_durable_at=2026-08-24T00:05:00Z\nsource_fence_state=ACKNOWLEDGED\nsource_power_state=UNKNOWN\n' > "${disaster_run_path}"
+ftctl_dr_runtime_finalize_failover plan-owner disaster-run "${target_disaster_profile}" \
+  "${checkpoint_ref}" disaster "${disaster_run_path}" "${plan_owner_status_path}"
+[[ "$(ftctl_dr_runtime_state_get_from_path "${disaster_run_path}" state)" == "CUTOVER_READY" ]]
+[[ "$(ftctl_dr_runtime_state_get_from_path "${disaster_run_path}" active_side)" == "SOURCE" ]]
+[[ "$(ftctl_dr_runtime_state_get_from_path "${disaster_run_path}" source_fence_state)" == "ACKNOWLEDGED" ]]
+[[ "$(ftctl_dr_runtime_state_get_from_path "${disaster_run_path}" source_power_state)" == "UNKNOWN" ]]
+[[ "$(ftctl_dr_runtime_state_get_from_path "${disaster_run_path}" manifest_sha256)" =~ ^[0-9a-f]{64}$ ]]
+
 reverse_profile_source="${TMP}/reverse-baseline-source.json"
 jq '.direction="KVM_TO_KVM"
   | .workers={"source":"source-host","coordinator":"target-host","target":"target-host"}
