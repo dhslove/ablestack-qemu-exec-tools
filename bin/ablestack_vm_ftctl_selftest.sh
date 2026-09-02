@@ -7565,7 +7565,9 @@ EOF
         "sizeBytes": 1048576,
         "targetDiskOfferingId": "disk-offering-1",
         "changeId": "52 00 01",
-        "snapshotRef": "snap-1"
+        "snapshotRef": "snap-1",
+        "baselineGeneration": 1,
+        "baselineState": "LOCAL_DURABLE"
       }
     ]
   }
