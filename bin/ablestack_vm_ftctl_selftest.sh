@@ -7535,8 +7535,15 @@ selftest_case_dr_scheduler_vmware_mock_checkpoint_loop() {
   selftest_reset_env
   selftest_info "FTCTL_DR scheduler VMware mock checkpoint loop"
 
+  local fakebin="${SELFTEST_ROOT}/fakebin"
   local profile="${SELFTEST_ROOT}/dr-scheduler-vmware-profile.json"
   local out="" restore_points="" checkpoint=""
+  mkdir -p "${fakebin}"
+  cat > "${fakebin}/qemu-img" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod +x "${fakebin}/qemu-img"
   cat > "${profile}" <<'JSON'
 {
   "version": 1,
@@ -7565,7 +7572,7 @@ selftest_case_dr_scheduler_vmware_mock_checkpoint_loop() {
 }
 JSON
 
-  out="$(FTCTL_DR_VMWARE_FORCE_VDDK_READY=1 FTCTL_DR_VMWARE_MOCK_CYCLE=1 FTCTL_DR_SCHEDULER_FOREGROUND=1 bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-sync-start \
+  out="$(FTCTL_DR_VMWARE_FORCE_VDDK_READY=1 FTCTL_DR_VMWARE_MOCK_CYCLE=1 FTCTL_DR_SCHEDULER_FOREGROUND=1 PATH="${fakebin}:$PATH" bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-sync-start \
     --config "${SELFTEST_CONFIG}" \
     --plan plan-scheduler-vmware \
     --run run-scheduler-vmware \
