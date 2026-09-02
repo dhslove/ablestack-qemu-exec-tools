@@ -8964,7 +8964,7 @@ error_code=
 updated_at=2026-07-01T02:11:00Z
 EOF
 
-  out="$(PATH="${fakebin}:$PATH" bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-reprotect \
+  out="$(FTCTL_DR_REPROTECT_FOREGROUND=1 PATH="${fakebin}:$PATH" bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-reprotect \
     --config "${SELFTEST_CONFIG}" \
     --plan "${plan}" \
     --run run-reprotect \
