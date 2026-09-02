@@ -7554,7 +7554,7 @@ EOF
   "source": {"provider": "VMWARE", "driver": "VMWARE_CBT", "vmId": "vm-101", "vcenterRef": "vc-a"},
   "target": {"provider": "VMWARE", "driver": "VMWARE_VDDK", "vmId": "vm-201", "datastoreRef": "ds-dr"},
   "policy": {"cbtPolicy": {"required": false}},
-  "schedule": {"intervalSeconds": 0},
+  "schedule": {"intervalSeconds": 1},
   "request": {"maxCycles": 2},
   "mapping": {
     "disks": [
