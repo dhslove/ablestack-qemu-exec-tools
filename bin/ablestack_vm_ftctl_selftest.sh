@@ -9082,6 +9082,7 @@ selftest_case_dr_vmware_mover_uses_raw_over_nbd_image_opts() {
   local credentials="${SELFTEST_ROOT}/vmware-credentials.json"
   local disk_map="${SELFTEST_ROOT}/vmware-disks.json"
   local target_map="${SELFTEST_ROOT}/ablestack-disks.json"
+  local cbt_helper="${SELFTEST_ROOT}/fake-cbt-query.py"
   local vddk_dir="${SELFTEST_ROOT}/vddk"
   mkdir -p "${fakebin}" "${vddk_dir}/lib64"
   : > "${vddk_dir}/lib64/libvixDiskLib.so"
@@ -9151,6 +9152,16 @@ exit 1
 EOF
   chmod +x "${fakebin}/openssl"
 
+  cat > "${cbt_helper}" <<'PY'
+import json
+print(json.dumps({
+    "activation_verified": True,
+    "new_change_id": "52 00 02",
+    "vmdk_path": "[datastore1] Rocky10/Rocky10.vmdk",
+    "areas": [{"start": 0, "length": 1048576}],
+}))
+PY
+
   cat > "${credentials}" <<JSON
 {
   "credentials": {
@@ -9170,6 +9181,9 @@ JSON
   "disks": [
     {
       "device": "disk0",
+      "cbtDiskId": "scsi0:0",
+      "sourceDiskKey": "2000",
+      "sourceSnapshotName": "snapshot-test",
       "sourceVmdkPath": "[datastore1] Rocky10/Rocky10.vmdk",
       "targetFormat": "raw"
     }
@@ -9193,6 +9207,8 @@ JSON
   FTCTL_DR_CREDENTIALS_FILE="${credentials}" \
   FTCTL_DR_VMWARE_MOVER_LOG_DIR="${SELFTEST_ROOT}/run/dr-runtime/mover" \
   FTCTL_DR_VMWARE_CREATE_RUN_SNAPSHOT=0 \
+  FTCTL_DR_VMWARE_CBT_PYTHON="$(command -v python3)" \
+  FTCTL_DR_VMWARE_CBT_QUERY_HELPER="${cbt_helper}" \
   FTCTL_DR_VMWARE_QEMU_INFO_TIMEOUT=5 \
   PATH="${fakebin}:$PATH" \
     bash "${ROOT_DIR}/lib/ftctl/dr_vmware_mover.sh"
