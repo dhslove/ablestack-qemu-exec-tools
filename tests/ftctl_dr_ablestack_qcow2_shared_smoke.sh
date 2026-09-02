@@ -62,6 +62,20 @@ assert disk["sourceType"] == "file"
 assert disk["targetFormat"] == "qcow2"
 PY
 
+# A stopped or disaster-lost domain is not a replication eligibility condition.
+# The command-time Cloud locator remains valid when its SharedMountPoint file
+# exists and qemu-img independently identifies it as qcow2.
+offline_profile="${TMP}/profile-offline.json"
+offline_canonical="${TMP}/canonical-offline.json"
+jq --arg source "${TMP}/source-volume" \
+  '.source.driver="KVM_QMP" | .source.instanceName="i-2-offline-VM" | .mapping.disks[0].sourcePath=$source' \
+  "${profile}" > "${offline_profile}"
+touch "${TMP}/source-volume"
+ftctl_dr_ablestack_canonicalize_profile "${offline_profile}" "${offline_canonical}"
+virsh() { return 1; }
+ftctl_dr_ablestack_rebind_live_qcow2_sources plan-qcow2 "${offline_canonical}"
+jq -e --arg source "${TMP}/source-volume" '.disks[0].sourcePath == $source' "${offline_canonical}" >/dev/null
+
 # A canceled failover can restore the source VM on its durable volume after a
 # temporary clone overlay has been removed. Rebind only the ABLESTACK KVM_QMP
 # qcow2 source whose stable volume identity uniquely matches the live QMP node.

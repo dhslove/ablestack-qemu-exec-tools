@@ -207,3 +207,11 @@ committed TARGET authority, canonical disk-set mapping, readable source RBD or
 SharedMountPoint artifacts, durable checkpoint/baseline evidence, and a
 writable dynamically resolved VMware target. `virsh dominfo` and `virsh
 domstate` are operation observations only and must never gate reverse transfer.
+
+SharedMountPoint qcow2 forward transfer follows the same power-independent
+contract. If a source domain is running, QMP may rebind a stale locator to the
+unique active backing file. If the domain is stopped, unavailable, or
+destroyed, QMP is not an eligibility gate: FTCTL accepts only the command-time
+Cloud locator whose absolute source file exists and whose format is confirmed
+as qcow2 by `qemu-img info`. Missing, ambiguous, or non-qcow2 source artifacts
+remain hard failures.

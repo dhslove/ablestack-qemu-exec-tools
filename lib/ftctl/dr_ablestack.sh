@@ -1424,6 +1424,23 @@ ftctl_dr_ablestack_qcow2_push_provider() {
   (( count > 0 ))
 }
 
+ftctl_dr_ablestack_validate_configured_qcow2_sources() {
+  local disk_map="${1-}" disk_json source_type source_format source_path actual_format count=0
+  [[ -s "${disk_map}" ]] || return 1
+  while IFS= read -r disk_json; do
+    source_type="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" sourceType)"
+    source_format="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" sourceFormat)"
+    source_path="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" sourcePath)"
+    [[ "${source_type}" == "file" && "${source_format}" == "qcow2" && -n "${source_path}" ]] || return 1
+    [[ -f "${source_path}" ]] || return 1
+    actual_format=""
+    ftctl_dr_ablestack_qemu_info_value "${source_path}" format actual_format || return 1
+    [[ "${actual_format,,}" == "qcow2" ]] || return 1
+    count=$((count + 1))
+  done < <(ftctl_dr_ablestack_disk_rows "${disk_map}")
+  (( count > 0 ))
+}
+
 ftctl_dr_ablestack_rebind_live_qcow2_sources() {
   local plan="${1-}" disk_map="${2-}" source_provider source_driver vm_name
   local qmp_path tmp_path result="" rebound_count="0"
@@ -1439,14 +1456,20 @@ ftctl_dr_ablestack_rebind_live_qcow2_sources() {
       and (.targetFormat // "" | ascii_downcase) == "qcow2")' "${disk_map}" >/dev/null 2>&1 || return 0
 
   vm_name="$(ftctl_dr_ablestack_json_field "${disk_map}" source.instanceName 2>/dev/null || true)"
-  [[ -n "${vm_name}" ]] || return 32
+  if [[ -z "${vm_name}" ]]; then
+    ftctl_dr_ablestack_validate_configured_qcow2_sources "${disk_map}" || return 32
+    return 0
+  fi
   qmp_path="$(mktemp "${TMPDIR:-/tmp}/ftctl-dr-qcow2-nodes.XXXXXX.json")" || return 2
   tmp_path="${disk_map}.live-source.$$"
   trap 'rm -f -- "${qmp_path:-}" "${tmp_path:-}"; trap - RETURN' RETURN
 
   if ! virsh -c "${FTCTL_PROFILE_PRIMARY_URI:-qemu:///system}" qemu-monitor-command "${vm_name}" --pretty \
       '{"execute":"query-named-block-nodes"}' > "${qmp_path}" 2>/dev/null; then
-    return 101
+    ftctl_dr_ablestack_validate_configured_qcow2_sources "${disk_map}" || return 32
+    ftctl_log_event "dr-runtime" "dr.ablestack.qcow2_source_verified" "ok" "" "" \
+      "plan=${plan} vm=${vm_name} source=profile runtime_probe=unavailable"
+    return 0
   fi
 
   result="$(python3 - "${disk_map}" "${qmp_path}" "${tmp_path}" <<'PY'
