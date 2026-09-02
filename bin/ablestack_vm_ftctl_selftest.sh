@@ -7883,7 +7883,8 @@ EOF
   selftest_assert_file_contains "${session_path}" '"checkpointSealState":"SEALED"'
   selftest_assert_file_contains "${session_path}" '"checkpointIntegrityState":"PASSED"'
   selftest_assert_file_contains "${call_log}" "info --output=json ${SELFTEST_ROOT}/target/root.qcow2"
-  selftest_assert_file_contains "${call_log}" "convert -f qcow2 -O qcow2 -S 4k ${SELFTEST_ROOT}/target/root.qcow2"
+  selftest_assert_file_contains "${call_log}" "check -q ${SELFTEST_ROOT}/target/.ftctl-dr-checkpoints/${plan}/2/.vda."
+  selftest_assert_file_contains "${call_log}" "compare -f qcow2 -F qcow2 ${SELFTEST_ROOT}/target/root.qcow2"
   selftest_assert_file_contains "${call_log}" "create -f qcow2 -F qcow2 -b ${sealed_checkpoint} ${shared_artifact}"
   selftest_assert_file_contains "${call_log}" "check -q ${shared_artifact}"
   selftest_assert_file_contains "${session_path}" '"ownedByFtctl":true'
