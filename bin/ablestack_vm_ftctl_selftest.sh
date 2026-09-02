@@ -10403,13 +10403,7 @@ selftest_case_dr_kvm_vmware_reverse_preflight_clears_return_trap() {
     }
     ftctl_dr_kvm_vmware_refresh_target_backings() { return 0; }
     rbd() { return 0; }
-    virsh() {
-      case "${1-}" in
-        dominfo) return 0 ;;
-        domstate) printf 'running\n'; return 0 ;;
-      esac
-      return 1
-    }
+    virsh() { selftest_fail "reverse preflight must not probe source domain runtime"; }
     command() { return 0; }
 
     ftctl_dr_kvm_vmware_reverse_preflight plan-trap "${profile}" FAILBACK_FINAL AUTO 1
@@ -10418,7 +10412,7 @@ selftest_case_dr_kvm_vmware_reverse_preflight_clears_return_trap() {
 
   selftest_assert_eq "${rc}" "0" "reverse preflight caller returns successfully under set -u"
   selftest_assert_contains "${out}" '"effective_mode":"FULL_REVERSE_SEED"' "reverse preflight emits the selected mode"
-  selftest_assert_contains "${out}" '"source_domain_probe_state":"READY"' "reverse preflight proves the live KVM domain"
+  selftest_assert_contains "${out}" '"source_domain_probe_state":"NOT_REQUIRED"' "reverse preflight ignores KVM domain runtime"
   selftest_assert_contains "${out}" '"status_evidence_contract_version":1' "reverse preflight advertises evidence contract"
   selftest_assert_contains "${out}" '"status_evidence_publication_ready":true' "reverse preflight proves evidence publication support"
   selftest_assert_contains "${out}" "caller-returned" "RETURN trap does not escape into its caller"
