@@ -7024,7 +7024,7 @@ JSON
     --json)"
   selftest_assert_contains "${out}" '"command":"dr-plan-apply"' "vmware preflight command"
   selftest_assert_contains "${out}" '"capable":false' "vmware preflight capable false"
-  selftest_assert_contains "${out}" '"error_code":"DR_MISSING_VDDK"' "vmware preflight error code"
+  selftest_assert_contains "${out}" '"error_code":"DR_VDDK_LIBDIR_UNRESOLVED"' "vmware preflight error code"
   selftest_assert_contains "${out}" '"driver":"VMWARE"' "vmware preflight details"
 }
 
@@ -7335,8 +7335,15 @@ selftest_case_dr_vmware_missing_disk_map_config_incomplete() {
   selftest_reset_env
   selftest_info "FTCTL_DR VMware missing disk map reports config incomplete"
 
+  local fakebin="${SELFTEST_ROOT}/fakebin"
   local profile="${SELFTEST_ROOT}/dr-vmware-missing-disk-map-profile.json"
   local out="" checkpoint=""
+  mkdir -p "${fakebin}"
+  cat > "${fakebin}/qemu-img" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod +x "${fakebin}/qemu-img"
   cat > "${profile}" <<'JSON'
 {
   "version": 1,
@@ -7349,7 +7356,7 @@ selftest_case_dr_vmware_missing_disk_map_config_incomplete() {
 }
 JSON
 
-  out="$(FTCTL_DR_SYNC_FOREGROUND=1 FTCTL_DR_SCHEDULER_DISABLE=1 FTCTL_DR_VMWARE_FORCE_VDDK_READY=1 bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-sync-start \
+  out="$(FTCTL_DR_SYNC_FOREGROUND=1 FTCTL_DR_SCHEDULER_DISABLE=1 FTCTL_DR_VMWARE_FORCE_VDDK_READY=1 PATH="${fakebin}:$PATH" bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-sync-start \
     --config "${SELFTEST_CONFIG}" \
     --plan plan-vmware-config-incomplete \
     --run run-vmware-config-incomplete \
