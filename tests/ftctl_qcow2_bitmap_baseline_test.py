@@ -24,6 +24,20 @@ class Args:
 
 
 class Qcow2BitmapBaselineTest(unittest.TestCase):
+    def test_remote_qemu_writer_is_reported_as_runtime_relocation(self):
+        locked = MODULE.BaselineError(
+            "DR_REVERSE_FILE_BASELINE_INVALID",
+            "Failed to get shared \"write\" lock",
+        )
+        with mock.patch.object(MODULE, "run_command", side_effect=[locked, '{"format":"qcow2"}']) as command:
+            with self.assertRaises(MODULE.BaselineError) as context:
+                MODULE.image_info("qemu-img", "/mnt/glue-gfs/disk.qcow2")
+
+        self.assertEqual("DR_QCOW2_SOURCE_RUNTIME_UNAVAILABLE", context.exception.code)
+        self.assertEqual(110, context.exception.exit_code)
+        self.assertNotIn("--force-share", command.call_args_list[0].args[0])
+        self.assertIn("--force-share", command.call_args_list[1].args[0])
+
     def test_relative_path_is_bound_to_shared_root(self):
         with tempfile.TemporaryDirectory() as temp:
             root = pathlib.Path(temp)

@@ -2397,7 +2397,7 @@ ftctl_dr_scheduler_worker() {
           cycle_retry_mode="FULL_RETRY"
           ;;
         DR_QCOW2_SOURCE_RUNTIME_UNAVAILABLE)
-          error_message="The running qcow2 source disappeared before the QMP backup could start"
+          error_message="The qcow2 source is active on another host; Cloud will re-resolve the current VM placement"
           data_commit_state="NOT_STARTED"
           cycle_retry_mode="FULL_RETRY"
           ;;
@@ -2435,7 +2435,7 @@ ftctl_dr_scheduler_worker() {
         "progress=100" \
         "accepted=false" \
         "scheduler_state=ERROR" \
-        "scheduler_health=$([[ "${cycle_retry_mode}" == "CLEANUP_ONLY" ]] && printf RECOVERY_REQUIRED || printf DEAD)" \
+        "scheduler_health=$([[ "${error_code}" == "DR_QCOW2_SOURCE_RUNTIME_UNAVAILABLE" || "${error_code}" == "DR_QCOW2_OFFLINE_SOURCE_BUSY" ]] && printf WAITING_SOURCE || { [[ "${cycle_retry_mode}" == "CLEANUP_ONLY" ]] && printf RECOVERY_REQUIRED || printf DEAD; })" \
         "cycle_state=FAILED" \
         "replication_activity=STOPPED" \
         "protection_state=DEGRADED" \
@@ -2458,6 +2458,8 @@ ftctl_dr_scheduler_worker() {
         "metadata_committed=false" \
         "target_durable=false" \
         "cycle_retry_mode=${cycle_retry_mode}" \
+        "retryable=$([[ "${error_code}" == "DR_QCOW2_SOURCE_RUNTIME_UNAVAILABLE" || "${error_code}" == "DR_QCOW2_OFFLINE_SOURCE_BUSY" ]] && printf true || printf false)" \
+        "retry_after_sec=$([[ "${error_code}" == "DR_QCOW2_SOURCE_RUNTIME_UNAVAILABLE" || "${error_code}" == "DR_QCOW2_OFFLINE_SOURCE_BUSY" ]] && printf 30 || printf '')" \
         "nbd_teardown_state=$([[ "${cycle_retry_mode}" == "CLEANUP_ONLY" ]] && printf QUARANTINED || printf FAILED)" \
         "nbd_quarantined_device_count=$([[ "${cycle_retry_mode}" == "CLEANUP_ONLY" ]] && printf 1 || printf 0)" \
         "nbd_teardown_error_code=${error_code}" \

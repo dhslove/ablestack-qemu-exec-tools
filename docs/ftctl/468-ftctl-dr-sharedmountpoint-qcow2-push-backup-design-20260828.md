@@ -776,3 +776,32 @@ release gates.
 | mode authority | runtime availability | provider baseline evidence |
 | multi-disk commit | bitmap cleared per completed disk | transfer complete set, then clear set |
 | existing providers | indirectly exposed to shared changes | unchanged behavior plus regression gates |
+
+## Runtime Relocation Recovery Contract (2026-09-04)
+
+A SharedMountPoint qcow2 file can be opened from every storage-capable host,
+but QMP exists only on the VM's current compute host. Live migration or a
+stopped-to-running transition can therefore leave a scheduler process on a
+host that no longer owns the VM runtime. This is placement drift, not a broken
+bitmap baseline and not a reason to overwrite the target with Full Seed.
+
+The scheduler first checks local QMP. If it is absent, the offline probe uses a
+normal locked `qemu-img info`. A shared write-lock rejection is confirmed with
+read-only `--force-share` inspection only; no bitmap or image metadata may be
+changed. A readable image with a remote writer returns exit 110 and
+`DR_QCOW2_SOURCE_RUNTIME_UNAVAILABLE`. FTCTL projects `WAITING_SOURCE` and a
+retryable status. Cloud then resolves the source VM's current host from live
+inventory and dispatches `RECOVER_SYNC` there. The new worker reuses the last
+durable checkpoint and selects QMP incremental backup or `NO_CHANGE`; it must
+not create a new Full Seed baseline merely because placement changed.
+
+Source hardware fingerprint contract version 2 excludes transient placement
+fields such as source host UUID, host name, and instance name. Firmware, the
+Cloud `UEFI` detail, Secure Boot, CPU, memory, disk controllers, and stable VM
+Details remain protected. Cloud normalizes legacy stored hardware to this
+stable projection when comparing a version 2 runtime fingerprint, allowing an
+existing Plan to survive migration without mutating its recorded VM Details.
+
+RBD-to-RBD and VMware-to-RBD do not use the qcow2 lock classifier. Their
+snapshot-diff and CBT behavior remains unchanged, but their placement tests
+remain release gates because Cloud's dynamic worker broker is shared.

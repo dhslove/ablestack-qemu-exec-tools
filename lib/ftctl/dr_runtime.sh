@@ -4275,7 +4275,7 @@ ftctl_dr_runtime_emit_state_json() {
   local reprotect_manifest_path reprotect_checkpoint_path reprotect_requested_at reprotect_completed_at
   local reprotect_rto_actual_seconds route_contract_version replication_direction reverse_direction provider_pair reverse_profile_path reverse_restore_points_path reprotect_worker_pid
   local target_vm_id target_external_ref target_materialized target_vm_present target_storage_present target_network_present restore_point_present
-  local status_scope profile_path authority_state_path source_firmware="" source_secure_boot="" source_hardware_fingerprint=""
+  local status_scope profile_path authority_state_path source_firmware="" source_secure_boot="" source_hardware_fingerprint="" source_hardware_fingerprint_version=""
   local target_boot_type="" target_boot_mode="" target_io_policy="" target_iothreads=""
   local reverse_evidence_contract_version="1" reverse_evidence_state="PENDING" reverse_evidence_run_uuid=""
   local reverse_evidence_state_path="" reverse_evidence_checkpoint_path="" reverse_evidence_checkpoint_plan=""
@@ -4317,6 +4317,7 @@ ftctl_dr_runtime_emit_state_json() {
     source_firmware="$(jq -r '.mapping.source.hardware.firmware // empty' "${profile_path}" 2>/dev/null || true)"
     source_secure_boot="$(jq -r '.mapping.source.hardware.secureBoot // empty' "${profile_path}" 2>/dev/null || true)"
     source_hardware_fingerprint="$(jq -r '.mapping.source.hardware.fingerprint // empty' "${profile_path}" 2>/dev/null || true)"
+    source_hardware_fingerprint_version="$(jq -r '.mapping.source.hardware.fingerprintVersion // empty' "${profile_path}" 2>/dev/null || true)"
     target_boot_type="$(jq -r '.mapping.target.hardware.bootType // empty' "${profile_path}" 2>/dev/null || true)"
     target_boot_mode="$(jq -r '.mapping.target.hardware.bootMode // empty' "${profile_path}" 2>/dev/null || true)"
     target_io_policy="$(jq -r '.mapping.target.hardware.ioPolicy // empty' "${profile_path}" 2>/dev/null || true)"
@@ -5050,6 +5051,7 @@ PY
   ftctl_dr_runtime_json_string_field "source_firmware" "${source_firmware}"
   ftctl_dr_runtime_json_boolean_field "source_secure_boot" "${source_secure_boot}" || return $?
   ftctl_dr_runtime_json_string_field "source_hardware_fingerprint" "${source_hardware_fingerprint}"
+  ftctl_dr_runtime_json_string_field "source_hardware_fingerprint_version" "${source_hardware_fingerprint_version}"
   ftctl_dr_runtime_json_string_field "target_boot_type" "${target_boot_type}"
   ftctl_dr_runtime_json_string_field "target_boot_mode" "${target_boot_mode}"
   ftctl_dr_runtime_json_string_field "target_io_policy" "${target_io_policy}"

@@ -76,9 +76,28 @@ def run_command(command):
     return result.stdout
 
 
+def is_shared_write_lock_error(error):
+    detail = str(error).lower()
+    return "failed to get shared" in detail and "write" in detail and "lock" in detail
+
+
 def image_info(qemu_img, path):
     try:
-        return json.loads(run_command([qemu_img, "info", "--output=json", str(path)]))
+        output = run_command([qemu_img, "info", "--output=json", str(path)])
+    except BaselineError as exc:
+        if not is_shared_write_lock_error(exc):
+            raise
+        try:
+            run_command([qemu_img, "info", "--force-share", "--output=json", str(path)])
+        except BaselineError:
+            raise exc
+        raise BaselineError(
+            "DR_QCOW2_SOURCE_RUNTIME_UNAVAILABLE",
+            "qcow2 source is active on another host; current VM placement must be re-resolved",
+            exit_code=110,
+        ) from exc
+    try:
+        return json.loads(output)
     except json.JSONDecodeError as exc:
         raise BaselineError("DR_REVERSE_FILE_BASELINE_INVALID", "qemu-img returned invalid JSON") from exc
 
