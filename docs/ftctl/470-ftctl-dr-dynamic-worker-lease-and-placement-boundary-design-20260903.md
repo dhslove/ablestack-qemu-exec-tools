@@ -226,13 +226,27 @@ binding. QMP, offline ownership, bitmap, and transfer errors use the dedicated
 qcow2 error namespace in design 468 and cannot trigger VMware/NBD cleanup.
 
 The same power-independent rule applies to subsequent scheduler Cycles. A
-running source keeps the existing QMP incremental path. A stopped source cannot
-produce a live dirty-bitmap delta, so the scheduler promotes that one requested
-incremental Cycle to the offline Full Seed producer after revalidating the
-whole disk set. It records requested mode `CBT_INCREMENTAL`, effective mode
-`FULL_SEED`, and reason `source_runtime_unavailable`. Treating normal VM power
-state as `DR_QCOW2_SOURCE_RUNTIME_UNAVAILABLE` is forbidden; that error is
-reserved for a command-time loss after a live QMP producer was selected.
+running source keeps the existing QMP incremental path. A stopped source opens
+the qcow2 files through a temporary `qemu-storage-daemon` block graph and uses
+the same persistent dirty bitmap with `blockdev-backup`. Zero dirty extents
+produce `NO_CHANGE`; non-zero extents produce `CBT_INCREMENTAL`. Normal power
+state must never promote a valid incremental baseline to Full Seed. Treating
+normal VM power state as `DR_QCOW2_SOURCE_RUNTIME_UNAVAILABLE` is forbidden;
+that error is reserved for a command-time loss after a live QMP producer was
+selected.
+
+Full Seed remains limited to initial protection, an explicit operator Full
+Resync, or provider evidence that the durable baseline is absent or invalid.
+The provider decision matrix is therefore:
+
+| Provider | Running source | Stopped source | Full Seed trigger |
+| --- | --- | --- | --- |
+| SharedMountPoint qcow2 | live QMP bitmap | offline storage-daemon bitmap | missing/invalid bitmap or explicit request |
+| RBD | RBD snapshot diff | RBD snapshot diff | missing baseline snapshot or explicit request |
+| VMware | snapshot + CBT changeId | snapshot + CBT changeId | CBT epoch/changeId invalid or explicit request |
+
+Power state selects only the qcow2 bitmap access adapter. It is not a transfer
+mode or capability decision for any provider.
 
 Regression gates must exercise one and multiple disks in both modes: a running
 domain retains the existing QMP producer, while a stopped domain selects the

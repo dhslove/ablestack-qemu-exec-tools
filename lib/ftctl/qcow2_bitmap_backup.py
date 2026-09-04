@@ -112,10 +112,34 @@ def ensure_bitmap(client, node_name, node, bitmap_name, mode, granularity):
     return count
 
 
+def clone_bitmap_for_backup(client, node_name, bitmap_name, job_id, granularity):
+    working_name = f"ftctl-work-{job_id}"[:255]
+    client.execute("block-dirty-bitmap-add", {
+        "node": node_name,
+        "name": working_name,
+        "granularity": granularity,
+        "persistent": False,
+    })
+    try:
+        client.execute("block-dirty-bitmap-merge", {
+            "node": node_name,
+            "target": working_name,
+            "bitmaps": [{"node": node_name, "name": bitmap_name}],
+        })
+    except BackupError:
+        try:
+            client.execute("block-dirty-bitmap-remove", {"node": node_name, "name": working_name})
+        except BackupError:
+            pass
+        raise
+    return working_name
+
+
 def write_progress(path, args, state, processed, total, changed, started, sample_sequence):
     now = time.time()
     elapsed = max(now - started, 0.001)
-    percent = int(min(100, max(0, processed * 100 / total))) if total else 0
+    percent = 100 if state == "COMPLETED" else (
+        int(min(100, max(0, processed * 100 / total))) if total else 0)
     throughput = int(processed / elapsed)
     remaining = max(total - processed, 0)
     eta = int(remaining / throughput) if throughput > 0 else 0
@@ -160,19 +184,24 @@ def wait_for_job(client, job_id, args, changed_bytes):
         last_total = int(job.get("total-progress") or last_total or 0)
         last_processed = int(job.get("current-progress") or 0)
         status = str(job.get("status") or "unknown")
-        write_progress(args.progress_path, args, "COPYING", last_processed, last_total,
+        logical_total = changed_bytes if args.mode == "incremental" else last_total
+        logical_processed = last_processed
+        if args.mode == "incremental":
+            logical_processed = int(changed_bytes * last_processed / last_total) if last_total else 0
+        write_progress(args.progress_path, args, "COPYING", logical_processed, logical_total,
                        changed_bytes, started, sample_sequence)
         if status == "concluded":
             if job.get("error"):
                 raise BackupError(str(job["error"]))
             client.execute("job-dismiss", {"id": job_id})
-            write_progress(args.progress_path, args, "COMPLETED", last_total, last_total,
+            transferred = changed_bytes if args.mode == "incremental" else last_total
+            write_progress(args.progress_path, args, "COMPLETED", transferred, transferred,
                            changed_bytes, started, sample_sequence + 1)
             return {
                 "changedBytes": changed_bytes,
-                "bytesProcessed": last_total,
-                "sourceReadBytes": last_total,
-                "targetWrittenBytes": last_total,
+                "bytesProcessed": transferred,
+                "sourceReadBytes": transferred,
+                "targetWrittenBytes": transferred,
                 "durationMs": int((time.time() - started) * 1000),
             }
         time.sleep(args.poll_interval)
@@ -192,15 +221,19 @@ def run_backup(args, client=None):
         raise SourceRuntimeUnavailable(str(exc)) from exc
     source_node = source["node-name"]
     changed_bytes = ensure_bitmap(client, source_node, source, args.bitmap, args.mode, args.granularity)
+    transfer_bitmap = args.bitmap
+    if args.mode == "incremental" and args.preserve_bitmap:
+        transfer_bitmap = clone_bitmap_for_backup(
+            client, source_node, args.bitmap, args.job_id, args.granularity)
     target_node = args.target_node
-    client.execute("blockdev-add", {
-        "driver": "nbd",
-        "node-name": target_node,
-        "server": {"type": "inet", "host": args.target_host, "port": str(args.target_port)},
-        "export": args.target_export,
-        "read-only": False,
-    })
     try:
+        client.execute("blockdev-add", {
+            "driver": "nbd",
+            "node-name": target_node,
+            "server": {"type": "inet", "host": args.target_host, "port": str(args.target_port)},
+            "export": args.target_export,
+            "read-only": False,
+        })
         backup_args = {
             "job-id": args.job_id,
             "device": source_node,
@@ -212,7 +245,7 @@ def run_backup(args, client=None):
             "on-target-error": "report",
         }
         if args.mode == "incremental":
-            backup_args["bitmap"] = args.bitmap
+            backup_args["bitmap"] = transfer_bitmap
             backup_args["bitmap-mode"] = "on-success"
         if args.bandwidth_limit_mbps > 0:
             backup_args["speed"] = args.bandwidth_limit_mbps * 1024 * 1024
@@ -223,6 +256,13 @@ def run_backup(args, client=None):
             client.execute("blockdev-del", {"node-name": target_node})
         except BackupError:
             pass
+        if transfer_bitmap != args.bitmap:
+            try:
+                client.execute("block-dirty-bitmap-remove", {
+                    "node": source_node, "name": transfer_bitmap,
+                })
+            except BackupError:
+                pass
     result.update({
         "result": "ok",
         "mode": "FULL_RESEED" if args.mode == "full" else "CBT_INCREMENTAL",
@@ -248,6 +288,7 @@ def parse_args(argv=None):
     parser.add_argument("--poll-interval", type=float, default=1.0)
     parser.add_argument("--granularity", type=int, default=65536)
     parser.add_argument("--bandwidth-limit-mbps", type=int, default=0)
+    parser.add_argument("--preserve-bitmap", action="store_true")
     parser.add_argument("--progress-path", default="")
     parser.add_argument("--plan-uuid", default="")
     parser.add_argument("--run-uuid", default="")

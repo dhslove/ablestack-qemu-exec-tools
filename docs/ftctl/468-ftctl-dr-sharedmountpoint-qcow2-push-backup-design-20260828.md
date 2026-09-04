@@ -729,3 +729,50 @@ reported NBD teardown evidence.
 | Multi-disk commit | A late failure can obscure earlier partial work | Checkpoint publication requires all disks and baselines |
 | Error code | QMP/baseline exit 92 becomes an NBD timeout | qcow2 uses isolated exits 110 through 116 |
 | Existing providers | Shared rc values can trigger unrelated recovery | VMware-to-RBD and RBD-to-RBD command paths stay unchanged |
+
+## Offline Incremental Bitmap Contract (2026-09-04)
+
+Stopping a source VM does not invalidate its durable qcow2 dirty-bitmap
+baseline. The former fallback from a requested incremental Cycle to an offline
+Full Seed transferred the complete virtual size on every RPO while a VM
+remained powered off. That behavior protected bytes but violated the
+incremental contract and made `requestedMode=CBT_INCREMENTAL` misleading.
+
+The corrected provider flow is:
+
+1. Revalidate every source path beneath the registered SharedMountPoint and
+   prove that the entire disk set has no writable holder.
+2. Verify every deterministic persistent bitmap before opening any target.
+   Missing, disabled, busy, inconsistent, or wrong-granularity bitmaps return
+   `DR_QCOW2_BASELINE_NOT_DURABLE`; they do not silently become Full Seed.
+3. For each disk, start a temporary `qemu-storage-daemon`, build an explicit
+   `file -> qcow2` source graph, and attach the existing target NBD export.
+4. Clone the persistent bitmap into a non-persistent, Run-owned working bitmap
+   and execute `blockdev-backup` with `sync=incremental` and the QEMU-required
+   `bitmap-mode=on-success`. Clearing the working bitmap must not advance the
+   persistent disk-set baseline. Its pre-clone dirty-byte count is the
+   authoritative changed-byte metric.
+5. Complete and flush every disk transfer before clearing any bitmap. After
+   the complete disk set is durable, clear every source bitmap and publish one
+   checkpoint. If transfer or clear fails, retrying old dirty extents is
+   idempotent because the target contains at most the same bytes.
+6. A zero dirty-byte sum publishes `effectiveMode=NO_CHANGE`,
+   `changedBytes=0`, and zero payload. A non-zero sum publishes
+   `effectiveMode=CBT_INCREMENTAL` with actual changed bytes.
+7. If a writable holder appears before the offline graph opens, fail with
+   `DR_QCOW2_OFFLINE_SOURCE_BUSY` and let the next attempt reselect the live
+   QMP adapter. Never use `--force-share` to bypass this race.
+
+The checkpoint is a disk-set contract, not a per-disk completion contract. No
+partial set is visible as durable. RBD-to-RBD and VMware-to-RBD retain their
+established snapshot-diff and CBT trackers; neither consults VM power state to
+decide Full Seed. Their lifecycle and CBT pagination suites remain mandatory
+release gates.
+
+| Area | AS-IS | TO-BE |
+| --- | --- | --- |
+| stopped qcow2 Cycle | automatic offline Full Seed | offline persistent-bitmap incremental |
+| no-change Cycle | full virtual-size transfer | durable `NO_CHANGE`, zero payload |
+| mode authority | runtime availability | provider baseline evidence |
+| multi-disk commit | bitmap cleared per completed disk | transfer complete set, then clear set |
+| existing providers | indirectly exposed to shared changes | unchanged behavior plus regression gates |

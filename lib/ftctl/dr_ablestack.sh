@@ -1146,6 +1146,12 @@ ftctl_dr_ablestack_initialize_qcow2_source_baselines() {
   ftctl_dr_ablestack_qcow2_source_baselines_ready "${plan}" "${disk_map}"
 }
 
+ftctl_dr_ablestack_clear_qcow2_source_baselines() {
+  local plan="${1-}" sequence="${2-}" disk_map="${3-}"
+  ftctl_dr_ablestack_qcow2_source_baselines_ready "${plan}" "${disk_map}" || return 116
+  ftctl_dr_ablestack_initialize_qcow2_source_baselines "${plan}" "${sequence}" "${disk_map}" 1
+}
+
 ftctl_dr_ablestack_prepare_reverse_baseline() {
   local plan="${1-}" run="${2-}" checkpoint_sequence="${3-}" profile_file state_path
   local reverse_profile reverse_disk_map prepared_run prepared_sequence prepared_state now
@@ -1872,6 +1878,36 @@ ftctl_dr_ablestack_qcow2_push_disk() {
   [[ -z "${out_var}" ]] || printf -v "${out_var}" '%s' "${output}"
 }
 
+ftctl_dr_ablestack_qcow2_offline_push_disk() {
+  local plan="${1-}" run="${2-}" sequence="${3-}" disk_map="${4-}" disk_json="${5-}"
+  local disk_index="${6-1}" disk_count="${7-1}" out_var="${8-}"
+  local device source_path size_bytes host port name bitmap job_id target_node output="" rc=0 bandwidth
+  device="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" device)"
+  source_path="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" sourcePath)"
+  size_bytes="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" sizeBytes)"
+  host="$(ftctl_dr_ablestack_export_value "${disk_map}" "${device}" host)"
+  port="$(ftctl_dr_ablestack_export_value "${disk_map}" "${device}" port)"
+  name="$(ftctl_dr_ablestack_export_value "${disk_map}" "${device}" name)"
+  [[ -n "${source_path}" && "${size_bytes}" =~ ^[1-9][0-9]*$ ]] || return 32
+  [[ -n "${host}" && "${port}" =~ ^[1-9][0-9]*$ && -n "${name}" ]] || return 100
+  ftctl_dr_ablestack_target_export_reachable "${host}" "${port}" || return 100
+  bitmap="$(ftctl_dr_ablestack_qcow2_bitmap_name "${plan}" "${device}")"
+  job_id="ftctl-dr-offline-$(printf '%s' "${run}:${device}" | cksum | awk '{print $1}')"
+  target_node="ftctl-dr-target-$(printf '%s' "${plan}:${device}" | cksum | awk '{print $1}')"
+  bandwidth="${FTCTL_DR_BANDWIDTH_LIMIT_MBPS:-0}"
+  [[ "${bandwidth}" =~ ^[0-9]+$ ]] || bandwidth=0
+  output="$(python3 "${FTCTL_LIB_BASE}/ftctl/qcow2_bitmap_offline_backup.py" \
+    --domain offline-storage-daemon --source-path "${source_path}" \
+    --target-host "${host}" --target-port "${port}" --target-export "${name}" \
+    --bitmap "${bitmap}" --mode incremental --job-id "${job_id}" --target-node "${target_node}" \
+    --virtual-size "${size_bytes}" --timeout "${FTCTL_DR_FULL_SEED_TIMEOUT_SEC:-3600}" \
+    --bandwidth-limit-mbps "${bandwidth}" --progress-path "${FTCTL_DR_TRANSFER_PROGRESS_PATH:-}" \
+    --plan-uuid "${plan}" --run-uuid "${run}" \
+    --cycle-sequence "${sequence:-0}" --disk-index "${disk_index}" --disk-count "${disk_count}")" || rc=$?
+  [[ "${rc}" == "0" ]] || return "${rc}"
+  [[ -z "${out_var}" ]] || printf -v "${out_var}" '%s' "${output}"
+}
+
 ftctl_dr_ablestack_prepare_file_target() {
   local target_path="${1-}" target_format="${2-}" size_bytes="${3-}"
   local out="" err="" rc=0 current_format="" current_size=""
@@ -2506,6 +2542,7 @@ ftctl_dr_ablestack_incremental_effective_mode() {
 ftctl_dr_ablestack_qcow2_incremental_once() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" disk_map="${4-}" manifest_path="${5-}" checkpoint_path="${6-}" sequence="${7-}"
   local disk_json vm_name result changed_bytes total_changed_bytes=0 started_at completed_at disk_count disk_index=0 rc=0 effective_mode
+  local transfer_mode="qmp" device
   : "${profile_file}"
   ftctl_dr_ablestack_site_agent_transport_load "${disk_map}" || return 90
   ftctl_dr_ablestack_qcow2_push_provider "${disk_map}" || return 90
@@ -2513,27 +2550,37 @@ ftctl_dr_ablestack_qcow2_incremental_once() {
   [[ -n "${vm_name}" ]] || return 32
   disk_count="$(ftctl_dr_ablestack_disk_count "${disk_map}")" || return $?
   if ! ftctl_dr_ablestack_qcow2_runtime_ready "${disk_map}" "${vm_name}"; then
-    ftctl_log_event "dr-runtime" "dr.ablestack.incremental_fallback" "warn" "" "" \
-      "plan=${plan} run=${run} reason=source_runtime_unavailable mode=offline-full-seed"
-    ftctl_dr_ablestack_full_seed_once "${plan}" "${run}" "${profile_file}" "${disk_map}" \
-      "${manifest_path}" "${checkpoint_path}" CBT_INCREMENTAL FULL_SEED \
-      source_runtime_unavailable "${sequence}"
-    return $?
+    ftctl_dr_ablestack_probe_offline_qcow2_sources "${disk_map}" || return $?
+    ftctl_dr_ablestack_qcow2_source_baselines_ready "${plan}" "${disk_map}" || return 116
+    transfer_mode="offline-qsd"
+    ftctl_log_event "dr-runtime" "dr.ablestack.incremental_mode" "ok" "" "" \
+      "plan=${plan} run=${run} mode=offline-qsd reason=source_runtime_unavailable"
   fi
   started_at="$(ftctl_now_iso8601)"
   while IFS= read -r disk_json; do
     disk_index=$((disk_index + 1))
     result=""
     rc=0
-    ftctl_dr_ablestack_qcow2_push_disk "${plan}" "${run}" "${sequence}" incremental "${vm_name}" \
-      "${disk_map}" "${disk_json}" "${disk_index}" "${disk_count}" result || rc=$?
+    if [[ "${transfer_mode}" == "offline-qsd" ]]; then
+      ftctl_dr_ablestack_qcow2_offline_push_disk "${plan}" "${run}" "${sequence}" \
+        "${disk_map}" "${disk_json}" "${disk_index}" "${disk_count}" result || rc=$?
+    else
+      ftctl_dr_ablestack_qcow2_push_disk "${plan}" "${run}" "${sequence}" incremental "${vm_name}" \
+        "${disk_map}" "${disk_json}" "${disk_index}" "${disk_count}" result || rc=$?
+    fi
     [[ "${rc}" == "0" ]] || return "${rc}"
     changed_bytes="$(python3 -c 'import json,sys; print(int(json.loads(sys.argv[1]).get("changedBytes",0)))' "${result}" 2>/dev/null || printf '0')"
     [[ "${changed_bytes}" =~ ^[0-9]+$ ]] || changed_bytes=0
     total_changed_bytes=$((total_changed_bytes + changed_bytes))
+    device="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" device)"
     ftctl_log_event "dr-runtime" "dr.ablestack.incremental_disk" "ok" "" "" \
-      "plan=${plan} run=${run} device=$(ftctl_dr_ablestack_disk_json_field "${disk_json}" device) bytes=${changed_bytes} transport=site-agent-qcow2-bitmap"
+      "plan=${plan} run=${run} device=${device} bytes=${changed_bytes} transport=${transfer_mode}-qcow2-bitmap"
   done < <(ftctl_dr_ablestack_disk_rows "${disk_map}")
+  if [[ "${transfer_mode}" == "offline-qsd" ]]; then
+    # Offline sources cannot acquire new guest writes. Defer clearing every
+    # bitmap until the complete disk set has reached durable target storage.
+    ftctl_dr_ablestack_clear_qcow2_source_baselines "${plan}" "${sequence}" "${disk_map}" || return $?
+  fi
   completed_at="$(ftctl_now_iso8601)"
   effective_mode="$(ftctl_dr_ablestack_incremental_effective_mode "${total_changed_bytes}")"
   ftctl_dr_ablestack_write_manifest "${disk_map}" "${manifest_path}.records.jsonl" "${manifest_path}" "incremental-complete" || return $?

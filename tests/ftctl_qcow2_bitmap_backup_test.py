@@ -51,7 +51,7 @@ def args(mode, progress_path):
         poll_interval=0, granularity=65536, bandwidth_limit_mbps=0,
         progress_path=progress_path, cycle_sequence=7, disk_index=1, disk_count=1,
         plan_uuid="plan-1", run_uuid="run-1",
-        uri="qemu:///system", virsh="virsh",
+        uri="qemu:///system", virsh="virsh", preserve_bitmap=False,
     )
 
 
@@ -91,7 +91,23 @@ class Qcow2BitmapBackupTest(unittest.TestCase):
         self.assertEqual("ftctl-dr-plan-sda", backup["bitmap"])
         self.assertEqual("on-success", backup["bitmap-mode"])
         self.assertEqual(4096, result["changedBytes"])
+        self.assertEqual(4096, result["bytesProcessed"])
         self.assertNotIn("block-dirty-bitmap-clear", [command for command, _ in client.calls])
+
+    def test_offline_incremental_uses_a_working_bitmap_and_preserves_the_baseline(self):
+        with tempfile.TemporaryDirectory() as temp:
+            client = FakeClient({"name": "ftctl-dr-plan-sda", "count": 4096, "recording": True})
+            values = args("incremental", str(pathlib.Path(temp) / "progress.json"))
+            values.preserve_bitmap = True
+            result = MODULE.run_backup(values, client)
+
+        backup = next(value for command, value in client.calls if command == "blockdev-backup")
+        self.assertEqual("on-success", backup["bitmap-mode"])
+        self.assertNotEqual("ftctl-dr-plan-sda", backup["bitmap"])
+        merge = next(value for command, value in client.calls if command == "block-dirty-bitmap-merge")
+        self.assertEqual("ftctl-dr-plan-sda", merge["bitmaps"][0]["name"])
+        self.assertEqual(4096, result["changedBytes"])
+        self.assertEqual(4096, result["targetWrittenBytes"])
 
     def test_inconsistent_bitmap_is_rejected_before_target_attach(self):
         client = FakeClient({"name": "ftctl-dr-plan-sda", "inconsistent": True})

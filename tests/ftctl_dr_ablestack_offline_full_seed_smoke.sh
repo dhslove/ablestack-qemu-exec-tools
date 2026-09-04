@@ -117,20 +117,21 @@ ftctl_dr_ablestack_full_seed_once plan-online run-online unused "${map}" \
 [[ "$(ftctl_dr_ablestack_error_code_for_rc 92)" != "DR_NBD_TEARDOWN_TIMEOUT" ]]
 
 # A stopped source remains protectable after Full Seed. Scheduled incremental
-# requests are promoted to the same validated offline Full Seed producer rather
-# than failing merely because QMP is unavailable.
+# requests retain the requested incremental contract and use the offline QEMU
+# block graph. All bitmaps are cleared only after every disk transfer succeeds.
 : > "${TRACE}"
 ftctl_dr_ablestack_qcow2_runtime_ready() { return 1; }
-ftctl_dr_ablestack_full_seed_once() {
-  [[ "$7" == "CBT_INCREMENTAL" ]]
-  [[ "$8" == "FULL_SEED" ]]
-  [[ "$9" == "source_runtime_unavailable" ]]
-  [[ "${10}" == "9" ]]
-  printf 'offline-incremental-fallback\n' >> "${TRACE}"
+ftctl_dr_ablestack_qcow2_offline_push_disk() {
+  local out_var="${8-}"
+  printf 'offline-incremental %s\n' "$(ftctl_dr_ablestack_disk_json_field "$5" device)" >> "${TRACE}"
+  printf -v "${out_var}" '%s' '{"changedBytes":0}'
 }
+ftctl_dr_ablestack_clear_qcow2_source_baselines() { printf 'offline-baseline-clear\n' >> "${TRACE}"; }
 ftctl_dr_ablestack_qcow2_incremental_once plan-offline run-scheduled unused "${map}" \
   "${TMP}/manifest-scheduled.json" "${TMP}/checkpoint-scheduled.json" 9
-grep -q '^offline-incremental-fallback$' "${TRACE}"
-grep -q 'reason=source_runtime_unavailable mode=offline-full-seed' "${TRACE}"
+[[ "$(grep -c '^offline-incremental ' "${TRACE}")" == "3" ]]
+[[ "$(grep -c '^offline-baseline-clear$' "${TRACE}")" == "1" ]]
+! grep -q '^command qemu-img convert ' "${TRACE}"
+grep -q 'mode=offline-qsd reason=source_runtime_unavailable' "${TRACE}"
 
 printf 'ftctl ABLESTACK offline full seed smoke: PASS\n'

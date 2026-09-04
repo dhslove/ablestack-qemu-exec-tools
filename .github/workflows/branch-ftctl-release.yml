@@ -147,7 +147,7 @@ jobs:
             cd "$verify_root"
             rpm2cpio "$GITHUB_WORKSPACE/$rpm_path" | cpio -idm --quiet
           )
-          for script in dr_runtime.sh dr_scheduler.sh qcow2_checkpoint.py qcow2_bitmap_baseline.py; do
+          for script in dr_runtime.sh dr_scheduler.sh qcow2_checkpoint.py qcow2_bitmap_baseline.py qcow2_bitmap_backup.py qcow2_bitmap_offline_backup.py; do
             packaged="$verify_root/usr/local/lib/ablestack-qemu-exec-tools/ftctl/$script"
             source="lib/ftctl/$script"
             expected_interpreter='#!/usr/bin/bash'
@@ -170,10 +170,14 @@ jobs:
             lib/ftctl/dr_scheduler.sh \
             lib/ftctl/qcow2_checkpoint.py \
             lib/ftctl/qcow2_bitmap_baseline.py \
+            lib/ftctl/qcow2_bitmap_backup.py \
+            lib/ftctl/qcow2_bitmap_offline_backup.py \
             "$verify_root/usr/local/lib/ablestack-qemu-exec-tools/ftctl/dr_runtime.sh" \
             "$verify_root/usr/local/lib/ablestack-qemu-exec-tools/ftctl/dr_scheduler.sh" \
             "$verify_root/usr/local/lib/ablestack-qemu-exec-tools/ftctl/qcow2_checkpoint.py" \
-            "$verify_root/usr/local/lib/ablestack-qemu-exec-tools/ftctl/qcow2_bitmap_baseline.py"
+            "$verify_root/usr/local/lib/ablestack-qemu-exec-tools/ftctl/qcow2_bitmap_baseline.py" \
+            "$verify_root/usr/local/lib/ablestack-qemu-exec-tools/ftctl/qcow2_bitmap_backup.py" \
+            "$verify_root/usr/local/lib/ablestack-qemu-exec-tools/ftctl/qcow2_bitmap_offline_backup.py"
 
       - name: Create FTCTL RPM repo
         shell: bash
