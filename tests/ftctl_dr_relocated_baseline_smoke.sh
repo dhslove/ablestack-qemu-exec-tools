@@ -42,6 +42,17 @@ ftctl_dr_scheduler_sequence_path() { printf '%s\n' "${sequence}"; }
 ftctl_dr_scheduler_current_plan_sequence() { printf '0\n'; }
 ftctl_dr_scheduler_current_authority_sequence() { printf '724\n'; }
 ftctl_now_iso8601() { printf '2026-09-04T23:00:00+09:00\n'; }
+ftctl_dr_runtime_profile_value() {
+  jq -r --arg path "${2-}" 'getpath($path | split(".")) // empty' "${1-}"
+}
+ftctl_dr_runtime_state_get_from_path() {
+  sed -n "s/^${2-}=//p" "${1-}" 2>/dev/null | tail -1
+}
+ftctl_state_set_path() {
+  local path="${1-}"
+  shift
+  printf '%s\n' "$@" > "${path}"
+}
 ftctl_dr_scheduler_update_state() {
   local run_path="${1-}" status_path="${2-}"
   shift 2
