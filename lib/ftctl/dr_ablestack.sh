@@ -2512,6 +2512,14 @@ ftctl_dr_ablestack_qcow2_incremental_once() {
   vm_name="$(ftctl_dr_ablestack_json_field "${disk_map}" source.instanceName 2>/dev/null || true)"
   [[ -n "${vm_name}" ]] || return 32
   disk_count="$(ftctl_dr_ablestack_disk_count "${disk_map}")" || return $?
+  if ! ftctl_dr_ablestack_qcow2_runtime_ready "${disk_map}" "${vm_name}"; then
+    ftctl_log_event "dr-runtime" "dr.ablestack.incremental_fallback" "warn" "" "" \
+      "plan=${plan} run=${run} reason=source_runtime_unavailable mode=offline-full-seed"
+    ftctl_dr_ablestack_full_seed_once "${plan}" "${run}" "${profile_file}" "${disk_map}" \
+      "${manifest_path}" "${checkpoint_path}" CBT_INCREMENTAL FULL_SEED \
+      source_runtime_unavailable "${sequence}"
+    return $?
+  fi
   started_at="$(ftctl_now_iso8601)"
   while IFS= read -r disk_json; do
     disk_index=$((disk_index + 1))

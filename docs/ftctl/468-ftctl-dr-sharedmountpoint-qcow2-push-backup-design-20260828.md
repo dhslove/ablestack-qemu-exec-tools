@@ -69,6 +69,18 @@ disable synchronization.
 No file-backed request may enter an RBD snapshot function. No RBD request may
 enter the qcow2 bitmap provider.
 
+An offline source also remains valid after the initial Full Seed. A scheduled
+`CBT_INCREMENTAL` request uses the QMP bitmap producer only when the source
+domain is currently available. If the domain is stopped, the request is
+promoted to a validated offline `FULL_SEED` Cycle with
+`reseedReason=source_runtime_unavailable`; it must not fail solely because QMP
+is absent. The entire disk set is re-probed for canonical SharedMountPoint
+membership, qcow2 format, and writable holders before any target write. A
+missing, ambiguous, non-qcow2, or concurrently written source remains a hard
+failure. This preserves correctness when no offline dirty-range producer is
+available and keeps the next automatic Cycle from degrading a successful
+offline Full Seed.
+
 ## 4. Bitmap and Job Rules
 
 - Bitmap name is deterministic per plan and disk and is persisted in qcow2.

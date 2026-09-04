@@ -225,6 +225,15 @@ or placement change is a retryable command-time race, never a durable Plan host
 binding. QMP, offline ownership, bitmap, and transfer errors use the dedicated
 qcow2 error namespace in design 468 and cannot trigger VMware/NBD cleanup.
 
+The same power-independent rule applies to subsequent scheduler Cycles. A
+running source keeps the existing QMP incremental path. A stopped source cannot
+produce a live dirty-bitmap delta, so the scheduler promotes that one requested
+incremental Cycle to the offline Full Seed producer after revalidating the
+whole disk set. It records requested mode `CBT_INCREMENTAL`, effective mode
+`FULL_SEED`, and reason `source_runtime_unavailable`. Treating normal VM power
+state as `DR_QCOW2_SOURCE_RUNTIME_UNAVAILABLE` is forbidden; that error is
+reserved for a command-time loss after a live QMP producer was selected.
+
 Regression gates must exercise one and multiple disks in both modes: a running
 domain retains the existing QMP producer, while a stopped domain selects the
 offline producer. The same release must continue to pass the VMware-to-RBD and

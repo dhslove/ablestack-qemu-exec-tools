@@ -116,4 +116,21 @@ ftctl_dr_ablestack_full_seed_once plan-online run-online unused "${map}" \
 [[ "$(ftctl_dr_ablestack_error_code_for_rc 115)" == "DR_QCOW2_OFFLINE_TRANSFER_FAILED" ]]
 [[ "$(ftctl_dr_ablestack_error_code_for_rc 92)" != "DR_NBD_TEARDOWN_TIMEOUT" ]]
 
+# A stopped source remains protectable after Full Seed. Scheduled incremental
+# requests are promoted to the same validated offline Full Seed producer rather
+# than failing merely because QMP is unavailable.
+: > "${TRACE}"
+ftctl_dr_ablestack_qcow2_runtime_ready() { return 1; }
+ftctl_dr_ablestack_full_seed_once() {
+  [[ "$7" == "CBT_INCREMENTAL" ]]
+  [[ "$8" == "FULL_SEED" ]]
+  [[ "$9" == "source_runtime_unavailable" ]]
+  [[ "${10}" == "9" ]]
+  printf 'offline-incremental-fallback\n' >> "${TRACE}"
+}
+ftctl_dr_ablestack_qcow2_incremental_once plan-offline run-scheduled unused "${map}" \
+  "${TMP}/manifest-scheduled.json" "${TMP}/checkpoint-scheduled.json" 9
+grep -q '^offline-incremental-fallback$' "${TRACE}"
+grep -q 'reason=source_runtime_unavailable mode=offline-full-seed' "${TRACE}"
+
 printf 'ftctl ABLESTACK offline full seed smoke: PASS\n'
