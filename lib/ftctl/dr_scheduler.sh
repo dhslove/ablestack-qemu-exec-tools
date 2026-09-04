@@ -2354,6 +2354,13 @@ ftctl_dr_scheduler_worker() {
         98) error_code="DR_SOURCE_SITE_UNAVAILABLE" ;;
         99) error_code="DR_VMWARE_SNAPSHOT_CLEANUP_PENDING" ;;
         100) error_code="DR_TARGET_EXPORT_UNAVAILABLE" ;;
+        110) error_code="DR_QCOW2_SOURCE_RUNTIME_UNAVAILABLE" ;;
+        111) error_code="DR_QCOW2_BACKUP_FAILED" ;;
+        112) error_code="DR_QCOW2_OFFLINE_SOURCE_BUSY" ;;
+        113) error_code="DR_QCOW2_OFFLINE_BASELINE_FAILED" ;;
+        114) error_code="DR_ABLESTACK_INCREMENTAL_APPLY_FAILED" ;;
+        115) error_code="DR_QCOW2_OFFLINE_TRANSFER_FAILED" ;;
+        116) error_code="DR_QCOW2_BASELINE_NOT_DURABLE" ;;
         66) error_code="DR_UNSUPPORTED_DIRECTION" ;;
         *) error_code="DR_REPLICATION_CYCLE_FAILED" ;;
       esac
@@ -2386,6 +2393,31 @@ ftctl_dr_scheduler_worker() {
           ;;
         DR_NBD_TARGET_FLUSH_FAILED)
           error_message="Target data flush failed before cycle commit"
+          data_commit_state="FAILED"
+          cycle_retry_mode="FULL_RETRY"
+          ;;
+        DR_QCOW2_SOURCE_RUNTIME_UNAVAILABLE)
+          error_message="The running qcow2 source disappeared before the QMP backup could start"
+          data_commit_state="NOT_STARTED"
+          cycle_retry_mode="FULL_RETRY"
+          ;;
+        DR_QCOW2_OFFLINE_SOURCE_BUSY)
+          error_message="The offline qcow2 source became writable before its baseline could be sealed"
+          data_commit_state="NOT_STARTED"
+          cycle_retry_mode="FULL_RETRY"
+          ;;
+        DR_QCOW2_OFFLINE_BASELINE_FAILED)
+          error_message="The offline qcow2 source baseline could not be prepared"
+          data_commit_state="NOT_STARTED"
+          cycle_retry_mode="FULL_RETRY"
+          ;;
+        DR_QCOW2_OFFLINE_TRANSFER_FAILED)
+          error_message="The offline qcow2 full seed did not reach the target export"
+          data_commit_state="FAILED"
+          cycle_retry_mode="FULL_RETRY"
+          ;;
+        DR_QCOW2_BACKUP_FAILED|DR_ABLESTACK_INCREMENTAL_APPLY_FAILED|DR_QCOW2_BASELINE_NOT_DURABLE)
+          error_message="The ABLESTACK qcow2 replication operation failed"
           data_commit_state="FAILED"
           cycle_retry_mode="FULL_RETRY"
           ;;

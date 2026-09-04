@@ -1059,10 +1059,39 @@ ftctl_dr_ablestack_qcow2_bitmap_baseline_path() {
   printf '%s/baseline-%s.bitmap\n' "$(ftctl_dr_ablestack_checkpoint_dir "${plan}")" "$(ftctl_dr_runtime_key "${device}")"
 }
 
+ftctl_dr_ablestack_qcow2_source_root() {
+  local disk_map="${1-}" out_var="${2-}" root=""
+  [[ -s "${disk_map}" && -n "${out_var}" ]] || return 2
+  root="$(ftctl_dr_ablestack_json_field "${disk_map}" source.storagePath 2>/dev/null || true)"
+  if [[ -z "${root}" ]]; then
+    root="$(python3 - "${disk_map}" <<'PY'
+import json
+import os
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as fh:
+    data = json.load(fh)
+parents = set()
+for disk in data.get("disks") or []:
+    if str(disk.get("sourceType") or "").lower() != "file":
+        raise SystemExit(1)
+    path = str(disk.get("sourcePath") or "").strip()
+    if not os.path.isabs(path):
+        raise SystemExit(1)
+    parents.add(os.path.realpath(os.path.dirname(path)))
+if len(parents) != 1:
+    raise SystemExit(1)
+print(parents.pop())
+PY
+)" || return 113
+  fi
+  [[ -n "${root}" && "${root}" == /* ]] || return 113
+  printf -v "${out_var}" '%s' "${root}"
+}
+
 ftctl_dr_ablestack_qcow2_source_baselines_ready() {
   local plan="${1-}" disk_map="${2-}" root disk_json device source_path bitmap baseline recorded
-  root="$(ftctl_dr_ablestack_json_field "${disk_map}" source.storagePath 2>/dev/null || true)"
-  [[ -n "${root}" && "${root}" == /* ]] || return 1
+  ftctl_dr_ablestack_qcow2_source_root "${disk_map}" root || return 1
   while IFS= read -r disk_json; do
     device="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" device)"
     source_path="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" sourcePath)"
@@ -1077,18 +1106,38 @@ ftctl_dr_ablestack_qcow2_source_baselines_ready() {
   done < <(ftctl_dr_ablestack_disk_rows "${disk_map}")
 }
 
+ftctl_dr_ablestack_probe_offline_qcow2_sources() {
+  local disk_map="${1-}" root disk_json source_path bitmap rc=0
+  ftctl_dr_ablestack_qcow2_source_root "${disk_map}" root || return 113
+  while IFS= read -r disk_json; do
+    source_path="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" sourcePath)"
+    bitmap="$(ftctl_dr_ablestack_qcow2_bitmap_name probe "$(ftctl_dr_ablestack_disk_json_field "${disk_json}" device)")"
+    rc=0
+    python3 "${FTCTL_LIB_BASE}/ftctl/qcow2_bitmap_baseline.py" \
+      --path "${source_path}" --storage-root "${root}" --bitmap "${bitmap}" \
+      --granularity "${FTCTL_DR_QCOW2_BITMAP_GRANULARITY:-65536}" --probe-only \
+      >/dev/null || rc=$?
+    [[ "${rc}" == "0" ]] || return "${rc}"
+  done < <(ftctl_dr_ablestack_disk_rows "${disk_map}")
+}
+
 ftctl_dr_ablestack_initialize_qcow2_source_baselines() {
-  local plan="${1-}" sequence="${2-}" disk_map="${3-}" root disk_json device source_path bitmap baseline tmp
+  local plan="${1-}" sequence="${2-}" disk_map="${3-}" reset="${4-0}"
+  local root disk_json device source_path bitmap baseline tmp rc=0
+  local -a reset_args=()
   : "${sequence}"
-  root="$(ftctl_dr_ablestack_json_field "${disk_map}" source.storagePath 2>/dev/null || true)"
-  [[ -n "${root}" && "${root}" == /* ]] || return 32
+  [[ "${reset}" == "1" ]] && reset_args+=(--reset)
+  ftctl_dr_ablestack_qcow2_source_root "${disk_map}" root || return 113
   while IFS= read -r disk_json; do
     device="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" device)"
     source_path="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" sourcePath)"
     bitmap="$(ftctl_dr_ablestack_qcow2_bitmap_name "${plan}" "${device}")"
+    rc=0
     python3 "${FTCTL_LIB_BASE}/ftctl/qcow2_bitmap_baseline.py" \
       --path "${source_path}" --storage-root "${root}" --bitmap "${bitmap}" \
-      --granularity "${FTCTL_DR_QCOW2_BITMAP_GRANULARITY:-65536}" >/dev/null || return $?
+      --granularity "${FTCTL_DR_QCOW2_BITMAP_GRANULARITY:-65536}" "${reset_args[@]}" \
+      >/dev/null || rc=$?
+    [[ "${rc}" == "0" ]] || return "${rc}"
     baseline="$(ftctl_dr_ablestack_qcow2_bitmap_baseline_path "${plan}" "${device}")"
     tmp="${baseline}.tmp.$$"
     printf '%s\n' "${bitmap}" > "${tmp}" || return 2
@@ -1118,7 +1167,7 @@ ftctl_dr_ablestack_prepare_reverse_baseline() {
   ftctl_dr_runtime_build_reverse_profile "${plan}" "${run}" "${profile_file}" "${reverse_profile}" "failback" || return $?
   ftctl_dr_ablestack_canonicalize_profile "${reverse_profile}" "${reverse_disk_map}" || return $?
   ftctl_dr_ablestack_initialize_source_baselines "${plan}" "reverse-${checkpoint_sequence}" "${reverse_disk_map}" || return $?
-  ftctl_dr_ablestack_source_baselines_ready "${plan}" "${reverse_disk_map}" || return 91
+  ftctl_dr_ablestack_source_baselines_ready "${plan}" "${reverse_disk_map}" || return 116
   now="$(ftctl_now_iso8601)"
   ftctl_state_write_kv_all "${state_path}" \
     "version=1" "plan_uuid=${plan}" "run_uuid=${run}" \
@@ -1422,6 +1471,40 @@ ftctl_dr_ablestack_qcow2_push_provider() {
     count=$((count + 1))
   done < <(ftctl_dr_ablestack_disk_rows "${disk_map}")
   (( count > 0 ))
+}
+
+ftctl_dr_ablestack_qcow2_runtime_ready() {
+  local disk_map="${1-}" vm_name="${2-}" qmp_path rc=0
+  [[ -s "${disk_map}" && -n "${vm_name}" ]] || return 1
+  qmp_path="$(mktemp "${TMPDIR:-/tmp}/ftctl-dr-qcow2-runtime.XXXXXX.json")" || return 2
+  trap 'rm -f -- "${qmp_path:-}"; trap - RETURN' RETURN
+  virsh -c "${FTCTL_PROFILE_PRIMARY_URI:-qemu:///system}" qemu-monitor-command "${vm_name}" --pretty \
+    '{"execute":"query-named-block-nodes"}' > "${qmp_path}" 2>/dev/null || return 1
+  python3 - "${disk_map}" "${qmp_path}" <<'PY' || rc=$?
+import json
+import os
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as fh:
+    disk_map = json.load(fh)
+with open(sys.argv[2], encoding="utf-8") as fh:
+    response = json.load(fh)
+nodes = response.get("return") if isinstance(response, dict) else None
+if not isinstance(nodes, list):
+    raise SystemExit(1)
+active = {
+    os.path.normpath(str((node.get("image") or {}).get("filename") or node.get("file") or ""))
+    for node in nodes
+    if isinstance(node, dict) and node.get("drv") == "qcow2" and node.get("active") is True
+}
+sources = {
+    os.path.normpath(str(disk.get("sourcePath") or ""))
+    for disk in disk_map.get("disks") or []
+}
+if not sources or "" in sources or not sources.issubset(active):
+    raise SystemExit(1)
+PY
+  [[ "${rc}" == "0" ]]
 }
 
 ftctl_dr_ablestack_validate_configured_qcow2_sources() {
@@ -1866,6 +1949,14 @@ ftctl_dr_ablestack_error_code_for_rc() {
     33) printf 'DR_TARGET_DISK_SIZE_UNRESOLVED\n' ;;
     34) printf 'DR_TARGET_DISK_PREPARE_FAILED\n' ;;
     35) printf 'DR_TARGET_STORAGE_UNRESOLVED\n' ;;
+    110) printf 'DR_QCOW2_SOURCE_RUNTIME_UNAVAILABLE\n' ;;
+    111) printf 'DR_QCOW2_BACKUP_FAILED\n' ;;
+    112) printf 'DR_QCOW2_OFFLINE_SOURCE_BUSY\n' ;;
+    113) printf 'DR_QCOW2_OFFLINE_BASELINE_FAILED\n' ;;
+    114) printf 'DR_ABLESTACK_INCREMENTAL_APPLY_FAILED\n' ;;
+    115) printf 'DR_QCOW2_OFFLINE_TRANSFER_FAILED\n' ;;
+    116) printf 'DR_QCOW2_BASELINE_NOT_DURABLE\n' ;;
+    100) printf 'DR_TARGET_EXPORT_UNAVAILABLE\n' ;;
     *) printf 'DR_ABLESTACK_DRIVER_FAILED\n' ;;
   esac
 }
@@ -2128,7 +2219,7 @@ ftctl_dr_ablestack_full_seed_once() {
   local disk_json device source_path target_path source_format target_format size_bytes source_type target_type resolved_size target_uri
   local out="" err="" rc=0 source_at target_at source_epoch target_epoch rpo="0"
   local remote_transport="0" remote_path="" export_name="" export_port="" export_host="" vm_name=""
-  local qcow2_push_provider="0" disk_count="0" disk_index=0 backup_result=""
+  local qcow2_transfer_mode="generic" disk_count="0" disk_index=0 backup_result=""
   local disk_transferred_bytes="0" total_transferred_bytes="0"
 
   ftctl_dr_ablestack_prepare_targets "${plan}" "${run}" "${profile_file}" "${disk_map}" "${manifest_path}" "${checkpoint_path}" || return $?
@@ -2143,8 +2234,17 @@ ftctl_dr_ablestack_full_seed_once() {
   [[ -n "${vm_name}" ]] || vm_name="dr-${plan}"
   disk_count="$(ftctl_dr_ablestack_disk_count "${disk_map}")" || return $?
   if [[ "${site_agent_transport}" == "1" ]] && ftctl_dr_ablestack_qcow2_push_provider "${disk_map}"; then
-    qcow2_push_provider="1"
+    if ftctl_dr_ablestack_qcow2_runtime_ready "${disk_map}" "${vm_name}"; then
+      qcow2_transfer_mode="qmp"
+    else
+      ftctl_dr_ablestack_probe_offline_qcow2_sources "${disk_map}" || return $?
+      ftctl_dr_ablestack_initialize_qcow2_source_baselines \
+        "${plan}" "${cycle_sequence:-${run}}" "${disk_map}" 1 || return $?
+      qcow2_transfer_mode="offline"
+    fi
   fi
+  ftctl_log_event "dr-runtime" "dr.ablestack.full_seed_mode" "ok" "" "" \
+    "plan=${plan} run=${run} mode=${qcow2_transfer_mode} disks=${disk_count}"
   source_at="$(ftctl_now_iso8601)"
   while IFS= read -r disk_json; do
     disk_index=$((disk_index + 1))
@@ -2182,11 +2282,16 @@ ftctl_dr_ablestack_full_seed_once() {
     out=""
     err=""
     rc=0
-    if [[ "${qcow2_push_provider}" == "1" ]]; then
+    if [[ "${qcow2_transfer_mode}" == "qmp" ]]; then
       backup_result=""
       ftctl_dr_ablestack_qcow2_push_disk "${plan}" "${run}" "${cycle_sequence}" full "${vm_name}" \
         "${disk_map}" "${disk_json}" "${disk_index}" "${disk_count}" backup_result || rc=$?
       out="${backup_result}"
+    elif [[ "${qcow2_transfer_mode}" == "offline" ]]; then
+      ftctl_cmd_run "${FTCTL_DR_FULL_SEED_TIMEOUT_SEC:-3600}" out err rc -- \
+        qemu-img convert -p -n -S "${FTCTL_THIN_SPARSE_SIZE:-4k}" \
+        -f "${source_format}" -O raw "${source_path}" "${target_uri}" || true
+      [[ "${rc}" == "0" ]] || rc=115
     else
       ftctl_cmd_run "${FTCTL_DR_FULL_SEED_TIMEOUT_SEC:-3600}" out err rc -- \
         qemu-img convert --force-share -p -n -S "${FTCTL_THIN_SPARSE_SIZE:-4k}" \
@@ -2201,6 +2306,9 @@ ftctl_dr_ablestack_full_seed_once() {
     total_transferred_bytes=$((total_transferred_bytes + disk_transferred_bytes))
   done < <(ftctl_dr_ablestack_disk_rows "${disk_map}")
 
+  if [[ "${qcow2_transfer_mode}" == "offline" ]]; then
+    ftctl_dr_ablestack_qcow2_source_baselines_ready "${plan}" "${disk_map}" || return 113
+  fi
   target_at="$(ftctl_now_iso8601)"
   source_epoch="$(ftctl_iso_to_epoch "${source_at}" 2>/dev/null || printf '0')"
   target_epoch="$(ftctl_iso_to_epoch "${target_at}" 2>/dev/null || printf '0')"
@@ -2211,8 +2319,10 @@ ftctl_dr_ablestack_full_seed_once() {
   ftctl_dr_ablestack_write_checkpoint "${disk_map}" "${manifest_path}" "${checkpoint_path}" "TARGET_READY" \
     "${source_at}" "${target_at}" "${rpo}" "${requested_mode}" "${effective_mode}" false \
     "${total_transferred_bytes}" "${reseed_reason}" "${cycle_sequence}" 0 0 || return $?
-  if [[ "${remote_transport}" == "1" && "${qcow2_push_provider}" != "1" ]]; then
-    if [[ "${site_agent_transport}" == "1" ]]; then
+  if [[ "${remote_transport}" == "1" && "${qcow2_transfer_mode}" != "qmp" ]]; then
+    if [[ "${qcow2_transfer_mode}" == "offline" ]]; then
+      :
+    elif [[ "${site_agent_transport}" == "1" ]]; then
       ftctl_dr_ablestack_initialize_source_baselines "${plan}" "${run}" "${disk_map}" || return $?
     else
       ftctl_dr_ablestack_initialize_baselines "${plan}" "${run}" "${disk_map}" || return $?
@@ -2367,7 +2477,7 @@ ftctl_dr_ablestack_incremental_once() {
     if [[ "${rc}" != "0" ]]; then
       rbd snap rm "${source_spec}@${current}" >/dev/null 2>&1 || true
       ftctl_dr_ablestack_remote_rbd_command "rbd snap rollback '${target_spec}@${previous}' >/dev/null 2>&1 || true; rbd snap rm '${target_spec}@${current}' >/dev/null 2>&1 || true" out err rc
-      return 92
+      return 114
     fi
     rbd snap rm "${source_spec}@${previous}" >/dev/null 2>&1 || true
     ftctl_dr_ablestack_remote_rbd_command "rbd snap rm '${target_spec}@${previous}' >/dev/null 2>&1 || true" out err rc
@@ -2466,7 +2576,7 @@ ftctl_dr_ablestack_site_agent_incremental_once() {
       rbd snap rm "${source_spec}@${current}" >/dev/null 2>&1 || true
       rm -f "${diff_json}"
       [[ "${apply_rc}" == "100" ]] && return 100
-      return 92
+      return 114
     fi
     rm -f "${diff_json}"
     rbd snap rm "${source_spec}@${previous}" >/dev/null 2>&1 || true

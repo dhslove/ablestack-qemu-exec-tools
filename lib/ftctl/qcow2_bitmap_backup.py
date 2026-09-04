@@ -19,6 +19,10 @@ class BaselineUnavailable(BackupError):
     pass
 
 
+class SourceRuntimeUnavailable(BackupError):
+    pass
+
+
 class QmpClient:
     def __init__(self, domain, uri="qemu:///system", virsh="virsh"):
         self.domain = domain
@@ -181,8 +185,11 @@ def wait_for_job(client, job_id, args, changed_bytes):
 
 def run_backup(args, client=None):
     client = client or QmpClient(args.domain, args.uri, args.virsh)
-    nodes = client.execute("query-named-block-nodes") or []
-    source = resolve_source_node(nodes, args.source_path)
+    try:
+        nodes = client.execute("query-named-block-nodes") or []
+        source = resolve_source_node(nodes, args.source_path)
+    except BackupError as exc:
+        raise SourceRuntimeUnavailable(str(exc)) from exc
     source_node = source["node-name"]
     changed_bytes = ensure_bitmap(client, source_node, source, args.bitmap, args.mode, args.granularity)
     target_node = args.target_node
@@ -258,11 +265,17 @@ def main(argv=None):
         print(json.dumps(run_backup(args), sort_keys=True, separators=(",", ":")))
         return 0
     except BaselineUnavailable as exc:
-        print(json.dumps({"result": "error", "error": str(exc)}, separators=(",", ":")), file=sys.stderr)
-        return 91
+        print(json.dumps({"result": "error", "errorCode": "DR_QCOW2_BASELINE_NOT_DURABLE",
+                          "error": str(exc)}, separators=(",", ":")), file=sys.stderr)
+        return 116
+    except SourceRuntimeUnavailable as exc:
+        print(json.dumps({"result": "error", "errorCode": "DR_QCOW2_SOURCE_RUNTIME_UNAVAILABLE",
+                          "error": str(exc)}, separators=(",", ":")), file=sys.stderr)
+        return 110
     except BackupError as exc:
-        print(json.dumps({"result": "error", "error": str(exc)}, separators=(",", ":")), file=sys.stderr)
-        return 92
+        print(json.dumps({"result": "error", "errorCode": "DR_QCOW2_BACKUP_FAILED",
+                          "error": str(exc)}, separators=(",", ":")), file=sys.stderr)
+        return 111
 
 
 if __name__ == "__main__":

@@ -122,6 +122,7 @@ jobs:
           bash tests/ftctl_dr_systemd_async_start_smoke.sh
           bash tests/ftctl_dr_ablestack_remote_rbd_smoke.sh
           bash tests/ftctl_dr_ablestack_qcow2_shared_smoke.sh
+          bash tests/ftctl_dr_ablestack_offline_full_seed_smoke.sh
           bash tests/ftctl_dr_ablestack_seed_retry_smoke.sh
           bash tests/ftctl_dr_active_cancel_recovery_smoke.sh
           bash tests/ftctl_dr_cancel_manual_recovery_smoke.sh

@@ -215,3 +215,17 @@ destroyed, QMP is not an eligibility gate: FTCTL accepts only the command-time
 Cloud locator whose absolute source file exists and whose format is confirmed
 as qcow2 by `qemu-img info`. Missing, ambiguous, or non-qcow2 source artifacts
 remain hard failures.
+
+For Full Seed, acceptance of that locator selects a distinct offline producer;
+it does not call a QMP helper with a known-missing domain. The dynamically
+leased SharedMountPoint worker first verifies the entire disk set has no
+writable holder, prepares all persistent bitmap baselines, and then copies to
+the already leased target exports without `--force-share`. A concurrent start
+or placement change is a retryable command-time race, never a durable Plan host
+binding. QMP, offline ownership, bitmap, and transfer errors use the dedicated
+qcow2 error namespace in design 468 and cannot trigger VMware/NBD cleanup.
+
+Regression gates must exercise one and multiple disks in both modes: a running
+domain retains the existing QMP producer, while a stopped domain selects the
+offline producer. The same release must continue to pass the VMware-to-RBD and
+RBD-to-RBD lifecycle suites before deployment.

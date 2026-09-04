@@ -10,7 +10,7 @@ from pathlib import Path
 
 
 class BaselineError(RuntimeError):
-    def __init__(self, code, message, exit_code=92):
+    def __init__(self, code, message, exit_code=113):
         super().__init__(message)
         self.code = code
         self.exit_code = exit_code
@@ -102,7 +102,7 @@ def validate_bitmap(info, bitmap, granularity):
         raise BaselineError(
             "DR_REVERSE_FILE_BASELINE_MISSING",
             f"persistent bitmap is missing: {bitmap}",
-            exit_code=91,
+            exit_code=116,
         )
     if int(record.get("granularity") or 0) != int(granularity):
         raise BaselineError(
@@ -133,11 +133,22 @@ def ensure_baseline(args):
         raise BaselineError(
             "DR_REVERSE_FILE_WRITER_NOT_DRAINED",
             "reverse baseline source has writable holders: " + "; ".join(holders[:4]),
+            exit_code=112,
         )
 
     info = image_info(args.qemu_img, path)
     if info.get("format") != "qcow2":
-        validate_bitmap(info, args.bitmap, args.granularity)
+        raise BaselineError(
+            "DR_REVERSE_FILE_FORMAT_INVALID",
+            f"reverse baseline source must be qcow2, got {info.get('format') or 'unknown'}",
+        )
+    if getattr(args, "probe_only", False):
+        return {
+            "result": "ok",
+            "state": "PROBED",
+            "path": str(path),
+            "storageRoot": str(root),
+        }
     record = bitmap_record(info, args.bitmap)
     created = False
     if record is None:
@@ -148,6 +159,10 @@ def ensure_baseline(args):
             str(path), args.bitmap,
         ])
         created = True
+    elif getattr(args, "reset", False):
+        run_command([
+            args.qemu_img, "bitmap", "--clear", str(path), args.bitmap,
+        ])
 
     info = image_info(args.qemu_img, path)
     record = validate_bitmap(info, args.bitmap, args.granularity)
@@ -171,12 +186,19 @@ def parse_args(argv=None):
     parser.add_argument("--bitmap", required=True)
     parser.add_argument("--granularity", type=int, default=65536)
     parser.add_argument("--check-only", action="store_true")
+    parser.add_argument("--probe-only", action="store_true")
+    parser.add_argument("--reset", action="store_true")
     parser.add_argument("--qemu-img", default="qemu-img")
     return parser.parse_args(argv)
 
 
 def main(argv=None):
     args = parse_args(argv)
+    if args.check_only and (args.probe_only or args.reset):
+        print(json.dumps({"result": "error", "errorCode": "DR_QCOW2_BASELINE_ARGUMENT_INVALID",
+                          "error": "--check-only cannot be combined with --probe-only or --reset"},
+                         separators=(",", ":")), file=sys.stderr)
+        return 113
     try:
         print(json.dumps(ensure_baseline(args), sort_keys=True, separators=(",", ":")))
         return 0

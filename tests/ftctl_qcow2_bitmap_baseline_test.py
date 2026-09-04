@@ -18,6 +18,8 @@ class Args:
     bitmap = "ftctl-dr-plan-disk0"
     granularity = 65536
     check_only = False
+    probe_only = False
+    reset = False
     qemu_img = "qemu-img"
 
 
@@ -55,6 +57,56 @@ class Qcow2BitmapBaselineTest(unittest.TestCase):
                 result = MODULE.ensure_baseline(args)
         self.assertTrue(result["created"])
         self.assertIn("--add", command.call_args.args[0])
+
+    def test_existing_bitmap_is_cleared_for_offline_full_seed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            image = pathlib.Path(temp) / "disk.qcow2"
+            image.write_bytes(b"image")
+            args = Args()
+            args.path = str(image)
+            args.storage_root = temp
+            args.reset = True
+            ready = {"format": "qcow2", "format-specific": {"data": {"bitmaps": [{
+                "name": args.bitmap, "granularity": args.granularity, "flags": ["auto"]
+            }]}}}
+            with mock.patch.object(MODULE, "writable_holders", return_value=[]), \
+                    mock.patch.object(MODULE, "image_info", side_effect=[ready, ready]), \
+                    mock.patch.object(MODULE, "run_command") as command, \
+                    mock.patch.object(MODULE, "fsync_path"):
+                result = MODULE.ensure_baseline(args)
+        self.assertFalse(result["created"])
+        clear_command = command.call_args.args[0]
+        self.assertEqual(["qemu-img", "bitmap", "--clear"], clear_command[:3])
+        self.assertEqual(image.name, pathlib.Path(clear_command[3]).name)
+        self.assertEqual(args.bitmap, clear_command[4])
+
+    def test_probe_only_checks_offline_ownership_without_requiring_bitmap(self):
+        with tempfile.TemporaryDirectory() as temp:
+            image = pathlib.Path(temp) / "disk.qcow2"
+            image.write_bytes(b"image")
+            args = Args()
+            args.path = str(image)
+            args.storage_root = temp
+            args.probe_only = True
+            info = {"format": "qcow2", "format-specific": {"data": {"bitmaps": []}}}
+            with mock.patch.object(MODULE, "writable_holders", return_value=[]), \
+                    mock.patch.object(MODULE, "image_info", return_value=info), \
+                    mock.patch.object(MODULE, "run_command") as command:
+                result = MODULE.ensure_baseline(args)
+        self.assertEqual("PROBED", result["state"])
+        command.assert_not_called()
+
+    def test_writable_holder_uses_qcow2_specific_exit_code(self):
+        with tempfile.TemporaryDirectory() as temp:
+            image = pathlib.Path(temp) / "disk.qcow2"
+            image.write_bytes(b"image")
+            args = Args()
+            args.path = str(image)
+            args.storage_root = temp
+            with mock.patch.object(MODULE, "writable_holders", return_value=["pid=10 command=qemu"]):
+                with self.assertRaises(MODULE.BaselineError) as context:
+                    MODULE.ensure_baseline(args)
+        self.assertEqual(112, context.exception.exit_code)
 
     def test_check_only_requires_existing_bitmap(self):
         with tempfile.TemporaryDirectory() as temp:

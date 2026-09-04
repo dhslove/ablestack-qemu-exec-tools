@@ -8,9 +8,9 @@
 ## 1. Scope
 
 This design adds the ABLESTACK KVM `qcow2 -> qcow2` data plane for
-cluster-scoped `SharedMountPoint` storage. It applies to the existing plan
-`41886f03-c19e-4382-927d-89bc4d6ce8e9` and must not create another DR site or
-plan.
+cluster-scoped `SharedMountPoint` storage. The active validation plan is
+`79154e02-0089-411e-8fd9-660ff01b2cf4`; validation must not create a replacement
+plan to bypass failures in this lifecycle.
 
 The first validated path is:
 
@@ -62,7 +62,8 @@ disable synchronization.
 | --- | --- | --- |
 | `rbd` | `rbd` | Existing RBD snapshots and `rbd diff` |
 | `rbd` | remote NBD | Existing RBD snapshot plus extent copier |
-| `file/qcow2` | remote NBD backed by `file/qcow2` | New QMP persistent bitmap push backup |
+| running `file/qcow2` | remote NBD backed by `file/qcow2` | QMP persistent bitmap push backup |
+| offline `file/qcow2` | remote NBD backed by `file/qcow2` | Offline baseline plus exclusive `qemu-img convert` |
 | other | any | Explicit unsupported/preflight failure |
 
 No file-backed request may enter an RBD snapshot function. No RBD request may
@@ -657,3 +658,62 @@ Required regression coverage includes successful pause/final/release,
 idempotent owner replay, final-delta rejection without a matching frozen map,
 automatic QMP resume on transfer failure, remote abort without premature
 scheduler start, and unchanged RBD/VMware action contracts.
+
+## Offline Full Seed Selection And Error Isolation (2026-09-04)
+
+The command-time source runtime determines the qcow2 Full Seed producer; VM
+power state is not a Plan capability gate.
+
+1. FTCTL first canonicalizes and rebinds the complete disk set.
+2. If QMP resolves every mapped source path as an active qcow2 node, the
+   established QMP persistent-bitmap backup runs unchanged.
+3. If QMP is unavailable, FTCTL probes every source file before changing any
+   bitmap. Every path must remain beneath the declared SharedMountPoint, be a
+   qcow2 file, and have no writable holder.
+   The explicit source storage root is authoritative when present. For rolling
+   compatibility with an existing Cloud profile that carries only absolute
+   volume paths, FTCTL accepts their canonical parent only when every mapped
+   file has exactly the same parent. A broader common prefix, mixed parents,
+   or a relative path is rejected; the derived root is command-local evidence
+   and is never persisted as Plan routing authority.
+4. After the complete set passes, FTCTL creates or clears the deterministic
+   persistent bitmap on every disk. This establishes the next incremental
+   baseline before data movement.
+5. Each disk is copied to its existing target NBD export with `qemu-img
+   convert -n -O raw` and without `--force-share`. The NBD export exposes the
+   guest-visible block device of the target qcow2 file, so writing a qcow2
+   container to that URI is forbidden. An image that becomes writable fails
+   closed instead of allowing a live, crash-inconsistent read.
+6. A durable target checkpoint is published only after every disk transfer and
+   every source baseline verification succeeds. A partial disk set is never
+   published.
+7. If QMP becomes available after selection, normal file locking rejects the
+   offline writer race; the next idempotent attempt re-evaluates the runtime
+   and can select the online path.
+
+The FTCTL exit namespace is provider-specific. `92..96` remain reserved for
+the VMware/NBD teardown contract. qcow2 paths use:
+
+| Exit | Error code | Meaning |
+| --- | --- | --- |
+| 110 | `DR_QCOW2_SOURCE_RUNTIME_UNAVAILABLE` | A selected online QMP source disappeared |
+| 111 | `DR_QCOW2_BACKUP_FAILED` | QMP backup failed after runtime selection |
+| 112 | `DR_QCOW2_OFFLINE_SOURCE_BUSY` | An offline source has a writable holder |
+| 113 | `DR_QCOW2_OFFLINE_BASELINE_FAILED` | Offline bitmap preparation or validation failed |
+| 114 | `DR_ABLESTACK_INCREMENTAL_APPLY_FAILED` | ABLESTACK incremental extent apply failed |
+| 115 | `DR_QCOW2_OFFLINE_TRANSFER_FAILED` | Offline Full Seed transfer failed |
+| 116 | `DR_QCOW2_BASELINE_NOT_DURABLE` | Required qcow2 baseline is absent |
+
+These errors never synthesize NBD quarantine evidence or start NBD cleanup.
+The UI receives the exact terminal code through the existing Cloud projection
+and must not show `DR_NBD_TEARDOWN_TIMEOUT` unless the VMware mover actually
+reported NBD teardown evidence.
+
+| Area | AS-IS | TO-BE |
+| --- | --- | --- |
+| Stopped source | File provider unconditionally invokes QMP | Complete disk set uses the offline Full Seed producer |
+| Source locking | `--force-share` permits a concurrent writer | Exclusive image locking fails closed |
+| Baseline order | Baseline may be initialized after copy | All baselines are prepared before the first byte is copied |
+| Multi-disk commit | A late failure can obscure earlier partial work | Checkpoint publication requires all disks and baselines |
+| Error code | QMP/baseline exit 92 becomes an NBD timeout | qcow2 uses isolated exits 110 through 116 |
+| Existing providers | Shared rc values can trigger unrelated recovery | VMware-to-RBD and RBD-to-RBD command paths stay unchanged |

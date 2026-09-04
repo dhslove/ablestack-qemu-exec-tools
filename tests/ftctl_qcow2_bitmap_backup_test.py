@@ -56,6 +56,14 @@ def args(mode, progress_path):
 
 
 class Qcow2BitmapBackupTest(unittest.TestCase):
+    def test_missing_domain_is_a_runtime_error_not_an_nbd_error(self):
+        class MissingDomainClient:
+            def execute(self, command, arguments=None):
+                raise MODULE.BackupError("failed to get domain")
+
+        with self.assertRaises(MODULE.SourceRuntimeUnavailable):
+            MODULE.run_backup(args("full", ""), MissingDomainClient())
+
     def test_full_seed_creates_persistent_bitmap_before_backup(self):
         with tempfile.TemporaryDirectory() as temp:
             client = FakeClient()

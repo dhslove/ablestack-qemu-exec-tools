@@ -75,6 +75,9 @@ ftctl_dr_ablestack_canonicalize_profile "${offline_profile}" "${offline_canonica
 virsh() { return 1; }
 ftctl_dr_ablestack_rebind_live_qcow2_sources plan-qcow2 "${offline_canonical}"
 jq -e --arg source "${TMP}/source-volume" '.disks[0].sourcePath == $source' "${offline_canonical}" >/dev/null
+offline_root=""
+ftctl_dr_ablestack_qcow2_source_root "${offline_canonical}" offline_root
+[[ "${offline_root}" == "${TMP}" ]]
 
 # A canceled failover can restore the source VM on its durable volume after a
 # temporary clone overlay has been removed. Rebind only the ABLESTACK KVM_QMP
