@@ -1060,11 +1060,11 @@ ftctl_dr_ablestack_qcow2_bitmap_baseline_path() {
 }
 
 ftctl_dr_ablestack_qcow2_source_root() {
-  local disk_map="${1-}" out_var="${2-}" root=""
+  local disk_map="${1-}" out_var="${2-}" resolved_root=""
   [[ -s "${disk_map}" && -n "${out_var}" ]] || return 2
-  root="$(ftctl_dr_ablestack_json_field "${disk_map}" source.storagePath 2>/dev/null || true)"
-  if [[ -z "${root}" ]]; then
-    root="$(python3 - "${disk_map}" <<'PY'
+  resolved_root="$(ftctl_dr_ablestack_json_field "${disk_map}" source.storagePath 2>/dev/null || true)"
+  if [[ -z "${resolved_root}" ]]; then
+    resolved_root="$(python3 - "${disk_map}" <<'PY'
 import json
 import os
 import sys
@@ -1085,12 +1085,12 @@ print(parents.pop())
 PY
 )" || return 113
   fi
-  [[ -n "${root}" && "${root}" == /* ]] || return 113
-  printf -v "${out_var}" '%s' "${root}"
+  [[ -n "${resolved_root}" && "${resolved_root}" == /* ]] || return 113
+  printf -v "${out_var}" '%s' "${resolved_root}"
 }
 
 ftctl_dr_ablestack_qcow2_source_baselines_ready() {
-  local plan="${1-}" disk_map="${2-}" root disk_json device source_path bitmap baseline recorded
+  local plan="${1-}" disk_map="${2-}" root="" disk_json device source_path bitmap baseline recorded
   ftctl_dr_ablestack_qcow2_source_root "${disk_map}" root || return 1
   while IFS= read -r disk_json; do
     device="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" device)"
@@ -1107,7 +1107,7 @@ ftctl_dr_ablestack_qcow2_source_baselines_ready() {
 }
 
 ftctl_dr_ablestack_probe_offline_qcow2_sources() {
-  local disk_map="${1-}" root disk_json source_path bitmap rc=0
+  local disk_map="${1-}" root="" disk_json source_path bitmap rc=0
   ftctl_dr_ablestack_qcow2_source_root "${disk_map}" root || return 113
   while IFS= read -r disk_json; do
     source_path="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" sourcePath)"
@@ -1123,7 +1123,7 @@ ftctl_dr_ablestack_probe_offline_qcow2_sources() {
 
 ftctl_dr_ablestack_initialize_qcow2_source_baselines() {
   local plan="${1-}" sequence="${2-}" disk_map="${3-}" reset="${4-0}"
-  local root disk_json device source_path bitmap baseline tmp rc=0
+  local root="" disk_json device source_path bitmap baseline tmp rc=0
   local -a reset_args=()
   : "${sequence}"
   [[ "${reset}" == "1" ]] && reset_args+=(--reset)

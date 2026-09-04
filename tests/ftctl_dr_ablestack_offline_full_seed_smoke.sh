@@ -48,6 +48,23 @@ with open(path,"w",encoding="utf-8") as fh:
                "disks":disks,"transport":{"exports":exports}},fh)
 PY
 
+# The Cloud profile may omit source.storagePath. The resolver must return the
+# single canonical parent through an output variable even when it is named
+# "root" by the caller; Bash dynamic scoping must not swallow the assignment.
+map_without_root="${TMP}/disk-map-without-root.json"
+python3 - "${map}" "${map_without_root}" <<'PY'
+import json,sys
+source,target=sys.argv[1:]
+with open(source,encoding="utf-8") as fh:
+    data=json.load(fh)
+data["source"]["storagePath"]=""
+with open(target,"w",encoding="utf-8") as fh:
+    json.dump(data,fh)
+PY
+root=""
+ftctl_dr_ablestack_qcow2_source_root "${map_without_root}" root
+[[ "${root}" == "${TMP}/source" ]]
+
 ftctl_dr_ablestack_prepare_targets() { :; }
 ftctl_dr_ablestack_site_agent_transport_load() { return 0; }
 ftctl_dr_ablestack_remote_transport_load() { return 1; }
