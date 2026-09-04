@@ -670,6 +670,66 @@ ftctl_dr_scheduler_seed_resume_checkpoint() {
     "resume_checkpoint_seeded_at=$(ftctl_now_iso8601)"
 }
 
+ftctl_dr_scheduler_seed_relocated_baseline() {
+  local plan="${1-}" profile_file="${2-}" state_path="${3-}" status_path="${4-}"
+  local baseline="${5-}" minimum="${6-}" current="" checkpoint_state="" checkpoint_ref=""
+  local checkpoint_cycle_type="" checkpoint_cycle_token="" checkpoint_effective_mode=""
+  local checkpoint_source_at="" checkpoint_target_at="" checkpoint_incremental_verified=""
+  local source_provider="" target_provider=""
+
+  [[ -f "${profile_file}" ]] || return 0
+  source_provider="$(ftctl_dr_runtime_profile_value "${profile_file}" "source.provider" 2>/dev/null | tr '[:lower:]' '[:upper:]' || true)"
+  target_provider="$(ftctl_dr_runtime_profile_value "${profile_file}" "target.provider" 2>/dev/null | tr '[:lower:]' '[:upper:]' || true)"
+  [[ "${source_provider}" == "ABLESTACK" && "${target_provider}" == "ABLESTACK" ]] || return 0
+
+  [[ "${baseline}" =~ ^[1-9][0-9]*$ ]] \
+    || baseline="$(ftctl_dr_runtime_profile_value "${profile_file}" "request.resumeBaselineCheckpointSequence" 2>/dev/null || true)"
+  [[ "${baseline}" =~ ^[1-9][0-9]*$ ]] \
+    || baseline="$(ftctl_dr_runtime_profile_value "${profile_file}" "request.checkpointSequence" 2>/dev/null || true)"
+  [[ "${baseline}" =~ ^[1-9][0-9]*$ ]] || return 0
+  [[ "${minimum}" =~ ^[1-9][0-9]*$ ]] \
+    || minimum="$(ftctl_dr_runtime_profile_value "${profile_file}" "request.minimumCompletedCheckpointSequence" 2>/dev/null || true)"
+  [[ "${minimum}" =~ ^[1-9][0-9]*$ ]] || minimum=$((baseline + 1))
+  (( minimum > baseline )) || return 2
+
+  checkpoint_state="$(ftctl_dr_runtime_profile_value "${profile_file}" "request.checkpointState" 2>/dev/null | tr '[:lower:]' '[:upper:]' || true)"
+  checkpoint_ref="$(ftctl_dr_runtime_profile_value "${profile_file}" "request.checkpointRef" 2>/dev/null || true)"
+  checkpoint_target_at="$(ftctl_dr_runtime_profile_value "${profile_file}" "request.checkpointTargetReadyAt" 2>/dev/null || true)"
+  [[ "${checkpoint_state}" == "READY" || "${checkpoint_state}" == "TARGET_READY" ]] || return 2
+  [[ -n "${checkpoint_ref}" && -n "${checkpoint_target_at}" ]] || return 2
+
+  ftctl_dr_scheduler_seed_resume_checkpoint "${plan}" "${baseline}" "${minimum}" \
+    "$(ftctl_dr_runtime_state_get_from_path "${state_path}" run)" || return $?
+  current="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "latest_completed_checkpoint_sequence" 2>/dev/null || true)"
+  if [[ "${current}" =~ ^[1-9][0-9]*$ ]] && (( current >= baseline )); then
+    return 0
+  fi
+
+  checkpoint_cycle_type="$(ftctl_dr_runtime_profile_value "${profile_file}" "request.checkpointCycleType" 2>/dev/null || true)"
+  checkpoint_cycle_token="$(ftctl_dr_runtime_profile_value "${profile_file}" "request.checkpointCycleToken" 2>/dev/null || true)"
+  checkpoint_effective_mode="$(ftctl_dr_runtime_profile_value "${profile_file}" "request.checkpointEffectiveMode" 2>/dev/null || true)"
+  checkpoint_source_at="$(ftctl_dr_runtime_profile_value "${profile_file}" "request.checkpointSourceCreatedAt" 2>/dev/null || true)"
+  checkpoint_incremental_verified="$(ftctl_dr_runtime_profile_value "${profile_file}" "request.checkpointIncrementalVerified" 2>/dev/null || true)"
+  [[ -n "${checkpoint_cycle_type}" ]] || checkpoint_cycle_type="incremental"
+  [[ -n "${checkpoint_cycle_token}" ]] || checkpoint_cycle_token="${plan}:${baseline}"
+
+  ftctl_dr_scheduler_update_state "${state_path}" "${status_path}" \
+    "latest_completed_checkpoint_sequence=${baseline}" \
+    "latest_completed_checkpoint_cycle_type=${checkpoint_cycle_type}" \
+    "latest_completed_checkpoint_ref=${checkpoint_ref}" \
+    "latest_completed_checkpoint_state=TARGET_READY" \
+    "latest_completed_source_checkpoint_at=${checkpoint_source_at}" \
+    "latest_completed_target_durable_at=${checkpoint_target_at}" \
+    "latest_completed_effective_mode=${checkpoint_effective_mode}" \
+    "latest_completed_incremental_verified=${checkpoint_incremental_verified}" \
+    "latest_completed_baseline_generation=${baseline}" \
+    "latest_completed_cycle_token=${checkpoint_cycle_token}" \
+    "baseline_state=LOCAL_DURABLE" \
+    "data_commit_state=LOCAL_DURABLE" \
+    "target_durable=true" \
+    "relocated_baseline_seeded_at=$(ftctl_now_iso8601)"
+}
+
 ftctl_dr_scheduler_mark_resume_checkpoint_completed() {
   local plan="${1-}" completed="${2-}" sequence_path minimum pending
   sequence_path="$(ftctl_dr_scheduler_sequence_path "${plan}")"

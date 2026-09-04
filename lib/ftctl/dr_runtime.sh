@@ -5644,6 +5644,8 @@ ftctl_dr_runtime_action() {
   local action="${1-}" plan="${2-}" run="${3-}" profile_file="${4-}" role="${5-}" mode="${6-}" restore_point="${7-}" force="${8-0}" dry_run="${9-0}" wait_value="${10-}" json="${11-0}" artifact_spec_file="${12-}" authority_spec_file="${13-}"
   local force_immediate_cycle="${14-false}"
   local authority_sequence_floor="${15-}"
+  local resume_baseline_checkpoint_sequence="${16-}"
+  local minimum_completed_checkpoint_sequence="${17-}"
   local state_tuple state step progress run_path status_path external_ref rc error_code error_message
   local target_vm_id target_external_ref checkpoint_lease_path test_sequence persisted_artifact_spec="" persisted_authority_spec=""
   local release_authority_side="" release_authority_generation="" release_resource_disposition="RETAIN_OPERATIONAL_VM"
@@ -5732,6 +5734,24 @@ ftctl_dr_runtime_action() {
 
   if [[ "${action}" == "dr-sync-recover" && "${dry_run}" != "1" ]]; then
     rc=0
+    ftctl_dr_scheduler_seed_relocated_baseline "${plan}" "$(ftctl_dr_runtime_profile_path "${plan}")" \
+      "${run_path}" "${status_path}" "${resume_baseline_checkpoint_sequence}" \
+      "${minimum_completed_checkpoint_sequence}" || rc=$?
+    if [[ "${rc}" != "0" ]]; then
+      error_code="DR_RECOVERY_BASELINE_EVIDENCE_INVALID"
+      ftctl_dr_runtime_path_set "${run_path}" \
+        "state=ERROR" \
+        "step=scheduler-recovery-baseline-invalid" \
+        "progress=100" \
+        "accepted=false" \
+        "scheduler_recovery_state=FAILED" \
+        "scheduler_recovery_rc=${rc}" \
+        "error_code=${error_code}" \
+        "error_message=Durable checkpoint evidence for scheduler relocation is incomplete" \
+        "updated_at=$(ftctl_now_iso8601)" || true
+      [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_state_json "${action}" "error" "${plan}" "${run}" "${run_path}" "0"
+      return "${rc}"
+    fi
     ftctl_dr_scheduler_recover "${plan}" "${run}" "$(ftctl_dr_runtime_profile_path "${plan}")" \
       "${run_path}" "${status_path}" "MANUAL" || rc=$?
     if [[ "${rc}" != "0" ]]; then

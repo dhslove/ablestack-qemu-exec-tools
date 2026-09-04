@@ -885,7 +885,8 @@ dispatch() {
       ftctl_dr_runtime_action "${CLI_COMMAND}" "${CLI_PLAN}" "${CLI_RUN}" "${CLI_PROFILE_JSON}" "${CLI_ROLE}" \
         "${CLI_MODE}" "${CLI_RESTORE_POINT}" "${CLI_FORCE}" "${CLI_DRY_RUN}" "${CLI_WAIT_VALUE}" "${CLI_JSON}" \
         "${CLI_ARTIFACT_SPEC_JSON}" "${CLI_AUTHORITY_SPEC_JSON}" "${CLI_FORCE_IMMEDIATE_CYCLE}" \
-        "${CLI_AUTHORITY_SEQUENCE_FLOOR}"
+        "${CLI_AUTHORITY_SEQUENCE_FLOOR}" "${CLI_RESUME_BASELINE_CHECKPOINT_SEQUENCE}" \
+        "${CLI_MINIMUM_COMPLETED_CHECKPOINT_SEQUENCE}"
       ;;
     dr-scheduler-run)
       ftctl_dr_scheduler_run_from_launch "${CLI_PLAN}" "${CLI_JSON}"

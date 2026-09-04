@@ -805,3 +805,14 @@ existing Plan to survive migration without mutating its recorded VM Details.
 RBD-to-RBD and VMware-to-RBD do not use the qcow2 lock classifier. Their
 snapshot-diff and CBT behavior remains unchanged, but their placement tests
 remain release gates because Cloud's dynamic worker broker is shared.
+## Runtime relocation baseline handoff
+
+SharedMountPoint access does not make `/run` scheduler metadata cluster-wide. When a
+running source VM moves to another KVM host, Cloud must route `RECOVER_SYNC` to the
+current host and include the latest target-durable checkpoint sequence, token,
+reference, and timestamps. FTCTL seeds only that controller-authoritative evidence
+on a host that has no newer local completion, then attempts the next incremental
+cycle. The qcow2 bitmap reader remains the final safety gate: missing or invalid
+bitmaps trigger the existing controlled reseed path instead of accepting an
+unverified baseline. A mere source-image write lock is never converted into Full
+Seed.
