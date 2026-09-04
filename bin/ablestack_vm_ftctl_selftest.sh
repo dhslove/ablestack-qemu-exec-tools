@@ -6292,6 +6292,10 @@ selftest_case_dr_runtime_profile_status_cancel() {
   "mapping": {
     "source": {
       "hardware": {
+        "sourceVmRef": "vm-test",
+        "sourceHostUuid": "host-a",
+        "sourceHostName": "host-a-name",
+        "instanceName": "i-2-100-VM",
         "firmware": "EFI",
         "secureBoot": true,
         "fingerprint": "sha256:test-source-hardware"
@@ -6357,7 +6361,8 @@ JSON
   selftest_assert_contains "${status}" '"events_truncated":' "status event truncation marker"
   selftest_assert_contains "${status}" '"source_firmware":"EFI"' "status source firmware"
   selftest_assert_contains "${status}" '"source_secure_boot":true' "status source secure boot"
-  selftest_assert_contains "${status}" '"source_hardware_fingerprint":"sha256:test-source-hardware"' "status source hardware fingerprint"
+  selftest_assert_contains "${status}" '"source_hardware_fingerprint_version":"2"' "status stable hardware fingerprint version"
+  selftest_assert_not_contains "${status}" '"source_hardware_fingerprint":"sha256:test-source-hardware"' "status replaces legacy placement fingerprint"
   selftest_assert_contains "${status}" '"target_boot_type":"UEFI"' "status target boot type"
   selftest_assert_contains "${status}" '"target_boot_mode":"SECURE"' "status target boot mode"
   selftest_assert_contains "${status}" '"target_io_policy":"io_uring"' "status target io policy"

@@ -4198,6 +4198,37 @@ sys.stdout.write("," + encoded[1:-1])
 PY
 }
 
+ftctl_dr_runtime_stable_hardware_fingerprint() {
+  local profile_path="${1-}" canonical="" digest=""
+  [[ -f "${profile_path}" ]] || return 1
+  canonical="$(jq -c '
+    (.mapping.source.hardware // {}) as $h
+    | {}
+    | if $h.sourceVmRef != null then .sourceVmRef = $h.sourceVmRef else . end
+    | if $h.firmware != null then .firmware = $h.firmware else . end
+    | if $h.UEFI != null then .UEFI = $h.UEFI else . end
+    | if $h.secureBoot != null then .secureBoot = $h.secureBoot else . end
+    | if $h.guestId != null then .guestId = $h.guestId else . end
+    | if $h.cpuCount != null then .cpuCount = $h.cpuCount else . end
+    | if $h.memoryMiB != null then .memoryMiB = $h.memoryMiB else . end
+    | if $h.rootDiskController != null then .rootDiskController = $h.rootDiskController else . end
+    | if $h.dataDiskController != null then .dataDiskController = $h.dataDiskController else . end
+    | if ($h.vmDetails | type) == "object" then
+        .vmDetails = ($h.vmDetails
+          | to_entries
+          | map(select((.key | ascii_downcase) as $key
+              | (["message.", "clone.", "ftctl.", "dr.", "ha.", "host.", "runtime.", "last."]
+                | map($key | startswith(.)) | any) | not))
+          | sort_by(.key)
+          | from_entries)
+      else . end
+  ' "${profile_path}" 2>/dev/null)" || return 1
+  [[ -n "${canonical}" ]] || return 1
+  digest="$(printf '%s' "${canonical}" | sha256sum | awk '{print $1}')"
+  [[ "${digest}" =~ ^[0-9a-f]{64}$ ]] || return 1
+  printf 'sha256:%s\n' "${digest}"
+}
+
 ftctl_dr_runtime_emit_state_json() {
   local command="${1-}" result="${2-ok}" plan="${3-}" run="${4-}" state_path="${5-}" events_offset="${6-}" events_limit="${7-20}"
   local action state step progress external_job_ref error_code error_message failed_component data_commit_state data_copied metadata_committed target_durable cycle_retry_mode driver_exit_code last_source last_target target_rpo updated accepted
@@ -4318,6 +4349,12 @@ ftctl_dr_runtime_emit_state_json() {
     source_secure_boot="$(jq -r '.mapping.source.hardware.secureBoot // empty' "${profile_path}" 2>/dev/null || true)"
     source_hardware_fingerprint="$(jq -r '.mapping.source.hardware.fingerprint // empty' "${profile_path}" 2>/dev/null || true)"
     source_hardware_fingerprint_version="$(jq -r '.mapping.source.hardware.fingerprintVersion // empty' "${profile_path}" 2>/dev/null || true)"
+    if [[ -z "${source_hardware_fingerprint_version}" ]]; then
+      source_hardware_fingerprint="$(ftctl_dr_runtime_stable_hardware_fingerprint "${profile_path}" 2>/dev/null || true)"
+      if [[ -n "${source_hardware_fingerprint}" ]]; then
+        source_hardware_fingerprint_version="2"
+      fi
+    fi
     target_boot_type="$(jq -r '.mapping.target.hardware.bootType // empty' "${profile_path}" 2>/dev/null || true)"
     target_boot_mode="$(jq -r '.mapping.target.hardware.bootMode // empty' "${profile_path}" 2>/dev/null || true)"
     target_io_policy="$(jq -r '.mapping.target.hardware.ioPolicy // empty' "${profile_path}" 2>/dev/null || true)"

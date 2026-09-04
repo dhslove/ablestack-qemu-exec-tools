@@ -816,3 +816,21 @@ cycle. The qcow2 bitmap reader remains the final safety gate: missing or invalid
 bitmaps trigger the existing controlled reseed path instead of accepting an
 unverified baseline. A mere source-image write lock is never converted into Full
 Seed.
+
+## Status Authority And Legacy Fingerprint Projection
+
+Worker-local status is evidence, not Plan authority by itself. The Cloud site
+broker gathers STATUS from all eligible workers and chooses the answer with the
+highest controller-floored authority sequence. The current VM host is used only
+as a tie-break for STATUS, while mutating actions still route once to the live
+placement selected at execution time. This permits a former worker holding the
+latest durable Cycle to hand authority to the new VM host after migration.
+
+For an unversioned profile, `dr-status` emits a derived contract-v2 fingerprint.
+Its canonical payload contains source VM reference, firmware, Cloud `UEFI`,
+Secure Boot, guest type, CPU, memory, disk controllers, and stable sorted VM
+Details. Host UUID/name, instance name, and transient detail namespaces are
+excluded exactly as in Cloud. The profile and Plan remain immutable; only the
+status projection is normalized. A real stable-hardware change still blocks
+projection, while source placement drift enters retryable `WAITING_SOURCE` and
+automatic `RECOVER_SYNC`.
