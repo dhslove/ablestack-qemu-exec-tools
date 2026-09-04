@@ -36,10 +36,14 @@ cat > "${profile}" <<'JSON'
 }
 JSON
 printf 'run=run-new\n' > "${state}"
-: > "${status}"
+cat > "${status}" <<'EOF'
+latest_completed_checkpoint_sequence=803
+latest_completed_checkpoint_ref=ftctl:stale-worker:run-old:803
+latest_completed_cycle_token=stale-worker:803
+EOF
 
 ftctl_dr_scheduler_sequence_path() { printf '%s\n' "${sequence}"; }
-ftctl_dr_scheduler_current_plan_sequence() { printf '0\n'; }
+ftctl_dr_scheduler_current_plan_sequence() { printf '900\n'; }
 ftctl_dr_scheduler_current_authority_sequence() { printf '724\n'; }
 ftctl_now_iso8601() { printf '2026-09-04T23:00:00+09:00\n'; }
 ftctl_dr_runtime_profile_value() {
@@ -62,13 +66,15 @@ ftctl_dr_scheduler_update_state() {
 
 ftctl_dr_scheduler_seed_relocated_baseline plan-new "${profile}" "${state}" "${status}" '' ''
 
-grep -q '^plan_cycle_sequence=259$' "${sequence}"
+grep -q '^plan_cycle_sequence=900$' "${sequence}"
 grep -q '^minimum_completed_checkpoint_sequence=260$' "${sequence}"
 grep -q '^immediate_cycle_pending=true$' "${sequence}"
 grep -q '^latest_completed_checkpoint_sequence=259$' "${status}"
 grep -q '^latest_completed_checkpoint_ref=ftctl:plan-old:run-old:259$' "${status}"
+grep -q '^latest_completed_cycle_token=plan-old:259$' "${status}"
 grep -q '^baseline_state=LOCAL_DURABLE$' "${status}"
 grep -q '^target_durable=true$' "${status}"
+[[ "$(ftctl_dr_scheduler_cycle_type 901 ABLESTACK "${status}" ABLESTACK plan-new)" == "incremental" ]]
 
 bad_profile="${tmp}/bad-profile.json"
 jq '.request.checkpointTargetReadyAt = ""' "${profile}" > "${bad_profile}"

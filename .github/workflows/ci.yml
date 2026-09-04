@@ -52,6 +52,7 @@ jobs:
           bash tests/ftctl_dr_ablestack_qcow2_shared_smoke.sh
           bash tests/ftctl_dr_ablestack_offline_full_seed_smoke.sh
           bash tests/ftctl_dr_ablestack_seed_retry_smoke.sh
+          bash tests/ftctl_dr_relocated_baseline_smoke.sh
 
       - name: FTCTL DR cancel terminal immutability smoke
         run: |

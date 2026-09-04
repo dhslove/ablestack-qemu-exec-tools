@@ -672,7 +672,7 @@ ftctl_dr_scheduler_seed_resume_checkpoint() {
 
 ftctl_dr_scheduler_seed_relocated_baseline() {
   local plan="${1-}" profile_file="${2-}" state_path="${3-}" status_path="${4-}"
-  local baseline="${5-}" minimum="${6-}" current="" checkpoint_state="" checkpoint_ref=""
+  local baseline="${5-}" minimum="${6-}" checkpoint_state="" checkpoint_ref=""
   local checkpoint_cycle_type="" checkpoint_cycle_token="" checkpoint_effective_mode=""
   local checkpoint_source_at="" checkpoint_target_at="" checkpoint_incremental_verified=""
   local source_provider="" target_provider=""
@@ -700,10 +700,6 @@ ftctl_dr_scheduler_seed_relocated_baseline() {
 
   ftctl_dr_scheduler_seed_resume_checkpoint "${plan}" "${baseline}" "${minimum}" \
     "$(ftctl_dr_runtime_state_get_from_path "${state_path}" run)" || return $?
-  current="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "latest_completed_checkpoint_sequence" 2>/dev/null || true)"
-  if [[ "${current}" =~ ^[1-9][0-9]*$ ]] && (( current >= baseline )); then
-    return 0
-  fi
 
   checkpoint_cycle_type="$(ftctl_dr_runtime_profile_value "${profile_file}" "request.checkpointCycleType" 2>/dev/null || true)"
   checkpoint_cycle_token="$(ftctl_dr_runtime_profile_value "${profile_file}" "request.checkpointCycleToken" 2>/dev/null || true)"
@@ -713,6 +709,11 @@ ftctl_dr_scheduler_seed_relocated_baseline() {
   [[ -n "${checkpoint_cycle_type}" ]] || checkpoint_cycle_type="incremental"
   [[ -n "${checkpoint_cycle_token}" ]] || checkpoint_cycle_token="${plan}:${baseline}"
 
+  # Checkpoint sequences are producer-local. A numerically larger value left
+  # by a former worker does not supersede the controller-selected durable
+  # checkpoint after relocation. Keep the local Plan counter monotonic in the
+  # sequence file, but always seed the accepted checkpoint provenance into the
+  # new Run and Plan status before the scheduler chooses its first cycle type.
   ftctl_dr_scheduler_update_state "${state_path}" "${status_path}" \
     "latest_completed_checkpoint_sequence=${baseline}" \
     "latest_completed_checkpoint_cycle_type=${checkpoint_cycle_type}" \

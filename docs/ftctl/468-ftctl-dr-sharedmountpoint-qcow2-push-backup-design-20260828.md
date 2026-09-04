@@ -810,9 +810,13 @@ remain release gates because Cloud's dynamic worker broker is shared.
 SharedMountPoint access does not make `/run` scheduler metadata cluster-wide. When a
 running source VM moves to another KVM host, Cloud must route `RECOVER_SYNC` to the
 current host and include the latest target-durable checkpoint sequence, token,
-reference, and timestamps. FTCTL seeds only that controller-authoritative evidence
-on a host that has no newer local completion, then attempts the next incremental
-cycle. The qcow2 bitmap reader remains the final safety gate: missing or invalid
+reference, and timestamps. Checkpoint sequence numbers are producer-local and
+must never be compared across workers to choose authority. FTCTL therefore always
+projects the controller-accepted checkpoint provenance into the new recovery Run
+and Plan status, while preserving the worker-local Plan Cycle counter separately
+for monotonic allocation. The first relocated Cycle is then attempted as
+incremental or `NO_CHANGE`. The qcow2 bitmap reader remains the final safety gate:
+missing or invalid
 bitmaps trigger the existing controlled reseed path instead of accepting an
 unverified baseline. A mere source-image write lock is never converted into Full
 Seed.
