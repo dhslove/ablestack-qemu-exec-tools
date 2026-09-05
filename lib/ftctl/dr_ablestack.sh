@@ -502,6 +502,18 @@ print(int(data.get("count") or 0))
 PY
 }
 
+ftctl_dr_ablestack_disk_total_size_bytes() {
+  local disk_map="${1-}"
+  [[ -n "${disk_map}" && -f "${disk_map}" ]] || return 1
+  python3 - "${disk_map}" <<'PY'
+import json
+import sys
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    disks = json.load(fh).get("disks") or []
+print(sum(max(0, int(disk.get("sizeBytes") or 0)) for disk in disks if isinstance(disk, dict)))
+PY
+}
+
 ftctl_dr_ablestack_missing_config() {
   local disk_map="${1-}"
   [[ -n "${disk_map}" && -f "${disk_map}" ]] || return 1
@@ -1873,7 +1885,9 @@ ftctl_dr_ablestack_qcow2_push_disk() {
     --virtual-size "${size_bytes}" --timeout "${FTCTL_DR_FULL_SEED_TIMEOUT_SEC:-3600}" \
     --bandwidth-limit-mbps "${bandwidth}" --progress-path "${FTCTL_DR_TRANSFER_PROGRESS_PATH:-}" \
     --plan-uuid "${plan}" --run-uuid "${run}" \
-    --cycle-sequence "${sequence:-0}" --disk-index "${disk_index}" --disk-count "${disk_count}")" || rc=$?
+    --cycle-sequence "${sequence:-0}" --disk-index "${disk_index}" --disk-count "${disk_count}" \
+    --aggregate-total-bytes "${FTCTL_DR_TRANSFER_AGGREGATE_TOTAL_BYTES:-0}" \
+    --aggregate-completed-bytes "${FTCTL_DR_TRANSFER_AGGREGATE_COMPLETED_BYTES:-0}")" || rc=$?
   [[ "${rc}" == "0" ]] || return "${rc}"
   [[ -z "${out_var}" ]] || printf -v "${out_var}" '%s' "${output}"
 }
@@ -1903,7 +1917,9 @@ ftctl_dr_ablestack_qcow2_offline_push_disk() {
     --virtual-size "${size_bytes}" --timeout "${FTCTL_DR_FULL_SEED_TIMEOUT_SEC:-3600}" \
     --bandwidth-limit-mbps "${bandwidth}" --progress-path "${FTCTL_DR_TRANSFER_PROGRESS_PATH:-}" \
     --plan-uuid "${plan}" --run-uuid "${run}" \
-    --cycle-sequence "${sequence:-0}" --disk-index "${disk_index}" --disk-count "${disk_count}")" || rc=$?
+    --cycle-sequence "${sequence:-0}" --disk-index "${disk_index}" --disk-count "${disk_count}" \
+    --aggregate-total-bytes "${FTCTL_DR_TRANSFER_AGGREGATE_TOTAL_BYTES:-0}" \
+    --aggregate-completed-bytes "${FTCTL_DR_TRANSFER_AGGREGATE_COMPLETED_BYTES:-0}")" || rc=$?
   [[ "${rc}" == "0" ]] || return "${rc}"
   [[ -z "${out_var}" ]] || printf -v "${out_var}" '%s' "${output}"
 }
@@ -2257,6 +2273,7 @@ ftctl_dr_ablestack_full_seed_once() {
   local remote_transport="0" remote_path="" export_name="" export_port="" export_host="" vm_name=""
   local qcow2_transfer_mode="generic" disk_count="0" disk_index=0 backup_result=""
   local disk_transferred_bytes="0" total_transferred_bytes="0"
+  local FTCTL_DR_TRANSFER_AGGREGATE_TOTAL_BYTES="0" FTCTL_DR_TRANSFER_AGGREGATE_COMPLETED_BYTES="0"
 
   ftctl_dr_ablestack_prepare_targets "${plan}" "${run}" "${profile_file}" "${disk_map}" "${manifest_path}" "${checkpoint_path}" || return $?
   local site_agent_transport="0"
@@ -2269,6 +2286,7 @@ ftctl_dr_ablestack_full_seed_once() {
   vm_name="$(ftctl_dr_ablestack_json_field "${disk_map}" source.instanceName 2>/dev/null || true)"
   [[ -n "${vm_name}" ]] || vm_name="dr-${plan}"
   disk_count="$(ftctl_dr_ablestack_disk_count "${disk_map}")" || return $?
+  FTCTL_DR_TRANSFER_AGGREGATE_TOTAL_BYTES="$(ftctl_dr_ablestack_disk_total_size_bytes "${disk_map}")" || return $?
   if [[ "${site_agent_transport}" == "1" ]] && ftctl_dr_ablestack_qcow2_push_provider "${disk_map}"; then
     if ftctl_dr_ablestack_qcow2_runtime_ready "${disk_map}" "${vm_name}"; then
       qcow2_transfer_mode="qmp"
@@ -2320,8 +2338,9 @@ ftctl_dr_ablestack_full_seed_once() {
     rc=0
     if [[ "${qcow2_transfer_mode}" == "qmp" ]]; then
       backup_result=""
+      FTCTL_DR_TRANSFER_AGGREGATE_COMPLETED_BYTES="${total_transferred_bytes}"
       ftctl_dr_ablestack_qcow2_push_disk "${plan}" "${run}" "${cycle_sequence}" full "${vm_name}" \
-        "${disk_map}" "${disk_json}" "${disk_index}" "${disk_count}" backup_result || rc=$?
+        "${disk_map}" "${disk_json}" "$((disk_index - 1))" "${disk_count}" backup_result || rc=$?
       out="${backup_result}"
     elif [[ "${qcow2_transfer_mode}" == "offline" ]]; then
       ftctl_cmd_run "${FTCTL_DR_FULL_SEED_TIMEOUT_SEC:-3600}" out err rc -- \
@@ -2563,10 +2582,10 @@ ftctl_dr_ablestack_qcow2_incremental_once() {
     rc=0
     if [[ "${transfer_mode}" == "offline-qsd" ]]; then
       ftctl_dr_ablestack_qcow2_offline_push_disk "${plan}" "${run}" "${sequence}" \
-        "${disk_map}" "${disk_json}" "${disk_index}" "${disk_count}" result || rc=$?
+        "${disk_map}" "${disk_json}" "$((disk_index - 1))" "${disk_count}" result || rc=$?
     else
       ftctl_dr_ablestack_qcow2_push_disk "${plan}" "${run}" "${sequence}" incremental "${vm_name}" \
-        "${disk_map}" "${disk_json}" "${disk_index}" "${disk_count}" result || rc=$?
+        "${disk_map}" "${disk_json}" "$((disk_index - 1))" "${disk_count}" result || rc=$?
     fi
     [[ "${rc}" == "0" ]] || return "${rc}"
     changed_bytes="$(python3 -c 'import json,sys; print(int(json.loads(sys.argv[1]).get("changedBytes",0)))' "${result}" 2>/dev/null || printf '0')"

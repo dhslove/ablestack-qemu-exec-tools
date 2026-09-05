@@ -138,10 +138,22 @@ def clone_bitmap_for_backup(client, node_name, bitmap_name, job_id, granularity)
 def write_progress(path, args, state, processed, total, changed, started, sample_sequence):
     now = time.time()
     elapsed = max(now - started, 0.001)
-    percent = 100 if state == "COMPLETED" else (
-        int(min(100, max(0, processed * 100 / total))) if total else 0)
+    aggregate_total = args.aggregate_total_bytes if args.aggregate_total_bytes > 0 else total
+    aggregate_processed = min(
+        aggregate_total,
+        max(0, args.aggregate_completed_bytes) + max(0, processed),
+    ) if aggregate_total else 0
+    aggregate_enabled = args.aggregate_total_bytes > 0
+    final_disk = args.disk_count <= 1 or args.disk_index >= args.disk_count - 1
+    published_state = state
+    if aggregate_enabled and state == "COMPLETED" and (
+            not final_disk or aggregate_processed < aggregate_total):
+        published_state = "COPYING"
+    percent = 100 if published_state == "COMPLETED" else (
+        int(min(99, max(0, aggregate_processed * 100 / aggregate_total)))
+        if aggregate_total else 0)
     throughput = int(processed / elapsed)
-    remaining = max(total - processed, 0)
+    remaining = max(aggregate_total - aggregate_processed, 0)
     eta = int(remaining / throughput) if throughput > 0 else 0
     atomic_write_json(path, {
         "schemaVersion": 2,
@@ -149,16 +161,16 @@ def write_progress(path, args, state, processed, total, changed, started, sample
         "runUuid": args.run_uuid,
         "cycleSequence": args.cycle_sequence,
         "sampleSequence": sample_sequence,
-        "state": state,
+        "state": published_state,
         "phase": "full-reseed-transfer" if args.mode == "full" else "incremental-transfer",
         "mode": "FULL_RESEED" if args.mode == "full" else "CBT_INCREMENTAL",
-        "bytesTotal": total,
-        "bytesProcessed": processed,
+        "bytesTotal": aggregate_total,
+        "bytesProcessed": aggregate_processed,
         "changedBytes": changed,
-        "transferPayloadBytes": processed,
-        "sourceReadBytes": processed,
-        "targetWrittenBytes": processed,
-        "verifiedBytes": processed if state == "COMPLETED" else 0,
+        "transferPayloadBytes": aggregate_processed,
+        "sourceReadBytes": aggregate_processed,
+        "targetWrittenBytes": aggregate_processed,
+        "verifiedBytes": aggregate_processed if published_state == "COMPLETED" else 0,
         "percent": percent,
         "throughputBps": throughput,
         "etaSeconds": eta,
@@ -293,8 +305,10 @@ def parse_args(argv=None):
     parser.add_argument("--plan-uuid", default="")
     parser.add_argument("--run-uuid", default="")
     parser.add_argument("--cycle-sequence", type=int, default=0)
-    parser.add_argument("--disk-index", type=int, default=1)
+    parser.add_argument("--disk-index", type=int, default=0)
     parser.add_argument("--disk-count", type=int, default=1)
+    parser.add_argument("--aggregate-total-bytes", type=int, default=0)
+    parser.add_argument("--aggregate-completed-bytes", type=int, default=0)
     parser.add_argument("--uri", default="qemu:///system")
     parser.add_argument("--virsh", default="virsh")
     return parser.parse_args(argv)

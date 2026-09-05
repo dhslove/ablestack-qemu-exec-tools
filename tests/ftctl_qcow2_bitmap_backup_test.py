@@ -49,7 +49,8 @@ def args(mode, progress_path):
         bitmap="ftctl-dr-plan-sda", mode=mode, job_id="job-1",
         target_node="ftctl-target-sda", virtual_size=1048576, timeout=2,
         poll_interval=0, granularity=65536, bandwidth_limit_mbps=0,
-        progress_path=progress_path, cycle_sequence=7, disk_index=1, disk_count=1,
+        progress_path=progress_path, cycle_sequence=7, disk_index=0, disk_count=1,
+        aggregate_total_bytes=0, aggregate_completed_bytes=0,
         plan_uuid="plan-1", run_uuid="run-1",
         uri="qemu:///system", virsh="virsh", preserve_bitmap=False,
     )
@@ -120,6 +121,37 @@ class Qcow2BitmapBackupTest(unittest.TestCase):
         with self.assertRaises(MODULE.BaselineUnavailable):
             MODULE.run_backup(args("incremental", ""), client)
         self.assertNotIn("blockdev-add", [command for command, _ in client.calls])
+
+    def test_full_seed_progress_is_aggregate_and_zero_based_for_multiple_disks(self):
+        with tempfile.TemporaryDirectory() as temp:
+            values = args("full", str(pathlib.Path(temp) / "progress.json"))
+            values.disk_index = 1
+            values.disk_count = 2
+            values.aggregate_total_bytes = 3 * 1048576
+            values.aggregate_completed_bytes = 2 * 1048576
+            client = FakeClient()
+            MODULE.run_backup(values, client)
+            progress = json.loads(pathlib.Path(values.progress_path).read_text(encoding="utf-8"))
+
+        self.assertEqual(3 * 1048576, progress["bytesTotal"])
+        self.assertEqual(3 * 1048576, progress["bytesProcessed"])
+        self.assertEqual(100, progress["percent"])
+        self.assertEqual(1, progress["diskIndex"])
+        self.assertEqual(2, progress["diskCount"])
+        self.assertEqual("COMPLETED", progress["state"])
+
+    def test_non_final_full_seed_disk_does_not_publish_cycle_completion(self):
+        with tempfile.TemporaryDirectory() as temp:
+            values = args("full", str(pathlib.Path(temp) / "progress.json"))
+            values.disk_index = 0
+            values.disk_count = 2
+            values.aggregate_total_bytes = 2 * 1048576
+            client = FakeClient()
+            MODULE.run_backup(values, client)
+            progress = json.loads(pathlib.Path(values.progress_path).read_text(encoding="utf-8"))
+
+        self.assertEqual(50, progress["percent"])
+        self.assertEqual("COPYING", progress["state"])
 
 
 if __name__ == "__main__":
