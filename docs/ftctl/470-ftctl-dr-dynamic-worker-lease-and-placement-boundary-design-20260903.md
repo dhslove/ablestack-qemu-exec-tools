@@ -20,6 +20,9 @@ It must not change VM Details, disk maps, provider selection, checkpoint
 ordering, authority transitions, target materialization, or terminal rules. It
 must not trigger a full reseed or recreate an existing replica.
 
+The Cross-Mold Test Cleanup authority refinement is defined in
+`471-ftctl-dr-remote-source-test-cleanup-authority-design-20260905.md`.
+
 ## 2. Non-negotiable Rules
 
 - A Plan profile must not make a VM host UUID durable routing authority.

@@ -286,6 +286,18 @@ cat > "${plan_owner_artifact}" <<EOF
 {"contractVersion":3,"planUuid":"plan-owner","runUuid":"test-run","checkpointRef":"${checkpoint_ref}","checkpointSequence":12,"disks":[]}
 EOF
 ftctl_dr_runtime_remote_source_transition "${plan_owner_profile}"
+
+# A target-side Cross-Mold profile cannot name a remote source host from its
+# local host inventory. REMOTE_SOURCE still forbids a local scheduler resume.
+target_only_profile="${TMP}/plan-owner-target-only-profile.json"
+jq 'del(.workers.source)' "${plan_owner_profile}" > "${target_only_profile}"
+ftctl_dr_runtime_remote_source_transition "${target_only_profile}"
+
+# Missing site scope must never be inferred from transient worker identities.
+local_transition_profile="${TMP}/plan-owner-local-transition-profile.json"
+jq 'del(.request.schedulerTransitionScope)' "${plan_owner_profile}" > "${local_transition_profile}"
+! ftctl_dr_runtime_remote_source_transition "${local_transition_profile}"
+
 ftctl_dr_runtime_ensure_plan_dirs plan-owner
 plan_owner_run_path="$(ftctl_dr_runtime_run_path plan-owner test-run)"
 plan_owner_status_path="$(ftctl_dr_runtime_status_path plan-owner)"

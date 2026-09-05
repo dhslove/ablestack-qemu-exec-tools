@@ -1251,12 +1251,12 @@ ftctl_dr_runtime_default_restore_points_path() {
 ftctl_dr_runtime_remote_source_transition() {
   local profile_file="${1-}"
   [[ -n "${profile_file}" && -f "${profile_file}" ]] || return 1
+  # Cross-Mold target profiles intentionally do not carry a source host UUID.
+  # The Cloud-issued site transition scope is the authority boundary; worker
+  # placement remains a transient runtime concern resolved by the source Mold.
   jq -e '
     ((.direction // "") | ascii_upcase) == "KVM_TO_KVM"
     and ((.request.schedulerTransitionScope // "") | ascii_upcase) == "REMOTE_SOURCE"
-    and ((.workers.source // "") | length) > 0
-    and ((.workers.coordinator // "") | length) > 0
-    and (.workers.source != .workers.coordinator)
   ' "${profile_file}" >/dev/null 2>&1
 }
 
