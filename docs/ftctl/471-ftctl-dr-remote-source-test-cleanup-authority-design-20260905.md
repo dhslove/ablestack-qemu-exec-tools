@@ -31,3 +31,22 @@ source worker observation and with no `workers.source`. Both must recognize
 
 This change does not alter disk transfer, checkpoint sealing, failover, or
 failback data paths.
+
+## Operation creation boundary
+
+An operation status query can arrive after Cloud persists the Run but before
+FTCTL creates the Run state file. In that interval, dr-status --run must not
+copy the Plan status file's action, cycle error, worker identity, or terminal
+metadata into the operation response.
+
+FTCTL returns a minimal operation-scoped envelope:
+
+- result=run_not_found
+- status_scope=OPERATION
+- state=QUEUED, step=run-pending
+- run_exists=false, error_code=not_found
+- terminal_authoritative=false
+
+The response is a retry boundary, not an operation failure. Once the Run file
+exists, the normal operation state replaces it. A completed operation keeps
+using its Run journal, so this rule cannot hide a durable terminal failure.

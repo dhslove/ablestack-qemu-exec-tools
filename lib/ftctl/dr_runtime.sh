@@ -5059,6 +5059,16 @@ PY
   }
 
   [[ -n "${run}" ]] && status_scope="OPERATION" || status_scope="PLAN_AUTHORITY"
+  if [[ "${command}" == "dr-status" && "${status_scope}" == "OPERATION" && "${run_exists}" != "true" ]]; then
+    printf '{"command":"%s","result":"run_not_found","plan_uuid":"%s","status_scope":"OPERATION","run_uuid":"%s","action":"dr-status","state":"QUEUED","step":"run-pending","progress":0,"external_job_ref":"%s","runtime_exists":%s,"profile_exists":%s,"run_exists":false,"accepted":false,"terminal_authoritative":false,"error_code":"not_found","error_message":"","events_offset":%s,"events":[],"exit_code":0}\n' \
+      "$(ftctl__json_escape "${command}")" \
+      "$(ftctl__json_escape "${plan}")" \
+      "$(ftctl__json_escape "${run}")" \
+      "$(ftctl__json_escape "${run}")" \
+      "${runtime_exists}" "${profile_exists}" \
+      "$(ftctl_dr_runtime_events_offset "${plan}")"
+    return 0
+  fi
   printf '{"command":"%s","result":"%s"' \
     "$(ftctl__json_escape "${command}")" \
     "$(ftctl__json_escape "${result}")"

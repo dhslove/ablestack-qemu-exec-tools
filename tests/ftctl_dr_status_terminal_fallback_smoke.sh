@@ -65,4 +65,22 @@ jq -e '.state == "ERROR"
   and .status_payload_truncated == true
   and (.error_message | length) == 4096' <<<"${status_json}" >/dev/null
 
+rm -f "${RUN_PATH}"
+missing_run_status="$(bash "${ROOT}/bin/ablestack_vm_ftctl.sh" dr-status \
+  --config "${CONFIG}" --plan "${PLAN}" --run "new-operation-run" --json)"
+
+jq -e '.result == "run_not_found"
+  and .status_scope == "OPERATION"
+  and .run_uuid == "new-operation-run"
+  and .state == "QUEUED"
+  and .step == "run-pending"
+  and .run_exists == false
+  and .accepted == false
+  and .terminal_authoritative == false
+  and .error_code == "not_found"
+  and .error_message == ""
+  and .action == "dr-status"
+  and (.worker_state | not)
+  and (.cycle_state | not)' <<<"${missing_run_status}" >/dev/null
+
 echo "ftctl DR terminal status fallback smoke: PASS"
