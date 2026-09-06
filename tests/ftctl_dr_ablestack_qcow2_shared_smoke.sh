@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
+FTCTL_LIB_BASE="${ROOT}/lib"
 trap 'rm -rf "${TMP}"' EXIT
 
 ftctl_ensure_dir() { mkdir -p "$1"; }
@@ -144,6 +145,26 @@ ftctl_dr_ablestack_replication_cycle plan-qcow2 run-relocated \
   "${stale_source_profile}" 144 incremental >/dev/null
 [[ -f "${relocated_incremental_marker}" ]]
 [[ ! -f "${relocated_full_seed_marker}" ]]
+
+# A relocated or restarted worker may not have the /run baseline sidecar. The
+# persistent qcow2 bitmap is durable authority, so a successful bitmap check
+# must reconstruct the disposable marker without resetting the bitmap.
+relocated_baseline_map="${TMP}/canonical-relocated-baseline.json"
+jq --arg source "${TMP}/relocated-source-volume" \
+  '.mapping.disks[0].sourcePath=$source' "${profile}" > "${TMP}/profile-relocated-baseline.json"
+touch "${TMP}/relocated-source-volume"
+ftctl_dr_ablestack_canonicalize_profile "${TMP}/profile-relocated-baseline.json" "${relocated_baseline_map}"
+relocated_baseline_path="$(ftctl_dr_ablestack_qcow2_bitmap_baseline_path plan-qcow2 sda)"
+rm -f "${relocated_baseline_path}"
+python3() {
+  if [[ "${1-}" == *qcow2_bitmap_baseline.py ]]; then
+    return 0
+  fi
+  command python3 "$@"
+}
+ftctl_dr_ablestack_qcow2_source_baselines_ready plan-qcow2 "${relocated_baseline_map}"
+unset -f python3
+[[ "$(cat "${relocated_baseline_path}")" == "$(ftctl_dr_ablestack_qcow2_bitmap_name plan-qcow2 sda)" ]]
 
 ambiguous_source_canonical="${TMP}/canonical-ambiguous-source.json"
 cp "${stale_source_canonical}" "${ambiguous_source_canonical}"

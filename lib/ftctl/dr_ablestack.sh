@@ -1102,19 +1102,26 @@ PY
 }
 
 ftctl_dr_ablestack_qcow2_source_baselines_ready() {
-  local plan="${1-}" disk_map="${2-}" root="" disk_json device source_path bitmap baseline recorded
+  local plan="${1-}" disk_map="${2-}" root="" disk_json device source_path bitmap baseline recorded tmp
   ftctl_dr_ablestack_qcow2_source_root "${disk_map}" root || return 1
   while IFS= read -r disk_json; do
     device="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" device)"
     source_path="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" sourcePath)"
     bitmap="$(ftctl_dr_ablestack_qcow2_bitmap_name "${plan}" "${device}")"
     baseline="$(ftctl_dr_ablestack_qcow2_bitmap_baseline_path "${plan}" "${device}")"
-    recorded="$(head -n 1 "${baseline}" 2>/dev/null || true)"
-    [[ "${recorded}" == "${bitmap}" ]] || return 1
     python3 "${FTCTL_LIB_BASE}/ftctl/qcow2_bitmap_baseline.py" \
       --path "${source_path}" --storage-root "${root}" --bitmap "${bitmap}" \
       --granularity "${FTCTL_DR_QCOW2_BITMAP_GRANULARITY:-65536}" --check-only \
       >/dev/null 2>&1 || return 1
+    recorded="$(head -n 1 "${baseline}" 2>/dev/null || true)"
+    if [[ "${recorded}" != "${bitmap}" ]]; then
+      # The sidecar is worker-local cache. Rebuild it only after the qcow2
+      # persistent bitmap itself proves the durable baseline is valid.
+      ftctl_ensure_dir "$(dirname "${baseline}")" "0750"
+      tmp="${baseline}.tmp.$$"
+      printf '%s\n' "${bitmap}" > "${tmp}" || return 1
+      mv -f "${tmp}" "${baseline}" || return 1
+    fi
   done < <(ftctl_dr_ablestack_disk_rows "${disk_map}")
 }
 

@@ -267,6 +267,14 @@ Seed fallback is allowed only after provider evidence proves that the bitmap
 or baseline epoch is missing or invalid, or when the operator explicitly
 requests Full Resync.
 
+The persistent bitmap embedded in each qcow2 image is the durable baseline
+authority. A worker-local `baseline-*.bitmap` sidecar under `/run` is cache and
+may be absent after scheduler relocation or process restart. Offline sync must
+first validate the expected bitmap name, granularity, and flags from the qcow2
+metadata. Only after that validation succeeds may it atomically reconstruct
+the missing sidecar. A missing sidecar alone is never
+`DR_QCOW2_BASELINE_NOT_DURABLE` and must not reset or recreate the bitmap.
+
 Regression gates must exercise one and multiple disks in both modes: a running
 domain retains the existing QMP producer, while a stopped domain selects the
 offline producer. The same release must continue to pass the VMware-to-RBD and
