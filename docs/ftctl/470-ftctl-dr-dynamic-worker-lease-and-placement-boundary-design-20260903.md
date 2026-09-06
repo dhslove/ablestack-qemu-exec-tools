@@ -315,3 +315,30 @@ already-stopped path completes without QMP, domain absence without the explicit
 controller observation is rejected, and migrated-worker domain absence is not
 misclassified as offline. VMware-to-RBD and RBD-to-RBD provider behavior stays
 unchanged and remains in the shared lifecycle smoke gate.
+
+## Target Cutover Projection Profile Ownership
+
+Cross-Mold KVM Failover commits authority at both sites. The source commit
+acknowledges the Run-owned final checkpoint; the target commit records TARGET
+authority beside the materialized replica. These acknowledgements use the same
+Cloud commit envelope but do not share worker-local `/run` state.
+
+The target worker resolves its projection contract from the transient runtime
+profile when present, then from the Plan-owned redacted export profile under
+`/var/lib/ablestack-vm-ftctl/dr-target-exports/<plan>/profile.json`. The
+persisted profile remains valid after target exports are stopped and contains
+the direction, transition scope, target identity, and selected target worker
+needed to validate the commit. It must not contain credentials.
+
+A command whose role is `target` must never fall through to the source commit
+implementation. If neither profile proves a Cloud-managed KVM target
+transition, FTCTL returns `DR_CUTOVER_TARGET_ROLE_INVALID`. It does not return a
+misleading source `DR_CUTOVER_SESSION_NOT_FOUND` and does not mutate authority.
+The target commit owns creation of its Plan-scoped `cutover-commits` directory;
+an older Plan is not required to have created that directory before the target
+projection, and failure to create it fails the commit before acknowledgement.
+
+Regression coverage executes target commit with no transient runtime profile,
+using only the Plan-owned export profile, and proves terminal TARGET authority
+plus an acknowledged commit journal. The shared VMware-to-RBD, RBD-to-RBD, and
+SharedMountPoint lifecycle gates remain unchanged.

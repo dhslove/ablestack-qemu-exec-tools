@@ -293,6 +293,42 @@ target_only_profile="${TMP}/plan-owner-target-only-profile.json"
 jq 'del(.workers.source)' "${plan_owner_profile}" > "${target_only_profile}"
 ftctl_dr_runtime_remote_source_transition "${target_only_profile}"
 
+# Target-side cutover authority uses the Plan-owned export profile when the
+# transient runtime profile is absent after the export is stopped.
+target_commit_plan="plan-target-cutover-commit"
+target_commit_run="run-target-cutover-commit"
+target_commit_session="${target_commit_plan}:${target_commit_run}"
+target_commit_cloud_session="cloud-target-cutover-session"
+target_commit_attempt="target-cutover-attempt"
+target_commit_manifest="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+ftctl_dr_ablestack_export_persist_intent "${target_commit_plan}" "${target_commit_run}" RUNNING \
+  "${target_only_profile}" "${persistent_manifest}"
+[[ ! -e "$(ftctl_dr_runtime_profile_path "${target_commit_plan}")" ]]
+resolved_target_commit_profile="$(ftctl_dr_runtime_cloud_target_profile_path "${target_commit_plan}")"
+[[ "${resolved_target_commit_profile}" == "$(ftctl_dr_ablestack_export_persist_profile_path "${target_commit_plan}")" ]]
+rm -rf "$(ftctl_dr_runtime_cutover_commit_dir "${target_commit_plan}")"
+[[ ! -d "$(ftctl_dr_runtime_cutover_commit_dir "${target_commit_plan}")" ]]
+ftctl_dr_scheduler_control_set() { return 0; }
+ftctl_dr_scheduler_systemd_available() { return 1; }
+target_commit_sha="$(ftctl_dr_runtime_cutover_commit_envelope_sha256 \
+  DR_CUTOVER_COMMIT_V2 "${target_commit_plan}" "${target_commit_run}" \
+  "${target_commit_session}" "${target_commit_cloud_session}" 12 "${target_commit_manifest}" \
+  400 "${target_commit_attempt}" 283 target-vm-uuid POWERED_ON POWER_STATE_VALIDATED \
+  VERIFIED POWERED_OFF)"
+ftctl_dr_runtime_cutover_commit "${target_commit_plan}" "${target_commit_run}" \
+  "${target_commit_session}" 12 400 POWERED_ON POWER_STATE_VALIDATED 1 \
+  DR_CUTOVER_COMMIT_V2 "${target_commit_cloud_session}" "${target_commit_manifest}" \
+  "${target_commit_attempt}" "${target_commit_sha}" 283 target-vm-uuid VERIFIED POWERED_OFF target \
+  > "${TMP}/target-cutover-commit.json"
+jq -e '.result == "ok" and .state == "FAILED_OVER" and .active_side == "TARGET"' \
+  "${TMP}/target-cutover-commit.json" >/dev/null
+target_commit_run_path="$(ftctl_dr_runtime_run_path "${target_commit_plan}" "${target_commit_run}")"
+[[ "$(ftctl_dr_runtime_state_get_from_path "${target_commit_run_path}" role)" == "target" ]]
+[[ "$(ftctl_dr_runtime_state_get_from_path "${target_commit_run_path}" terminal_authoritative)" == "true" ]]
+target_commit_journal="$(ftctl_dr_runtime_cutover_commit_state_path "${target_commit_plan}" "${target_commit_run}")"
+[[ "$(ftctl_state_read_kv "${target_commit_journal}" phase)" == "ACKNOWLEDGED" ]]
+rm -rf "$(ftctl_dr_ablestack_export_persist_dir "${target_commit_plan}")"
+
 # Missing site scope must never be inferred from transient worker identities.
 local_transition_profile="${TMP}/plan-owner-local-transition-profile.json"
 jq 'del(.request.schedulerTransitionScope)' "${plan_owner_profile}" > "${local_transition_profile}"

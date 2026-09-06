@@ -1278,6 +1278,26 @@ ftctl_dr_runtime_cloud_target_transition() {
     || ftctl_dr_runtime_target_disaster_transition "${profile_file}"
 }
 
+ftctl_dr_runtime_cloud_target_profile_path() {
+  local plan="${1-}" candidate
+  [[ -n "${plan}" ]] || return 1
+
+  candidate="$(ftctl_dr_runtime_profile_path "${plan}")"
+  if ftctl_dr_runtime_cloud_target_transition "${candidate}"; then
+    printf '%s\n' "${candidate}"
+    return 0
+  fi
+
+  if command -v ftctl_dr_ablestack_export_persist_profile_path >/dev/null 2>&1; then
+    candidate="$(ftctl_dr_ablestack_export_persist_profile_path "${plan}")"
+    if ftctl_dr_runtime_cloud_target_transition "${candidate}"; then
+      printf '%s\n' "${candidate}"
+      return 0
+    fi
+  fi
+  return 1
+}
+
 ftctl_dr_runtime_worker_role_path() {
   local plan="${1-}"
   printf '%s/worker-role.state\n' "$(ftctl_dr_runtime_plan_dir "${plan}")"
@@ -6598,10 +6618,13 @@ ftctl_dr_runtime_cutover_commit_target_projection() {
   local contract_version="${9-}" cloud_session_id="${10-}" manifest_sha256="${11-}"
   local commit_attempt_id="${12-}" commit_envelope_sha256="${13-}" target_vm_id="${14-}"
   local target_external_ref="${15-}" source_fence_state="${16-}" source_power_state="${17-}"
-  local profile_file run_path status_path commit_path now profile_target_vm_id profile_target_external_ref
+  local profile_file="${18-}"
+  local run_path status_path commit_path now profile_target_vm_id profile_target_external_ref
   local journal_attempt journal_sha journal_cloud_session reverse_baseline_state unit
 
-  profile_file="$(ftctl_dr_runtime_profile_path "${plan}")"
+  if [[ -z "${profile_file}" ]]; then
+    profile_file="$(ftctl_dr_runtime_cloud_target_profile_path "${plan}" 2>/dev/null || true)"
+  fi
   ftctl_dr_runtime_cloud_target_transition "${profile_file}" || {
     [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_error_json "dr-cutover-commit" "${plan}" "${run}" \
       "DR_CUTOVER_TARGET_ROLE_INVALID" "target authority projection requires a Cloud-managed KVM cutover profile" 79
@@ -6629,6 +6652,7 @@ ftctl_dr_runtime_cutover_commit_target_projection() {
     fi
   fi
   commit_path="$(ftctl_dr_runtime_cutover_commit_state_path "${plan}" "${run}")"
+  ftctl_ensure_dir "$(dirname "${commit_path}")" "0755" || return 2
   if [[ -f "${commit_path}" ]]; then
     journal_attempt="$(ftctl_state_read_kv "${commit_path}" "commit_attempt_id" 2>/dev/null || true)"
     journal_sha="$(ftctl_state_read_kv "${commit_path}" "commit_envelope_sha256" 2>/dev/null || true)"
@@ -6705,7 +6729,7 @@ ftctl_dr_runtime_cutover_commit() {
   local target_external_ref="${15-}" source_fence_state="${16-}" source_power_state="${17-}" role="${18-}"
   local run_path status_path active_path session_path commit_path state current_session current_checkpoint current_generation now
   local current_manifest current_target_vm_id current_target_external_ref current_source_fence current_source_power
-  local calculated_envelope_sha256 journal_attempt journal_sha journal_cloud_session journal_phase
+  local calculated_envelope_sha256 journal_attempt journal_sha journal_cloud_session journal_phase target_profile_file
   local v2="false"
 
   ftctl_dr_runtime_require_plan "${plan}" || return 2
@@ -6764,12 +6788,19 @@ ftctl_dr_runtime_cutover_commit() {
       ;;
   esac
 
-  if [[ "${role,,}" == "target" ]] && ftctl_dr_runtime_cloud_target_transition "$(ftctl_dr_runtime_profile_path "${plan}")"; then
+  if [[ "${role,,}" == "target" ]]; then
+    target_profile_file="$(ftctl_dr_runtime_cloud_target_profile_path "${plan}" 2>/dev/null || true)"
+    if [[ -z "${target_profile_file}" ]]; then
+      [[ "${json}" == "1" ]] && ftctl_dr_runtime_emit_error_json "dr-cutover-commit" "${plan}" "${run}" \
+        "DR_CUTOVER_TARGET_ROLE_INVALID" "target authority projection requires a Plan-owned target profile" 79
+      return 79
+    fi
     ftctl_dr_runtime_cutover_commit_target_projection "${plan}" "${run}" "${session_id}" \
       "${checkpoint_sequence}" "${authority_generation}" "${target_power_state}" \
       "${boot_validation_state}" "${json}" "${contract_version}" "${cloud_session_id}" \
       "${manifest_sha256}" "${commit_attempt_id}" "${commit_envelope_sha256}" \
-      "${target_vm_id}" "${target_external_ref}" "${source_fence_state}" "${source_power_state}"
+      "${target_vm_id}" "${target_external_ref}" "${source_fence_state}" "${source_power_state}" \
+      "${target_profile_file}"
     return $?
   fi
 
