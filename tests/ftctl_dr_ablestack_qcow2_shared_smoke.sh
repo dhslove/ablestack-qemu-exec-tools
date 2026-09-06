@@ -123,6 +123,28 @@ ftctl_dr_ablestack_site_agent_incremental_once plan-qcow2 run-incremental-dispat
   "${TMP}/incremental-manifest.json" "${TMP}/incremental-checkpoint.json" 91
 [[ -f "${incremental_dispatch_marker}" ]]
 
+# A newly leased worker has no worker-local canonical disk map. Incremental
+# dispatch must rebuild it from the recovery profile before transport
+# selection instead of silently promoting the cycle to Full Seed.
+relocated_dispatch_map="$(ftctl_dr_ablestack_disk_map_path plan-qcow2)"
+relocated_incremental_marker="${TMP}/relocated-incremental-dispatched"
+relocated_full_seed_marker="${TMP}/relocated-full-seed-dispatched"
+rm -f "${relocated_dispatch_map}" "${relocated_incremental_marker}" "${relocated_full_seed_marker}"
+ftctl_dr_ablestack_site_agent_transport_load() {
+  jq -e '.transport.mode == "site-agent-nbd"' "$1" >/dev/null
+}
+ftctl_dr_ablestack_qcow2_incremental_once() {
+  jq -e '.transport.mode == "site-agent-nbd"' "$4" >/dev/null
+  : > "${relocated_incremental_marker}"
+}
+ftctl_dr_ablestack_full_seed_once() {
+  : > "${relocated_full_seed_marker}"
+}
+ftctl_dr_ablestack_replication_cycle plan-qcow2 run-relocated \
+  "${stale_source_profile}" 144 incremental >/dev/null
+[[ -f "${relocated_incremental_marker}" ]]
+[[ ! -f "${relocated_full_seed_marker}" ]]
+
 ambiguous_source_canonical="${TMP}/canonical-ambiguous-source.json"
 cp "${stale_source_canonical}" "${ambiguous_source_canonical}"
 jq --arg stale "/mnt/glue-gfs/clone/overlay/${live_volume_uuid}-old-overlay" \

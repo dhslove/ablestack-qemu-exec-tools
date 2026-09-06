@@ -2690,6 +2690,12 @@ ftctl_dr_ablestack_replication_cycle() {
   manifest_path="$(ftctl_dr_ablestack_manifest_path "${plan}" "${cycle_run}")"
   checkpoint_path="$(ftctl_dr_ablestack_checkpoint_path "${plan}" "${cycle_run}")"
   normalized_cycle_type="$(ftctl_dr_ablestack_normalize_cycle_type "${cycle_type}")"
+  if ftctl_dr_ablestack_cycle_incremental_capable "${normalized_cycle_type}"; then
+    # Worker-local disk maps are disposable placement cache. Rebuild the map
+    # from the recovery profile before choosing the post-relocation transport.
+    ftctl_dr_ablestack_prepare_cycle_disk_map "${plan}" "${profile_file}" "${disk_map}" \
+      "${normalized_cycle_type}" || return $?
+  fi
   if ftctl_dr_ablestack_cycle_incremental_capable "${normalized_cycle_type}" &&
      { ftctl_dr_ablestack_site_agent_transport_load "${disk_map}" 2>/dev/null ||
        ftctl_dr_ablestack_remote_transport_load "${disk_map}" 2>/dev/null; }; then

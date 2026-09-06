@@ -251,6 +251,22 @@ The provider decision matrix is therefore:
 Power state selects only the qcow2 bitmap access adapter. It is not a transfer
 mode or capability decision for any provider.
 
+## Relocated SharedMountPoint Incremental Transport Ordering
+
+The worker-local canonical disk map is disposable placement cache. It is not
+durable replication authority and may legitimately be absent after live
+migration selects a different source worker. Before an incremental-capable
+Cycle chooses its transport, FTCTL must reconstruct the canonical disk map
+from the recovery profile, refresh the current Cloud locator, and rebind the
+live QMP source when the domain is running.
+
+A missing worker-local map alone must never promote a requested incremental
+Cycle to Full Seed. The first Cycle after relocation must remain
+`CBT_INCREMENTAL` or `NO_CHANGE` when the durable bitmap epoch is valid. Full
+Seed fallback is allowed only after provider evidence proves that the bitmap
+or baseline epoch is missing or invalid, or when the operator explicitly
+requests Full Resync.
+
 Regression gates must exercise one and multiple disks in both modes: a running
 domain retains the existing QMP producer, while a stopped domain selects the
 offline producer. The same release must continue to pass the VMware-to-RBD and
