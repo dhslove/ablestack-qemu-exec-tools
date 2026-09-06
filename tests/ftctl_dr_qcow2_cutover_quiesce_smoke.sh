@@ -43,11 +43,13 @@ PY
 ftctl_dr_runtime_path_set() { ftctl_state_set_path "$@"; }
 
 QMP_STUB_STATE=running
+QMP_COMMAND_COUNT=0
 ftctl_cmd_run() {
   local timeout="$1" out_name="$2" err_name="$3" rc_name="$4" payload
   : "${timeout}"
   shift 5
   payload="${*: -1}"
+  QMP_COMMAND_COUNT=$((QMP_COMMAND_COUNT + 1))
   case "${payload}" in
     *query-status*) printf -v "${out_name}" '{"return":{"status":"%s"}}' "${QMP_STUB_STATE}" ;;
     *'"execute":"stop"'*) QMP_STUB_STATE=paused; printf -v "${out_name}" '%s' '{"return":{}}' ;;
@@ -125,6 +127,56 @@ mv -f "${FROZEN_MAP}.good" "${FROZEN_MAP}"
 ftctl_dr_ablestack_cutover_quiesce_release "${PLAN}" "${RUN}" "${RUN_PATH}" "${STATUS_PATH}"
 [[ "${QMP_STUB_STATE}" == "running" ]]
 [[ "$(ftctl_state_read_kv "${QUIESCE_PATH}" state)" == "RELEASED" ]]
+
+# An explicitly observed stopped source is already writer-quiesced. It must
+# freeze and validate the whole disk set without using QMP on a storage worker.
+OFFLINE_PLAN=plan-qcow2-cutover-offline
+OFFLINE_RUN=run-qcow2-cutover-offline
+OFFLINE_PROFILE="${TMP}/offline-profile.json"
+OFFLINE_RUN_PATH="${TMP}/offline-run.state"
+OFFLINE_STATUS_PATH="${TMP}/offline-status.state"
+jq --arg plan "${OFFLINE_PLAN}" --arg run "${OFFLINE_RUN}" \
+  '.planUuid=$plan
+   | .request.sourceRuntimeQuiesceMode="SOURCE_ALREADY_STOPPED"
+   | .request.sourceRuntimeObservedPowerState="POWERED_OFF"
+   | .request.cutoverRunUuid=$run' "${PROFILE}" > "${OFFLINE_PROFILE}"
+ftctl_dr_ablestack_rebind_live_qcow2_sources() {
+  local plan="$1" map="$2" temporary
+  : "${plan}"
+  temporary="${map}.rebound"
+  jq --arg live "${LIVE_PATH}" '.disks[0].sourcePath=$live | .disks[0].sourceFormat="qcow2"' \
+    "${map}" > "${temporary}"
+  mv -f "${temporary}" "${map}"
+}
+baseline_validation_count=0
+ftctl_dr_ablestack_qcow2_source_baselines_ready() {
+  baseline_validation_count=$((baseline_validation_count + 1))
+}
+ftctl_state_write_kv_all "${OFFLINE_RUN_PATH}" "state=RUNNING"
+qmp_before="${QMP_COMMAND_COUNT}"
+ftctl_dr_ablestack_cutover_quiesce_begin "${OFFLINE_PLAN}" "${OFFLINE_RUN}" \
+  "${OFFLINE_PROFILE}" "${OFFLINE_RUN_PATH}" "${OFFLINE_STATUS_PATH}"
+OFFLINE_QUIESCE_PATH="$(ftctl_dr_ablestack_cutover_quiesce_path "${OFFLINE_PLAN}" "${OFFLINE_RUN}")"
+[[ "$(ftctl_state_read_kv "${OFFLINE_QUIESCE_PATH}" state)" == "OFFLINE" ]]
+[[ "$(ftctl_state_read_kv "${OFFLINE_QUIESCE_PATH}" mode)" == "SOURCE_ALREADY_STOPPED" ]]
+[[ "$(ftctl_state_read_kv "${OFFLINE_RUN_PATH}" source_power_state)" == "POWERED_OFF" ]]
+[[ "${QMP_COMMAND_COUNT}" == "${qmp_before}" ]]
+OFFLINE_FINAL_MAP="${TMP}/offline-final-map.json"
+ftctl_dr_ablestack_prepare_cycle_disk_map "${OFFLINE_PLAN}" "${OFFLINE_PROFILE}" \
+  "${OFFLINE_FINAL_MAP}" FAILOVER_FINAL
+[[ "${baseline_validation_count}" == "2" ]]
+[[ "${QMP_COMMAND_COUNT}" == "${qmp_before}" ]]
+ftctl_dr_ablestack_cutover_quiesce_release "${OFFLINE_PLAN}" "${OFFLINE_RUN}" \
+  "${OFFLINE_RUN_PATH}" "${OFFLINE_STATUS_PATH}"
+[[ "${QMP_COMMAND_COUNT}" == "${qmp_before}" ]]
+
+# Domain absence or a stale worker must never be enough to select offline mode.
+jq 'del(.request.sourceRuntimeObservedPowerState)' "${OFFLINE_PROFILE}" > "${TMP}/unproven-offline.json"
+if ftctl_dr_ablestack_cutover_quiesce_begin "unproven-plan" "unproven-run" \
+    "${TMP}/unproven-offline.json" "${TMP}/unproven-run.state" "${TMP}/unproven-status.state"; then
+  echo "[ERR] unproven stopped source was accepted as offline" >&2
+  exit 1
+fi
 
 # Existing provider contracts do not opt in implicitly.
 jq 'del(.request.sourceRuntimeQuiesceRequired,.request.sourceRuntimeQuiesceMode,.request.cutoverRunUuid)' \

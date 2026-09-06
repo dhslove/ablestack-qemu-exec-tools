@@ -279,3 +279,39 @@ Regression gates must exercise one and multiple disks in both modes: a running
 domain retains the existing QMP producer, while a stopped domain selects the
 offline producer. The same release must continue to pass the VMware-to-RBD and
 RBD-to-RBD lifecycle suites before deployment.
+
+## Planned Failover From An Already Stopped File Source
+
+A planned SharedMountPoint qcow2 Failover has two valid source-quiesce modes.
+`QMP_STOP` remains the unchanged path for a running source domain. When the
+controller reads the source VM as `POWERED_OFF` immediately before dispatch,
+it may instead request `SOURCE_ALREADY_STOPPED` and include that observation in
+both the request and recovery profile.
+
+FTCTL must never infer `SOURCE_ALREADY_STOPPED` from a missing libvirt domain or
+failed QMP lookup. Those conditions can also mean that the VM migrated or that
+the storage worker is not the current VM host. The offline mode is accepted
+only when the controller supplied `sourceRuntimeObservedPowerState=POWERED_OFF`.
+FTCTL then refreshes the command-time disk map, validates the complete qcow2
+disk set and every persistent bitmap baseline, and atomically freezes the map
+under the Failover Run UUID. It performs no QMP `stop` or `cont` operation.
+
+The resulting immutable evidence is:
+
+* `source_runtime_quiesce_state=OFFLINE`
+* `source_runtime_quiesce_mode=SOURCE_ALREADY_STOPPED`
+* a Run-owned `cutover_source_disk_map_sha256`
+* `source_power_state=POWERED_OFF`
+
+Cloud may accept either this evidence or the existing `PAUSED/QMP_STOP`
+evidence as cutover-ready. Before target promotion, Cloud rechecks source power
+through the source Mold and requires `POWERED_OFF`; a changed or unknown state
+fails the transition instead of promoting from a questionable checkpoint.
+Release of an offline quiesce lease only terminalizes the lease and must not
+start the source VM.
+
+Regression coverage must prove that the running QMP path is unchanged, the
+already-stopped path completes without QMP, domain absence without the explicit
+controller observation is rejected, and migrated-worker domain absence is not
+misclassified as offline. VMware-to-RBD and RBD-to-RBD provider behavior stays
+unchanged and remains in the shared lifecycle smoke gate.

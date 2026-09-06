@@ -1693,29 +1693,41 @@ ftctl_dr_ablestack_cutover_quiesce_required() {
   local profile_file="${1-}"
   [[ -s "${profile_file}" ]] || return 1
   jq -e '.request.sourceRuntimeQuiesceRequired == true
-      and (.request.sourceRuntimeQuiesceMode // "") == "QMP_STOP"
+      and ((.request.sourceRuntimeQuiesceMode // "") == "QMP_STOP"
+        or (.request.sourceRuntimeQuiesceMode // "") == "SOURCE_ALREADY_STOPPED")
       and ((.request.cutoverRunUuid // "") | length > 0)' \
     "${profile_file}" >/dev/null 2>&1
 }
 
 ftctl_dr_ablestack_cutover_quiesce_begin() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" run_path="${4-}" status_path="${5-}"
-  local disk_map frozen_map quiesce_path owner state vm_name qmp_state="" digest tmp now
+  local disk_map frozen_map quiesce_path owner state mode vm_name qmp_state="" digest tmp now
+  local requested_mode observed_power initial_state
   [[ -n "${plan}" && -n "${run}" && -s "${profile_file}" ]] || return 2
   ftctl_dr_ablestack_cutover_quiesce_required "${profile_file}" || return 0
 
   disk_map="$(ftctl_dr_ablestack_disk_map_path "${plan}")"
   frozen_map="$(ftctl_dr_ablestack_cutover_source_map_path "${plan}" "${run}")"
   quiesce_path="$(ftctl_dr_ablestack_cutover_quiesce_path "${plan}" "${run}")"
+  requested_mode="$(jq -r '.request.sourceRuntimeQuiesceMode // ""' "${profile_file}" 2>/dev/null || true)"
+  observed_power="$(jq -r '.request.sourceRuntimeObservedPowerState // ""' "${profile_file}" 2>/dev/null || true)"
+  if [[ "${requested_mode}" == "SOURCE_ALREADY_STOPPED" && "${observed_power}" != "POWERED_OFF" ]]; then
+    return 108
+  fi
   ftctl_ensure_dir "$(dirname "${frozen_map}")" "0755"
 
   if [[ -s "${quiesce_path}" ]]; then
     owner="$(ftctl_state_read_kv "${quiesce_path}" owner_run 2>/dev/null || true)"
     state="$(ftctl_state_read_kv "${quiesce_path}" state 2>/dev/null || true)"
+    mode="$(ftctl_state_read_kv "${quiesce_path}" mode 2>/dev/null || true)"
     [[ -z "${owner}" || "${owner}" == "${run}" ]] || return 79
     vm_name="$(ftctl_state_read_kv "${quiesce_path}" vm_name 2>/dev/null || true)"
     if [[ "${state}" == "PAUSED" ]] && ftctl_dr_ablestack_qmp_status "${vm_name}" qmp_state \
         && [[ "${qmp_state}" == "paused" ]]; then
+      return 0
+    fi
+    if [[ "${state}" == "OFFLINE" && "${mode}" == "SOURCE_ALREADY_STOPPED" \
+        && "${requested_mode}" == "SOURCE_ALREADY_STOPPED" && "${observed_power}" == "POWERED_OFF" ]]; then
       return 0
     fi
   fi
@@ -1724,10 +1736,17 @@ ftctl_dr_ablestack_cutover_quiesce_begin() {
   ftctl_dr_ablestack_qcow2_push_provider "${disk_map}" || return 90
   vm_name="$(ftctl_dr_ablestack_json_field "${disk_map}" source.instanceName 2>/dev/null || true)"
   [[ -n "${vm_name}" ]] || return 32
-  ftctl_dr_ablestack_qmp_status "${vm_name}" qmp_state || return $?
-  [[ "${qmp_state}" == "running" || "${qmp_state}" == "paused" ]] || return 103
-  if [[ "${qmp_state}" == "paused" && ! -s "${quiesce_path}" ]]; then
-    return 103
+  if [[ "${requested_mode}" == "SOURCE_ALREADY_STOPPED" ]]; then
+    ftctl_dr_ablestack_qcow2_source_baselines_ready "${plan}" "${disk_map}" || return 109
+    qmp_state="powered-off-observed"
+    initial_state="OFFLINE"
+  else
+    ftctl_dr_ablestack_qmp_status "${vm_name}" qmp_state || return $?
+    [[ "${qmp_state}" == "running" || "${qmp_state}" == "paused" ]] || return 103
+    if [[ "${qmp_state}" == "paused" && ! -s "${quiesce_path}" ]]; then
+      return 103
+    fi
+    initial_state="QUIESCING"
   fi
 
   tmp="${frozen_map}.tmp.$$"
@@ -1737,10 +1756,27 @@ ftctl_dr_ablestack_cutover_quiesce_begin() {
   [[ "${digest}" =~ ^[0-9a-f]{64}$ ]] || return 2
   now="$(ftctl_now_iso8601)"
   ftctl_state_write_kv_all "${quiesce_path}" \
-    "plan=${plan}" "owner_run=${run}" "state=QUIESCING" "mode=QMP_STOP" \
+    "plan=${plan}" "owner_run=${run}" "state=${initial_state}" "mode=${requested_mode}" \
     "vm_name=${vm_name}" "previous_status=${qmp_state}" \
     "frozen_map_path=${frozen_map}" "frozen_map_sha256=${digest}" \
     "updated_at=${now}" || return 2
+
+  if [[ "${requested_mode}" == "SOURCE_ALREADY_STOPPED" ]]; then
+    if [[ -n "${run_path}" ]]; then
+      ftctl_dr_runtime_path_set "${run_path}" \
+        "source_runtime_quiesce_state=OFFLINE" \
+        "source_runtime_quiesce_mode=SOURCE_ALREADY_STOPPED" \
+        "source_runtime_quiesce_owner_run=${run}" \
+        "source_power_state=POWERED_OFF" \
+        "cutover_source_disk_map_path=${frozen_map}" \
+        "cutover_source_disk_map_sha256=${digest}" \
+        "source_runtime_quiesced_at=${now}" || true
+      [[ -n "${status_path}" ]] && cp -f "${run_path}" "${status_path}" 2>/dev/null || true
+    fi
+    ftctl_log_event "dr-runtime" "dr.ablestack.source_quiesce" "ok" "" "" \
+      "plan=${plan} run=${run} vm=${vm_name} mode=SOURCE_ALREADY_STOPPED map=${frozen_map} sha256=${digest}"
+    return 0
+  fi
 
   if [[ "${qmp_state}" != "paused" ]]; then
     ftctl_dr_ablestack_qmp_lifecycle "${vm_name}" stop || return $?
@@ -1769,15 +1805,18 @@ ftctl_dr_ablestack_cutover_quiesce_begin() {
 
 ftctl_dr_ablestack_cutover_quiesce_release() {
   local plan="${1-}" run="${2-}" run_path="${3-}" status_path="${4-}"
-  local quiesce_path owner state vm_name qmp_state="" now
+  local quiesce_path owner state mode vm_name qmp_state="" now
   [[ -n "${plan}" && -n "${run}" ]] || return 2
   quiesce_path="$(ftctl_dr_ablestack_cutover_quiesce_path "${plan}" "${run}")"
   [[ -s "${quiesce_path}" ]] || return 0
   owner="$(ftctl_state_read_kv "${quiesce_path}" owner_run 2>/dev/null || true)"
   [[ -z "${owner}" || "${owner}" == "${run}" ]] || return 79
   state="$(ftctl_state_read_kv "${quiesce_path}" state 2>/dev/null || true)"
+  mode="$(ftctl_state_read_kv "${quiesce_path}" mode 2>/dev/null || true)"
   vm_name="$(ftctl_state_read_kv "${quiesce_path}" vm_name 2>/dev/null || true)"
-  if ftctl_dr_ablestack_qmp_status "${vm_name}" qmp_state; then
+  if [[ "${mode}" == "SOURCE_ALREADY_STOPPED" ]]; then
+    qmp_state="powered-off"
+  elif ftctl_dr_ablestack_qmp_status "${vm_name}" qmp_state; then
     if [[ "${qmp_state}" == "paused" ]]; then
       ftctl_dr_ablestack_qmp_lifecycle "${vm_name}" cont || return $?
       ftctl_dr_ablestack_wait_qmp_status "${vm_name}" running || return $?
@@ -1801,7 +1840,7 @@ ftctl_dr_ablestack_cutover_quiesce_release() {
 
 ftctl_dr_ablestack_load_frozen_cutover_map() {
   local plan="${1-}" profile_file="${2-}" disk_map="${3-}"
-  local owner frozen_map quiesce_path state recorded_digest actual_digest vm_name qmp_state="" tmp
+  local owner frozen_map quiesce_path state mode observed_power recorded_digest actual_digest vm_name qmp_state="" tmp
   owner="$(jq -r '.request.cutoverRunUuid // ""' "${profile_file}" 2>/dev/null || true)"
   [[ -n "${owner}" ]] || return 105
   frozen_map="$(ftctl_dr_ablestack_cutover_source_map_path "${plan}" "${owner}")"
@@ -1809,14 +1848,22 @@ ftctl_dr_ablestack_load_frozen_cutover_map() {
   [[ -s "${frozen_map}" && -s "${quiesce_path}" ]] || return 105
   [[ "$(ftctl_state_read_kv "${quiesce_path}" owner_run 2>/dev/null || true)" == "${owner}" ]] || return 79
   state="$(ftctl_state_read_kv "${quiesce_path}" state 2>/dev/null || true)"
-  [[ "${state}" == "PAUSED" ]] || return 106
+  mode="$(ftctl_state_read_kv "${quiesce_path}" mode 2>/dev/null || true)"
+  observed_power="$(jq -r '.request.sourceRuntimeObservedPowerState // ""' "${profile_file}" 2>/dev/null || true)"
+  [[ "${state}" == "PAUSED" || "${state}" == "OFFLINE" ]] || return 106
   recorded_digest="$(ftctl_state_read_kv "${quiesce_path}" frozen_map_sha256 2>/dev/null || true)"
   actual_digest="$(sha256sum "${frozen_map}" | awk '{print $1}')"
   [[ "${recorded_digest}" =~ ^[0-9a-f]{64}$ && "${actual_digest}" == "${recorded_digest}" ]] || return 107
   ftctl_dr_ablestack_qcow2_push_provider "${frozen_map}" || return 90
-  vm_name="$(ftctl_state_read_kv "${quiesce_path}" vm_name 2>/dev/null || true)"
-  ftctl_dr_ablestack_qmp_status "${vm_name}" qmp_state || return 101
-  [[ "${qmp_state}" == "paused" ]] || return 106
+  if [[ "${state}" == "OFFLINE" ]]; then
+    [[ "${mode}" == "SOURCE_ALREADY_STOPPED" && "${observed_power}" == "POWERED_OFF" ]] || return 108
+    ftctl_dr_ablestack_qcow2_source_baselines_ready "${plan}" "${frozen_map}" || return 109
+  else
+    [[ "${mode}" == "QMP_STOP" ]] || return 106
+    vm_name="$(ftctl_state_read_kv "${quiesce_path}" vm_name 2>/dev/null || true)"
+    ftctl_dr_ablestack_qmp_status "${vm_name}" qmp_state || return 101
+    [[ "${qmp_state}" == "paused" ]] || return 106
+  fi
   tmp="${disk_map}.frozen.$$"
   cp -f "${frozen_map}" "${tmp}" || return 2
   mv -f "${tmp}" "${disk_map}" || return 2
