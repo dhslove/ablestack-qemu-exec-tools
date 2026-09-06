@@ -280,6 +280,29 @@ domain retains the existing QMP producer, while a stopped domain selects the
 offline producer. The same release must continue to pass the VMware-to-RBD and
 RBD-to-RBD lifecycle suites before deployment.
 
+Scheduler relocation is a Plan-scoped control operation. Every `dr-*` command
+must use Plan transition/Cycle locks or remain read-only; no DR command may
+acquire the legacy global FT/HA lock. Otherwise an unrelated long-running
+scheduler on the newly selected worker can block relocation until Cloud reports
+`DR_ENGINE_BUSY_TIMEOUT`. Regression tests exercise all known scheduler control
+commands plus an unknown future `dr-*` command so adding a command cannot
+silently reintroduce host-global serialization.
+
+Plan-owned NBD export transitions have a separate per-Plan serialization
+boundary. `dr-target-export-start`, `dr-target-export-stop`, and the periodic
+export reconciler must never create or rewrite the same export manifest at the
+same time. A transition holds the Plan export lock from the first `STARTING`
+intent through publication of the complete manifest. The reconciler waits for
+that transition and then validates the published set instead of rebuilding a
+partially visible set. For an N-disk Plan, a successful response contains
+exactly N unique device exports. A missing or duplicate device is a failed
+transport contract and must not enter a Failback transfer profile.
+
+This lock is independent of the legacy FT/HA host-global lock and therefore
+does not serialize unrelated DR Plans. The regression gate runs a multi-disk
+start concurrently with reconciliation and requires one complete, ordered
+manifest response.
+
 ## Planned Failover From An Already Stopped File Source
 
 A planned SharedMountPoint qcow2 Failover has two valid source-quiesce modes.

@@ -220,6 +220,23 @@ else
   [[ "$?" == "2" ]]
 fi
 
+# A timer reconciliation may start while a site Agent is publishing a
+# multi-disk export set. Both operations must serialize on the Plan lock so the
+# response and persisted manifest can never expose a partial set.
+lock_trace="${TMP}/target-export-lock.trace"
+ftctl_dr_ablestack_target_export_start_unlocked() {
+  printf 'start:%s\n' "$2" >> "${lock_trace}"
+  sleep 0.2
+  printf 'end:%s\n' "$2" >> "${lock_trace}"
+}
+ftctl_dr_ablestack_target_export_start plan-lock run-agent "${site_agent_profile}" 0 &
+lock_pid=$!
+sleep 0.05
+ftctl_dr_ablestack_target_export_start plan-lock run-reconcile "${site_agent_profile}" 0
+wait "${lock_pid}"
+[[ "$(tr '\n' ' ' < "${lock_trace}")" == \
+  "start:run-agent end:run-agent start:run-reconcile end:run-reconcile " ]]
+
 ftctl_dr_ablestack_local_port_in_use() { return 1; }
 selected_port=""
 ftctl_dr_ablestack_target_export_pick_port plan-persist sda selected_port

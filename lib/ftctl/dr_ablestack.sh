@@ -896,7 +896,21 @@ ftctl_dr_ablestack_target_export_resolve_profile() {
   printf -v "${out_var}" '%s' "${candidate}"
 }
 
-ftctl_dr_ablestack_target_export_start() {
+ftctl_dr_ablestack_target_export_lock_path() {
+  local plan="${1-}"
+  printf '%s/.transition.lock\n' "$(ftctl_dr_ablestack_export_persist_dir "${plan}")"
+}
+
+ftctl_dr_ablestack_target_export_start() (
+  local plan="${1-}" lock_path
+  lock_path="$(ftctl_dr_ablestack_target_export_lock_path "${plan}")"
+  ftctl_ensure_dir "$(dirname "${lock_path}")" "0750"
+  exec 203>"${lock_path}"
+  flock -w "${FTCTL_DR_TARGET_EXPORT_LOCK_TIMEOUT_SEC:-30}" 203 || return 93
+  ftctl_dr_ablestack_target_export_start_unlocked "$@"
+)
+
+ftctl_dr_ablestack_target_export_start_unlocked() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" json="${4-0}"
   local disk_map manifest host count disk_json device target_path target_type size_bytes target_format spec uri target_backend
   local port name pid_file current_pid unit_name out="" err="" rc=0 records ready reverse_requested reverse_profile
@@ -1316,7 +1330,16 @@ ftctl_dr_ablestack_reverse_preflight() {
   return "${rc}"
 }
 
-ftctl_dr_ablestack_target_export_stop() {
+ftctl_dr_ablestack_target_export_stop() (
+  local plan="${1-}" lock_path
+  lock_path="$(ftctl_dr_ablestack_target_export_lock_path "${plan}")"
+  ftctl_ensure_dir "$(dirname "${lock_path}")" "0750"
+  exec 203>"${lock_path}"
+  flock -w "${FTCTL_DR_TARGET_EXPORT_LOCK_TIMEOUT_SEC:-30}" 203 || return 93
+  ftctl_dr_ablestack_target_export_stop_unlocked "$@"
+)
+
+ftctl_dr_ablestack_target_export_stop_unlocked() {
   local plan="${1-}" json="${2-0}" run="${3-}" checkpoint_sequence="${4-}" profile_file="${5-}"
   local manifest item stopped=0 action_intent="" reverse_baseline_state="NOT_REQUESTED"
   manifest="$(ftctl_dr_ablestack_export_manifest_path "${plan}")"

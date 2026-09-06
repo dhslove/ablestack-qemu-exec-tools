@@ -115,12 +115,13 @@ ftctl_command_requires_lock() {
     reconcile)
       return 1
       ;;
-    status|check|health|events|protect-start|preflight-remote|dr-key-ensure|dr-key-install|dr-key-remove|dr-status|dr-transition-preflight|dr-reverse-preflight|dr-capabilities|dr-target-materialized|dr-target-export-start|dr-target-export-stop|dr-cutover-commit|dr-cutover-commit-status|dr-failover-abort|dr-failback-commit|dr-failback-commit-status|dr-failback-abort)
+    status|check|health|events|protect-start|preflight-remote)
       return 1
       ;;
-    dr-plan-apply|dr-sync-start|dr-sync-pause|dr-sync-resume|dr-test-failover|dr-test-cleanup|dr-test-prepare|dr-test-artifact-cleanup|dr-failover|dr-failback|dr-reprotect|dr-release|dr-cancel)
-      # DR commands coordinate through plan-scoped transition/cycle locks. The
-      # legacy global lock is retained for FT/HA commands only.
+    dr-*)
+      # Every DR command coordinates through plan-scoped transition/cycle
+      # locks or is read-only. Keep the legacy global lock for FT/HA only so a
+      # scheduler on one Plan cannot block another Plan's recovery command.
       return 1
       ;;
     config)

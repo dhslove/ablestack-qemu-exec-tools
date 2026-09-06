@@ -6575,13 +6575,14 @@ selftest_case_dr_plan_scoped_control_protocol() {
   local producer_run_path="${plan_dir}/runs/${producer_run}.state"
   local status_path="${plan_dir}/status.state"
   local generation="" lease_path="" ack_pid="" capabilities="" worker_pid="" worker_start_ticks=""
+  local dr_command=""
 
-  if ftctl_command_requires_lock "dr-test-failover" ""; then
-    selftest_fail "DR test failover must not use the legacy global lock"
-  fi
-  if ftctl_command_requires_lock "dr-sync-start" ""; then
-    selftest_fail "DR scheduler must not hold the legacy global lock"
-  fi
+  for dr_command in dr-sync-start dr-sync-recover dr-sync-pause dr-sync-resume \
+      dr-test-failover dr-failover dr-failback dr-release dr-future-operation; do
+    if ftctl_command_requires_lock "${dr_command}" ""; then
+      selftest_fail "DR command must not use the legacy global lock: ${dr_command}"
+    fi
+  done
 
   mkdir -p "${scheduler_dir}" "$(dirname "${run_path}")"
   cat > "${run_path}" <<EOF
