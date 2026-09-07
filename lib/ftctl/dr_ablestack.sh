@@ -1063,7 +1063,7 @@ ftctl_dr_ablestack_reverse_baseline_state_path() {
 ftctl_dr_ablestack_source_baselines_ready() {
   local plan="${1-}" disk_map="${2-}" disk_json device source_path source_spec baseline snap
   [[ -n "${plan}" && -s "${disk_map}" ]] || return 1
-  if ftctl_dr_ablestack_qcow2_push_provider "${disk_map}"; then
+  if ftctl_dr_ablestack_qcow2_source_provider "${disk_map}"; then
     ftctl_dr_ablestack_qcow2_source_baselines_ready "${plan}" "${disk_map}"
     return $?
   fi
@@ -1341,7 +1341,7 @@ ftctl_dr_ablestack_target_export_stop() (
 
 ftctl_dr_ablestack_target_export_stop_unlocked() {
   local plan="${1-}" json="${2-0}" run="${3-}" checkpoint_sequence="${4-}" profile_file="${5-}"
-  local manifest item stopped=0 action_intent="" reverse_baseline_state="NOT_REQUESTED"
+  local manifest item stopped=0 action_intent="" reverse_baseline_state="NOT_REQUESTED" baseline_rc=0
   manifest="$(ftctl_dr_ablestack_export_manifest_path "${plan}")"
   if [[ -f "${profile_file}" ]]; then
     action_intent="$(jq -r '.request.actionIntent // empty' "${profile_file}" 2>/dev/null || true)"
@@ -1359,11 +1359,21 @@ PY
 )
     rm -f "${manifest}"
   fi
+  ftctl_dr_ablestack_export_persist_intent "${plan}" "${run}" "STOPPED" "" "" "STOPPED" || return $?
   if [[ ! "${action_intent}" =~ ^TEST_FAILOVER$ && -n "${run}" && "${checkpoint_sequence}" =~ ^[0-9]+$ ]]; then
-    ftctl_dr_ablestack_prepare_reverse_baseline "${plan}" "${run}" "${checkpoint_sequence}" || return $?
+    ftctl_dr_ablestack_prepare_reverse_baseline "${plan}" "${run}" "${checkpoint_sequence}" || baseline_rc=$?
+    if [[ "${baseline_rc}" != "0" ]]; then
+      if [[ "${json}" == "1" ]]; then
+        printf '{"command":"dr-target-export-stop","result":"error","accepted":false,"state":"STOPPED","step":"reverse-baseline-failed","progress":100,"stopped":%s,"reverse_baseline_state":"FAILED","error_code":"DR_REVERSE_BASELINE_PREPARE_FAILED","exit_code":%s}\n' \
+          "${stopped}" "${baseline_rc}"
+      else
+        printf 'target exports stopped but reverse baseline preparation failed: plan=%s count=%s exit_code=%s\n' \
+          "${plan}" "${stopped}" "${baseline_rc}" >&2
+      fi
+      return "${baseline_rc}"
+    fi
     reverse_baseline_state="$(ftctl_dr_ablestack_reverse_baseline_status "${plan}" "${run}" "${checkpoint_sequence}")"
   fi
-  ftctl_dr_ablestack_export_persist_intent "${plan}" "${run}" "STOPPED" "" "" "STOPPED" || return $?
   if [[ "${json}" == "1" ]]; then
     printf '{"command":"dr-target-export-stop","result":"ok","accepted":true,"state":"STOPPED","step":"target-export-stopped","progress":100,"stopped":%s,"reverse_baseline_state":"%s"}\n' "${stopped}" "$(ftctl__json_escape "${reverse_baseline_state}")"
   else
@@ -1516,6 +1526,18 @@ ftctl_dr_ablestack_qcow2_push_provider() {
     target_format="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" targetFormat)"
     [[ "${source_type}" == "file" && "${source_format}" == "qcow2" \
        && "${target_type}" == "file" && "${target_format}" == "qcow2" ]] || return 1
+    count=$((count + 1))
+  done < <(ftctl_dr_ablestack_disk_rows "${disk_map}")
+  (( count > 0 ))
+}
+
+ftctl_dr_ablestack_qcow2_source_provider() {
+  local disk_map="${1-}" disk_json source_type source_format count=0
+  [[ -s "${disk_map}" ]] || return 1
+  while IFS= read -r disk_json; do
+    source_type="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" sourceType)"
+    source_format="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" sourceFormat)"
+    [[ "${source_type}" == "file" && "${source_format}" == "qcow2" ]] || return 1
     count=$((count + 1))
   done < <(ftctl_dr_ablestack_disk_rows "${disk_map}")
   (( count > 0 ))
@@ -2550,7 +2572,7 @@ ftctl_dr_ablestack_initialize_baselines() {
 
 ftctl_dr_ablestack_initialize_source_baselines() {
   local plan="${1-}" sequence="${2-}" disk_map="${3-}" snap disk_json device source_path source_spec baseline previous
-  if ftctl_dr_ablestack_qcow2_push_provider "${disk_map}"; then
+  if ftctl_dr_ablestack_qcow2_source_provider "${disk_map}"; then
     ftctl_dr_ablestack_initialize_qcow2_source_baselines "${plan}" "${sequence}" "${disk_map}"
     return $?
   fi

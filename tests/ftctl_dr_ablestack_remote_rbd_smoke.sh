@@ -429,6 +429,43 @@ test_failover_stop="$(ftctl_dr_ablestack_target_export_stop plan-test 1 run-test
 [[ "${test_failover_stop}" == *'"reverse_baseline_state":"NOT_REQUESTED"'* ]]
 [[ ! -e "$(ftctl_dr_ablestack_reverse_baseline_state_path plan-test)" ]]
 
+# Reverse baseline selection is based on the promoted source format, not the
+# complete transfer pair. RBD-to-qcow2 reverses to qcow2-to-RBD and must retain
+# qcow2 persistent-bitmap semantics instead of treating the file as an RBD ref.
+cross_format_reverse_map="${TMP}/cross-format-reverse-map.json"
+cat > "${cross_format_reverse_map}" <<EOF
+{"source":{"storagePath":"${TMP}"},"count":1,"disks":[{"device":"sda","sourcePath":"${TMP}/replica.qcow2","sourceType":"file","sourceFormat":"qcow2","targetPath":"rbd:rbd/source-image","targetType":"rbd","targetFormat":"raw"}]}
+EOF
+(
+  called="${TMP}/qcow2-initialize-called"
+  ftctl_dr_ablestack_initialize_qcow2_source_baselines() { printf '%s\n' "$*" > "${called}"; }
+  ftctl_dr_ablestack_initialize_source_baselines plan-cross reverse-33 "${cross_format_reverse_map}"
+  [[ -s "${called}" ]]
+)
+(
+  called="${TMP}/qcow2-ready-called"
+  ftctl_dr_ablestack_qcow2_source_baselines_ready() { printf '%s\n' "$*" > "${called}"; }
+  ftctl_dr_ablestack_source_baselines_ready plan-cross "${cross_format_reverse_map}"
+  [[ -s "${called}" ]]
+)
+
+# Export termination is durable even if the following reverse-baseline step
+# fails. A retry observes STOPPED rather than remaining stuck at STOPPING, and
+# callers receive a structured error instead of an empty Agent answer.
+set +e
+stop_failure_output="$(
+  ftctl_dr_ablestack_prepare_reverse_baseline() { return 32; }
+  ftctl_dr_ablestack_target_export_stop plan-stop-failure 1 run-stop-failure 41
+)"
+stop_failure_rc=$?
+set -e
+[[ "${stop_failure_rc}" == "32" ]]
+[[ "${stop_failure_output}" == *'"state":"STOPPED"'* ]]
+[[ "${stop_failure_output}" == *'"error_code":"DR_REVERSE_BASELINE_PREPARE_FAILED"'* ]]
+stop_failure_intent="$(ftctl_dr_ablestack_export_persist_intent_path plan-stop-failure)"
+[[ "$(jq -r '.actualState' "${stop_failure_intent}")" == "STOPPED" ]]
+[[ "$(jq -r '.desiredState' "${stop_failure_intent}")" == "STOPPED" ]]
+
 reverse_preflight="$(ftctl_dr_ablestack_reverse_preflight plan-reverse "${reverse_profile_source}" FAILBACK_FINAL AUTO 1)"
 jq -e '.ready == true
   and .effective_mode == "RBD_INCREMENTAL"

@@ -386,3 +386,28 @@ Failover-final map load, and QMP resume sequence for both `file/qcow2` and
 `rbd/raw`. The transfer suites continue to prove VMware-to-RBD, RBD-to-RBD,
 qcow2-to-qcow2, and RBD-to-qcow2 independently so this cutover correction does
 not alter their established data paths.
+
+## Cross-Format Reverse Baseline Contract
+
+Reverse-baseline ownership follows the reverse source, independently of the
+reverse target format. The exact transfer-pair predicate remains responsible
+for selecting a data mover, while baseline management uses a source-only
+predicate. Consequently a promoted SharedMountPoint `file/qcow2` replica must
+initialize and validate its persistent dirty bitmap even when the Failback
+target is `rbd/raw`. It must never fall through to the RBD snapshot baseline
+implementation merely because the target is not qcow2.
+
+Stopping a Plan-owned target export and preparing the reverse baseline are two
+ordered durability steps. After all export processes are absent, FTCTL removes
+the manifest and publishes `actualState=STOPPED` before attempting baseline
+preparation. A retry therefore treats an already absent unit as success and
+continues from the durable stopped state. If baseline preparation fails, the
+command returns a structured `DR_REVERSE_BASELINE_PREPARE_FAILED` response with
+the original exit code; it must not leave `STOPPING` or return empty output.
+
+Regression coverage includes RBD-to-qcow2 planned Failover, whose reverse map
+is qcow2-to-RBD, and a forced baseline failure after the export unit is already
+absent. The former must create a qcow2 persistent-bitmap baseline; the latter
+must preserve `STOPPED` and remain safely retryable. Existing qcow2-to-qcow2,
+RBD-to-RBD, and VMware-to-RBD lifecycle suites remain mandatory deployment
+gates.
