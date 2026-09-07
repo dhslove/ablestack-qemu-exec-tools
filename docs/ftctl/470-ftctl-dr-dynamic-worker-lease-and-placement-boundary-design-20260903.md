@@ -433,3 +433,11 @@ RBD-to-qcow2 Failover and proves that qcow2-to-RBD selects the bitmap/NBD
 producer. The existing qcow2-to-qcow2 and RBD source assertions prove that the
 change neither redirects the established SharedMountPoint path nor captures
 the RBD producer path.
+
+Reprotect completion has one terminal state contract across the Run file,
+Plan status, and Cloud projection. A successful reverse checkpoint and owned
+healthy scheduler publish both `state=READY` and `protection_state=READY` while
+retaining `active_side=TARGET`. Terminal-journal repair publishes the same
+fields. A Run must not be reported as successful while the Plan remains
+`FAILED_OVER_UNPROTECTED`, because that would leave the UI asking for an action
+that has already completed and obscure Failback readiness.

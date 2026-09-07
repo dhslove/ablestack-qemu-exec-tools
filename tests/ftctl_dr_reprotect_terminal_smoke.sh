@@ -36,6 +36,7 @@ action=dr-reprotect
 state=READY
 step=reprotect-ready
 progress=100
+protection_state=READY
 accepted=true
 active_side=TARGET
 worker_state=SUCCEEDED
@@ -54,6 +55,7 @@ status_json="$(bash "${ROOT}/bin/ablestack_vm_ftctl.sh" dr-status \
   --config "${CONFIG}" --plan "${PLAN}" --run "${RUN}" --json)"
 jq -e '.state == "READY"
   and .step == "reprotect-ready"
+  and .protection_state == "READY"
   and .terminal_authoritative == true
   and .runtime_endpoints_drained == true
   and .worker_state == "TERMINAL_PUBLISHED"

@@ -4040,6 +4040,7 @@ PY
     "state=READY" \
     "step=reprotect-ready" \
     "progress=100" \
+    "protection_state=READY" \
     "scheduler_state=RUNNING" \
     "scheduler_health=HEALTHY" \
     "scheduler_desired_state=RUNNING" \
@@ -4129,6 +4130,7 @@ ftctl_dr_runtime_repair_reprotect_terminal() {
   ftctl_dr_runtime_terminal_journal_write "${plan}" "${run}" "${nonce}" "${generation}" \
     "SUCCEEDED" "0" "" "${now}" || return $?
   ftctl_dr_runtime_path_set "${path}" \
+    "protection_state=READY" \
     "control_request_run_uuid=${run}" \
     "worker_state=TERMINAL_PUBLISHED" \
     "worker_exit_code=0" \
