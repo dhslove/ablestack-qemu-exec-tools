@@ -2751,6 +2751,13 @@ ftctl_dr_scheduler_worker() {
     fi
     ftctl_log_event "dr-runtime" "dr.scheduler.cycle" "ok" "" "" \
       "plan=${plan} run=${cycle_run} sequence=${sequence} type=${cycle_type} checkpoint=${checkpoint_path} rpo=${rpo}"
+    if [[ "${cycle_request_bound}" != "true" && "${cycle_request_state}" == "FAILED" \
+          && "${cycle_request_mode}" == "FULL_RESEED" && "${cycle_request_owner}" == "${cycle_run}" \
+          && ( "${cycle_type}" == "full-seed" || "${cycle_type}" == "full-reseed" ) ]]; then
+      # A transient first-cycle failure can restart the scheduler. The same
+      # Cloud request still owns this newer durable Full Seed terminal.
+      cycle_request_bound="true"
+    fi
     if [[ "${cycle_request_bound}" == "true" ]]; then
       if ! ftctl_dr_scheduler_publish_requested_cycle_terminal "${plan}" "${cycle_run}" \
           "${status_path}" "${sequence_path}" "${sequence}"; then

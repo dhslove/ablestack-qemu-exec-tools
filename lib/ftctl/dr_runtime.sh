@@ -8029,11 +8029,15 @@ ftctl_dr_runtime_repair_requested_cycle_terminal() {
   local plan="${1-}" run="${2-}" path="${3-}"
   local state step progress owner requested_state mode commit_state durable sequence token expected_token
   local scheduler_path scheduler_owner scheduler_state scheduler_sequence run_requested_sequence
-  local terminal_path nonce generation now
+  local terminal_path terminal_state nonce generation now restore_points_path recovered_json
+  local recovered_sequence recovered_token recovered_manifest recovered_checkpoint recovered_source_at recovered_target_at
 
   [[ -n "${plan}" && -n "${run}" && -f "${path}" ]] || return 0
   terminal_path="$(ftctl_dr_runtime_run_journal_path "${plan}" "${run}" terminal)"
-  [[ ! -f "${terminal_path}" ]] || return 0
+  terminal_state="$(ftctl_dr_runtime_journal_value "${terminal_path}" terminal_state)"
+  if [[ -f "${terminal_path}" && "${terminal_state}" != "FAILED" ]]; then
+    return 0
+  fi
   state="$(ftctl_dr_runtime_state_get_from_path "${path}" state)"
   step="$(ftctl_dr_runtime_state_get_from_path "${path}" step)"
   progress="$(ftctl_dr_runtime_state_get_from_path "${path}" progress)"
@@ -8047,6 +8051,92 @@ ftctl_dr_runtime_repair_requested_cycle_terminal() {
   sequence="$(ftctl_dr_runtime_state_get_from_path "${path}" latest_completed_checkpoint_sequence)"
   token="$(ftctl_dr_runtime_state_get_from_path "${path}" latest_completed_cycle_token)"
   run_requested_sequence="$(ftctl_dr_runtime_state_get_from_path "${path}" requested_cycle_sequence)"
+  if [[ "${terminal_state}" == "FAILED" ]]; then
+    restore_points_path="$(ftctl_dr_runtime_state_get_from_path "${path}" restore_points_path)"
+    [[ -n "${restore_points_path}" ]] || restore_points_path="$(ftctl_dr_runtime_plan_dir "${plan}")/restore-points.jsonl"
+    [[ "${run_requested_sequence}" =~ ^[1-9][0-9]*$ && -s "${restore_points_path}" ]] || return 0
+    recovered_json="$(python3 - "${restore_points_path}" "${plan}" "${run}" "${run_requested_sequence}" <<'PY'
+import json
+import os
+import sys
+
+path, plan, run, requested_sequence = sys.argv[1:5]
+requested_sequence = int(requested_sequence)
+candidate = None
+with open(path, "r", encoding="utf-8") as handle:
+    for line in handle:
+        try:
+            row = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        sequence = row.get("checkpointSequence")
+        mode = str(row.get("requestedMode") or "").upper()
+        cycle_type = str(row.get("cycleType") or "").lower()
+        commit = str(row.get("cycleCommitState") or "").upper()
+        state = str(row.get("state") or "").upper()
+        token = str(row.get("cycleToken") or "")
+        owner = row.get("runUuid") or row.get("producerRunUuid")
+        try:
+            sequence = int(sequence)
+        except (TypeError, ValueError):
+            continue
+        if row.get("planUuid") != plan or owner != run or sequence <= requested_sequence:
+            continue
+        if mode not in {"FULL_SEED", "FULL_RESEED"} and cycle_type not in {"full-seed", "full-reseed"}:
+            continue
+        if commit not in {"LOCAL_DURABLE", "COMMITTED", "DURABLE"}:
+            continue
+        if state not in {"READY", "COMPLETED", "TARGET_READY"} or token != f"{plan}:{sequence}":
+            continue
+        manifest = str(row.get("manifest") or "")
+        checkpoint = str(row.get("checkpoint") or "")
+        marker = f"{run}-cycle-{sequence}-"
+        if marker not in manifest or marker not in checkpoint:
+            continue
+        if not os.path.isfile(manifest) or not os.path.isfile(checkpoint):
+            continue
+        if candidate is None or sequence > int(candidate["checkpointSequence"]):
+            candidate = row
+if candidate is not None:
+    print(json.dumps(candidate, separators=(",", ":")))
+PY
+)"
+    [[ -n "${recovered_json}" ]] || return 0
+    recovered_sequence="$(jq -r '.checkpointSequence // empty' <<< "${recovered_json}")"
+    recovered_token="$(jq -r '.cycleToken // empty' <<< "${recovered_json}")"
+    recovered_manifest="$(jq -r '.manifest // empty' <<< "${recovered_json}")"
+    recovered_checkpoint="$(jq -r '.checkpoint // empty' <<< "${recovered_json}")"
+    recovered_source_at="$(jq -r '.sourceCheckpointAt // empty' <<< "${recovered_json}")"
+    recovered_target_at="$(jq -r '.targetDurableAt // empty' <<< "${recovered_json}")"
+    nonce="$(ftctl_dr_runtime_state_get_from_path "${path}" scheduler_session_uuid)"
+    generation="$(ftctl_dr_runtime_state_get_from_path "${path}" scheduler_lease_epoch)"
+    [[ -n "${nonce}" ]] || nonce="status-repair:${plan}"
+    [[ "${generation}" =~ ^[0-9]+$ ]] || generation="0"
+    now="$(ftctl_now_iso8601)"
+    ftctl_dr_runtime_terminal_journal_write "${plan}" "${run}" "${nonce}" "${generation}" \
+      "SUCCEEDED" "0" "" "${now}" || return $?
+    ftctl_dr_runtime_path_set "${path}" \
+      "state=READY" "step=full-resync-completed" "progress=100" \
+      "control_request_run_uuid=${run}" "requested_cycle_owner_run=${run}" \
+      "requested_cycle_sequence=${recovered_sequence}" "requested_cycle_state=COMPLETED" \
+      "checkpoint_sequence=${recovered_sequence}" "checkpoint_path=${recovered_checkpoint}" \
+      "manifest_path=${recovered_manifest}" "data_commit_state=LOCAL_DURABLE" "target_durable=true" \
+      "worker_state=TERMINAL_PUBLISHED" "worker_exit_code=0" "transfer_activity_state=IDLE" \
+      "terminal_source=ENGINE_TERMINAL" "terminal_version=1" "terminal_authoritative=true" \
+      "runtime_endpoints_drained=true" "terminal_publication_pending=false" \
+      "error_code=" "error_message=" "failed_component=" \
+      "terminal_repaired_at=${now}" "updated_at=${now}" || return $?
+    scheduler_path="$(ftctl_dr_runtime_plan_dir "${plan}")/scheduler/sequence.state"
+    if [[ -f "${scheduler_path}" ]]; then
+      ftctl_state_set_path "${scheduler_path}" \
+        "requested_cycle_owner_run=${run}" "requested_cycle_sequence=${recovered_sequence}" \
+        "requested_cycle_state=COMPLETED" "requested_cycle_error=" \
+        "requested_cycle_completed_at=${now}" || return $?
+    fi
+    ftctl_log_event "dr-runtime" "dr.requested-cycle.failed-terminal-repair" "ok" "" "" \
+      "plan=${plan} run=${run} sequence=${recovered_sequence} token=${recovered_token} source_at=${recovered_source_at} target_at=${recovered_target_at}"
+    return 0
+  fi
   expected_token="${plan}:${sequence}"
   if [[ "${requested_state}" != "COMPLETED" ]]; then
     scheduler_path="$(ftctl_dr_runtime_plan_dir "${plan}")/scheduler/sequence.state"

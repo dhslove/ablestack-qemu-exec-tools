@@ -114,3 +114,49 @@ Plan별 unit을 조회하고 `cycle_state=IDLE`인 unit만 순차 재시작한�
 | 상태 복구 | Run 파일의 PENDING에서 중단 | 정확히 일치하는 scheduler sequence를 제한 사용 |
 | 패키지 배포 | 실행 중 shell 프로세스는 구 코드 유지 | IDLE Plan별 rolling reload와 코드 hash 검증 |
 | 데이터 경로 | VMware mover/NBD/librbd 성공 경로 | 변경 없음 |
+
+## 8. 2026-09-08 VMware CBT transient failure late-success convergence
+
+### 8.1 Incident
+
+VMware snapshot creation succeeded, but the first `QueryChangedDiskAreas` call
+briefly returned `vim.hostd.vmsvc.cbt.cannotGetChanges: Change tracking invalid
+or disk in use`. The scheduler published a failed requested-cycle terminal and
+was restarted by systemd. The same Cloud Run then completed a newer durable
+Full Seed and a following incremental cycle, while the operation journal still
+exposed the first failure. Cloud therefore never materialized the target VM.
+
+### 8.2 Contract
+
+1. The VMware mover retries only the known transient CBT busy signature, for a
+   bounded number of attempts. Authentication, transport, invalid baseline,
+   and unknown faults retain their existing fail-closed behavior.
+2. After a scheduler restart, a failed `FULL_RESEED` request may be terminalized
+   as success only when a newer restore-point record has the same plan and Run,
+   a canonical `<plan>:<sequence>` token, durable commit, completed state, and
+   existing Run-scoped manifest/checkpoint artifacts.
+3. The repaired operation projection points to the recovered Full Seed. A later
+   incremental remains the live Plan authority and is not rewritten.
+4. Scheduler success publishes this terminal before starting another cycle.
+   `dr-status --run` provides the same strict repair for already deployed stale
+   failure journals. Direct DB mutation is prohibited.
+
+### 8.3 AS-IS / TO-BE
+
+| Area | AS-IS | TO-BE |
+|---|---|---|
+| CBT snapshot race | First busy response fails the Run | Known transient response is retried with a bounded policy |
+| Scheduler restart | Later durable Full Seed does not own the request | Same-Run durable Full Seed publishes the requested terminal |
+| Existing failed journal | Any journal blocks repair | Only a strict newer durable same-Run proof may replace FAILED with SUCCEEDED |
+| Later incremental | Can hide Full Seed operation evidence | Plan authority stays latest; operation authority stays recovered Full Seed |
+| Other providers | Shared recovery assumptions can leak | RBD and qcow2 transfer decisions remain unchanged |
+
+### 8.4 Verification
+
+- transient CBT busy response followed by success calls the helper twice;
+- a permanent CBT failure remains `DR_CBT_QUERY_FAILED` after bounded attempts;
+- failed sequence 1 plus durable same-Run Full Seed sequence 2 repairs the
+  terminal, Run state, and scheduler request state;
+- different Run, non-durable, missing artifact, or non-newer evidence does not
+  repair;
+- run the shared DR action contract and release tombstone regression gates.

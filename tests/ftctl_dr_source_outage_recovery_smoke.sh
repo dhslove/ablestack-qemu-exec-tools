@@ -73,6 +73,45 @@ grep -q 'FTCTL_DR_AUTOMATIC_RESEED_REASON' "${ROOT}/lib/ftctl/dr_vmware_mover.sh
 
 cat > "${TMP}/cbt-python" <<'EOF'
 #!/usr/bin/env bash
+count_file="${FTCTL_TEST_CBT_COUNT_FILE:?}"
+count=0
+[[ ! -f "${count_file}" ]] || count="$(cat "${count_file}")"
+count=$((count + 1))
+printf '%s\n' "${count}" > "${count_file}"
+if [[ "${FTCTL_TEST_CBT_MODE:-transient}" == "transient" && "${count}" -ge 2 ]]; then
+  printf '%s\n' '{"activation_verified":true,"new_change_id":"change-2","vmdk_path":"[pool] vm/disk.vmdk","areas":[]}'
+  exit 0
+fi
+echo 'vim.hostd.vmsvc.cbt.cannotGetChanges: Change tracking invalid or disk in use' >&2
+exit 1
+EOF
+chmod +x "${TMP}/cbt-python"
+printf '# mock helper\n' > "${TMP}/helper.py"
+FTCTL_DR_VMWARE_CBT_PYTHON="${TMP}/cbt-python"
+FTCTL_DR_VMWARE_CBT_QUERY_HELPER="${TMP}/helper.py"
+FTCTL_DR_VMWARE_CBT_QUERY_ATTEMPTS=3
+FTCTL_DR_VMWARE_CBT_QUERY_RETRY_SEC=0
+export FTCTL_TEST_CBT_COUNT_FILE="${TMP}/cbt-count"
+export FTCTL_TEST_CBT_MODE=transient
+ftctl_vmware_mover_query_cbt '10.10.21.10' 'administrator' "${TMP}/password" false '' \
+  'vm-1' 'snapshot-1' 'scsi0:0' '' "${TMP}/cbt-transient.json" true '2000'
+[[ "$(cat "${FTCTL_TEST_CBT_COUNT_FILE}")" == '2' ]]
+jq -e '.new_change_id == "change-2"' "${TMP}/cbt-transient.json" >/dev/null
+
+rm -f "${FTCTL_TEST_CBT_COUNT_FILE}"
+export FTCTL_TEST_CBT_MODE=permanent
+set +e
+(
+  ftctl_vmware_mover_query_cbt '10.10.21.10' 'administrator' "${TMP}/password" false '' \
+    'vm-1' 'snapshot-2' 'scsi0:0' '' "${TMP}/cbt-permanent.json" true '2000'
+) >/dev/null 2>&1
+rc=$?
+set -e
+[[ "${rc}" == '82' ]]
+[[ "$(cat "${FTCTL_TEST_CBT_COUNT_FILE}")" == '3' ]]
+
+cat > "${TMP}/cbt-python" <<'EOF'
+#!/usr/bin/env bash
 if printf '%s\n' "$@" | grep -qx -- '--verify-current'; then
   printf '%s\n' '{"activation_verified":true,"new_change_id":"current-epoch-change-id"}'
   exit 0

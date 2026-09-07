@@ -331,6 +331,7 @@ ftctl_vmware_mover_query_cbt() {
   local endpoint="${1-}" username="${2-}" password_file="${3-}" tls_verify="${4-}" libdir="${5-}"
   local vm_ref="${6-}" snapshot_name="${7-}" disk_id="${8-}" previous_change_id="${9-}" output_path="${10-}"
   local verify_current="${11-false}" device_key="${12-}" python_bin helper current_probe_path
+  local query_error_path query_attempt=1 query_attempts query_retry_sec query_rc=1
   python_bin="$(ftctl_vmware_mover_resolve_cbt_python "${libdir}" || true)"
   helper="${FTCTL_DR_VMWARE_CBT_QUERY_HELPER:-${FTCTL_DR_VMWARE_MOVER_LIB_DIR}/dr_vmware_changed_areas.py}"
   [[ -n "${python_bin}" ]] || ftctl_vmware_mover_die 82 "DR_CBT_QUERY_FAILED: pyVmomi runtime was not found"
@@ -340,11 +341,35 @@ ftctl_vmware_mover_query_cbt() {
   local -a helper_args=(--vm "${vm_ref}" --snapshot "${snapshot_name}" --disk-id "${disk_id}" --change-id "${previous_change_id}")
   [[ -n "${device_key}" && "${device_key}" != "null" ]] && helper_args+=(--device-key "${device_key}")
   [[ "${verify_current}" == "true" ]] && helper_args+=(--verify-current)
-  if ! VCENTER_HOST="$(ftctl_vmware_mover_govc_url "${endpoint}")" \
-  VCENTER_USER="${username}" \
-  VCENTER_PASS="$(cat "${password_file}")" \
-  VCENTER_INSECURE="$([[ "${tls_verify}" == "true" ]] && printf 0 || printf 1)" \
-    "${python_bin}" "${helper}" "${helper_args[@]}" > "${output_path}"; then
+  query_attempts="${FTCTL_DR_VMWARE_CBT_QUERY_ATTEMPTS:-3}"
+  query_retry_sec="${FTCTL_DR_VMWARE_CBT_QUERY_RETRY_SEC:-2}"
+  [[ "${query_attempts}" =~ ^[1-9][0-9]*$ ]] || query_attempts=3
+  [[ "${query_retry_sec}" =~ ^[0-9]+$ ]] || query_retry_sec=2
+  query_error_path="${output_path}.stderr"
+  while (( query_attempt <= query_attempts )); do
+    rm -f "${output_path}" "${query_error_path}"
+    if VCENTER_HOST="$(ftctl_vmware_mover_govc_url "${endpoint}")" \
+    VCENTER_USER="${username}" \
+    VCENTER_PASS="$(cat "${password_file}")" \
+    VCENTER_INSECURE="$([[ "${tls_verify}" == "true" ]] && printf 0 || printf 1)" \
+      "${python_bin}" "${helper}" "${helper_args[@]}" > "${output_path}" 2> "${query_error_path}"; then
+      query_rc=0
+      break
+    else
+      query_rc=$?
+    fi
+    if (( query_attempt >= query_attempts )) \
+        || ! grep -Eqi 'vim\.hostd\.vmsvc\.cbt\.cannotGetChanges|Change tracking invalid or disk in use' \
+          "${query_error_path}"; then
+      break
+    fi
+    printf 'VMware CBT query is temporarily busy for %s; retrying (%s/%s)\n' \
+      "${disk_id}" "${query_attempt}" "${query_attempts}" >&2
+    (( query_retry_sec > 0 )) && sleep "${query_retry_sec}"
+    query_attempt=$((query_attempt + 1))
+  done
+  if (( query_rc != 0 )); then
+    cat "${query_error_path}" >&2 2>/dev/null || true
     if [[ "${verify_current}" != "true" && -n "${previous_change_id}" && "${previous_change_id}" != "null" && "${previous_change_id}" != "*" ]]; then
       current_probe_path="${output_path}.current"
       if VCENTER_HOST="$(ftctl_vmware_mover_govc_url "${endpoint}")" \
@@ -366,6 +391,7 @@ ftctl_vmware_mover_query_cbt() {
       "QueryChangedDiskAreas failed for ${disk_id}" "${disk_id}" || true
     ftctl_vmware_mover_die 82 "DR_CBT_QUERY_FAILED: QueryChangedDiskAreas failed for ${disk_id}"
   fi
+  rm -f "${query_error_path}"
   if ! jq -e '.new_change_id != null and .new_change_id != ""' "${output_path}" >/dev/null; then
     ftctl_vmware_mover_publish_cbt_failure "DR_VMWARE_CBT_CHANGE_ID_MISSING" \
       "VMware did not return a current changeId for ${disk_id}" "${disk_id}" || true
