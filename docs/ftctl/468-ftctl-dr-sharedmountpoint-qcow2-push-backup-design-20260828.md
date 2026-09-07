@@ -838,3 +838,34 @@ excluded exactly as in Cloud. The profile and Plan remain immutable; only the
 status projection is normalized. A real stable-hardware change still blocks
 projection, while source placement drift enters retryable `WAITING_SOURCE` and
 automatic `RECOVER_SYNC`.
+
+## Cross-Format NBD Full Seed Contract (2026-09-07)
+
+A target SharedMountPoint artifact can be a qcow2 file while its Plan-owned
+`qemu-nbd` export presents the guest-visible block contents as a raw NBD
+device. These are two separate formats:
+
+- `targetFormat` describes the persistent backing file created on the target
+  site and remains `qcow2`.
+- the output format passed to `qemu-img convert` describes the destination
+  interface. A Plan-owned `nbd://` export is always written as `raw`.
+
+Full Seed must therefore derive its transfer output format from the selected
+transport, not copy `targetFormat` into the NBD command. The target Agent
+continues to create and validate the qcow2 artifact before exposing it. The
+source worker writes guest blocks through the NBD export with `-O raw`, and a
+durable checkpoint is published only after the target export is reachable and
+the complete disk set has transferred successfully.
+
+This rule applies only to the site-agent/remote NBD data plane. A directly
+opened local file retains its declared file format, and a directly opened RBD
+target retains raw. The VMware-to-RBD mover, RBD-to-RBD snapshot-diff path,
+and SharedMountPoint qcow2 bitmap path are unchanged and remain regression
+gates.
+
+| Area | AS-IS | TO-BE |
+| --- | --- | --- |
+| Target backing | qcow2 | qcow2 |
+| NBD interface | incorrectly treated as qcow2 | raw guest block interface |
+| Full Seed command | `-O <targetFormat>` for every URI | `-O raw` for `nbd://`, declared format otherwise |
+| Failure | immediate `Image is not in qcow2 format` | transfer proceeds and checkpoint gates completion |

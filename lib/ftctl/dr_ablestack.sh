@@ -2341,11 +2341,20 @@ ftctl_dr_ablestack_prepare_targets() {
     "plan=${plan} run=${run} disks=${count} manifest=${manifest_path} remote_transport=${remote_transport}"
 }
 
+ftctl_dr_ablestack_transfer_target_format() {
+  local target_uri="${1-}" target_format="${2-}" out_var="${3-}"
+  local transfer_format="${target_format:-raw}"
+  case "${target_uri}" in
+    nbd://*) transfer_format="raw" ;;
+  esac
+  printf -v "${out_var}" '%s' "${transfer_format}"
+}
+
 ftctl_dr_ablestack_full_seed_once() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" disk_map="${4-}" manifest_path="${5-}" checkpoint_path="${6-}"
   local requested_mode="${7-FULL_SEED}" effective_mode="${8-FULL_SEED}" reseed_reason="${9-}"
   local cycle_sequence="${10-}"
-  local disk_json device source_path target_path source_format target_format size_bytes source_type target_type resolved_size target_uri
+  local disk_json device source_path target_path source_format target_format transfer_target_format size_bytes source_type target_type resolved_size target_uri
   local out="" err="" rc=0 source_at target_at source_epoch target_epoch rpo="0"
   local remote_transport="0" remote_path="" export_name="" export_port="" export_host="" vm_name=""
   local qcow2_transfer_mode="generic" disk_count="0" disk_index=0 backup_result=""
@@ -2413,6 +2422,7 @@ ftctl_dr_ablestack_full_seed_once() {
     out=""
     err=""
     rc=0
+    ftctl_dr_ablestack_transfer_target_format "${target_uri}" "${target_format}" transfer_target_format
     if [[ "${qcow2_transfer_mode}" == "qmp" ]]; then
       backup_result=""
       FTCTL_DR_TRANSFER_AGGREGATE_COMPLETED_BYTES="${total_transferred_bytes}"
@@ -2427,7 +2437,7 @@ ftctl_dr_ablestack_full_seed_once() {
     else
       ftctl_cmd_run "${FTCTL_DR_FULL_SEED_TIMEOUT_SEC:-3600}" out err rc -- \
         qemu-img convert --force-share -p -n -S "${FTCTL_THIN_SPARSE_SIZE:-4k}" \
-        -f "${source_format}" -O "${target_format}" "${source_path}" "${target_uri}" || true
+        -f "${source_format}" -O "${transfer_target_format}" "${source_path}" "${target_uri}" || true
     fi
     : "${out}${err}${resolved_size}"
     if [[ "${remote_transport}" == "1" && "${site_agent_transport}" != "1" ]]; then

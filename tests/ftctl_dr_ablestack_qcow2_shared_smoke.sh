@@ -261,6 +261,17 @@ ftctl_dr_ablestack_canonicalize_profile "${rbd_profile}" "${rbd_canonical}"
 jq -e '.disks[0].sourceFormat == "raw" and .disks[0].sourceType == "rbd"' "${rbd_canonical}" >/dev/null
 ! ftctl_dr_ablestack_qcow2_push_provider "${rbd_canonical}"
 
+transfer_target_format=""
+ftctl_dr_ablestack_transfer_target_format \
+  "nbd://10.10.31.1:12031/dr-plan-qcow2-sda" "qcow2" transfer_target_format
+[[ "${transfer_target_format}" == "raw" ]]
+ftctl_dr_ablestack_transfer_target_format \
+  "/mnt/glue-gfs/target-volume" "qcow2" transfer_target_format
+[[ "${transfer_target_format}" == "qcow2" ]]
+ftctl_dr_ablestack_transfer_target_format \
+  "rbd:rbd/target" "raw" transfer_target_format
+[[ "${transfer_target_format}" == "raw" ]]
+
 [[ "$(ftctl_dr_ablestack_full_seed_transferred_bytes '{"changedBytes":4096}' 8192)" == "4096" ]]
 [[ "$(ftctl_dr_ablestack_full_seed_transferred_bytes '{"mode":"FULL_RESEED","changedBytes":0,"bytesProcessed":16384,"sourceReadBytes":16384,"targetWrittenBytes":16384}' 8192)" == "16384" ]]
 [[ "$(ftctl_dr_ablestack_full_seed_transferred_bytes '{"mode":"FULL_RESEED","changedBytes":0,"bytesProcessed":0,"targetWrittenBytes":0}' 8192)" == "0" ]]
