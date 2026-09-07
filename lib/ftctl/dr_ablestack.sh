@@ -1521,6 +1521,29 @@ ftctl_dr_ablestack_qcow2_push_provider() {
   (( count > 0 ))
 }
 
+ftctl_dr_ablestack_cutover_source_supported() {
+  local disk_map="${1-}" disk_json source_type source_format source_path count=0
+  [[ -s "${disk_map}" ]] || return 1
+  while IFS= read -r disk_json; do
+    source_type="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" sourceType)"
+    source_format="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" sourceFormat)"
+    source_path="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" sourcePath)"
+    case "${source_type,,}:${source_format,,}" in
+      file:qcow2)
+        [[ -n "${source_path}" ]] || return 1
+        ;;
+      rbd:raw|rbd:)
+        [[ "${source_path}" == rbd:* ]] || return 1
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+    count=$((count + 1))
+  done < <(ftctl_dr_ablestack_disk_rows "${disk_map}")
+  (( count > 0 ))
+}
+
 ftctl_dr_ablestack_qcow2_runtime_ready() {
   local disk_map="${1-}" vm_name="${2-}" qmp_path rc=0
   [[ -s "${disk_map}" && -n "${vm_name}" ]] || return 1
@@ -1756,7 +1779,7 @@ ftctl_dr_ablestack_cutover_quiesce_begin() {
   fi
 
   ftctl_dr_ablestack_prepare_cycle_disk_map "${plan}" "${profile_file}" "${disk_map}" "PRE_CUTOVER_CAPTURE" || return $?
-  ftctl_dr_ablestack_qcow2_push_provider "${disk_map}" || return 90
+  ftctl_dr_ablestack_cutover_source_supported "${disk_map}" || return 90
   vm_name="$(ftctl_dr_ablestack_json_field "${disk_map}" source.instanceName 2>/dev/null || true)"
   [[ -n "${vm_name}" ]] || return 32
   if [[ "${requested_mode}" == "SOURCE_ALREADY_STOPPED" ]]; then
@@ -1877,7 +1900,7 @@ ftctl_dr_ablestack_load_frozen_cutover_map() {
   recorded_digest="$(ftctl_state_read_kv "${quiesce_path}" frozen_map_sha256 2>/dev/null || true)"
   actual_digest="$(sha256sum "${frozen_map}" | awk '{print $1}')"
   [[ "${recorded_digest}" =~ ^[0-9a-f]{64}$ && "${actual_digest}" == "${recorded_digest}" ]] || return 107
-  ftctl_dr_ablestack_qcow2_push_provider "${frozen_map}" || return 90
+  ftctl_dr_ablestack_cutover_source_supported "${frozen_map}" || return 90
   if [[ "${state}" == "OFFLINE" ]]; then
     [[ "${mode}" == "SOURCE_ALREADY_STOPPED" && "${observed_power}" == "POWERED_OFF" ]] || return 108
     ftctl_dr_ablestack_qcow2_source_baselines_ready "${plan}" "${frozen_map}" || return 109

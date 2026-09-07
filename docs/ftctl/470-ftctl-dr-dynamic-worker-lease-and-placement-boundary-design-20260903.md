@@ -365,3 +365,24 @@ Regression coverage executes target commit with no transient runtime profile,
 using only the Plan-owned export profile, and proves terminal TARGET authority
 plus an acknowledged commit journal. The shared VMware-to-RBD, RBD-to-RBD, and
 SharedMountPoint lifecycle gates remain unchanged.
+
+## Format-Neutral KVM Planned Cutover Lease
+
+Planned Failover quiesces the source VM writer, not a particular target image
+format. The Run-owned frozen source map therefore accepts every source disk
+that the ABLESTACK transfer provider can read: SharedMountPoint `file/qcow2`
+and Ceph `rbd/raw`. Mixed or unsupported source locators fail before QMP pause.
+Target type and format remain the responsibility of the selected transfer
+provider and must not be used to decide whether the source can be quiesced.
+
+The previous qcow2-only guard incorrectly rejected an RBD source before QMP
+`stop`, even though the same provider had already replicated raw guest blocks
+to a remote qcow2 NBD export. Both creation and later consumption of the frozen
+cutover map now use the format-neutral source guard. The existing qcow2 live
+path rebind remains unchanged and RBD keeps its shared locator unchanged.
+
+Regression coverage must run the complete QMP stop, frozen-map digest,
+Failover-final map load, and QMP resume sequence for both `file/qcow2` and
+`rbd/raw`. The transfer suites continue to prove VMware-to-RBD, RBD-to-RBD,
+qcow2-to-qcow2, and RBD-to-qcow2 independently so this cutover correction does
+not alter their established data paths.

@@ -128,6 +128,39 @@ ftctl_dr_ablestack_cutover_quiesce_release "${PLAN}" "${RUN}" "${RUN_PATH}" "${S
 [[ "${QMP_STUB_STATE}" == "running" ]]
 [[ "$(ftctl_state_read_kv "${QUIESCE_PATH}" state)" == "RELEASED" ]]
 
+# RBD guest blocks use the same QMP cutover lease. The immutable source map is
+# format-neutral; only the subsequent transfer provider differs.
+RBD_PLAN=plan-rbd-qcow2-cutover
+RBD_RUN=run-rbd-qcow2-cutover
+RBD_PROFILE="${TMP}/rbd-profile.json"
+RBD_RUN_PATH="${TMP}/rbd-run.state"
+RBD_STATUS_PATH="${TMP}/rbd-status.state"
+jq --arg plan "${RBD_PLAN}" --arg run "${RBD_RUN}" \
+  '.planUuid=$plan
+   | .request.cutoverRunUuid=$run
+   | .mapping.disks[0].sourcePath="rbd:rbd/volume-live"
+   | .mapping.disks[0].sourceType="rbd"
+   | .mapping.disks[0].sourceFormat="raw"' "${PROFILE}" > "${RBD_PROFILE}"
+ftctl_dr_ablestack_rebind_live_qcow2_sources() { return 0; }
+QMP_STUB_STATE=running
+ftctl_state_write_kv_all "${RBD_RUN_PATH}" "state=RUNNING"
+ftctl_dr_ablestack_cutover_quiesce_begin "${RBD_PLAN}" "${RBD_RUN}" \
+  "${RBD_PROFILE}" "${RBD_RUN_PATH}" "${RBD_STATUS_PATH}"
+RBD_QUIESCE_PATH="$(ftctl_dr_ablestack_cutover_quiesce_path "${RBD_PLAN}" "${RBD_RUN}")"
+RBD_FROZEN_MAP="$(ftctl_dr_ablestack_cutover_source_map_path "${RBD_PLAN}" "${RBD_RUN}")"
+[[ "${QMP_STUB_STATE}" == "paused" ]]
+[[ "$(ftctl_state_read_kv "${RBD_QUIESCE_PATH}" state)" == "PAUSED" ]]
+jq -e '.disks[0].sourceType == "rbd" and .disks[0].sourceFormat == "raw"
+  and .disks[0].sourcePath == "rbd:rbd/volume-live"' "${RBD_FROZEN_MAP}" >/dev/null
+RBD_FINAL_MAP="${TMP}/rbd-final-map.json"
+ftctl_dr_ablestack_prepare_cycle_disk_map "${RBD_PLAN}" "${RBD_PROFILE}" \
+  "${RBD_FINAL_MAP}" FAILOVER_FINAL
+jq -e '.disks[0].sourceType == "rbd" and .disks[0].sourceFormat == "raw"' \
+  "${RBD_FINAL_MAP}" >/dev/null
+ftctl_dr_ablestack_cutover_quiesce_release "${RBD_PLAN}" "${RBD_RUN}" \
+  "${RBD_RUN_PATH}" "${RBD_STATUS_PATH}"
+[[ "${QMP_STUB_STATE}" == "running" ]]
+
 # An explicitly observed stopped source is already writer-quiesced. It must
 # freeze and validate the whole disk set without using QMP on a storage worker.
 OFFLINE_PLAN=plan-qcow2-cutover-offline
