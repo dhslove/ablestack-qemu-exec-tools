@@ -46,6 +46,34 @@ grep -Fxq 'guest_preflight_state=READY' "${RUN_PATH}"
 grep -Fxq 'guest_family=linux' "${RUN_PATH}"
 grep -Fxq 'guest_preflight_error_code=' "${RUN_PATH}"
 
+WINPE_ROOT="${TMP}/versioned-winpe"
+mkdir -p "${WINPE_ROOT}/winpe"
+printf 'versioned winpe payload\n' > "${WINPE_ROOT}/winpe/winpe-ablestack-v2k-test-amd64.iso"
+WINPE_SHA="$(sha256sum "${WINPE_ROOT}/winpe/winpe-ablestack-v2k-test-amd64.iso" | awk '{print $1}')"
+jq -nc --arg filename 'winpe-ablestack-v2k-test-amd64.iso' --arg sha256 "${WINPE_SHA}" \
+  '{filename:$filename,sha256:$sha256}' > "${WINPE_ROOT}/winpe/current.json"
+printf 'virtio payload\n' > "${TMP}/virtio.iso"
+cat > "${SESSION_PATH}" <<'EOF'
+{
+  "profile": {
+    "planUuid": "plan-windows",
+    "direction": "VMWARE_TO_KVM",
+    "mapping": {
+      "source": {"vm": {"guestId": "Windows Server 2022", "firmware": "UEFI"}},
+      "target": {"hardware": {"UEFI": "LEGACY"}}
+    }
+  }
+}
+EOF
+unset FTCTL_DR_WINPE_ISO
+V2K_WINPE_INSTALL_ROOT="${WINPE_ROOT}"
+FTCTL_DR_VIRTIO_ISO="${TMP}/virtio.iso"
+ftctl_guestprep_preflight_test_session "${SESSION_PATH}" "${RUN_PATH}"
+grep -Fxq 'guest_preflight_state=READY' "${RUN_PATH}"
+grep -Fxq 'guest_family=windows' "${RUN_PATH}"
+[[ "$(ftctl_guestprep_resolve_winpe_iso "${ROOT}/lib/v2k")" == \
+  "$(readlink -e "${WINPE_ROOT}/winpe/winpe-ablestack-v2k-test-amd64.iso")" ]]
+
 FTCTL_LIB_BASE="${TMP}/missing-runtime"
 ROOT_DIR="${TMP}/missing-root"
 if ftctl_guestprep_preflight_test_session "${SESSION_PATH}" "${RUN_PATH}"; then

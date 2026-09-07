@@ -31,6 +31,15 @@ ftctl_guestprep_v2k_lib_dir() {
   return 1
 }
 
+ftctl_guestprep_resolve_winpe_iso() {
+  local v2k_dir="${1-}" requested="${FTCTL_DR_WINPE_ISO-}"
+  [[ -n "${v2k_dir}" && -f "${v2k_dir}/engine.sh" ]] || return 1
+  env V2K_LIB_DIR="${v2k_dir}" \
+    V2K_WINPE_INSTALL_ROOT="${V2K_WINPE_INSTALL_ROOT:-/usr/share/ablestack/v2k}" \
+    bash -c 'source "$1/engine.sh"; v2k_resolve_winpe_iso "$2"' \
+      _ "${v2k_dir}" "${requested}"
+}
+
 ftctl_guestprep_write_manifest() {
   local session_path="${1-}" manifest_path="${2-}" test_domain_name="${3-}" run_path="${4-}"
   local tool output="" rc=0 error_code="" error_message=""
@@ -171,7 +180,7 @@ ftctl_guestprep_preflight_test_session() {
     fi
   fi
   if ftctl_guestprep_conversion_required "${session_path}" && [[ "${family}" == "windows" ]]; then
-    winpe_iso="${FTCTL_DR_WINPE_ISO:-/usr/share/ablestack/v2k/winpe/winpe-ablestack-v2k-amd64.iso}"
+    winpe_iso="$(ftctl_guestprep_resolve_winpe_iso "${v2k_dir}" 2>/dev/null || true)"
     virtio_iso="${FTCTL_DR_VIRTIO_ISO:-/usr/share/virtio-win/virtio-win.iso}"
     if [[ ! -r "${winpe_iso}" || ! -s "${winpe_iso}" ]]; then
       ftctl_guestprep_preflight_fail "${run_path}" "DR_GUEST_PREP_WINPE_ISO_MISSING" \
@@ -288,7 +297,7 @@ ftctl_guestprep_release_manifest_mappings() {
 
 ftctl_guestprep_prepare_artifacts() {
   local session_path="${1-}" run_path="${2-}"
-  local artifacts_dir plan run artifact_name manifest v2k_dir family rc=0 state_file execution_mode
+  local artifacts_dir plan run artifact_name manifest v2k_dir family winpe_iso rc=0 state_file execution_mode
   artifacts_dir="$(jq -r '.testArtifacts.path // ""' "${session_path}" 2>/dev/null || true)"
   plan="$(jq -r '.planUuid // ""' "${session_path}" 2>/dev/null || true)"
   run="$(jq -r '.runUuid // ""' "${session_path}" 2>/dev/null || true)"
@@ -334,8 +343,10 @@ PY
         bash -c 'source "$1/engine.sh"; v2k_linux_bootstrap_initramfs "$2"' _ "${v2k_dir}" "${manifest}" || rc=$?
       ;;
     windows)
+      winpe_iso="$(ftctl_guestprep_resolve_winpe_iso "${v2k_dir}")" || return 47
       env V2K_LIB_DIR="${v2k_dir}" V2K_WORKDIR="${artifacts_dir}" V2K_MANIFEST="${manifest}" V2K_JSON_OUT=1 \
-        bash -c 'source "$1/engine.sh"; v2k_cloud_windows_winpe_bootstrap "${FTCTL_DR_WINPE_ISO:-/usr/share/ablestack/v2k/winpe/winpe-ablestack-v2k-amd64.iso}" "${FTCTL_DR_VIRTIO_ISO:-/usr/share/virtio-win/virtio-win.iso}" "${FTCTL_DR_WINPE_TIMEOUT:-900}"' _ "${v2k_dir}" || rc=$?
+        bash -c 'source "$1/engine.sh"; v2k_cloud_windows_winpe_bootstrap "$2" "${FTCTL_DR_VIRTIO_ISO:-/usr/share/virtio-win/virtio-win.iso}" "${FTCTL_DR_WINPE_TIMEOUT:-900}"' \
+          _ "${v2k_dir}" "${winpe_iso}" || rc=$?
       ;;
     *) return 48 ;;
   esac
@@ -371,7 +382,7 @@ PY
 
 ftctl_guestprep_prepare_and_start() {
   local session_path="${1-}" run_path="${2-}"
-  local artifacts_dir plan run domain manifest v2k_dir family validation timeout rc=0 state_file execution_mode
+  local artifacts_dir plan run domain manifest v2k_dir family winpe_iso validation timeout rc=0 state_file execution_mode
   execution_mode="$(jq -r '.profile.policy.testExecutionMode // .request.testExecutionMode // "BOOT"' "${session_path}" 2>/dev/null || echo BOOT)"
   if [[ "${execution_mode}" == "METADATA_ONLY" ]]; then
     return 0
@@ -396,8 +407,10 @@ ftctl_guestprep_prepare_and_start() {
           bash -c 'source "$1/engine.sh"; v2k_linux_bootstrap_initramfs "$2"' _ "${v2k_dir}" "${manifest}" || rc=$?
         ;;
       windows)
+        winpe_iso="$(ftctl_guestprep_resolve_winpe_iso "${v2k_dir}")" || return 47
         env V2K_LIB_DIR="${v2k_dir}" V2K_WORKDIR="${artifacts_dir}" V2K_MANIFEST="${manifest}" V2K_JSON_OUT=1 \
-          bash -c 'source "$1/engine.sh"; v2k_cloud_windows_winpe_bootstrap "${FTCTL_DR_WINPE_ISO:-/usr/share/ablestack/v2k/winpe/winpe-ablestack-v2k-amd64.iso}" "${FTCTL_DR_VIRTIO_ISO:-/usr/share/virtio-win/virtio-win.iso}" "${FTCTL_DR_WINPE_TIMEOUT:-900}"' _ "${v2k_dir}" || rc=$?
+          bash -c 'source "$1/engine.sh"; v2k_cloud_windows_winpe_bootstrap "$2" "${FTCTL_DR_VIRTIO_ISO:-/usr/share/virtio-win/virtio-win.iso}" "${FTCTL_DR_WINPE_TIMEOUT:-900}"' \
+            _ "${v2k_dir}" "${winpe_iso}" || rc=$?
         ;;
       *) return 48 ;;
     esac
@@ -461,7 +474,7 @@ PY
 
 ftctl_guestprep_prepare_cutover_target() {
   local profile_file="${1-}" run_path="${2-}" workdir="${3-}" status_path="${4-}" restore_point="${5-}"
-  local manifest v2k_dir family rc=0 plan run disk_map restore_points tool build_result validate_result manifest_sha256
+  local manifest v2k_dir family winpe_iso rc=0 plan run disk_map restore_points tool build_result validate_result manifest_sha256
   mkdir -p "${workdir}"
   manifest="${workdir}/cutover-manifest.json"
   plan="$(ftctl_dr_runtime_state_get_from_path "${run_path}" plan)"
@@ -525,8 +538,10 @@ ftctl_guestprep_prepare_cutover_target() {
         bash -c 'source "$1/engine.sh"; v2k_linux_bootstrap_initramfs "$2"' _ "${v2k_dir}" "${manifest}" || rc=$?
       ;;
     windows)
+      winpe_iso="$(ftctl_guestprep_resolve_winpe_iso "${v2k_dir}")" || return 47
       env V2K_LIB_DIR="${v2k_dir}" V2K_WORKDIR="${workdir}" V2K_MANIFEST="${manifest}" V2K_JSON_OUT=1 \
-        bash -c 'source "$1/engine.sh"; v2k_cloud_windows_winpe_bootstrap "${FTCTL_DR_WINPE_ISO:-/usr/share/ablestack/v2k/winpe/winpe-ablestack-v2k-amd64.iso}" "${FTCTL_DR_VIRTIO_ISO:-/usr/share/virtio-win/virtio-win.iso}" "${FTCTL_DR_WINPE_TIMEOUT:-900}"' _ "${v2k_dir}" || rc=$?
+        bash -c 'source "$1/engine.sh"; v2k_cloud_windows_winpe_bootstrap "$2" "${FTCTL_DR_VIRTIO_ISO:-/usr/share/virtio-win/virtio-win.iso}" "${FTCTL_DR_WINPE_TIMEOUT:-900}"' \
+          _ "${v2k_dir}" "${winpe_iso}" || rc=$?
       ;;
     *) return 61 ;;
   esac

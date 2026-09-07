@@ -158,6 +158,12 @@ ISO9660 descriptor 확인 가능
 WinPE와 VirtIO ISO가 서로 다른 파일
 ```
 
+WinPE 경로는 FTCTL에서 파일명으로 고정하지 않는다. preflight, 테스트 부팅,
+실제 cutover는 모두 V2K의 `v2k_resolve_winpe_iso()`를 사용한다. resolver는
+명시적 `FTCTL_DR_WINPE_ISO`를 최우선으로 검증하고, 그렇지 않으면 RPM이
+설치한 `winpe/current.json`의 파일명과 SHA-256을 권위 계약으로 사용한다.
+버전형 ISO 파일만 설치된 호스트도 이 계약으로 동일하게 동작해야 한다.
+
 호스트에서 확인한 현재 파일은 다음과 같다.
 
 ```text
