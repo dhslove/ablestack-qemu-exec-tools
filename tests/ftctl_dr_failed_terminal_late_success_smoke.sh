@@ -46,7 +46,6 @@ progress=100
 control_request_run_uuid=${RUN}
 requested_cycle_mode=FULL_RESEED
 requested_cycle_owner_run=${RUN}
-requested_cycle_sequence=1
 requested_cycle_state=FAILED
 restore_points_path=${RESTORE_POINTS}
 scheduler_session_uuid=${PLAN}

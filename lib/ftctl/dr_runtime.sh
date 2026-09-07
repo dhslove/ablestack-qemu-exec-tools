@@ -8028,7 +8028,7 @@ PY
 ftctl_dr_runtime_repair_requested_cycle_terminal() {
   local plan="${1-}" run="${2-}" path="${3-}"
   local state step progress owner requested_state mode commit_state durable sequence token expected_token
-  local scheduler_path scheduler_owner scheduler_state scheduler_sequence run_requested_sequence
+  local scheduler_path scheduler_owner scheduler_state scheduler_sequence scheduler_mode run_requested_sequence
   local terminal_path terminal_state nonce generation now restore_points_path recovered_json
   local recovered_sequence recovered_token recovered_manifest recovered_checkpoint recovered_source_at recovered_target_at
 
@@ -8054,6 +8054,16 @@ ftctl_dr_runtime_repair_requested_cycle_terminal() {
   if [[ "${terminal_state}" == "FAILED" ]]; then
     restore_points_path="$(ftctl_dr_runtime_state_get_from_path "${path}" restore_points_path)"
     [[ -n "${restore_points_path}" ]] || restore_points_path="$(ftctl_dr_runtime_plan_dir "${plan}")/restore-points.jsonl"
+    if [[ ! "${run_requested_sequence}" =~ ^[1-9][0-9]*$ ]]; then
+      scheduler_path="$(ftctl_dr_runtime_plan_dir "${plan}")/scheduler/sequence.state"
+      [[ -f "${scheduler_path}" ]] || return 0
+      scheduler_owner="$(ftctl_dr_runtime_state_get_from_path "${scheduler_path}" requested_cycle_owner_run)"
+      scheduler_sequence="$(ftctl_dr_runtime_state_get_from_path "${scheduler_path}" requested_cycle_sequence)"
+      scheduler_mode="$(ftctl_dr_runtime_state_get_from_path "${scheduler_path}" requested_cycle_mode)"
+      [[ "${scheduler_owner}" == "${run}" && "${scheduler_sequence}" =~ ^[1-9][0-9]*$ \
+            && ( "${scheduler_mode}" == "FULL_RESEED" || "${scheduler_mode}" == "FULL_SEED" ) ]] || return 0
+      run_requested_sequence="${scheduler_sequence}"
+    fi
     [[ "${run_requested_sequence}" =~ ^[1-9][0-9]*$ && -s "${restore_points_path}" ]] || return 0
     recovered_json="$(python3 - "${restore_points_path}" "${plan}" "${run}" "${run_requested_sequence}" <<'PY'
 import json

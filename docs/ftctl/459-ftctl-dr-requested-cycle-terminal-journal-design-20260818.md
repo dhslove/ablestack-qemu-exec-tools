@@ -160,3 +160,13 @@ exposed the first failure. Cloud therefore never materialized the target VM.
 - different Run, non-durable, missing artifact, or non-newer evidence does not
   repair;
 - run the shared DR action contract and release tombstone regression gates.
+
+### 8.5 Missing per-Run requested sequence
+
+Older failed Runs can retain `requested_cycle_sequence` only in
+`scheduler/sequence.state`. In that case terminal repair may use the scheduler
+journal as a sequence fallback only when its request owner is the failed Run,
+its mode is `FULL_SEED` or `FULL_RESEED`, and its sequence is positive. The
+recovered restore point must still be newer and satisfy every same-Run,
+canonical-token, durable-commit, and artifact-existence check in section 8.2.
+The fallback cannot replace a valid per-Run sequence or weaken ownership.
