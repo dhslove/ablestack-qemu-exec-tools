@@ -411,3 +411,25 @@ absent. The former must create a qcow2 persistent-bitmap baseline; the latter
 must preserve `STOPPED` and remain safely retryable. Existing qcow2-to-qcow2,
 RBD-to-RBD, and VMware-to-RBD lifecycle suites remain mandatory deployment
 gates.
+
+## Cross-Format qcow2 Source Transfer Contract
+
+The qcow2 QMP/bitmap producer is selected from the source disk format and the
+Cloud-managed site-Agent NBD transport. Its supported destination pairs are
+`file/qcow2 -> file/qcow2` and `file/qcow2 -> rbd/raw`. The target backing
+format does not change the NBD wire contract: the producer always writes raw
+guest block bytes to the Plan-owned export, while the target Agent owns the
+qcow2 file or RBD image behind that export.
+
+A running qcow2 source must never fall through to generic `qemu-img convert
+--force-share`. Full Seed and reverse Full Seed use QMP bitmap backup; a
+stopped source uses the existing offline persistent-bitmap path. Incremental
+transfer follows the same provider selection. Unsupported destination pairs
+remain rejected before transfer instead of being accepted by a source-only
+wildcard.
+
+The cross-format regression creates the reverse map produced by an
+RBD-to-qcow2 Failover and proves that qcow2-to-RBD selects the bitmap/NBD
+producer. The existing qcow2-to-qcow2 and RBD source assertions prove that the
+change neither redirects the established SharedMountPoint path nor captures
+the RBD producer path.

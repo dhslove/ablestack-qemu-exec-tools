@@ -436,6 +436,7 @@ cross_format_reverse_map="${TMP}/cross-format-reverse-map.json"
 cat > "${cross_format_reverse_map}" <<EOF
 {"source":{"storagePath":"${TMP}"},"count":1,"disks":[{"device":"sda","sourcePath":"${TMP}/replica.qcow2","sourceType":"file","sourceFormat":"qcow2","targetPath":"rbd:rbd/source-image","targetType":"rbd","targetFormat":"raw"}]}
 EOF
+ftctl_dr_ablestack_qcow2_push_provider "${cross_format_reverse_map}"
 (
   called="${TMP}/qcow2-initialize-called"
   ftctl_dr_ablestack_initialize_qcow2_source_baselines() { printf '%s\n' "$*" > "${called}"; }

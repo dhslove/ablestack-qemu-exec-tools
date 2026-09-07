@@ -1524,8 +1524,11 @@ ftctl_dr_ablestack_qcow2_push_provider() {
     source_format="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" sourceFormat)"
     target_type="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" targetType)"
     target_format="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" targetFormat)"
-    [[ "${source_type}" == "file" && "${source_format}" == "qcow2" \
-       && "${target_type}" == "file" && "${target_format}" == "qcow2" ]] || return 1
+    [[ "${source_type}" == "file" && "${source_format}" == "qcow2" ]] || return 1
+    case "${target_type}:${target_format}" in
+      file:qcow2|rbd:raw|rbd:) ;;
+      *) return 1 ;;
+    esac
     count=$((count + 1))
   done < <(ftctl_dr_ablestack_disk_rows "${disk_map}")
   (( count > 0 ))
