@@ -94,6 +94,37 @@ for index, disk in enumerate(disks):
         disk.get("targetPath") if reverse_from_target else disk.get("sourcePath"),
         disk.get("targetDiskRef") if reverse_from_target else disk.get("sourceDiskRef"),
     )
+    source_type = first(
+        disk.get("sourceType"), source_obj.get("type"), source_obj.get("targetType"),
+    ).lower()
+    source_format = first(
+        disk.get("sourceFormat"), source_obj.get("format"),
+    ).lower()
+    if not source_type:
+        source_storage_type = first(
+            source_obj.get("storagePoolType"), source_obj.get("poolType"),
+            source.get("storagePoolType"), source.get("poolType"),
+        ).upper()
+        source_storage_path = first(source_obj.get("storagePath"), source.get("storagePath"))
+        if (source_path.startswith(("rbd:", "rbd/", "/dev/rbd/"))
+                or "RBD" in source_storage_type
+                or source_storage_path.startswith(("rbd:", "rbd/", "/dev/rbd/"))
+                or source_storage_path == "rbd"):
+            source_type = "rbd"
+        elif source_path.startswith("/dev/"):
+            source_type = "block"
+        elif source_path:
+            source_type = "file"
+    if not source_format:
+        source_format = "qcow2" if source_type == "file" and source_path.endswith(".qcow2") else "raw"
+    if source_type == "file":
+        storage_root = first(source_obj.get("storagePath"), source.get("storagePath"))
+        if not os.path.isabs(source_path) and storage_root:
+            source_path = os.path.normpath(os.path.join(storage_root, source_path))
+        if not os.path.isabs(source_path) or not os.path.isabs(storage_root):
+            raise SystemExit("KVM_TO_VMWARE file source locator is incomplete")
+        if os.path.commonpath((os.path.normpath(storage_root), source_path)) != os.path.normpath(storage_root):
+            raise SystemExit("KVM_TO_VMWARE file source escapes the storage root")
     pool = first(
         disk.get("sourcePool"), source_obj.get("pool"), source_obj.get("storagePath"),
         source_obj.get("storagePool"), source.get("storagePool"),
@@ -124,6 +155,9 @@ for index, disk in enumerate(disks):
         "device": first(disk.get("device"), source_obj.get("device"), target_obj.get("device"), f"disk{index}"),
         "sourcePool": pool,
         "sourceImage": image,
+        "sourcePath": source_path,
+        "sourceType": source_type,
+        "sourceFormat": source_format,
         "sourceVolumeUuid": first(source_obj.get("volumeUuid"), source_obj.get("uuid")),
         "sourceUri": f"rbd:{pool}/{image}" if pool and image else source_path,
         "targetVmdkPath": target_vmdk,
@@ -145,7 +179,12 @@ payload = {
     "sourceDomain": first(source.get("instanceName"), source.get("domainName"), source.get("vmName")),
     "disks": rows,
 }
-if not payload["sourceDomain"] or not rows or any(not row["sourcePool"] or not row["sourceImage"] or not row["targetVmdkPath"] or not row["targetVmRef"] for row in rows):
+def valid_source(row):
+    if row["sourceType"] == "file" and row["sourceFormat"] == "qcow2":
+        return bool(row["sourcePath"])
+    return bool(row["sourcePool"] and row["sourceImage"])
+
+if not payload["sourceDomain"] or not rows or any(not valid_source(row) or not row["targetVmdkPath"] or not row["targetVmRef"] for row in rows):
     raise SystemExit("KVM_TO_VMWARE disk map is incomplete")
 os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 tmp = output_path + ".tmp"
@@ -325,12 +364,78 @@ ftctl_dr_kvm_vmware_baseline_state() {
   baseline="$(ftctl_dr_kvm_vmware_baseline_path "${plan}")"
   if [[ ! -e "${baseline}" ]]; then
     printf 'MISSING_EXPECTED\n'
-  elif [[ -s "${baseline}" ]] && jq -e '.state == "LOCAL_DURABLE" and ((.disks | type) == "array") and ((.disks | length) > 0)' \
+  elif [[ -s "${baseline}" ]] && jq -e '.state == "LOCAL_DURABLE" and ((.disks | type) == "array") and ((.disks | length) > 0)
+      and ((.trackerType // "RBD_SNAPSHOT") == "RBD_SNAPSHOT" or (.trackerType // "") == "QCOW2_BITMAP")' \
       "${baseline}" >/dev/null 2>&1; then
     printf 'LOCAL_DURABLE\n'
   else
     printf 'INVALID\n'
   fi
+}
+
+ftctl_dr_kvm_vmware_qcow2_source_provider() {
+  local map_path="${1-}"
+  [[ -s "${map_path}" ]] || return 1
+  jq -e '.disks | length > 0 and all(.[]; .sourceType == "file" and .sourceFormat == "qcow2" and (.sourcePath | type == "string") and (.sourcePath | length > 0))' \
+    "${map_path}" >/dev/null 2>&1
+}
+
+ftctl_dr_kvm_vmware_seed_qcow2_cutover_baseline() {
+  local plan="${1-}" run="${2-}" map_path="${3-}" baseline_path="${4-}" checkpoint_sequence="${5-}"
+  local current_run current_sequence root now
+  current_run="$(jq -r '.runUuid // ""' "${baseline_path}" 2>/dev/null || true)"
+  current_sequence="$(jq -r '.createdFromCheckpoint // 0' "${baseline_path}" 2>/dev/null || true)"
+  if [[ "${current_run}" == "${run}" && "${current_sequence}" == "${checkpoint_sequence}" ]] \
+      && ftctl_dr_ablestack_qcow2_source_baselines_ready "${plan}" "${map_path}"; then
+    return 0
+  fi
+  ftctl_dr_ablestack_initialize_qcow2_source_baselines \
+    "${plan}" "cutover-${checkpoint_sequence}" "${map_path}" 1 || return $?
+  ftctl_dr_ablestack_qcow2_source_root "${map_path}" root || return 113
+  now="$(ftctl_now_iso8601)"
+  python3 - "${map_path}" "${baseline_path}" "${plan}" "${run}" "${checkpoint_sequence}" "${root}" "${now}" <<'PY'
+import json
+import os
+import subprocess
+import sys
+
+map_path, output_path, plan, run, sequence, root, now = sys.argv[1:8]
+with open(map_path, encoding="utf-8") as handle:
+    disk_map = json.load(handle)
+rows = []
+for disk in disk_map.get("disks") or []:
+    device = str(disk.get("device") or f"disk{len(rows)}")
+    checksum = subprocess.check_output(
+        ["cksum"], input=(plan + ":" + device).encode("utf-8")
+    ).decode("utf-8").split()[0]
+    rows.append({
+        "diskIndex": int(disk.get("diskIndex") or len(rows)),
+        "diskIdentityHash": disk.get("diskIdentityHash", ""),
+        "sourcePath": disk.get("sourcePath", ""),
+        "sourceType": "file",
+        "sourceFormat": "qcow2",
+        "storageRoot": root,
+        "bitmap": f"ftctl-dr-{checksum}-{''.join(c if c.isalnum() or c in '._-' else '_' for c in device)}",
+        "generation": int(sequence),
+        "state": "LOCAL_DURABLE",
+    })
+payload = {
+    "schemaVersion": 1, "planUuid": plan, "runUuid": run,
+    "direction": "KVM_TO_VMWARE", "providerPair": "ABLESTACK_TO_VMWARE",
+    "origin": "FAILOVER_CUTOVER", "trackerType": "QCOW2_BITMAP",
+    "generation": int(sequence), "createdFromCheckpoint": int(sequence),
+    "state": "LOCAL_DURABLE", "committedAt": now,
+    "virtualBytes": sum(int(d.get("virtualBytes") or 0) for d in disk_map.get("disks") or []),
+    "disks": rows,
+}
+tmp = output_path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as handle:
+    json.dump(payload, handle, sort_keys=True, separators=(",", ":"))
+    handle.write("\n")
+    handle.flush()
+    os.fsync(handle.fileno())
+os.replace(tmp, output_path)
+PY
 }
 
 ftctl_dr_kvm_vmware_snapshot_exists() {
@@ -354,6 +459,14 @@ ftctl_dr_kvm_vmware_seed_cutover_baseline() {
   baseline_path="$(ftctl_dr_kvm_vmware_baseline_path "${plan}")"
   ftctl_ensure_dir "${root}" "0755"
   ftctl_dr_kvm_vmware_canonicalize_profile "${profile_file}" "${map_path}" || return 67
+
+  if ftctl_dr_kvm_vmware_qcow2_source_provider "${map_path}"; then
+    ftctl_dr_kvm_vmware_seed_qcow2_cutover_baseline \
+      "${plan}" "${run}" "${map_path}" "${baseline_path}" "${checkpoint_sequence}" || return $?
+    ftctl_log_event "dr-runtime" "dr.reverse.baseline.seed" "ok" "" "" \
+      "plan=${plan} run=${run} checkpoint=${checkpoint_sequence} origin=FAILOVER_CUTOVER tracker=QCOW2_BITMAP"
+    return 0
+  fi
 
   if [[ -s "${baseline_path}" ]]; then
     jq -e '.schemaVersion == 1 and .state == "LOCAL_DURABLE"
@@ -569,19 +682,34 @@ ftctl_dr_kvm_vmware_reverse_preflight() {
   source_disk_count="$(jq -r '.disks | length' "${map_path}" 2>/dev/null || printf 0)"
   estimated_virtual_bytes="$(jq -r '[.disks[].virtualBytes // 0] | add // 0' "${map_path}" 2>/dev/null || printf 0)"
   if [[ "${rc}" == "0" ]]; then
-    while IFS=$'\t' read -r pool image; do
-      if [[ -z "${pool}" || -z "${image}" ]] || ! rbd info "${pool}/${image}" >/dev/null 2>&1; then
+    if ftctl_dr_kvm_vmware_qcow2_source_provider "${map_path}"; then
+      if ! ftctl_dr_ablestack_qcow2_source_baselines_ready "${plan}" "${map_path}"; then
         source_disk_probe_state="NOT_READY"
         ready=false
-        rc=82
-        error_code="DR_REVERSE_SOURCE_STORAGE_MISSING"
-        break
+        rc=83
+        error_code="DR_REVERSE_BASELINE_REQUIRED"
       fi
-    done < <(jq -r '.disks[] | [.sourcePool,.sourceImage] | @tsv' "${map_path}")
+    else
+      while IFS=$'\t' read -r pool image; do
+        if [[ -z "${pool}" || -z "${image}" ]] || ! rbd info "${pool}/${image}" >/dev/null 2>&1; then
+          source_disk_probe_state="NOT_READY"
+          ready=false
+          rc=82
+          error_code="DR_REVERSE_SOURCE_STORAGE_MISSING"
+          break
+        fi
+      done < <(jq -r '.disks[] | [.sourcePool,.sourceImage] | @tsv' "${map_path}")
+    fi
   else
     source_disk_probe_state="NOT_CHECKED"
   fi
-  for cmd in jq rbd qemu-nbd nbd-client nbdkit blockdev flock python3; do
+  local required_commands=(jq nbdkit blockdev flock python3)
+  if ftctl_dr_kvm_vmware_qcow2_source_provider "${map_path}"; then
+    required_commands+=(qemu-storage-daemon virsh)
+  else
+    required_commands+=(rbd qemu-nbd nbd-client)
+  fi
+  for cmd in "${required_commands[@]}"; do
     if ! command -v "${cmd}" >/dev/null 2>&1; then
       target_writer_probe_state="NOT_READY"
       ready=false

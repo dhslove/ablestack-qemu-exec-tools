@@ -730,6 +730,50 @@ reported NBD teardown evidence.
 | Error code | QMP/baseline exit 92 becomes an NBD timeout | qcow2 uses isolated exits 110 through 116 |
 | Existing providers | Shared rc values can trigger unrelated recovery | VMware-to-RBD and RBD-to-RBD command paths stay unchanged |
 
+## VMware Source To SharedMountPoint Reverse Baseline Dispatch (2026-09-08)
+
+The forward VMware CBT capture contract is independent of the ABLESTACK target
+storage provider. VMware-to-RBD and VMware-to-SharedMountPoint therefore use the
+same snapshot, CBT pagination, VDDK read, durable target checkpoint, and final
+delta path. Provider dispatch changes only after the final checkpoint has been
+sealed and before the promoted target VM is started.
+
+The former reverse-baseline call classified every `VMWARE_TO_KVM` target as an
+RBD source for the future failback. A SharedMountPoint volume name was therefore
+parsed as `pool/image` and sent to `rbd snap create`. This failed a valid forward
+replication after its durable checkpoint and incorrectly made the established
+VMware-to-RBD implementation appear suspect.
+
+The reverse contract is now selected from the canonical target disk set:
+
+| Forward target | Cutover tracker | Reverse transfer |
+| --- | --- | --- |
+| RBD/raw | Existing paired RBD snapshot | Existing RBD diff to VDDK writer |
+| SharedMountPoint/file/qcow2 | Persistent qcow2 dirty bitmap | QMP or offline QSD bitmap backup to VDDK writer |
+
+For a FILE target, FTCTL resolves every relative Cloud volume name below the
+configured SharedMountPoint root, proves the complete disk set is qcow2, drains
+the forward writer, and creates or resets each persistent bitmap before target
+power-on. The baseline journal records `trackerType=QCOW2_BITMAP`, the absolute
+source path, storage root, bitmap identity, checkpoint sequence, and cutover Run.
+No RBD command is reachable from this branch.
+
+Reverse transfer preserves every source bitmap until all mapped disks have
+reached the VMware VDDK writer durably. A running promoted VM uses QMP and clears
+the complete bitmap set in one QMP transaction. A stopped VM uses a temporary
+QEMU storage daemon and clears the set only after every disk transfer succeeds.
+Any failure leaves the source bitmap evidence retryable; the Cloud Run may fail
+but the tracker is not advanced past uncommitted target data.
+
+Required regression gates are:
+
+1. VMware-to-RBD still selects only the RBD snapshot mover.
+2. VMware-to-SharedMountPoint selects only the qcow2 bitmap mover.
+3. A relative FILE volume path cannot escape the configured storage root.
+4. One or many disks advance their bitmaps only after the complete set succeeds.
+5. Failover creates the bitmap baseline before target boot and Failback consumes
+   it without a full reverse seed.
+
 ## Offline Incremental Bitmap Contract (2026-09-04)
 
 Stopping a source VM does not invalidate its durable qcow2 dirty-bitmap

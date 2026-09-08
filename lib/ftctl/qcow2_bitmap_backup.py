@@ -239,10 +239,14 @@ def run_backup(args, client=None):
             client, source_node, args.bitmap, args.job_id, args.granularity)
     target_node = args.target_node
     try:
+        target_unix = getattr(args, "target_unix", "")
+        server = ({"type": "unix", "path": target_unix}
+                  if target_unix else
+                  {"type": "inet", "host": args.target_host, "port": str(args.target_port)})
         client.execute("blockdev-add", {
             "driver": "nbd",
             "node-name": target_node,
-            "server": {"type": "inet", "host": args.target_host, "port": str(args.target_port)},
+            "server": server,
             "export": args.target_export,
             "read-only": False,
         })
@@ -288,8 +292,9 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--domain", required=True)
     parser.add_argument("--source-path", required=True)
-    parser.add_argument("--target-host", required=True)
-    parser.add_argument("--target-port", required=True, type=int)
+    parser.add_argument("--target-host", default="")
+    parser.add_argument("--target-port", type=int, default=0)
+    parser.add_argument("--target-unix", default="")
     parser.add_argument("--target-export", required=True)
     parser.add_argument("--bitmap", required=True)
     parser.add_argument("--mode", choices=("full", "incremental"), required=True)
@@ -311,7 +316,10 @@ def parse_args(argv=None):
     parser.add_argument("--aggregate-completed-bytes", type=int, default=0)
     parser.add_argument("--uri", default="qemu:///system")
     parser.add_argument("--virsh", default="virsh")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if not args.target_unix and (not args.target_host or args.target_port <= 0):
+        parser.error("either --target-unix or --target-host/--target-port is required")
+    return args
 
 
 def main(argv=None):

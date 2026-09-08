@@ -143,12 +143,7 @@ class OfflineStorageDaemon:
 
 def main(argv=None):
     args = backup.parse_args(argv)
-    if args.mode != "incremental":
-        print(json.dumps({"result": "error", "errorCode": "DR_QCOW2_OFFLINE_MODE_INVALID",
-                          "error": "offline bitmap backup accepts incremental mode only"},
-                         separators=(",", ":")), file=sys.stderr)
-        return 115
-    args.preserve_bitmap = True
+    args.preserve_bitmap = args.mode == "incremental"
     try:
         with OfflineStorageDaemon(args.source_path) as client:
             print(json.dumps(backup.run_backup(args, client), sort_keys=True, separators=(",", ":")))

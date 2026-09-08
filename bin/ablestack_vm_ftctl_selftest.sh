@@ -10603,6 +10603,35 @@ JSON
   rm -rf "${tmp}"
 }
 
+selftest_case_dr_kvm_vmware_dispatches_shared_qcow2_reverse_baseline() {
+  selftest_reset_env
+  selftest_info "FTCTL_DR VMware to SharedMountPoint cutover uses a qcow2 bitmap baseline"
+
+  local profile="${SELFTEST_ROOT}/vmware-file-profile.json"
+  local output="${SELFTEST_ROOT}/vmware-file-map.json"
+  local call_log="${SELFTEST_ROOT}/vmware-file-baseline.log"
+  cat > "${profile}" <<'JSON'
+{"planUuid":"plan-file","runUuid":"run-file","direction":"VMWARE_TO_KVM","source":{"provider":"VMWARE","externalRef":"vm-60975"},"target":{"provider":"ABLESTACK","instanceName":"i-2-234-VM","storagePath":"/mnt/glue-gfs","storagePoolType":"SharedMountPoint"},"mapping":{"disks":[{"device":"2000","sizeBytes":107374182400,"sourcePath":"[ds] vm/vm.vmdk","targetPath":"disk-uuid","source":{"path":"[ds] vm/vm.vmdk"},"target":{"path":"disk-uuid","format":"qcow2","type":"file","storagePath":"/mnt/glue-gfs","storagePoolType":"SharedMountPoint"}}]}}
+JSON
+  ftctl_dr_kvm_vmware_canonicalize_profile "${profile}" "${output}"
+  jq -e '.sourceDomain == "i-2-234-VM"
+    and .disks[0].sourceType == "file"
+    and .disks[0].sourceFormat == "qcow2"
+    and .disks[0].sourcePath == "/mnt/glue-gfs/disk-uuid"
+    and .disks[0].targetVmdkPath == "[ds] vm/vm.vmdk"' "${output}" >/dev/null
+
+  (
+    ftctl_dr_kvm_vmware_seed_qcow2_cutover_baseline() {
+      printf '%s\n' "$*" > "${call_log}"
+    }
+    rbd() { selftest_fail "SharedMountPoint baseline must not invoke rbd"; }
+    ftctl_dr_kvm_vmware_seed_cutover_baseline \
+      plan-file run-file "${profile}" 41
+  )
+  selftest_assert_file_contains "${call_log}" "plan-file run-file"
+  selftest_assert_file_contains "${call_log}" "41"
+}
+
 selftest_case_dr_kvm_vmware_refreshes_stale_target_backing() {
   selftest_reset_env
   selftest_info "FTCTL_DR resolves the current VMware backing by stable device key before reverse writes"
@@ -10823,6 +10852,7 @@ selftest_main() {
   selftest_case_dr_failback_live_worker_journal_is_read_only
   selftest_case_dr_kvm_vmware_reverse_preflight_ignores_domain_runtime
   selftest_case_dr_kvm_vmware_canonicalizes_cloud_rbd_volume_identity
+  selftest_case_dr_kvm_vmware_dispatches_shared_qcow2_reverse_baseline
   selftest_case_dr_kvm_vmware_refreshes_stale_target_backing
   selftest_case_events_json
   selftest_info "all checks passed"
