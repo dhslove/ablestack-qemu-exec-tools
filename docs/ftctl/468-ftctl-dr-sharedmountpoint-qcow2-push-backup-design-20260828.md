@@ -946,3 +946,40 @@ Regression gates cover both VMware-to-RBD and VMware-to-SharedMountPoint:
   is `DRAINED` when NBD was used;
 - Cloud Reprotect resolves the same canonical sequence without DB repair;
 - no provider-specific target branch can bypass or replace this publication.
+
+## Live Reverse-Baseline Preflight Contract (2026-09-08)
+
+After Reprotect, a promoted SharedMountPoint qcow2 replica is both the active
+source disk and the durable reverse baseline. When that VM is running, an
+offline `qemu-img` bitmap check correctly rejects the writable file, but that
+writer is expected and must not make Failback unavailable.
+
+Reverse preflight therefore selects its validator from current runtime
+evidence:
+
+- when the source domain answers QMP, `query-named-block-nodes` is
+  authoritative for every mapped disk;
+- each source path must resolve to exactly one active qcow2 node whose expected
+  persistent bitmap is recording, not busy, not inconsistent, and uses the
+  configured granularity;
+- an invalid QMP answer is terminal for that preflight attempt and must never
+  fall through to an offline check;
+- only an unavailable domain/QMP endpoint falls back to the existing
+  writer-drained file validator, preserving stopped-VM and relocated-worker
+  behavior;
+- RBD reverse sources continue to use RBD snapshot evidence without entering
+  this branch.
+
+Canonical reverse disk maps also preserve locator type. A file source emits its
+absolute SharedMountPoint path as `sourceUri`; pool-like metadata must not turn
+that path into an `rbd:` URI. This keeps source selection independent from
+provider metadata and prevents the transfer stage from reopening a file through
+the wrong driver.
+
+| Area | AS-IS | TO-BE |
+| --- | --- | --- |
+| Running qcow2 baseline check | offline file inspection rejects QEMU writer | read-only QMP bitmap validation |
+| QMP invalid bitmap | may be obscured by fallback | fail preflight with baseline-required evidence |
+| QMP unavailable | baseline reported missing | writer-drained offline validation |
+| File `sourceUri` | could be synthesized as `rbd:<root>/<name>` | absolute SharedMountPoint path |
+| Existing providers | shared preflight ambiguity | VMware capture and RBD snapshot paths unchanged |

@@ -25,6 +25,8 @@ ftctl_cmd_run() {
 
 # shellcheck source=../lib/ftctl/dr_ablestack.sh
 source "${ROOT}/lib/ftctl/dr_ablestack.sh"
+# shellcheck source=../lib/ftctl/dr_kvm_vmware.sh
+source "${ROOT}/lib/ftctl/dr_kvm_vmware.sh"
 
 profile="${TMP}/profile.json"
 canonical="${TMP}/canonical.json"
@@ -62,6 +64,28 @@ with open(sys.argv[1], encoding="utf-8") as fh:
 assert disk["sourceType"] == "file"
 assert disk["targetFormat"] == "qcow2"
 PY
+
+# Reverse VMware failback must keep a SharedMountPoint file locator as a file
+# URI even when its storage metadata also contains pool and volume names.
+kvm_vmware_profile="${TMP}/profile-kvm-vmware.json"
+kvm_vmware_map="${TMP}/canonical-kvm-vmware.json"
+cat > "${kvm_vmware_profile}" <<'EOF'
+{
+  "planUuid":"plan-qcow2",
+  "direction":"VMWARE_TO_KVM",
+  "source":{"provider":"VMWARE","externalRef":"vm-101"},
+  "target":{"provider":"ABLESTACK","instanceName":"i-2-234-VM","storagePath":"/mnt/glue-gfs"},
+  "mapping":{"disks":[{
+    "device":"2000","sourceType":"file","sourceFormat":"qcow2","sizeBytes":1073741824,
+    "source":{"path":"[datastore1] vm/vm.vmdk","deviceKey":"2000"},
+    "target":{"path":"/mnt/glue-gfs/w25-01-dr-disk-0","storagePath":"/mnt/glue-gfs","name":"w25-01-dr-disk-0"}
+  }]}
+}
+EOF
+ftctl_dr_kvm_vmware_canonicalize_profile "${kvm_vmware_profile}" "${kvm_vmware_map}"
+jq -e '.disks[0].sourceType == "file"
+  and .disks[0].sourceUri == "/mnt/glue-gfs/w25-01-dr-disk-0"
+  and (.disks[0].sourceUri | startswith("rbd:") | not)' "${kvm_vmware_map}" >/dev/null
 
 # A stopped or disaster-lost domain is not a replication eligibility condition.
 # The command-time Cloud locator remains valid when its SharedMountPoint file
@@ -165,6 +189,43 @@ python3() {
 ftctl_dr_ablestack_qcow2_source_baselines_ready plan-qcow2 "${relocated_baseline_map}"
 unset -f python3
 [[ "$(cat "${relocated_baseline_path}")" == "$(ftctl_dr_ablestack_qcow2_bitmap_name plan-qcow2 sda)" ]]
+
+# A running SharedMountPoint qcow2 source is validated through QMP. Its file is
+# intentionally writable, so the offline checker must not be used as fallback
+# after QMP returned an authoritative but invalid bitmap state.
+live_bitmap="$(ftctl_dr_ablestack_qcow2_bitmap_name plan-qcow2 sda)"
+virsh() {
+  cat <<EOF
+{"return":[{"node-name":"libvirt-2-format","drv":"qcow2","active":true,"image":{"filename":"${TMP}/relocated-source-volume","virtual-size":1073741824},"dirty-bitmaps":[{"name":"${live_bitmap}","persistent":true,"recording":true,"busy":false,"inconsistent":false,"granularity":65536,"count":4096}]}]}
+EOF
+}
+rm -f "${relocated_baseline_path}"
+ftctl_dr_ablestack_qcow2_source_baselines_ready_for_runtime plan-qcow2 "${relocated_baseline_map}"
+[[ "$(cat "${relocated_baseline_path}")" == "${live_bitmap}" ]]
+
+offline_fallback_marker="${TMP}/offline-fallback-called"
+python3() {
+  if [[ "${1-}" == *qcow2_bitmap_baseline.py ]]; then
+    : > "${offline_fallback_marker}"
+    return 0
+  fi
+  command python3 "$@"
+}
+virsh() {
+  cat <<EOF
+{"return":[{"node-name":"libvirt-2-format","drv":"qcow2","active":true,"image":{"filename":"${TMP}/relocated-source-volume","virtual-size":1073741824},"dirty-bitmaps":[{"name":"${live_bitmap}","persistent":true,"recording":true,"busy":true,"inconsistent":false,"granularity":65536,"count":4096}]}]}
+EOF
+}
+if ftctl_dr_ablestack_qcow2_source_baselines_ready_for_runtime plan-qcow2 "${relocated_baseline_map}"; then
+  echo "[ERR] invalid live qcow2 bitmap was accepted" >&2
+  exit 1
+fi
+[[ ! -e "${offline_fallback_marker}" ]]
+
+virsh() { return 1; }
+ftctl_dr_ablestack_qcow2_source_baselines_ready_for_runtime plan-qcow2 "${relocated_baseline_map}"
+[[ -e "${offline_fallback_marker}" ]]
+unset -f python3
 
 ambiguous_source_canonical="${TMP}/canonical-ambiguous-source.json"
 cp "${stale_source_canonical}" "${ambiguous_source_canonical}"

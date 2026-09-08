@@ -159,7 +159,7 @@ for index, disk in enumerate(disks):
         "sourceType": source_type,
         "sourceFormat": source_format,
         "sourceVolumeUuid": first(source_obj.get("volumeUuid"), source_obj.get("uuid")),
-        "sourceUri": f"rbd:{pool}/{image}" if pool and image else source_path,
+        "sourceUri": source_path if source_type == "file" else (f"rbd:{pool}/{image}" if pool and image else source_path),
         "targetVmdkPath": target_vmdk,
         "targetDiskKey": target_disk_key,
         "targetDiskLabel": first(target_obj.get("label"), disk.get("label")),
@@ -683,7 +683,7 @@ ftctl_dr_kvm_vmware_reverse_preflight() {
   estimated_virtual_bytes="$(jq -r '[.disks[].virtualBytes // 0] | add // 0' "${map_path}" 2>/dev/null || printf 0)"
   if [[ "${rc}" == "0" ]]; then
     if ftctl_dr_kvm_vmware_qcow2_source_provider "${map_path}"; then
-      if ! ftctl_dr_ablestack_qcow2_source_baselines_ready "${plan}" "${map_path}"; then
+      if ! ftctl_dr_ablestack_qcow2_source_baselines_ready_for_runtime "${plan}" "${map_path}"; then
         source_disk_probe_state="NOT_READY"
         ready=false
         rc=83

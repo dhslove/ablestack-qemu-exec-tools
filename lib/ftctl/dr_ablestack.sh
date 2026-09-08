@@ -1139,6 +1139,98 @@ ftctl_dr_ablestack_qcow2_source_baselines_ready() {
   done < <(ftctl_dr_ablestack_disk_rows "${disk_map}")
 }
 
+ftctl_dr_ablestack_qcow2_live_source_baselines_ready() {
+  local plan="${1-}" disk_map="${2-}" vm_name="" qmp_path="" rc=0
+  local disk_json device bitmap baseline recorded tmp
+  [[ -n "${plan}" && -s "${disk_map}" ]] || return 2
+  vm_name="$(ftctl_dr_ablestack_json_field "${disk_map}" sourceDomain 2>/dev/null || true)"
+  [[ -n "${vm_name}" ]] \
+    || vm_name="$(ftctl_dr_ablestack_json_field "${disk_map}" source.instanceName 2>/dev/null || true)"
+  [[ -n "${vm_name}" ]] || return 3
+
+  qmp_path="$(mktemp "${TMPDIR:-/tmp}/ftctl-dr-qcow2-baseline.XXXXXX.json")" || return 2
+  trap 'rm -f -- "${qmp_path:-}"; trap - RETURN' RETURN
+  if ! virsh -c "${FTCTL_PROFILE_PRIMARY_URI:-qemu:///system}" qemu-monitor-command \
+      "${vm_name}" --pretty '{"execute":"query-named-block-nodes"}' > "${qmp_path}" 2>/dev/null; then
+    return 3
+  fi
+
+  python3 - "${disk_map}" "${qmp_path}" "${plan}" \
+      "${FTCTL_DR_QCOW2_BITMAP_GRANULARITY:-65536}" <<'PY' || rc=$?
+import json
+import os
+import re
+import subprocess
+import sys
+
+disk_map_path, qmp_path, plan, granularity_text = sys.argv[1:5]
+with open(disk_map_path, encoding="utf-8") as handle:
+    disk_map = json.load(handle)
+with open(qmp_path, encoding="utf-8") as handle:
+    response = json.load(handle)
+nodes = response.get("return") if isinstance(response, dict) else None
+if not isinstance(nodes, list):
+    raise SystemExit(1)
+
+granularity = int(granularity_text)
+for disk in disk_map.get("disks") or []:
+    if str(disk.get("sourceType") or "").lower() != "file" \
+            or str(disk.get("sourceFormat") or "").lower() != "qcow2":
+        raise SystemExit(1)
+    source_path = os.path.normpath(str(disk.get("sourcePath") or "").strip())
+    device = str(disk.get("device") or "").strip()
+    if not source_path or not device:
+        raise SystemExit(1)
+    matches = []
+    for node in nodes:
+        if not isinstance(node, dict) or node.get("drv") != "qcow2" or node.get("active") is not True:
+            continue
+        filename = str((node.get("image") or {}).get("filename") or node.get("file") or "").strip()
+        if filename and os.path.normpath(filename) == source_path:
+            matches.append(node)
+    if len(matches) != 1:
+        raise SystemExit(1)
+    checksum = subprocess.check_output(
+        ["cksum"], input=f"{plan}:{device}".encode("utf-8")
+    ).decode("utf-8").split()[0]
+    safe_device = re.sub(r"[^A-Za-z0-9._-]", "_", device)
+    bitmap_name = f"ftctl-dr-{checksum}-{safe_device}"
+    bitmaps = [item for item in matches[0].get("dirty-bitmaps") or []
+               if isinstance(item, dict) and item.get("name") == bitmap_name]
+    if len(bitmaps) != 1:
+        raise SystemExit(1)
+    bitmap = bitmaps[0]
+    if bitmap.get("persistent") is not True or bitmap.get("recording") is not True \
+            or bitmap.get("busy") is True or bitmap.get("inconsistent") is True \
+            or int(bitmap.get("granularity") or 0) != granularity:
+        raise SystemExit(1)
+PY
+  [[ "${rc}" == "0" ]] || return 1
+
+  while IFS= read -r disk_json; do
+    device="$(ftctl_dr_ablestack_disk_json_field "${disk_json}" device)"
+    bitmap="$(ftctl_dr_ablestack_qcow2_bitmap_name "${plan}" "${device}")"
+    baseline="$(ftctl_dr_ablestack_qcow2_bitmap_baseline_path "${plan}" "${device}")"
+    recorded="$(head -n 1 "${baseline}" 2>/dev/null || true)"
+    if [[ "${recorded}" != "${bitmap}" ]]; then
+      ftctl_ensure_dir "$(dirname "${baseline}")" "0750"
+      tmp="${baseline}.tmp.$$"
+      printf '%s\n' "${bitmap}" > "${tmp}" || return 1
+      mv -f "${tmp}" "${baseline}" || return 1
+    fi
+  done < <(ftctl_dr_ablestack_disk_rows "${disk_map}")
+}
+
+ftctl_dr_ablestack_qcow2_source_baselines_ready_for_runtime() {
+  local plan="${1-}" disk_map="${2-}" rc=0
+  ftctl_dr_ablestack_qcow2_live_source_baselines_ready "${plan}" "${disk_map}" || rc=$?
+  case "${rc}" in
+    0) return 0 ;;
+    3) ftctl_dr_ablestack_qcow2_source_baselines_ready "${plan}" "${disk_map}" ;;
+    *) return "${rc}" ;;
+  esac
+}
+
 ftctl_dr_ablestack_probe_offline_qcow2_sources() {
   local disk_map="${1-}" root="" disk_json source_path bitmap rc=0
   ftctl_dr_ablestack_qcow2_source_root "${disk_map}" root || return 113
