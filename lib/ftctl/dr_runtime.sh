@@ -1394,6 +1394,36 @@ PY
   printf '%s\n' "$((current + 1))"
 }
 
+ftctl_dr_runtime_checkpoint_value() {
+  local checkpoint_path="${1-}" key="${2-}" kind="${3-string}"
+  if command -v ftctl_dr_scheduler_checkpoint_value >/dev/null 2>&1; then
+    ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "${key}" "${kind}"
+    return $?
+  fi
+  python3 - "${checkpoint_path}" "${key}" "${kind}" <<'PY'
+import json
+import sys
+
+path, key, kind = sys.argv[1:4]
+with open(path, "r", encoding="utf-8") as fh:
+    value = json.load(fh).get(key)
+if value is None:
+    raise SystemExit(1)
+if kind == "boolean":
+    if not isinstance(value, bool):
+        raise SystemExit(1)
+    print("true" if value else "false")
+elif kind == "integer":
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise SystemExit(1)
+    print(value)
+elif isinstance(value, (str, int, float)) and not isinstance(value, bool):
+    print(value)
+else:
+    raise SystemExit(1)
+PY
+}
+
 ftctl_dr_runtime_publish_latest_completed_checkpoint() {
   local plan="${1-}" run="${2-}" sequence="${3-}" cycle_type="${4-}"
   local manifest_path="${5-}" checkpoint_path="${6-}" run_path="${7-}" status_path="${8-}"
@@ -1407,37 +1437,37 @@ ftctl_dr_runtime_publish_latest_completed_checkpoint() {
 
   [[ "${sequence}" =~ ^[1-9][0-9]*$ && -s "${manifest_path}" && -s "${checkpoint_path}" ]] || return 1
   checkpoint_ref="ftctl:${plan}:${run}:${sequence}"
-  source_at="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "sourceCheckpointAt" || true)"
-  target_at="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "targetDurableAt" || true)"
-  rpo="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "targetReadyRpoSeconds" integer || true)"
-  requested_mode="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "requestedMode" || true)"
-  effective_mode="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "effectiveMode" || true)"
-  mode_decision_code="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "modeDecisionCode" || true)"
-  reseed_reason="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "reseedReason" || true)"
-  automatic_reseed="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "automaticReseed" boolean || true)"
-  invalid_baseline_disk_count="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "invalidBaselineDiskCount" integer || true)"
-  incremental_verified="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "incrementalVerified" boolean || true)"
-  metrics_estimated="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "metricsEstimated" boolean || true)"
-  virtual_bytes="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "virtualBytes" integer || true)"
-  changed_bytes="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "changedBytes" integer || true)"
-  source_read_bytes="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "sourceReadBytes" integer || true)"
-  target_written_bytes="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "targetWrittenBytes" integer || true)"
-  transfer_payload_bytes="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "transferPayloadBytes" integer || true)"
-  changed_extent_count="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "changedExtentCount" integer || true)"
-  duration_ms="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "durationMs" integer || true)"
-  throughput_bps="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "throughputBps" integer || true)"
-  baseline_generation="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "baselineGeneration" integer || true)"
-  cycle_token="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "cycleToken" || true)"
-  cycle_metrics_path="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "cycleMetricsPath" || true)"
-  nbd_teardown_state="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "nbdTeardownState" || true)"
-  nbd_teardown_started_at_ms="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "nbdTeardownStartedAtEpochMs" integer || true)"
-  nbd_teardown_completed_at_ms="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "nbdTeardownCompletedAtEpochMs" integer || true)"
-  nbd_teardown_duration_ms="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "nbdTeardownDurationMs" integer || true)"
-  nbd_source_device_count="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "nbdSourceDeviceCount" integer || true)"
-  nbd_target_device_count="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "nbdTargetDeviceCount" integer || true)"
-  nbd_quarantined_device_count="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "nbdQuarantinedDeviceCount" integer || true)"
-  nbd_teardown_error_code="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "nbdTeardownErrorCode" || true)"
-  nbd_teardown_error_message="$(ftctl_dr_scheduler_checkpoint_value "${checkpoint_path}" "nbdTeardownErrorMessage" || true)"
+  source_at="$(ftctl_dr_runtime_checkpoint_value "${checkpoint_path}" "sourceCheckpointAt" || true)"
+  target_at="$(ftctl_dr_runtime_checkpoint_value "${checkpoint_path}" "targetDurableAt" || true)"
+  rpo="$(ftctl_dr_runtime_checkpoint_value "${checkpoint_path}" "targetReadyRpoSeconds" integer || true)"
+  requested_mode="$(ftctl_dr_runtime_checkpoint_value "${checkpoint_path}" "requestedMode" || true)"
+  effective_mode="$(ftctl_dr_runtime_checkpoint_value "${checkpoint_path}" "effectiveMode" || true)"
+  mode_decision_code="$(ftctl_dr_runtime_checkpoint_value "${checkpoint_path}" "modeDecisionCode" || true)"
+  reseed_reason="$(ftctl_dr_runtime_checkpoint_value "${checkpoint_path}" "reseedReason" || true)"
+  automatic_reseed="$(ftctl_dr_runtime_checkpoint_value "${checkpoint_path}" "automaticReseed" boolean || true)"
+  invalid_baseline_disk_count="$(ftctl_dr_runtime_checkpoint_value "${checkpoint_path}" "invalidBaselineDiskCount" integer || true)"
+  incremental_verified="$(ftctl_dr_runtime_checkpoint_value "${checkpoint_path}" "incrementalVerified" boolean || true)"
+  metrics_estimated="$(ftctl_dr_runtime_checkpoint_value "${checkpoint_path}" "metricsEstimated" boolean || true)"
+  virtual_bytes="$(ftctl_dr_runtime_checkpoint_value "${checkpoint_path}" "virtualBytes" integer || true)"
+  changed_bytes="$(ftctl_dr_runtime_checkpoint_value "${checkpoint_path}" "changedBytes" integer || true)"
+  source_read_bytes="$(ftctl_dr_runtime_checkpoint_value "${checkpoint_path}" "sourceReadBytes" integer || true)"
+  target_written_bytes="$(ftctl_dr_runtime_checkpoint_value "${checkpoint_path}" "targetWrittenBytes" integer || true)"
+  transfer_payload_bytes="$(ftctl_dr_runtime_checkpoint_value "${checkpoint_path}" "transferPayloadBytes" integer || true)"
+  changed_extent_count="$(ftctl_dr_runtime_checkpoint_value "${checkpoint_path}" "changedExtentCount" integer || true)"
+  duration_ms="$(ftctl_dr_runtime_checkpoint_value "${checkpoint_path}" "durationMs" integer || true)"
+  throughput_bps="$(ftctl_dr_runtime_checkpoint_value "${checkpoint_path}" "throughputBps" integer || true)"
+  baseline_generation="$(ftctl_dr_runtime_checkpoint_value "${checkpoint_path}" "baselineGeneration" integer || true)"
+  cycle_token="$(ftctl_dr_runtime_checkpoint_value "${checkpoint_path}" "cycleToken" || true)"
+  cycle_metrics_path="$(ftctl_dr_runtime_checkpoint_value "${checkpoint_path}" "cycleMetricsPath" || true)"
+  nbd_teardown_state="$(ftctl_dr_runtime_checkpoint_value "${checkpoint_path}" "nbdTeardownState" || true)"
+  nbd_teardown_started_at_ms="$(ftctl_dr_runtime_checkpoint_value "${checkpoint_path}" "nbdTeardownStartedAtEpochMs" integer || true)"
+  nbd_teardown_completed_at_ms="$(ftctl_dr_runtime_checkpoint_value "${checkpoint_path}" "nbdTeardownCompletedAtEpochMs" integer || true)"
+  nbd_teardown_duration_ms="$(ftctl_dr_runtime_checkpoint_value "${checkpoint_path}" "nbdTeardownDurationMs" integer || true)"
+  nbd_source_device_count="$(ftctl_dr_runtime_checkpoint_value "${checkpoint_path}" "nbdSourceDeviceCount" integer || true)"
+  nbd_target_device_count="$(ftctl_dr_runtime_checkpoint_value "${checkpoint_path}" "nbdTargetDeviceCount" integer || true)"
+  nbd_quarantined_device_count="$(ftctl_dr_runtime_checkpoint_value "${checkpoint_path}" "nbdQuarantinedDeviceCount" integer || true)"
+  nbd_teardown_error_code="$(ftctl_dr_runtime_checkpoint_value "${checkpoint_path}" "nbdTeardownErrorCode" || true)"
+  nbd_teardown_error_message="$(ftctl_dr_runtime_checkpoint_value "${checkpoint_path}" "nbdTeardownErrorMessage" || true)"
 
   ftctl_dr_runtime_path_set "${run_path}" \
     "latest_completed_checkpoint_sequence=${sequence}" \
