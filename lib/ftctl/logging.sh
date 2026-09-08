@@ -67,7 +67,7 @@ ftctl_log_event() {
   local vm="${4-}"
   local rc="${5-}"
   local details_kv="${6-}"
-  local ts scan_id json details_json parent
+  local ts scan_id json details_json parent event_seq token detail_key detail_value plan_uuid plan_key plan_log
 
   ts="$(ftctl_now_iso8601)"
   scan_id="$(ftctl_get_scan_id)"
@@ -76,9 +76,18 @@ ftctl_log_event() {
     ftctl_set_scan_id "${scan_id}"
   fi
 
+  parent="$(dirname "${FTCTL_EVENTS_LOG}")"
+  [[ -d "${parent}" ]] || mkdir -p "${parent}" 2>/dev/null || true
+  if [[ -f "${FTCTL_EVENTS_LOG}" ]]; then
+    event_seq="$(( $(wc -l < "${FTCTL_EVENTS_LOG}" 2>/dev/null || echo 0) + 1 ))"
+  else
+    event_seq="1"
+  fi
+
   json="{"
   json+="\"ts\":\"$(ftctl__json_escape "${ts}")\""
   json+=",\"scan_id\":\"$(ftctl__json_escape "${scan_id}")\""
+  json+=",\"event_seq\":${event_seq}"
   if [[ -n "${vm}" ]]; then
     json+=",\"vm\":\"$(ftctl__json_escape "${vm}")\""
   fi
@@ -94,7 +103,26 @@ ftctl_log_event() {
   fi
   json+="}"
 
-  parent="$(dirname "${FTCTL_EVENTS_LOG}")"
-  [[ -d "${parent}" ]] || mkdir -p "${parent}" 2>/dev/null || true
   printf "%s\n" "${json}" >> "${FTCTL_EVENTS_LOG}"
+
+  # DR status consumes a plan-owned stream. Keep the global log for existing
+  # operators, but never make a DR plan read unrelated VM/plan events.
+  if [[ "${stage}" == "dr-runtime" && -n "${FTCTL_RUN_DIR:-}" ]]; then
+    plan_uuid=""
+    for token in ${details_kv}; do
+      detail_key="${token%%=*}"
+      detail_value="${token#*=}"
+      if [[ "${detail_key}" == "plan" ]]; then
+        plan_uuid="${detail_value}"
+        break
+      fi
+    done
+    if [[ -n "${plan_uuid}" ]]; then
+      plan_key="$(printf '%s' "${plan_uuid}" | tr -c 'A-Za-z0-9._-' '_')"
+      plan_log="${FTCTL_RUN_DIR}/dr-runtime/plans/${plan_key}/events.jsonl"
+      mkdir -p "$(dirname "${plan_log}")" 2>/dev/null || true
+      printf "%s\n" "${json}" >> "${plan_log}"
+      chmod 0644 "${plan_log}" 2>/dev/null || true
+    fi
+  fi
 }

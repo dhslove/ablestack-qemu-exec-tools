@@ -402,6 +402,7 @@ FTCTL_BLOCKCOPY_GRANULARITY="0"
 FTCTL_XCOLO_CONTROL_NET="10.10.10.0/24"
 FTCTL_XCOLO_REPL_NET="10.10.20.0/24"
 FTCTL_XCOLO_QMP_TIMEOUT_SEC="3"
+FTCTL_XCOLO_DOMAIN_CREATE_TIMEOUT_SEC="180"
 
 FTCTL_PROFILE_DIR="/etc/ablestack/ftctl.d"
 ```
@@ -515,7 +516,7 @@ VM癰???쇱젟?? ??μ뵬 ?袁⑸열 conf揶쎛 ?袁⑤빍??`/etc/ablestack/ftc
 
 - Secondary side:
   - local block is exposed to libvirt through a writable XML disk
-  - after boot, QMP `blockdev-add` attaches hidden/active/replication/quorum nodes
+- before boot, generated transient XML contains the COLO disk graph for protected disks; after boot, QMP must not `device_del` / `device_add` guest-visible protected disks
 - Primary side:
   - local block FT must follow the same mediation-friendly policy
   - the implementation must avoid reopening the same block path through a competing custom graph while the root graph still owns it

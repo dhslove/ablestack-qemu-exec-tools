@@ -361,13 +361,33 @@ hangctl_collect_dump_pre_action() {
 
   local out err rc
   out=""; err=""; rc=0
+  local dump_mode
+  dump_mode="${HANGCTL_DUMP_MODE:-live}"
+  case "${dump_mode}" in
+    disabled|none|off)
+      hangctl_log_event "evidence" "dump.start" "skip" "${vm}" "${incident_id}" "" "reason=mode_disabled"
+      return 0
+      ;;
+    live|crash)
+      ;;
+    *)
+      hangctl_log_event "evidence" "dump.start" "skip" "${vm}" "${incident_id}" "" "reason=invalid_mode mode=${dump_mode}"
+      return 0
+      ;;
+  esac
+
   # Commit 09.0.1:
   # virsh dump may create the file but keep running (rare). Watch the dump file and accept "stable" completion.
   local stable_need stable_interval
   stable_need="${HANGCTL_DUMP_STABLE_COUNT-${HANGCTL__DUMP_STABLE_COUNT_DEFAULT}}"
   stable_interval="${HANGCTL_DUMP_STABLE_INTERVAL_SEC-${HANGCTL__DUMP_STABLE_INTERVAL_SEC_DEFAULT}}"
-  hangctl__run_dump_with_watch "${tout}" "${stable_need}" "${stable_interval}" out err rc -- \
-    virsh -c qemu:///system dump --memory-only --crash "${vm}" "${dump_path}" || true 
+  if [[ "${dump_mode}" == "crash" ]]; then
+    hangctl__run_dump_with_watch "${tout}" "${stable_need}" "${stable_interval}" out err rc -- \
+      virsh -c qemu:///system dump --memory-only --crash "${vm}" "${dump_path}" || true
+  else
+    hangctl__run_dump_with_watch "${tout}" "${stable_need}" "${stable_interval}" out err rc -- \
+      virsh -c qemu:///system dump --memory-only --live "${vm}" "${dump_path}" || true
+  fi
 
   local result
   if [[ "${rc}" == "124" || "${rc}" == "143" ]]; then
@@ -380,7 +400,7 @@ hangctl_collect_dump_pre_action() {
     local err_short="${err:0:200}"
     local err_url="${err_short// /%20}"
     hangctl_log_event "evidence" "dump.end" "${result}" "${vm}" "${incident_id}" "${rc}" \
-      "dump_path_url=${dump_path// /%20} err_url=${err_url} timeout_sec=${tout} stable_need=${stable_need} stable_interval_sec=${stable_interval}"
+      "dump_path_url=${dump_path// /%20} mode=${dump_mode} err_url=${err_url} timeout_sec=${tout} stable_need=${stable_need} stable_interval_sec=${stable_interval}"
     return 0
   fi
 
@@ -398,7 +418,7 @@ hangctl_collect_dump_pre_action() {
   HANGCTL__DUMP_COUNT_THIS_SCAN="$((HANGCTL__DUMP_COUNT_THIS_SCAN + 1))"
 
   hangctl_log_event "evidence" "dump.file" "ok" "${vm}" "${incident_id}" "" \
-    "dump_path_url=${dump_path// /%20} bytes=${bytes} sha256=${sha}"
+    "dump_path_url=${dump_path// /%20} mode=${dump_mode} bytes=${bytes} sha256=${sha}"
 
   # write pointer under evidence dir
   local edir
@@ -419,6 +439,6 @@ vm=${vm}"
     "kind=dump.pointer path_url=${pointer_url}"
 
   hangctl_log_event "evidence" "dump.end" "ok" "${vm}" "${incident_id}" "" \
-    "dump_path_url=${dump_path// /%20} bytes=${bytes}"
+    "dump_path_url=${dump_path// /%20} mode=${dump_mode} bytes=${bytes}"
   return 0
 }

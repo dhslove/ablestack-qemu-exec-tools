@@ -27,56 +27,147 @@ ftctl_inventory_probe_uri_vm() {
   return "${rc}"
 }
 
+ftctl_inventory_probe_uri_vm_state() {
+  local uri="${1-}"
+  local vm="${2-}"
+  local _state_var="${3}"
+  local out err rc state
+
+  out=""
+  err=""
+  rc=0
+  ftctl_virsh "${FTCTL_HEALTH_INTERVAL_SEC}" out err rc -- -c "${uri}" domstate "${vm}" || true
+  : "${err}"
+  if [[ "${rc}" == "0" ]]; then
+    state="$(head -n 1 <<< "${out}" | tr '[:upper:]' '[:lower:]' | awk '{print $1}')"
+    [[ -n "${state}" ]] || state="unknown"
+    printf -v "${_state_var}" '%s' "${state}"
+    return 0
+  fi
+
+  out=""
+  err=""
+  rc=0
+  ftctl_virsh "${FTCTL_HEALTH_INTERVAL_SEC}" out err rc -- -c "${uri}" dominfo "${vm}" || true
+  : "${out}${err}"
+  if [[ "${rc}" == "0" ]]; then
+    state="$(awk -F: 'tolower($1) ~ /^state$/ {gsub(/^[ \t]+|[ \t]+$/, "", $2); print tolower($2); exit}' <<< "${out}" | awk '{print $1}')"
+    [[ -n "${state}" ]] || state="defined"
+    printf -v "${_state_var}" '%s' "${state}"
+    return 0
+  fi
+
+  printf -v "${_state_var}" '%s' "not-found"
+  return "${rc}"
+}
+
+ftctl_inventory_secondary_domain_name() {
+  local vm="${1-}"
+  local secondary_vm_name
+  secondary_vm_name="$(ftctl_state_get "${vm}" "secondary_vm_name" 2>/dev/null || true)"
+  if [[ -z "${secondary_vm_name}" ]]; then
+    secondary_vm_name="$(ftctl_profile_secondary_vm_name_resolved "${vm}")"
+  fi
+  printf '%s\n' "${secondary_vm_name}"
+}
+
+ftctl_inventory_peer_missing_is_expected() {
+  local vm="${1-}"
+  local standby_state
+  [[ "${FTCTL_PROFILE_PROVISIONING_BACKEND:-libvirt-managed}" == "cloud-managed" ]] || return 1
+  standby_state="$(ftctl_state_get "${vm}" "standby_state" 2>/dev/null || true)"
+  case "${standby_state}" in
+    prepared-transient|stopped|stopped-dry-run)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
 ftctl_inventory_check_vm() {
   local vm="${1-}"
-  local local_rc peer_rc result
+  local local_rc peer_rc result peer_domain_expected primary_domain_state standby_domain_state active_side secondary_vm
   local_rc=0
   peer_rc=0
+  peer_domain_expected="true"
+  standby_domain_state=""
+  active_side="${FTCTL_CHECK_ACTIVE_SIDE:-}"
+  [[ -n "${active_side}" ]] || active_side="$(ftctl_state_get "${vm}" "active_side" 2>/dev/null || echo "primary")"
+  secondary_vm="$(ftctl_inventory_secondary_domain_name "${vm}")"
 
-  ftctl_inventory_probe_uri_vm "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" || local_rc=$?
-  ftctl_inventory_probe_uri_vm "${FTCTL_PROFILE_SECONDARY_URI}" "${vm}" || peer_rc=$?
+  ftctl_inventory_probe_uri_vm_state "${FTCTL_PROFILE_PRIMARY_URI}" "${vm}" primary_domain_state || local_rc=$?
+  ftctl_inventory_probe_uri_vm_state "${FTCTL_PROFILE_SECONDARY_URI}" "${secondary_vm}" standby_domain_state || peer_rc=$?
 
-  if [[ "${local_rc}" == "0" && "${peer_rc}" == "0" ]]; then
-    result="ok"
-  elif [[ "${local_rc}" == "0" ]]; then
-    result="warn"
+  if [[ "${active_side}" == "secondary" ]]; then
+    if [[ "${local_rc}" == "0" && "${primary_domain_state}" == "running" && "${peer_rc}" == "0" ]]; then
+      result="fail"
+    elif [[ "${peer_rc}" == "0" ]]; then
+      result="ok"
+      peer_domain_expected="true"
+    else
+      result="fail"
+    fi
   else
-    result="fail"
+    if [[ "${local_rc}" == "0" && "${peer_rc}" == "0" ]]; then
+      result="ok"
+    elif [[ "${local_rc}" == "0" ]] && ftctl_inventory_peer_missing_is_expected "${vm}"; then
+      result="ok"
+      peer_domain_expected="false"
+      standby_domain_state="not-defined-expected"
+    elif [[ "${local_rc}" == "0" ]]; then
+      result="warn"
+    else
+      result="fail"
+    fi
   fi
 
   ftctl_log_event "inventory" "inventory.check" "${result}" "${vm}" "" \
-    "primary_rc=${local_rc} peer_rc=${peer_rc} peer_uri=${FTCTL_PROFILE_SECONDARY_URI}"
+    "primary_rc=${local_rc} peer_rc=${peer_rc} peer_uri=${FTCTL_PROFILE_SECONDARY_URI} active_side=${active_side} primary_domain_state=${primary_domain_state} secondary_vm_name=${secondary_vm} peer_domain_expected=${peer_domain_expected} standby_domain_state=${standby_domain_state}"
 
-  printf '%s %s %s\n' "${local_rc}" "${peer_rc}" "${result}"
+  printf '%s %s %s %s %s\n' "${local_rc}" "${peer_rc}" "${result}" "${peer_domain_expected}" "${standby_domain_state}"
+}
+
+ftctl_inventory_qemu_img_info_json() {
+  local source_path="${1-}"
+  local _out_var="${2}"
+  local _info_out="" _info_err="" _info_rc=0
+
+  ftctl_cmd_run "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC:-30}" _info_out _info_err _info_rc -- \
+    qemu-img info --force-share --output=json "${source_path}" || true
+  if [[ "${_info_rc}" != "0" ]]; then
+    _info_out=""
+    _info_err=""
+    _info_rc=0
+    ftctl_cmd_run "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC:-30}" _info_out _info_err _info_rc -- \
+      qemu-img info --output=json "${source_path}" || true
+  fi
+  [[ "${_info_rc}" == "0" ]] || return "${_info_rc}"
+  printf -v "${_out_var}" '%s' "${_info_out}"
 }
 
 ftctl_inventory_detect_disk_format() {
   local source_path="${1-}"
   local _out_var="${2}"
-  local fmt=""
-  local out err rc
+  local _detected_format=""
+  local out=""
 
   if command -v qemu-img >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
-    out=""
-    err=""
-    rc=0
-    ftctl_cmd_run "${FTCTL_BLOCKCOPY_WAIT_TIMEOUT_SEC}" out err rc -- qemu-img info --output=json "${source_path}" || true
-    if [[ "${rc}" == "0" ]]; then
-      fmt="$(printf '%s' "${out}" | jq -r '.format // empty' 2>/dev/null || true)"
+    if ftctl_inventory_qemu_img_info_json "${source_path}" out; then
+      _detected_format="$(printf '%s' "${out}" | jq -r '.format // empty' 2>/dev/null || true)"
     fi
   fi
 
-  if [[ -z "${fmt}" ]]; then
+  if [[ -z "${_detected_format}" ]]; then
     case "${source_path}" in
-      rbd:*) fmt="qcow2" ;;
-      rbd/*) fmt="qcow2" ;;
-      *.qcow2|*.qcow2.*) fmt="qcow2" ;;
-      *.raw) fmt="raw" ;;
-      *) fmt="" ;;
+      rbd:*) _detected_format="qcow2" ;;
+      rbd/*) _detected_format="qcow2" ;;
+      *.qcow2|*.qcow2.*) _detected_format="qcow2" ;;
+      *.raw) _detected_format="raw" ;;
+      *) _detected_format="" ;;
     esac
   fi
 
-  printf -v "${_out_var}" '%s' "${fmt}"
+  printf -v "${_out_var}" '%s' "${_detected_format}"
 }
 
 ftctl_inventory_collect_vm_disks() {

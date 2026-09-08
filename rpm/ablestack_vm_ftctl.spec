@@ -10,19 +10,17 @@ Source0:        %{name}-%{version}.tar.gz
 BuildArch:      noarch
 
 BuildRequires:  systemd-rpm-macros
+# Keep runtime requirements intentionally small.
+# FTCTL is installed on top of an existing ABLESTACK KVM host where
+# libvirt/qemu/firewalld related components are already provisioned as part
+# of the host stack. Requiring those packages here can trigger solver-driven
+# upgrades/removals of the existing agent/libvirt stack during localinstall.
+# Feature-specific tools are validated at runtime by ftctl commands instead.
 Requires:       bash
-Requires:       bash-completion
 Requires:       coreutils
-Requires:       findutils
-Requires:       iputils
 Requires:       jq
-Requires:       libvirt-client
 Requires:       openssh-clients
 Requires:       python3
-Requires:       qemu-img
-Requires:       firewalld
-Requires:       nmap-ncat
-Requires:       socat
 Requires:       systemd
 Requires:       util-linux
 
@@ -48,19 +46,27 @@ install -d %{buildroot}/usr/local/bin
 install -m 0755 bin/ablestack_vm_ftctl.sh %{buildroot}/usr/local/bin/ablestack_vm_ftctl
 install -m 0755 bin/ablestack_vm_ftctl_selftest.sh %{buildroot}/usr/local/bin/ablestack_vm_ftctl_selftest
 install -m 0755 bin/ablestack_vm_ftctl_firewalld.sh %{buildroot}/usr/local/bin/ablestack_vm_ftctl_firewalld
+install -m 0755 bin/ablestack_vm_ftctl_dr_rolling_reload.sh %{buildroot}/usr/local/bin/ablestack_vm_ftctl_dr_rolling_reload
 
 install -d %{buildroot}/usr/local/lib/ablestack-qemu-exec-tools/ftctl
 cp -a lib/ftctl/* %{buildroot}/usr/local/lib/ablestack-qemu-exec-tools/ftctl/
+install -m 0755 lib/v2k/vmware_changed_areas.py %{buildroot}/usr/local/lib/ablestack-qemu-exec-tools/ftctl/dr_vmware_changed_areas.py
 find %{buildroot}/usr/local/lib/ablestack-qemu-exec-tools/ftctl -type f -name "*.sh" -exec chmod 0755 {} \;
+find %{buildroot}/usr/local/lib/ablestack-qemu-exec-tools/ftctl -type f -name "*.py" -exec chmod 0755 {} \;
 
 install -d %{buildroot}/etc/ablestack
 install -m 0644 etc/ablestack-vm-ftctl.conf %{buildroot}/etc/ablestack/ablestack-vm-ftctl.conf
 install -m 0644 etc/ablestack-vm-ftctl-cluster.conf %{buildroot}/etc/ablestack/ablestack-vm-ftctl-cluster.conf
 install -d %{buildroot}/etc/ablestack/ftctl-cluster.d/hosts
+install -d %{buildroot}/usr/lib/udev/rules.d
+install -m 0644 etc/10-ablestack-ftctl-nbd.rules %{buildroot}/usr/lib/udev/rules.d/10-ablestack-ftctl-nbd.rules
+install -d %{buildroot}/etc/modprobe.d
+install -m 0644 etc/ablestack-ftctl-nbd.conf %{buildroot}/etc/modprobe.d/ablestack-ftctl-nbd.conf
 
 install -d %{buildroot}%{_unitdir}
 install -m 0644 lib/ftctl/systemd/ablestack-vm-ftctl.service %{buildroot}%{_unitdir}/ablestack-vm-ftctl.service
 install -m 0644 lib/ftctl/systemd/ablestack-vm-ftctl.timer %{buildroot}%{_unitdir}/ablestack-vm-ftctl.timer
+install -m 0644 lib/ftctl/systemd/ablestack-vm-ftctl-dr@.service %{buildroot}%{_unitdir}/ablestack-vm-ftctl-dr@.service
 
 install -d %{buildroot}%{_datadir}/bash-completion/completions
 install -m 0644 completions/%{name} %{buildroot}%{_datadir}/bash-completion/completions/%{name}
@@ -70,6 +76,38 @@ install -m 0644 completions/%{name} %{buildroot}%{_datadir}/bash-completion/comp
 %systemd_post ablestack-vm-ftctl.timer
 if [ -x /usr/local/bin/ablestack_vm_ftctl_firewalld ]; then
   /usr/local/bin/ablestack_vm_ftctl_firewalld apply >/dev/null 2>&1 || true
+fi
+if command -v udevadm >/dev/null 2>&1; then
+  udevadm control --reload-rules >/dev/null 2>&1 || true
+fi
+if command -v modprobe >/dev/null 2>&1; then
+  current_max="$(cat /sys/module/nbd/parameters/nbds_max 2>/dev/null || echo 0)"
+  case "${current_max}" in (*[!0-9]*|'') current_max=0;; esac
+  if [ "${current_max}" -lt 32 ]; then
+    active_nbd="$(find /sys/class/block -maxdepth 2 -path '/sys/class/block/nbd*/pid' -type f -exec sh -c 'test -s "$1" && echo active' sh {} \; 2>/dev/null | head -n 1)"
+    if [ -z "${active_nbd}" ]; then
+      modprobe -r nbd >/dev/null 2>&1 || true
+      modprobe nbd nbds_max=32 max_part=16 >/dev/null 2>&1 || true
+    else
+      echo "WARNING: active NBD devices prevented immediate FTCTL NBD capacity reload; reboot or reload nbd after transfers finish." >&2
+    fi
+  else
+    modprobe nbd nbds_max=32 max_part=16 >/dev/null 2>&1 || true
+  fi
+fi
+if command -v udevadm >/dev/null 2>&1; then
+  udevadm trigger --subsystem-match=block --sysname-match='nbd*' >/dev/null 2>&1 || true
+  udevadm settle >/dev/null 2>&1 || true
+fi
+missing_tools=""
+for tool in virsh qemu-img socat nc ping firewall-cmd; do
+  if ! command -v "${tool}" >/dev/null 2>&1; then
+    missing_tools="${missing_tools} ${tool}"
+  fi
+done
+if [ -n "${missing_tools}" ]; then
+  echo "WARNING: ablestack_vm_ftctl installed with missing optional tools:${missing_tools}" >&2
+  echo "WARNING: FTCTL features that rely on those tools may fail until the host stack provides them." >&2
 fi
 
 %preun
@@ -82,19 +120,26 @@ fi
 if [ "$1" -eq 0 ] && [ -x /usr/local/bin/ablestack_vm_ftctl_firewalld ]; then
   /usr/local/bin/ablestack_vm_ftctl_firewalld remove >/dev/null 2>&1 || true
 fi
+if command -v udevadm >/dev/null 2>&1; then
+  udevadm control --reload-rules >/dev/null 2>&1 || true
+fi
 
 %files
 %license LICENSE
 /usr/local/bin/ablestack_vm_ftctl
 /usr/local/bin/ablestack_vm_ftctl_selftest
 /usr/local/bin/ablestack_vm_ftctl_firewalld
+/usr/local/bin/ablestack_vm_ftctl_dr_rolling_reload
 /usr/local/lib/ablestack-qemu-exec-tools/ftctl/
 %config(noreplace) /etc/ablestack/ablestack-vm-ftctl.conf
 %config(noreplace) /etc/ablestack/ablestack-vm-ftctl-cluster.conf
 %dir /etc/ablestack/ftctl-cluster.d
 %dir /etc/ablestack/ftctl-cluster.d/hosts
+/usr/lib/udev/rules.d/10-ablestack-ftctl-nbd.rules
+%config(noreplace) /etc/modprobe.d/ablestack-ftctl-nbd.conf
 %{_unitdir}/ablestack-vm-ftctl.service
 %{_unitdir}/ablestack-vm-ftctl.timer
+%{_unitdir}/ablestack-vm-ftctl-dr@.service
 %{_datadir}/bash-completion/completions/%{name}
 
 %changelog

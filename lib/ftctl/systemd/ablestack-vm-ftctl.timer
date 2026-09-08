@@ -3,7 +3,7 @@ Description=Run ABLESTACK VM FT Controller Reconcile periodically
 
 [Timer]
 OnBootSec=30s
-OnUnitActiveSec=5s
+OnUnitInactiveSec=10s
 Unit=ablestack-vm-ftctl.service
 
 [Install]

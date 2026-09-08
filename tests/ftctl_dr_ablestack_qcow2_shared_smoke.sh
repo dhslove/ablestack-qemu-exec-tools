@@ -1,0 +1,368 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TMP="$(mktemp -d)"
+FTCTL_LIB_BASE="${ROOT}/lib"
+trap 'rm -rf "${TMP}"' EXIT
+
+ftctl_ensure_dir() { mkdir -p "$1"; }
+ftctl_log_event() { :; }
+ftctl__json_escape() { printf '%s' "${1-}"; }
+ftctl_dr_runtime_key() { printf '%s\n' "${1//[^A-Za-z0-9._-]/_}"; }
+ftctl_dr_runtime_plan_dir() { printf '%s/runtime/%s\n' "${TMP}" "$(ftctl_dr_runtime_key "$1")"; }
+ftctl_state_write_json_file() { printf '%s\n' "$2" > "$1"; }
+ftctl_state_write_kv_all() { :; }
+ftctl_state_read_kv() { :; }
+ftctl_cmd_run() {
+  local _timeout="$1" out_var="$2" err_var="$3" rc_var="$4"
+  shift 5
+  printf '%s\n' "$*" >> "${TMP}/cmd-run.log"
+  printf -v "${out_var}" '%s' '{"format":"qcow2","virtual-size":1073741824}'
+  printf -v "${err_var}" '%s' ''
+  printf -v "${rc_var}" '%s' '0'
+}
+
+# shellcheck source=../lib/ftctl/dr_ablestack.sh
+source "${ROOT}/lib/ftctl/dr_ablestack.sh"
+# shellcheck source=../lib/ftctl/dr_kvm_vmware.sh
+source "${ROOT}/lib/ftctl/dr_kvm_vmware.sh"
+
+profile="${TMP}/profile.json"
+canonical="${TMP}/canonical.json"
+cat > "${profile}" <<'EOF'
+{
+  "planUuid": "plan-qcow2",
+  "source": {"provider":"ABLESTACK","instanceName":"i-2-13-VM"},
+  "target": {"provider":"ABLESTACK"},
+  "mapping": {"disks":[{
+    "device":"sda",
+    "sourcePath":"/mnt/glue-gfs/source-volume",
+    "targetPath":"/mnt/glue-gfs/target-volume",
+    "sourceFormat":"qcow2",
+    "targetFormat":"qcow2",
+    "sizeBytes":1073741824,
+    "sourceType":"file",
+    "targetType":"file"
+  }]},
+  "transport": {
+    "mode":"site-agent-nbd",
+    "controlMode":"site-agent",
+    "targetHostAddress":"10.10.31.2",
+    "exports":[{"device":"sda","host":"10.10.31.2","port":12031,"name":"dr-plan-qcow2-sda"}]
+  }
+}
+EOF
+
+ftctl_dr_ablestack_canonicalize_profile "${profile}" "${canonical}"
+ftctl_dr_ablestack_qcow2_push_provider "${canonical}"
+[[ "$(ftctl_dr_ablestack_qcow2_bitmap_name plan-qcow2 sda)" == ftctl-dr-*-sda ]]
+python3 - "${canonical}" <<'PY'
+import json,sys
+with open(sys.argv[1], encoding="utf-8") as fh:
+    disk=json.load(fh)["disks"][0]
+assert disk["sourceType"] == "file"
+assert disk["targetFormat"] == "qcow2"
+PY
+
+# Reverse VMware failback must keep a SharedMountPoint file locator as a file
+# URI even when its storage metadata also contains pool and volume names.
+kvm_vmware_profile="${TMP}/profile-kvm-vmware.json"
+kvm_vmware_map="${TMP}/canonical-kvm-vmware.json"
+cat > "${kvm_vmware_profile}" <<'EOF'
+{
+  "planUuid":"plan-qcow2",
+  "direction":"VMWARE_TO_KVM",
+  "source":{"provider":"VMWARE","externalRef":"vm-101"},
+  "target":{"provider":"ABLESTACK","instanceName":"i-2-234-VM","storagePath":"/mnt/glue-gfs"},
+  "mapping":{"disks":[{
+    "device":"2000","sourceType":"file","sourceFormat":"qcow2","sizeBytes":1073741824,
+    "source":{"path":"[datastore1] vm/vm.vmdk","deviceKey":"2000"},
+    "target":{"path":"/mnt/glue-gfs/w25-01-dr-disk-0","storagePath":"/mnt/glue-gfs","name":"w25-01-dr-disk-0"}
+  }]}
+}
+EOF
+ftctl_dr_kvm_vmware_canonicalize_profile "${kvm_vmware_profile}" "${kvm_vmware_map}"
+jq -e '.disks[0].sourceType == "file"
+  and .disks[0].sourceUri == "/mnt/glue-gfs/w25-01-dr-disk-0"
+  and (.disks[0].sourceUri | startswith("rbd:") | not)' "${kvm_vmware_map}" >/dev/null
+
+# A stopped or disaster-lost domain is not a replication eligibility condition.
+# The command-time Cloud locator remains valid when its SharedMountPoint file
+# exists and qemu-img independently identifies it as qcow2.
+offline_profile="${TMP}/profile-offline.json"
+offline_canonical="${TMP}/canonical-offline.json"
+jq --arg source "${TMP}/source-volume" \
+  '.source.driver="KVM_QMP" | .source.instanceName="i-2-offline-VM" | .mapping.disks[0].sourcePath=$source' \
+  "${profile}" > "${offline_profile}"
+touch "${TMP}/source-volume"
+ftctl_dr_ablestack_canonicalize_profile "${offline_profile}" "${offline_canonical}"
+virsh() { return 1; }
+ftctl_dr_ablestack_rebind_live_qcow2_sources plan-qcow2 "${offline_canonical}"
+jq -e --arg source "${TMP}/source-volume" '.disks[0].sourcePath == $source' "${offline_canonical}" >/dev/null
+offline_root=""
+ftctl_dr_ablestack_qcow2_source_root "${offline_canonical}" offline_root
+[[ "${offline_root}" == "${TMP}" ]]
+
+# A canceled failover can restore the source VM on its durable volume after a
+# temporary clone overlay has been removed. Rebind only the ABLESTACK KVM_QMP
+# qcow2 source whose stable volume identity uniquely matches the live QMP node.
+live_volume_uuid="86ad3ac3-3552-4889-a5da-7eab4c10a7a5"
+stale_source_profile="${TMP}/profile-stale-source.json"
+stale_source_canonical="${TMP}/canonical-stale-source.json"
+jq --arg device "${live_volume_uuid}" \
+   --arg stale "/mnt/glue-gfs/clone/overlay/${live_volume_uuid}-old-overlay" \
+  '.source.driver="KVM_QMP"
+  | .mapping.disks[0].device=$device
+  | .mapping.disks[0].sourcePath=$stale
+  | del(.mapping.disks[0].sourceFormat)' \
+  "${profile}" > "${stale_source_profile}"
+ftctl_dr_ablestack_canonicalize_profile "${stale_source_profile}" "${stale_source_canonical}"
+virsh() {
+  cat <<EOF
+{"return":[
+  {"node-name":"libvirt-pflash0-format","drv":"qcow2","active":true,"image":{"filename":"/usr/share/edk2/ovmf/OVMF_CODE.secboot.fd","virtual-size":3653632}},
+  {"node-name":"libvirt-2-format","drv":"qcow2","active":true,"image":{"filename":"/mnt/glue-gfs/${live_volume_uuid}","virtual-size":1073741824}}
+]}
+EOF
+}
+ftctl_dr_ablestack_rebind_live_qcow2_sources plan-qcow2 "${stale_source_canonical}"
+jq -e --arg live "/mnt/glue-gfs/${live_volume_uuid}" \
+  '.disks[0].sourcePath == $live and .disks[0].sourceFormat == "qcow2"' \
+  "${stale_source_canonical}" >/dev/null
+
+# The incremental dispatcher must classify the provider only after applying
+# the live QMP source mapping. This is the exact post-cancel contract: the
+# immutable profile has a deleted overlay and no sourceFormat, while QEMU is
+# running from the durable SharedMountPoint qcow2 volume.
+incremental_dispatch_map="${TMP}/canonical-incremental-dispatch.json"
+incremental_dispatch_marker="${TMP}/incremental-qcow2-dispatched"
+ftctl_dr_ablestack_site_agent_transport_load() { return 0; }
+ftctl_dr_ablestack_qcow2_incremental_once() {
+  jq -e --arg live "/mnt/glue-gfs/${live_volume_uuid}" \
+    '.disks[0].sourcePath == $live and .disks[0].sourceFormat == "qcow2"' "$4" >/dev/null
+  : > "${incremental_dispatch_marker}"
+}
+ftctl_dr_ablestack_site_agent_incremental_once plan-qcow2 run-incremental-dispatch \
+  "${stale_source_profile}" "${incremental_dispatch_map}" \
+  "${TMP}/incremental-manifest.json" "${TMP}/incremental-checkpoint.json" 91
+[[ -f "${incremental_dispatch_marker}" ]]
+
+# A newly leased worker has no worker-local canonical disk map. Incremental
+# dispatch must rebuild it from the recovery profile before transport
+# selection instead of silently promoting the cycle to Full Seed.
+relocated_dispatch_map="$(ftctl_dr_ablestack_disk_map_path plan-qcow2)"
+relocated_incremental_marker="${TMP}/relocated-incremental-dispatched"
+relocated_full_seed_marker="${TMP}/relocated-full-seed-dispatched"
+rm -f "${relocated_dispatch_map}" "${relocated_incremental_marker}" "${relocated_full_seed_marker}"
+ftctl_dr_ablestack_site_agent_transport_load() {
+  jq -e '.transport.mode == "site-agent-nbd"' "$1" >/dev/null
+}
+ftctl_dr_ablestack_qcow2_incremental_once() {
+  jq -e '.transport.mode == "site-agent-nbd"' "$4" >/dev/null
+  : > "${relocated_incremental_marker}"
+}
+ftctl_dr_ablestack_full_seed_once() {
+  : > "${relocated_full_seed_marker}"
+}
+ftctl_dr_ablestack_replication_cycle plan-qcow2 run-relocated \
+  "${stale_source_profile}" 144 incremental >/dev/null
+[[ -f "${relocated_incremental_marker}" ]]
+[[ ! -f "${relocated_full_seed_marker}" ]]
+
+# A relocated or restarted worker may not have the /run baseline sidecar. The
+# persistent qcow2 bitmap is durable authority, so a successful bitmap check
+# must reconstruct the disposable marker without resetting the bitmap.
+relocated_baseline_map="${TMP}/canonical-relocated-baseline.json"
+jq --arg source "${TMP}/relocated-source-volume" \
+  '.mapping.disks[0].sourcePath=$source' "${profile}" > "${TMP}/profile-relocated-baseline.json"
+touch "${TMP}/relocated-source-volume"
+ftctl_dr_ablestack_canonicalize_profile "${TMP}/profile-relocated-baseline.json" "${relocated_baseline_map}"
+relocated_baseline_path="$(ftctl_dr_ablestack_qcow2_bitmap_baseline_path plan-qcow2 sda)"
+rm -f "${relocated_baseline_path}"
+python3() {
+  if [[ "${1-}" == *qcow2_bitmap_baseline.py ]]; then
+    return 0
+  fi
+  command python3 "$@"
+}
+ftctl_dr_ablestack_qcow2_source_baselines_ready plan-qcow2 "${relocated_baseline_map}"
+unset -f python3
+[[ "$(cat "${relocated_baseline_path}")" == "$(ftctl_dr_ablestack_qcow2_bitmap_name plan-qcow2 sda)" ]]
+
+# A running SharedMountPoint qcow2 source is validated through QMP. Its file is
+# intentionally writable, so the offline checker must not be used as fallback
+# after QMP returned an authoritative but invalid bitmap state.
+live_bitmap="$(ftctl_dr_ablestack_qcow2_bitmap_name plan-qcow2 sda)"
+virsh() {
+  cat <<EOF
+{"return":[{"node-name":"libvirt-2-format","drv":"qcow2","active":true,"image":{"filename":"${TMP}/relocated-source-volume","virtual-size":1073741824},"dirty-bitmaps":[{"name":"${live_bitmap}","persistent":true,"recording":true,"busy":false,"inconsistent":false,"granularity":65536,"count":4096}]}]}
+EOF
+}
+rm -f "${relocated_baseline_path}"
+ftctl_dr_ablestack_qcow2_source_baselines_ready_for_runtime plan-qcow2 "${relocated_baseline_map}"
+[[ "$(cat "${relocated_baseline_path}")" == "${live_bitmap}" ]]
+
+offline_fallback_marker="${TMP}/offline-fallback-called"
+python3() {
+  if [[ "${1-}" == *qcow2_bitmap_baseline.py ]]; then
+    : > "${offline_fallback_marker}"
+    return 0
+  fi
+  command python3 "$@"
+}
+virsh() {
+  cat <<EOF
+{"return":[{"node-name":"libvirt-2-format","drv":"qcow2","active":true,"image":{"filename":"${TMP}/relocated-source-volume","virtual-size":1073741824},"dirty-bitmaps":[{"name":"${live_bitmap}","persistent":true,"recording":true,"busy":true,"inconsistent":false,"granularity":65536,"count":4096}]}]}
+EOF
+}
+if ftctl_dr_ablestack_qcow2_source_baselines_ready_for_runtime plan-qcow2 "${relocated_baseline_map}"; then
+  echo "[ERR] invalid live qcow2 bitmap was accepted" >&2
+  exit 1
+fi
+[[ ! -e "${offline_fallback_marker}" ]]
+
+virsh() { return 1; }
+ftctl_dr_ablestack_qcow2_source_baselines_ready_for_runtime plan-qcow2 "${relocated_baseline_map}"
+[[ -e "${offline_fallback_marker}" ]]
+unset -f python3
+
+ambiguous_source_canonical="${TMP}/canonical-ambiguous-source.json"
+cp "${stale_source_canonical}" "${ambiguous_source_canonical}"
+jq --arg stale "/mnt/glue-gfs/clone/overlay/${live_volume_uuid}-old-overlay" \
+  '.disks[0].sourcePath=$stale' "${ambiguous_source_canonical}" > "${ambiguous_source_canonical}.tmp"
+mv "${ambiguous_source_canonical}.tmp" "${ambiguous_source_canonical}"
+virsh() {
+  cat <<EOF
+{"return":[
+  {"node-name":"libvirt-2-format","drv":"qcow2","active":true,"image":{"filename":"/mnt/glue-gfs/${live_volume_uuid}","virtual-size":1073741824}},
+  {"node-name":"libvirt-3-format","drv":"qcow2","active":true,"image":{"filename":"/mnt/glue-gfs/${live_volume_uuid}-other","virtual-size":1073741824}}
+]}
+EOF
+}
+if ftctl_dr_ablestack_rebind_live_qcow2_sources plan-qcow2 "${ambiguous_source_canonical}" 2>/dev/null; then
+  echo "[ERR] ambiguous live qcow2 source identity was accepted" >&2
+  exit 1
+fi
+
+relative_target_profile="${TMP}/profile-relative-target.json"
+relative_target_canonical="${TMP}/canonical-relative-target.json"
+jq '.mapping.disks[0] |= (.targetPath="target-volume" | .targetStoragePath="/mnt/glue-gfs" | .targetStorageType="SharedMountPoint")' \
+  "${profile}" > "${relative_target_profile}"
+ftctl_dr_ablestack_canonicalize_profile "${relative_target_profile}" "${relative_target_canonical}"
+jq -e '.disks[0].targetPath == "/mnt/glue-gfs/target-volume"' "${relative_target_canonical}" >/dev/null
+
+traversal_target_profile="${TMP}/profile-traversal-target.json"
+traversal_target_canonical="${TMP}/canonical-traversal-target.json"
+jq '.mapping.disks[0] |= (.targetPath="../outside" | .targetStoragePath="/mnt/glue-gfs" | .targetStorageType="SharedMountPoint")' \
+  "${profile}" > "${traversal_target_profile}"
+if ftctl_dr_ablestack_canonicalize_profile "${traversal_target_profile}" "${traversal_target_canonical}" 2>/dev/null; then
+  echo "[ERR] SharedMountPoint traversal target was accepted" >&2
+  exit 1
+fi
+
+missing_format_profile="${TMP}/profile-missing-format.json"
+missing_format_canonical="${TMP}/canonical-missing-format.json"
+touch "${TMP}/source-volume"
+jq --arg path "${TMP}/source-volume" '.mapping.disks[0].sourcePath=$path | del(.mapping.disks[0].sourceFormat)' \
+  "${profile}" > "${missing_format_profile}"
+ftctl_dr_ablestack_canonicalize_profile "${missing_format_profile}" "${missing_format_canonical}"
+ftctl_dr_ablestack_qcow2_push_provider "${missing_format_canonical}"
+jq -e '.disks[0].sourceFormat == "qcow2"' "${missing_format_canonical}" >/dev/null
+
+remote_source_profile="${TMP}/profile-remote-source.json"
+remote_source_canonical="${TMP}/canonical-remote-source.json"
+jq '.mapping.disks[0] |= (.sourcePath="/mnt/glue-gfs/not-mounted-on-target" | del(.sourceFormat))' \
+  "${profile}" > "${remote_source_profile}"
+ftctl_dr_ablestack_canonicalize_profile "${remote_source_profile}" "${remote_source_canonical}"
+jq -e '.disks[0].sourceFormat == "" and .disks[0].sourceType == "file"' "${remote_source_canonical}" >/dev/null
+
+reverse_relative_profile="${TMP}/profile-reverse-relative.json"
+reverse_relative_canonical="${TMP}/canonical-reverse-relative.json"
+jq '.source.storagePath="/mnt/glue-gfs"
+  | .source.storagePoolType="SharedMountPoint"
+  | .mapping.disks[0].sourcePath="rocky9-vm-dr-disk-0"' \
+  "${profile}" > "${reverse_relative_profile}"
+ftctl_dr_ablestack_canonicalize_profile "${reverse_relative_profile}" "${reverse_relative_canonical}"
+jq -e '.source.storagePath == "/mnt/glue-gfs"
+  and .source.storagePoolType == "SharedMountPoint"
+  and .disks[0].sourcePath == "/mnt/glue-gfs/rocky9-vm-dr-disk-0"' \
+  "${reverse_relative_canonical}" >/dev/null
+ftctl_dr_ablestack_qcow2_push_provider "${reverse_relative_canonical}"
+
+# A promoted SharedMountPoint qcow2 remains locked by the running VM. Reverse
+# preflight must use the shared-safe metadata probe instead of reporting the
+# existing source file as missing.
+reverse_live_profile="${TMP}/profile-reverse-live.json"
+reverse_live_source="${TMP}/live-source-volume"
+touch "${reverse_live_source}"
+jq --arg root "${TMP}" --arg path "${reverse_live_source}" \
+  '.source.storagePath=$root
+  | .source.storagePoolType="SharedMountPoint"
+  | .target.storagePath=$root
+  | .target.storagePoolType="SharedMountPoint"
+  | .mapping.disks[0] |= (.sourcePath=($root + "/missing-original-source")
+      | del(.sourceFormat) | .targetPath=$path | .targetFormat="qcow2")' \
+  "${profile}" > "${reverse_live_profile}"
+reverse_live_canonical="${TMP}/canonical-reverse-live.json"
+ftctl_dr_ablestack_canonicalize_profile "${reverse_live_profile}" "${reverse_live_canonical}"
+! ftctl_dr_ablestack_qcow2_push_provider "${reverse_live_canonical}"
+ftctl_dr_ablestack_qcow2_reverse_source_provider "${reverse_live_canonical}"
+: > "${TMP}/cmd-run.log"
+reverse_live_preflight="$(ftctl_dr_ablestack_reverse_preflight plan-reverse-live "${reverse_live_profile}" FAILBACK_FINAL AUTO 1)"
+jq -e '.ready == true
+  and .source_disk_probe_state == "READY"
+  and .effective_mode == "FULL_RESEED"' <<< "${reverse_live_preflight}" >/dev/null
+grep -q 'qemu-img info --force-share --output=json' "${TMP}/cmd-run.log"
+
+rbd_profile="${TMP}/profile-rbd.json"
+rbd_canonical="${TMP}/canonical-rbd.json"
+jq '.mapping.disks[0] |= (.sourcePath="rbd:rbd/source" | .sourceType="rbd" | .sourceFormat="raw" | .targetPath="rbd:rbd/target" | .targetType="rbd" | .targetFormat="raw")' "${profile}" > "${rbd_profile}"
+ftctl_dr_ablestack_canonicalize_profile "${rbd_profile}" "${rbd_canonical}"
+jq -e '.disks[0].sourceFormat == "raw" and .disks[0].sourceType == "rbd"' "${rbd_canonical}" >/dev/null
+! ftctl_dr_ablestack_qcow2_push_provider "${rbd_canonical}"
+
+transfer_target_format=""
+ftctl_dr_ablestack_transfer_target_format \
+  "nbd://10.10.31.1:12031/dr-plan-qcow2-sda" "qcow2" transfer_target_format
+[[ "${transfer_target_format}" == "raw" ]]
+ftctl_dr_ablestack_transfer_target_format \
+  "/mnt/glue-gfs/target-volume" "qcow2" transfer_target_format
+[[ "${transfer_target_format}" == "qcow2" ]]
+ftctl_dr_ablestack_transfer_target_format \
+  "rbd:rbd/target" "raw" transfer_target_format
+[[ "${transfer_target_format}" == "raw" ]]
+
+[[ "$(ftctl_dr_ablestack_full_seed_transferred_bytes '{"changedBytes":4096}' 8192)" == "4096" ]]
+[[ "$(ftctl_dr_ablestack_full_seed_transferred_bytes '{"mode":"FULL_RESEED","changedBytes":0,"bytesProcessed":16384,"sourceReadBytes":16384,"targetWrittenBytes":16384}' 8192)" == "16384" ]]
+[[ "$(ftctl_dr_ablestack_full_seed_transferred_bytes '{"mode":"FULL_RESEED","changedBytes":0,"bytesProcessed":0,"targetWrittenBytes":0}' 8192)" == "0" ]]
+[[ "$(ftctl_dr_ablestack_full_seed_transferred_bytes '{}' 8192)" == "8192" ]]
+[[ "$(ftctl_dr_ablestack_full_seed_transferred_bytes 'invalid-json' 8192)" == "8192" ]]
+[[ "$(ftctl_dr_ablestack_incremental_effective_mode 0)" == "NO_CHANGE" ]]
+[[ "$(ftctl_dr_ablestack_incremental_effective_mode 4096)" == "CBT_INCREMENTAL" ]]
+[[ "$(ftctl_dr_ablestack_incremental_effective_mode invalid)" == "NO_CHANGE" ]]
+
+checkpoint_manifest="${TMP}/full-seed-manifest.json"
+checkpoint_path="${TMP}/full-seed-checkpoint.json"
+jq '{planUuid,runUuid:"run-full-seed",disks}' "${canonical}" > "${checkpoint_manifest}"
+ftctl_dr_ablestack_write_checkpoint "${canonical}" "${checkpoint_manifest}" "${checkpoint_path}" \
+  TARGET_READY 2026-08-28T00:00:00Z 2026-08-28T00:00:10Z 10 \
+  FULL_SEED FULL_SEED false 1073741824 '' 1 0 0
+jq -e '.changedBytes == 1073741824
+  and .sourceReadBytes == 1073741824
+  and .targetWrittenBytes == 1073741824
+  and .transferPayloadBytes == 1073741824
+  and .cycleToken == "plan-qcow2:1"
+  and .cycleCommitState == "LOCAL_DURABLE"' "${checkpoint_path}" >/dev/null
+
+grep -q 'total_transferred_bytes' "${ROOT}/lib/ftctl/dr_ablestack.sh"
+grep -q '"${total_transferred_bytes}" "${reseed_reason}"' "${ROOT}/lib/ftctl/dr_ablestack.sh"
+
+grep -q 'file:qcow2)' "${ROOT}/lib/ftctl/dr_ablestack.sh"
+grep -q 'qcow2_bitmap_backup.py' "${ROOT}/lib/ftctl/dr_ablestack.sh"
+grep -q 'ftctl_dr_ablestack_qcow2_incremental_once' "${ROOT}/lib/ftctl/dr_ablestack.sh"
+grep -q 'effective_mode="$(ftctl_dr_ablestack_incremental_effective_mode "${total_changed_bytes}")"' "${ROOT}/lib/ftctl/dr_ablestack.sh"
+grep -q 'rbd export-diff --from-snap' "${ROOT}/lib/ftctl/dr_ablestack.sh"
+
+python3 "${ROOT}/tests/ftctl_qcow2_bitmap_backup_test.py"
+printf 'ftctl SharedMountPoint qcow2 smoke: PASS\n'

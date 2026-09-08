@@ -172,38 +172,229 @@ ftctl_orchestrator_handle_transport_issue() {
 
 ftctl_orchestrator_protect() {
   local vm="${1-}"
+  local rc=0 job_id="${FTCTL_PROTECT_JOB_ID:-}" job_log="${FTCTL_PROTECT_JOB_LOG:-}"
   ftctl_state_init_vm "${vm}"
-  if [[ "${FTCTL_PROFILE_MODE}" == "ft" ]]; then
-    ftctl_xcolo_plan_protect "${vm}"
-  else
-    ftctl_blockcopy_plan_protect "${vm}"
+  if [[ -n "${job_id}" ]]; then
+    ftctl_state_set "${vm}" \
+      "protect_job_id=${job_id}" \
+      "protect_job_pid=$$" \
+      "protect_job_state=running" \
+      "protect_job_started_at=$(ftctl_now_iso8601)"
+    [[ -n "${job_log}" ]] && ftctl_state_set "${vm}" "protect_job_log=${job_log}"
+    ftctl_log_event "protect" "protect.job.running" "ok" "${vm}" "" \
+      "job_id=${job_id} pid=$$"
   fi
-  ftctl_verify_vm "${vm}"
+
+  if [[ "${FTCTL_PROFILE_MODE}" == "ft" ]]; then
+    ftctl_xcolo_plan_protect "${vm}" || rc=$?
+  else
+    ftctl_blockcopy_plan_protect "${vm}" || rc=$?
+  fi
+  if (( rc == 0 )); then
+    ftctl_verify_vm "${vm}" || rc=$?
+  fi
+
+  if (( rc == 0 )); then
+    if [[ -n "${job_id}" ]]; then
+      ftctl_state_set "${vm}" \
+        "protect_job_state=done" \
+        "protect_job_finished_at=$(ftctl_now_iso8601)"
+      ftctl_log_event "protect" "protect.job.done" "ok" "${vm}" "0" "job_id=${job_id}"
+    fi
+    ftctl_state_print_one "${vm}" "0"
+    return 0
+  fi
+
+  if [[ -n "${job_id}" ]]; then
+    ftctl_state_set "${vm}" \
+      "protect_job_state=failed" \
+      "protect_job_finished_at=$(ftctl_now_iso8601)"
+    ftctl_log_event "protect" "protect.job.failed" "fail" "${vm}" "${rc}" "job_id=${job_id}"
+  fi
+  if [[ -z "$(ftctl_state_get "${vm}" "last_error" 2>/dev/null || true)" ]]; then
+    ftctl_state_set "${vm}" "last_error=protect_failed"
+  fi
   ftctl_state_print_one "${vm}" "0"
+  return "${rc}"
+}
+
+ftctl_orchestrator_protect_start() {
+  local vm="${1-}"
+  local existing_pid existing_state job_id vm_key job_log self_bin pid
+  local -a args=()
+
+  vm_key="$(ftctl_state_vm_key "${vm}")"
+  existing_pid="$(ftctl_state_get "${vm}" "protect_job_pid" 2>/dev/null || true)"
+  existing_state="$(ftctl_state_get "${vm}" "protect_job_state" 2>/dev/null || true)"
+  if [[ "${existing_pid}" =~ ^[0-9]+$ ]] && kill -0 "${existing_pid}" 2>/dev/null; then
+    case "${existing_state}" in
+      accepted|running)
+        job_id="$(ftctl_state_get "${vm}" "protect_job_id" 2>/dev/null || true)"
+        job_log="$(ftctl_state_get "${vm}" "protect_job_log" 2>/dev/null || true)"
+        ftctl_log_event "protect" "protect.start" "accepted" "${vm}" "" \
+          "reason=already_running job_id=${job_id} pid=${existing_pid}"
+        printf '{"command":"protect-start","result":"accepted","vm":"%s","job_id":"%s","pid":%s,"state":"%s","already_running":true,"log":"%s"}\n' \
+          "$(ftctl__json_escape "${vm}")" \
+          "$(ftctl__json_escape "${job_id}")" \
+          "${existing_pid}" \
+          "$(ftctl__json_escape "${existing_state}")" \
+          "$(ftctl__json_escape "${job_log}")"
+        return 0
+        ;;
+    esac
+  fi
+
+  ftctl_state_init_vm "${vm}"
+  job_id="protect-${vm_key}-$(date +%Y%m%d%H%M%S)-$(ftctl_rand_id)"
+  job_log="${FTCTL_LOG_DIR}/jobs/${job_id}.log"
+  self_bin="${FTCTL_SELF_BIN:-/usr/local/bin/ablestack_vm_ftctl}"
+
+  [[ -x "${self_bin}" || -f "${self_bin}" ]] || {
+    ftctl_state_set "${vm}" \
+      "protect_job_state=failed" \
+      "last_error=protect_start_binary_not_found"
+    printf '{"command":"protect-start","result":"fail","vm":"%s","reason":"binary_not_found","path":"%s"}\n' \
+      "$(ftctl__json_escape "${vm}")" \
+      "$(ftctl__json_escape "${self_bin}")"
+    return 10
+  }
+
+  args=("${self_bin}" "protect" "--vm" "${vm}" "--mode" "${FTCTL_PROFILE_MODE}")
+  [[ -n "${FTCTL_PROFILE_SECONDARY_URI:-}" ]] && args+=("--peer" "${FTCTL_PROFILE_SECONDARY_URI}")
+  [[ -n "${FTCTL_PROFILE_NAME:-}" ]] && args+=("--profile" "${FTCTL_PROFILE_NAME}")
+  [[ -n "${FTCTL_CONFIG_PATH:-}" ]] && args+=("--config" "${FTCTL_CONFIG_PATH}")
+  args+=("--json")
+
+  (
+    export FTCTL_PROTECT_JOB_ID="${job_id}"
+    export FTCTL_PROTECT_JOB_LOG="${job_log}"
+    exec nohup "${args[@]}" > "${job_log}" 2>&1 < /dev/null
+  ) &
+  pid=$!
+  disown "${pid}" 2>/dev/null || true
+
+  ftctl_state_set "${vm}" \
+    "protect_job_id=${job_id}" \
+    "protect_job_pid=${pid}" \
+    "protect_job_state=accepted" \
+    "protect_job_started_at=$(ftctl_now_iso8601)" \
+    "protect_job_log=${job_log}" \
+    "protection_state=pairing" \
+    "transport_state=initializing" \
+    "last_error="
+  ftctl_log_event "protect" "protect.start" "accepted" "${vm}" "" \
+    "job_id=${job_id} pid=${pid} mode=${FTCTL_PROFILE_MODE}"
+
+  printf '{"command":"protect-start","result":"accepted","vm":"%s","job_id":"%s","pid":%s,"state":"accepted","log":"%s"}\n' \
+    "$(ftctl__json_escape "${vm}")" \
+    "$(ftctl__json_escape "${job_id}")" \
+    "${pid}" \
+    "$(ftctl__json_escape "${job_log}")"
 }
 
 ftctl_orchestrator_check_vm() {
   local vm="${1-}"
   local json="${2-0}"
-  local probe local_rc peer_rc result
+  local probe local_rc peer_rc result peer_domain_expected standby_domain_state snapshot
   probe="$(ftctl_inventory_check_vm "${vm}")"
-  local_rc="${probe%% *}"
-  probe="${probe#* }"
-  peer_rc="${probe%% *}"
-  result="${probe##* }"
+  read -r local_rc peer_rc result peer_domain_expected standby_domain_state <<< "${probe}"
+  peer_domain_expected="${peer_domain_expected:-true}"
+  standby_domain_state="${standby_domain_state:-}"
+  snapshot="$(printf '{"command":"check","vm":"%s","result":"ok","inventory_result":"%s","primary_rc":%s,"peer_rc":%s,"peer_domain_expected":%s,"standby_domain_state":"%s","provisioning_backend":"%s","updated":"%s"}' \
+    "$(ftctl__json_escape "${vm}")" \
+    "$(ftctl__json_escape "${result}")" \
+    "${local_rc}" \
+    "${peer_rc}" \
+    "${peer_domain_expected}" \
+    "$(ftctl__json_escape "${standby_domain_state}")" \
+    "$(ftctl__json_escape "${FTCTL_PROFILE_PROVISIONING_BACKEND:-libvirt-managed}")" \
+    "$(ftctl__json_escape "$(ftctl_now_iso8601)")")"
+  ftctl_state_write_json_file "$(ftctl_state_check_path "${vm}")" "${snapshot}"
 
   if [[ "${json}" == "1" ]]; then
-    printf '{"vm":"%s","primary_rc":"%s","peer_rc":"%s","result":"%s"}\n' \
-      "${vm}" "${local_rc}" "${peer_rc}" "${result}"
+    printf '%s\n' "${snapshot}"
   else
-    printf '%s inventory=%s primary_rc=%s peer_rc=%s\n' "${vm}" "${result}" "${local_rc}" "${peer_rc}"
+    printf '%s inventory=%s primary_rc=%s peer_rc=%s peer_domain_expected=%s standby_domain_state=%s provisioning_backend=%s\n' \
+      "${vm}" "${result}" "${local_rc}" "${peer_rc}" "${peer_domain_expected}" "${standby_domain_state}" \
+      "${FTCTL_PROFILE_PROVISIONING_BACKEND:-libvirt-managed}"
   fi
+}
+
+ftctl_orchestrator_is_failover_steady_state() {
+  local vm="${1-}"
+  local mode="${2-}"
+  local active_side="${3-}"
+  local peer_rc="${4-}"
+  local inventory_result="${5-}"
+  local standby_domain_state="${6-}"
+  local standby_state
+
+  [[ "${mode}" == "ha" ]] || return 1
+  [[ "${active_side}" == "secondary" ]] || return 1
+  [[ "${FTCTL_PROFILE_PROVISIONING_BACKEND:-libvirt-managed}" == "cloud-managed" ]] || return 1
+  [[ "${inventory_result}" == "ok" ]] || return 1
+  [[ "${peer_rc}" == "0" ]] || return 1
+  ftctl_fencing_is_explicit "${vm}" || return 1
+
+  standby_state="${standby_domain_state:-$(ftctl_state_get "${vm}" "standby_state" 2>/dev/null || echo "unknown")}"
+  case "${standby_state}" in
+    running|start-dry-run|running-network-ok|running-network-unknown)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+ftctl_orchestrator_is_cloud_failback_transition() {
+  local vm="${1-}"
+  local protection_state="${2-}"
+  local transport_state="${3-}"
+
+  [[ "${FTCTL_PROFILE_PROVISIONING_BACKEND:-libvirt-managed}" == "cloud-managed" ]] || return 1
+  case "${protection_state}" in
+    failing_back)
+      return 0
+      ;;
+  esac
+  case "${transport_state}" in
+    reverse_syncing|reverse_sync_ready|reverse_sync_cutback_required|reverse_sync_failed|secondary_stopping|finalizing|primary_restoring|cutback_ready|cutback_switching|failback_failed)
+      return 0
+      ;;
+    failed_over|unknown|"")
+      if declare -F ftctl_blockcopy_reverse_sync_artifacts_present >/dev/null 2>&1 &&
+          ftctl_blockcopy_reverse_sync_artifacts_present "${vm}"; then
+        return 0
+      fi
+      ;;
+  esac
+  return 1
+}
+
+ftctl_orchestrator_is_cloud_failback_awaiting_command() {
+  local mode="${1-}"
+  local active_side="${2-}"
+  local protection_state="${3-}"
+  local transport_state="${4-}"
+  local fencing_state="${5-}"
+
+  [[ "${FTCTL_PROFILE_PROVISIONING_BACKEND:-libvirt-managed}" == "cloud-managed" ]] || return 1
+  [[ "${mode}" == "ha" || "${mode}" == "dr" ]] || return 1
+  [[ "${active_side}" == "secondary" ]] || return 1
+  [[ "${protection_state}" == "failed_over" ]] || return 1
+  [[ "${transport_state}" == "failed_over" ]] || return 1
+  case "${fencing_state}" in
+    clear|cleared)
+      return 0
+      ;;
+  esac
+  return 1
 }
 
 ftctl_orchestrator_reconcile_one() {
   local vm="${1-}"
   local admin mode transport refresh_rc peer_host_id peer_mgmt_ip peer_reach active_side
-  local inventory_probe local_rc peer_rc inventory_result
+  local protection_state fencing_state failover_ready
+  local inventory_probe local_rc peer_rc inventory_result _peer_domain_expected _standby_domain_state
   admin="$(ftctl_state_get "${vm}" "admin_state" 2>/dev/null || echo "active")"
   [[ "${admin}" == "paused" ]] && {
     ftctl_log_event "rearm" "reconcile.skip" "skip" "${vm}" "" "reason=admin_paused"
@@ -213,6 +404,24 @@ ftctl_orchestrator_reconcile_one() {
   mode="$(ftctl_state_get "${vm}" "mode" 2>/dev/null || echo "")"
   transport="$(ftctl_state_get "${vm}" "transport_state" 2>/dev/null || echo "unknown")"
   active_side="$(ftctl_state_get "${vm}" "active_side" 2>/dev/null || echo "primary")"
+  protection_state="$(ftctl_state_get "${vm}" "protection_state" 2>/dev/null || echo "")"
+  fencing_state="$(ftctl_state_get "${vm}" "fencing_state" 2>/dev/null || echo "clear")"
+  failover_ready="$(ftctl_state_get "${vm}" "failover_ready" 2>/dev/null || echo "")"
+
+  if [[ ( "${mode}" == "ha" || "${mode}" == "dr" ) && "${active_side}" == "primary" && "${protection_state}" == "failing_over" ]]; then
+    case "${fencing_state}" in
+      required|manual-required|manual-fenced)
+        case "${failover_ready}" in
+          1|true|yes)
+            ftctl_state_set "${vm}" "last_reconcile_ts=$(ftctl_now_iso8601)"
+            ftctl_log_event "failover" "reconcile.defer" "skip" "${vm}" "" \
+              "reason=manual_fence_in_progress protection=${protection_state} transport=${transport} fencing=${fencing_state} readiness=marker"
+            return 0
+            ;;
+        esac
+        ;;
+    esac
+  fi
 
   ftctl_profile_load_vm "${vm}"
   ftctl_profile_apply_cli "${vm}" "${mode}" "" ""
@@ -222,12 +431,97 @@ ftctl_orchestrator_reconcile_one() {
   : "${peer_mgmt_ip}"
   ftctl_state_set "${vm}" "last_reconcile_ts=$(ftctl_now_iso8601)"
 
+  protection_state="$(ftctl_state_get "${vm}" "protection_state" 2>/dev/null || echo "${protection_state}")"
+  transport="$(ftctl_state_get "${vm}" "transport_state" 2>/dev/null || echo "${transport}")"
+  active_side="$(ftctl_state_get "${vm}" "active_side" 2>/dev/null || echo "${active_side}")"
+  fencing_state="$(ftctl_state_get "${vm}" "fencing_state" 2>/dev/null || echo "${fencing_state}")"
+
+  if [[ "${mode}" == "ft" && "${protection_state}" == "pairing" && "${transport}" == "establishing" ]]; then
+    ftctl_xcolo_reconcile_pending_runtime "${vm}"
+    return 0
+  fi
+
+  if [[ "${mode}" == "ft" && ( "${protection_state}" == "error" || "${transport}" == "failed" ) ]]; then
+    if declare -F ftctl_xcolo_preserve_runtime_error >/dev/null 2>&1; then
+      ftctl_xcolo_preserve_runtime_error "${vm}"
+    fi
+    ftctl_state_set "${vm}" "last_healthy_ts=$(ftctl_now_iso8601)"
+    ftctl_log_event "health" "reconcile.defer" "warn" "${vm}" "" \
+      "reason=ft_runtime_failure_preserved protection=${protection_state} transport=${transport}"
+    return 0
+  fi
+
+  if ftctl_orchestrator_is_cloud_failback_awaiting_command "${mode}" "${active_side}" "${protection_state}" "${transport}" "${fencing_state}"; then
+    ftctl_state_set "${vm}" "last_healthy_ts=$(ftctl_now_iso8601)"
+    ftctl_log_event "failback" "failback.await-command" "ok" "${vm}" "" \
+      "reason=cloud_managed_manual_fence_released active_side=${active_side} protection=${protection_state} transport=${transport} fencing=${fencing_state}"
+    return 0
+  fi
+  if [[ "${mode}" != "ft" ]] && ftctl_orchestrator_is_cloud_failback_transition "${vm}" "${protection_state}" "${transport}"; then
+    case "${transport}" in
+      reverse_syncing|reverse_sync_ready|reverse_sync_cutback_required|failed_over|unknown|"")
+        refresh_rc=0
+        ftctl_blockcopy_refresh_and_classify "${vm}" || refresh_rc=$?
+        transport="$(ftctl_state_get "${vm}" "transport_state" 2>/dev/null || echo "${transport}")"
+        case "${refresh_rc}" in
+          0|11|23)
+            ftctl_state_set "${vm}" "last_healthy_ts=$(ftctl_now_iso8601)"
+            ftctl_log_event "failback" "reconcile.reverse-sync" "ok" "${vm}" "" \
+              "transport=${transport} refresh_rc=${refresh_rc}"
+            return 0
+            ;;
+          *)
+            ftctl_state_set "${vm}" \
+              "protection_state=error" \
+              "transport_state=reverse_sync_failed" \
+              "last_error=reverse_sync_refresh_failed"
+            ftctl_log_event "failback" "reconcile.reverse-sync" "fail" "${vm}" "" \
+              "transport=${transport} refresh_rc=${refresh_rc} peer_host=${peer_host_id} peer_reach=${peer_reach}"
+            return 0
+            ;;
+        esac
+        ;;
+      reverse_sync_failed)
+        ftctl_state_set "${vm}" "last_healthy_ts=$(ftctl_now_iso8601)"
+        ftctl_log_event "failback" "reconcile.defer" "warn" "${vm}" "" \
+          "reason=cloud_failback_failure_preserved transport=${transport}"
+        return 0
+        ;;
+      *)
+        ftctl_state_set "${vm}" "last_healthy_ts=$(ftctl_now_iso8601)"
+        ftctl_log_event "failback" "reconcile.defer" "ok" "${vm}" "" \
+          "reason=cloud_failback_transition transport=${transport}"
+        return 0
+        ;;
+    esac
+  fi
+
   inventory_probe="$(ftctl_inventory_check_vm "${vm}")"
-  local_rc="${inventory_probe%% *}"
-  inventory_probe="${inventory_probe#* }"
-  peer_rc="${inventory_probe%% *}"
-  inventory_result="${inventory_probe##* }"
+  read -r local_rc peer_rc inventory_result _peer_domain_expected _standby_domain_state <<< "${inventory_probe}"
   : "${peer_rc}${inventory_result}"
+
+  if ftctl_orchestrator_is_failover_steady_state "${vm}" "${mode}" "${active_side}" "${peer_rc}" "${inventory_result}" "${_standby_domain_state}"; then
+    ftctl_state_set "${vm}" \
+      "protection_state=failed_over" \
+      "transport_state=failed_over" \
+      "last_error=" \
+      "last_healthy_ts=$(ftctl_now_iso8601)"
+    ftctl_log_event "failover" "failover.steady" "ok" "${vm}" "" \
+      "reason=source_fenced active_side=secondary standby=${_standby_domain_state:-unknown}"
+    return 0
+  fi
+
+  if [[ ( "${mode}" == "ha" || "${mode}" == "dr" ) && "${active_side}" == "primary" && "${local_rc}" != "0" ]]; then
+    if [[ "${FTCTL_PROFILE_PROVISIONING_BACKEND:-libvirt-managed}" == "cloud-managed" ]]; then
+      ftctl_state_set "${vm}" \
+        "last_error=cloud_managed_failover_candidate" \
+        "failover_candidate_reason=primary_domain_missing" \
+        "failover_candidate_ts=$(ftctl_now_iso8601)"
+      ftctl_log_event "failover" "cloud_managed.failover_candidate" "warn" "${vm}" "" \
+        "reason=primary_domain_missing mode=${mode} peer_host=${peer_host_id} controller=cloud"
+      return 0
+    fi
+  fi
 
   if [[ "${mode}" == "ha" && "${active_side}" == "primary" && "${local_rc}" != "0" ]]; then
     ftctl_log_event "failover" "failover.auto" "warn" "${vm}" "" \
@@ -273,17 +567,88 @@ ftctl_orchestrator_reconcile_one() {
 ftctl_orchestrator_reconcile() {
   local vm="${1-}"
   local json="${2-0}"
-  local f name
+  local f name lock_file profile_path rc check_rc
   if [[ -n "${vm}" ]]; then
+    lock_file="$(ftctl_lock_path_for_command "reconcile" "${vm}")"
+    CLI_COMMAND="reconcile" CLI_VM="${vm}" ftctl_lock_acquire "${lock_file}" || {
+      ftctl_log_event "lock" "reconcile.skip" "skip" "${vm}" "${EXIT_LOCKED:-20}" \
+        "reason=vm_locked lock_file=${lock_file}"
+      ftctl_state_print_one "${vm}" "${json}"
+      return 0
+    }
+
+    rc=0
+    set +e
     ftctl_orchestrator_reconcile_one "${vm}"
+    rc=$?
+    set -e
+    if (( rc != 0 )); then
+      ftctl_log_event "health" "reconcile.error" "warn" "${vm}" "${rc}" \
+        "reason=reconcile_failed"
+      ftctl_lock_release
+      ftctl_state_print_one "${vm}" "${json}"
+      return 0
+    fi
+
+    check_rc=0
+    if ftctl_profile_load_vm "${vm}" 2>/dev/null; then
+      set +e
+      ftctl_orchestrator_check_vm "${vm}" "1" >/dev/null
+      check_rc=$?
+      set -e
+      if (( check_rc != 0 )); then
+        ftctl_log_event "check" "reconcile.check" "warn" "${vm}" "${check_rc}" \
+          "reason=check_failed"
+      fi
+    fi
+    ftctl_lock_release
+    ftctl_local_health "1" "${vm}" >/dev/null || true
     ftctl_state_print_one "${vm}" "${json}"
     return 0
   fi
 
+  ftctl_local_health "1" "${vm}" >/dev/null || true
   shopt -s nullglob
   for f in "${FTCTL_STATE_DIR}"/*.state; do
     name="$(basename "${f}" .state)"
+    profile_path="$(ftctl_profile_path "${name}")"
+    if [[ ! -f "${profile_path}" ]]; then
+      ftctl_log_event "profile" "reconcile.skip" "skip" "${name}" "" \
+        "reason=missing_profile state_file=${f} profile_file=${profile_path}"
+      continue
+    fi
+
+    lock_file="$(ftctl_lock_path_for_command "reconcile" "${name}")"
+    CLI_COMMAND="reconcile" CLI_VM="${name}" ftctl_lock_acquire "${lock_file}" || {
+      ftctl_log_event "lock" "reconcile.skip" "skip" "${name}" "${EXIT_LOCKED:-20}" \
+        "reason=vm_locked lock_file=${lock_file}"
+      continue
+    }
+
+    rc=0
+    set +e
     ftctl_orchestrator_reconcile_one "${name}"
+    rc=$?
+    set -e
+    if (( rc != 0 )); then
+      ftctl_log_event "health" "reconcile.error" "warn" "${name}" "${rc}" \
+        "reason=reconcile_failed"
+      ftctl_lock_release
+      continue
+    fi
+
+    check_rc=0
+    if ftctl_profile_load_vm "${name}" 2>/dev/null; then
+      set +e
+      ftctl_orchestrator_check_vm "${name}" "1" >/dev/null
+      check_rc=$?
+      set -e
+      if (( check_rc != 0 )); then
+        ftctl_log_event "check" "reconcile.check" "warn" "${name}" "${check_rc}" \
+          "reason=check_failed"
+      fi
+    fi
+    ftctl_lock_release
     if [[ "${json}" == "1" ]]; then
       ftctl_state_emit_json "${name}"
     else

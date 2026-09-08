@@ -74,10 +74,10 @@ For file-based FT, implementation must follow the QEMU COLO test procedure as th
 Startup alignment checklist:
 
 1. Primary startup
-   - `mirror0` listens with `wait=off`
-   - `compare1` listens with `wait=on`
+   - `compare1` is emitted before `mirror0` and listens with `wait=on`
+   - `mirror0` listens with `wait=on` by default in the active cloud-managed/libvirt path so primary QEMU cannot pass the mirror listener before the secondary `red0` peer attaches
    - `compare0`, `compare0-0`, `compare_out`, `compare_out0` use local loopback
-   - `filter-mirror`, `filter-redirector`, `colo-compare` objects are present
+   - `filter-mirror`, `filter-redirector`, `colo-compare` are attached later through QMP after the block graph is ready
    - root disk is attached as `if=ide` quorum
    - startup uses `-S`
 2. Secondary startup
@@ -87,23 +87,41 @@ Startup alignment checklist:
    - `-incoming` is present
    - startup does not use `-S`
 3. Protect QMP sequence
+   - when both primary compare and mirror listeners use `wait=on`, the primary
+     generated-create wait treats `compare1` as the bootstrap listener so the
+     secondary `red1` path can connect before the primary reaches `mirror0`
    - secondary: `qmp_capabilities`
    - secondary: `migrate-set-capabilities` with `x-colo`
    - secondary: `nbd-server-start`
-   - secondary: `nbd-server-add parent0`
+   - secondary: `nbd-server-add` for every mapped writable disk
    - primary: `qmp_capabilities`
-   - primary: `blockdev-add nbd0`
-   - primary: `x-blockdev-change parent=colo-disk0 node=nbd0`
+   - primary: `blockdev-add` and `x-blockdev-change` for every mapped writable disk
+   - primary: attach network filter objects after all disk graphs are ready
    - primary: `migrate-set-capabilities` with `x-colo`
    - primary: `migrate`
 
-The engine must not mark file-based FT as `colo_running` unless both sides are actually `running=true` in QMP.
+The engine must not mark FT as `colo_running` unless both sides are actually `running=true` in QMP and the secondary migration status has converged to `colo`.
 The engine must also reject prebuilt file-based FT pairs when the following virtual sizes do not match:
 
 - primary source
 - secondary parent
 - secondary hidden overlay
 - secondary active overlay
+
+## 2.2 DR Reprotect Authority Boundary
+
+After Cloud commits real Failover, Reprotect starts from TARGET authority. A
+delegated Reprotect Run must preserve the committed authority generation,
+cutover session, checkpoint, target identity, and target power/promotion state.
+It must not infer authority from mutable Plan `status.state`.
+
+For VMware-to-ABLESTACK protection, Reprotect builds and validates the reverse
+`KVM_TO_VMWARE` path, creates a durable reverse seed, and only then starts the
+target-side scheduler. A failed preflight or reverse seed leaves TARGET
+authority unchanged.
+
+The normative code-level design is:
+`441-ftctl-dr-reprotect-canonical-authority-preservation-design-20260723.md`.
 
 ## 3. Failback Disk Map
 
@@ -127,3 +145,16 @@ FTCTL_PROFILE_FAILBACK_DISK_MAP="vda=/primary/demo-vda.qcow2;vdb=/primary/demo-v
   - `transport_state=mirroring`
 - `remote-nbd` failback requires reverse NBD export orchestration and primary-side handoff.
 - FT block-backed failback now depends on the same cold conversion runtime XML and post-boot QMP graph attach path that is used for baseline protect.
+
+## 5. Cross-Hypervisor Bidirectional Replication Rule
+
+For VMware-to-KVM DR, Failover leaves TARGET authoritative and unprotected.
+Operators must complete Reprotect before Failback. Reprotect performs an
+initial reverse seed when no KVM baseline exists, then maintains
+`KVM_TO_VMWARE` incrementals. Failback is permitted only after a final
+quiesced reverse delta, reverse guest preparation, and isolated VMware boot
+validation have all committed successfully.
+
+Swapping the source and target fields of the forward profile is not a reverse
+replication implementation. FTCTL must reject that unsafe path. See
+[445-ftctl-dr-bidirectional-incremental-replication-and-reverse-guest-compatibility-design-20260801.md](445-ftctl-dr-bidirectional-incremental-replication-and-reverse-guest-compatibility-design-20260801.md).

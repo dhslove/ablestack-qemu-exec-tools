@@ -134,6 +134,13 @@ hangctl_action_handle_confirmed_vm() {
   local stuck_sec="${4-}"
   local qmp_status="${5-}"
 
+  local guard_reason="" guard_detail=""
+  if hangctl_ftctl_guard_should_skip_action "${vm}" "${reason}" guard_reason guard_detail; then
+    hangctl_log_event "action" "action.skip" "ok" "${vm}" "" "" "reason=${guard_reason} ${guard_detail}"
+    hangctl_log_event "action" "incident.end" "ok" "${vm}" "" "" "result=skipped reason=${guard_reason}"
+    return 0
+  fi
+
   local incident_id
   incident_id="$(hangctl_new_incident_id)"
 

@@ -1,0 +1,3 @@
+# Keep FTCTL's reserved NBD pool out of host filesystem/LVM auto-discovery.
+# FTCTL uses whole-disk I/O and removes partition children before disconnect.
+SUBSYSTEM=="block", KERNEL=="nbd1[6-9]|nbd2[0-9]|nbd3[0-1]|nbd1[6-9]p*|nbd2[0-9]p*|nbd3[0-1]p*", ENV{UDEV_DISABLE_PERSISTENT_STORAGE_BLKID_FLAG}="1", ENV{UDISKS_IGNORE}="1", ENV{SYSTEMD_READY}="0", OPTIONS+="nowatch"

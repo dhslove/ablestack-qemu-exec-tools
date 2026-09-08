@@ -11,6 +11,7 @@ Thumbs.db
 # Local one-off test scripts and credentials
 tests/local/
 tests/ftctl/
+.local-dev/
 
 # RPM build work directories
 rpmbuild/

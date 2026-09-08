@@ -44,6 +44,7 @@ Examples:
 - shared NFS
 - shared multipath-backed filesystem
 - storage systems where both hosts can access the same replicated target path
+- shared RBD exposed as KRBD paths such as `/dev/rbd/rbd/<image>`
 
 Behavior:
 
@@ -112,7 +113,6 @@ The controller must reject:
 - local file backend
 - local block backend
 - non-shared storage
-- shared-visible blockcopy mode selected
 
 Reason:
 
@@ -124,6 +124,7 @@ The controller may accept:
 
 - shared paths visible from both hosts
 - target paths explicitly marked as shared-visible
+- KRBD shared RBD targets when both hosts can access the same RBD image
 
 ### 4.3 Accept remote-local transport layouts
 
@@ -142,8 +143,11 @@ Protect success should be judged from multiple signals:
 - runtime XML mirror metadata in `virsh dumpxml`
 - target path storage scope validation
 - actual target existence on the correct host
+- materialization verification that proves the target contains copied data
 - secondary standby XML correctness
 - secondary domain define/create readiness
+
+For shared RBD/KRBD targets, QMP or runtime XML `ready=yes` is not enough. After blockcopy reports ready, FTCTL must verify the target RBD is not empty when the source contains data and that the target head sample matches the source head sample before declaring `protected/mirroring`.
 
 For non-shared local storage, success requires:
 
@@ -181,4 +185,3 @@ Shared-storage tests may continue under:
 3. Implement `remote-local transport mode` for non-shared local storage
 4. Separate service identity from standby domain name
 5. Update real-environment test IDs and expectations by backend mode
-
