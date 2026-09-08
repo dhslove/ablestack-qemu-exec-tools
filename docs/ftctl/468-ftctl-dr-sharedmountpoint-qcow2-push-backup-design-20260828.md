@@ -913,3 +913,36 @@ gates.
 | NBD interface | incorrectly treated as qcow2 | raw guest block interface |
 | Full Seed command | `-O <targetFormat>` for every URI | `-O raw` for `nbd://`, declared format otherwise |
 | Failure | immediate `Image is not in qcow2 format` | transfer proceeds and checkpoint gates completion |
+
+## Failover Final Checkpoint Publication Contract (2026-09-08)
+
+Planned Failover creates one last durable checkpoint after the continuous
+scheduler is stopped and before target activation. That operation-owned
+checkpoint is the recovery authority for promotion, Reprotect, and Failback.
+It must therefore be published through the same `latest_completed_*` contract
+as a scheduler Cycle; keeping it only in `failover_final_*` fields leaves Cloud
+with the previous scheduler sequence and makes a successful cutover appear to
+have a non-durable committed checkpoint.
+
+After the complete disk set is durable and the restore-point journal record is
+fsynced, FTCTL atomically publishes the final sequence, `failover-final` cycle
+type, operation Run UUID, checkpoint reference, mode decision, byte metrics,
+baseline generation, cycle token, and NBD teardown evidence to both the Run
+state and Plan status. Target activation is not allowed before this barrier.
+The implementation is transport-neutral: VMware CBT capture is unchanged and
+the target writer may be RBD or a SharedMountPoint qcow2 file.
+
+For an execution created before this contract, `dr-status` compares the Plan
+state with the durable restore-point journal. A newer valid journal sequence is
+projected as latest completed without editing Cloud DB. The normal Cloud
+projection then persists the canonical Cycle and restore point, allowing the
+Plan to converge through its ordinary reconciliation path.
+
+Regression gates cover both VMware-to-RBD and VMware-to-SharedMountPoint:
+
+- final checkpoint sequence is greater than the last scheduler sequence;
+- `latest_completed_checkpoint_sequence` equals the committed cutover sequence;
+- checkpoint state is `READY`, commit state is `LOCAL_DURABLE`, and NBD teardown
+  is `DRAINED` when NBD was used;
+- Cloud Reprotect resolves the same canonical sequence without DB repair;
+- no provider-specific target branch can bypass or replace this publication.

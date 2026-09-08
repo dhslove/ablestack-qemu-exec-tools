@@ -1679,7 +1679,7 @@ if metrics:
     for key in (
         "cycleUuid", "cycleToken", "requestedMode", "effectiveMode",
         "automaticReseed", "modeDecisionCode", "reseedReason", "invalidBaselineDiskCount",
-        "incrementalVerified", "baselineGeneration", "cycleCommitState",
+        "incrementalVerified", "metricsEstimated", "baselineGeneration", "cycleCommitState", "cycleMetricsPath",
         "virtualBytes", "changedBytes", "sourceReadBytes", "targetWrittenBytes",
         "transferPayloadBytes", "changedExtentCount", "durationMs", "throughputBps",
         "nbdTeardownState", "nbdTeardownStartedAtEpochMs", "nbdTeardownCompletedAtEpochMs",
