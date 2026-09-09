@@ -192,9 +192,14 @@ with open(sys.argv[1], "w", encoding="utf-8") as fh:
     fh.write(json.dumps({"pidFile": sys.argv[2]}, separators=(",", ":")) + "\n")
 PY
 printf '{}\n' > "${rollback_manifest}"
-ftctl_dr_ablestack_target_export_abort "${rollback_records}" "${rollback_manifest}"
-! kill -0 "${rollback_process}" 2>/dev/null
-[[ ! -e "${rollback_records}" && ! -e "${rollback_manifest}" && ! -e "${rollback_pid}" ]]
+# A reused/unrelated PID cannot be killed or have its evidence discarded.
+if ftctl_dr_ablestack_target_export_abort "${rollback_records}" "${rollback_manifest}"; then
+  echo "unrelated PID accepted as export" >&2; exit 1
+fi
+kill -0 "${rollback_process}"
+[[ -e "${rollback_records}" && -e "${rollback_manifest}" && -e "${rollback_pid}" ]]
+kill "${rollback_process}"
+wait "${rollback_process}" 2>/dev/null || true
 
 FTCTL_DR_TARGET_EXPORT_PERSIST_ROOT="${TMP}/persist"
 persistent_manifest="${TMP}/persistent-exports.json"
