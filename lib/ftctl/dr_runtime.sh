@@ -4342,6 +4342,22 @@ sys.stdout.write("," + encoded[1:-1])
 PY
 }
 
+# Additive profile boot evidence; keep full observation fingerprint v2 unchanged.
+ftctl_dr_runtime_boot_hardware() {
+  local profile_path="${1-}"
+  [[ -f "${profile_path}" ]] || { printf '{}'; return 0; }
+  jq -c '
+    (.mapping.source.hardware // {})
+    | with_entries(select(.key == "sourceVmRef" or .key == "firmware" or .key == "UEFI"
+        or .key == "secureBoot" or .key == "rootDiskController" or .key == "dataDiskController"
+        or .key == "vmDetails"))
+    | if (.vmDetails | type) == "object" then
+        .vmDetails |= with_entries(select(.key | ascii_downcase |
+          test("^(uefi|rootdiskcontroller|datadiskcontroller|bootorder|boot[.]order|tpmversion|tpmmodel|machinetype)$")))
+      else del(.vmDetails) end
+  ' "${profile_path}" 2>/dev/null || printf '{}'
+}
+
 ftctl_dr_runtime_stable_hardware_fingerprint() {
   local profile_path="${1-}" canonical="" digest=""
   [[ -f "${profile_path}" ]] || return 1
@@ -5243,6 +5259,8 @@ PY
   ftctl_dr_runtime_json_string_field "target_external_ref" "${target_external_ref}"
   ftctl_dr_runtime_json_string_field "source_firmware" "${source_firmware}"
   ftctl_dr_runtime_json_boolean_field "source_secure_boot" "${source_secure_boot}" || return $?
+  ftctl_dr_runtime_json_number_field "source_boot_hardware_version" "1"
+  printf ',"source_boot_hardware":%s' "$(ftctl_dr_runtime_boot_hardware "${profile_path:-}")"
   ftctl_dr_runtime_json_string_field "source_hardware_fingerprint" "${source_hardware_fingerprint}"
   ftctl_dr_runtime_json_string_field "source_hardware_fingerprint_version" "${source_hardware_fingerprint_version}"
   ftctl_dr_runtime_json_string_field "target_boot_type" "${target_boot_type}"

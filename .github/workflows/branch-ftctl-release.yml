@@ -106,6 +106,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          bash tests/ftctl_dr_boot_hardware_smoke.sh
           bash tests/ftctl_dr_full_lifecycle_smoke.sh
           tests/ftctl_dr_release_tombstone_smoke.sh
           bash tests/ftctl_dr_status_terminal_fallback_smoke.sh

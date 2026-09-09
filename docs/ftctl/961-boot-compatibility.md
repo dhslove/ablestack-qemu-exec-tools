@@ -1,0 +1,5 @@
+# Issue 961: boot compatibility evidence
+
+Keep source_hardware_fingerprint v2 unchanged. Runtime status additionally emits source_boot_hardware_version=1 and source_boot_hardware, an allowlisted projection of profile source hardware excluding compute/performance details. Cloud performs normalization and comparison. This is profile correlation evidence, not proof of target XML or successful guest boot. Existing profiles are supported without rewriting them. Missing/deleted profiles emit an empty object; release tombstone reconstruction remains valid.
+
+Implementation refinement from the issue design: transmit inspectable boot fields instead of introducing a second cross-language hash. The consumer compares normalized fields; existing full hashes remain diagnostic and legacy fallback. Unknown evidence never becomes fabricated proof. No worker placement, authority, artifact, lifecycle or scheduler contract changes. Branch release gates include the new boot smoke and existing release/action tests before packaging.
