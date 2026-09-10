@@ -37,3 +37,7 @@ VMware에서 복제한 VM은 VMware 원본과 ABLESTACK 대상 모두 QGA 검증
 모든 TEST_PREPARE에서 이전 RUNNING/PAUSED 의도를 durable store에 저장한다. Cloud 요청은 TEST_PREPARE/TEST_ARTIFACT_CLEANUP에 `sourceSchedulerRestoreManagedByCloud=true`를 포함하고 `dr-cloud-test-recovery-v1` capability를 요구한다. qemu는 이 계약이 있는 cleanup/실패 rollback에서 source scheduler를 직접 재개하지 않는다. 로컬 transition 종료와 checkpoint lease/테스트 아티팩트 정리는 유지한다. 직접 CLI와 계약 없는 요청은 기존 재개 동작을 유지한다.
 
 Cloud 복구 worker가 정상 source profile을 다시 구성한 뒤 RUNNING 의도일 때만 RESUME한다. PAUSED 의도는 재개하지 않는다. 따라서 VMware의 source mover와 target 작업이 같은 host에서 실행되어도 source credential이 없는 target-only profile로 복제를 시작하지 않는다. 대상 정리는 원본의 QGA/연결/자격 증명에 의존하지 않는다. 새 capability가 없는 host에는 이 변경을 보내지 않는다.
+## #988 Cloud-managed 테스트 정리 복원 계약
+sourceSchedulerRestoreManagedByCloud=true일 때 local cleanup/rollback은 전환 종료와 artifact 정리만 수행하고 source RUN을 보내지 않는다. Cloud durable recovery가 기록한 RUNNING/PAUSED 의도를 적용하고 source 자격 증명을 포함한 정상 프로필을 복원한다. 직접 CLI cleanup은 기존 재개 동작을 유지한다. capability dr-cloud-test-recovery-v1로 혼합 버전을 차단한다. VMware 원본과 ABLESTACK 대상 모두 QGA 검증에서 제외한다.
+
+구현 220c7e9, 회귀 보정 50b7424. Actions 34443556696은 full lifecycle 71 cases, release tombstone 및 전체 gate PASS. 13/22/31/32 총12대 배포. 실환경 RBD RUNNING 자동 복원과 PAUSED 유지 각각 PASS. VMware 외부 스냅샷 충돌(#1001) 및 31 다른 시험용 Cloud JAR 복원 차단으로 나머지 실환경 회귀는 미완료. Cloud docs/ftctl/issue-988-validation.md에 정확한 run과 배포 증거를 기록한다.
