@@ -2154,6 +2154,11 @@ ftctl_dr_scheduler_worker() {
     if ftctl_dr_checkpoint_enabled "${profile_file}" && [[ -s "${checkpoint_pending_path}" ]]; then
       next_sequence="$(jq -r '.request.checkpointSequence' "${checkpoint_pending_path}")"
       cycle_run="$(jq -r '.request.producerRunUuid' "${checkpoint_pending_path}")"
+      local pending_cycle_context
+      pending_cycle_context="$(ftctl_dr_checkpoint_resume_context "${checkpoint_pending_path}" \
+        "${cycle_request_state}" "${cycle_request_mode}" "${cycle_request_owner}" \
+        "$(ftctl_state_read_kv "${sequence_path}" requested_cycle_sequence 2>/dev/null || true)")" || return 108
+      IFS=$'\t' read -r cycle_type cycle_request_bound <<< "${pending_cycle_context}"
     fi
     checkpoint_ref="ftctl:${plan}:${cycle_run}:${next_sequence}"
     transfer_progress_path="$(ftctl_dr_runtime_run_journal_path "${plan}" "${cycle_run}" progress)"
@@ -2253,7 +2258,7 @@ ftctl_dr_scheduler_worker() {
       ftctl_dr_scheduler_run_cycle "${plan}" "${cycle_run}" "${profile_file}" "${sequence}" "${cycle_type}")" || rc=$?
     fi
     if [[ "${rc}" == "0" ]]; then
-      ftctl_dr_checkpoint_barrier "${plan}" "${cycle_run}" "${sequence}" "${output}" "${profile_file}" || rc=$?
+      ftctl_dr_checkpoint_barrier "${plan}" "${cycle_run}" "${sequence}" "${output}" "${profile_file}" "${cycle_type}" || rc=$?
     fi
     ftctl_dr_scheduler_slot_release 203
     ftctl_dr_scheduler_lock_release "${plan}" "cycle" 202

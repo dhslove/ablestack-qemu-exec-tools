@@ -266,11 +266,24 @@ def load(path):
     with open(path, encoding="utf-8") as handle:
         return json.load(handle)
 disk_map, baseline, metrics = load(map_path), load(baseline_path), load(metrics_path)
+# qcow2 legacy verified counters represent successful QEMU backup completion,
+# not readback. Keep that distinction in the committed baseline evidence.
+
+if len(metrics) != len(disk_map.get("disks") or []) or not metrics or any(
+        item.get("writeVerified") is not True
+        or int(item.get("verifiedBytes") or 0) != int(item.get("targetWrittenBytes") or 0)
+        for item in metrics):
+    raise SystemExit("DR_REVERSE_DURABILITY_VERIFY_FAILED")
+if cycle_type == "FULL_REVERSE_SEED" and sum(int(item.get("verifiedBytes") or 0) for item in metrics) != sum(
+        int(item.get("virtualBytes") or 0) for item in disk_map.get("disks") or []):
+    raise SystemExit("DR_REVERSE_FULL_TRANSFER_INCOMPLETE")
 generation = max(int(baseline.get("generation") or 0) + 1, int(sequence or 0))
 for row in baseline.get("disks") or []:
     row["generation"] = generation
     row["state"] = "LOCAL_DURABLE"
 baseline.update({"generation": generation, "state": "LOCAL_DURABLE",
+                 "origin": "VERIFIED_REVERSE", "commonBaselineVerified": True,
+                 "commonBaselineVerification": "QEMU_BACKUP_COMPLETION",
                  "committedAtEpochMs": int(time.time() * 1000)})
 totals = {key: sum(int(item.get(key) or 0) for item in metrics) for key in (
     "changedExtentCount", "changedBytes", "sourceReadBytes", "targetWrittenBytes",
@@ -365,6 +378,14 @@ disk_map = load(map_path, {})
 old = load(old_path, {})
 rows = load(rows_path, [])
 metrics = load(metrics_path, [])
+if len(metrics) != len(disk_map.get("disks") or []) or not metrics or any(
+        item.get("writeVerified") is not True
+        or int(item.get("verifiedBytes") or 0) != int(item.get("targetWrittenBytes") or 0)
+        for item in metrics):
+    raise SystemExit("DR_REVERSE_DURABILITY_VERIFY_FAILED")
+if cycle_type == "FULL_REVERSE_SEED" and sum(int(item.get("verifiedBytes") or 0) for item in metrics) != sum(
+        int(item.get("virtualBytes") or 0) for item in disk_map.get("disks") or []):
+    raise SystemExit("DR_REVERSE_FULL_READBACK_INCOMPLETE")
 sequence_number = int(sequence or 0)
 generation = max(int(old.get("generation") or 0) + 1, sequence_number)
 now = int(time.time() * 1000)
@@ -384,6 +405,7 @@ baseline = {
     "schemaVersion": 1, "planUuid": plan, "direction": "KVM_TO_VMWARE",
     "providerPair": "ABLESTACK_TO_VMWARE", "generation": generation,
     "state": "LOCAL_DURABLE", "committedAtEpochMs": now, "disks": baseline_disks,
+    "commonBaselineVerified": True, "commonBaselineVerification": "REVERSE_READBACK",
 }
 totals = {key: sum(int(item.get(key) or 0) for item in metrics) for key in (
     "changedExtentCount", "changedBytes", "sourceReadBytes", "targetWrittenBytes",
@@ -421,6 +443,10 @@ main() {
   local endpoint username tls_verify thumbprint libdir govc_bin vm_ref power_state work_dir password_file rows_path disk_metrics_path
   local index row pool image previous_snapshot new_snapshot metric_path extent_path rc=0 baseline_file_state progress_base_bytes
   [[ -f "${map_path}" && -n "${baseline_path}" && -n "${metrics_path}" ]] || ftctl_kvm_vmware_die 65 "DR_REVERSE_MAP_MISSING"
+  if [[ "${cycle_type}" != "FULL_REVERSE_SEED" ]] \
+      && ! jq -e '.commonBaselineVerified == true' "${baseline_path}" >/dev/null 2>&1; then
+    ftctl_kvm_vmware_die 83 "DR_REVERSE_COMMON_BASELINE_UNVERIFIED: full reverse seed required"
+  fi
   for command in jq nbdkit blockdev flock python3; do
     ftctl_vmware_mover_require "${command}" 65
   done

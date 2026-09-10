@@ -107,6 +107,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest tests.ftctl_dr_export_ownership_test
+          python3 -m unittest tests.ftctl_dr_checkpoint_test tests.ftctl_dr_common_baseline_test
           bash tests/ftctl_dr_ablestack_remote_rbd_smoke.sh
           bash tests/ftctl_dr_boot_hardware_smoke.sh
           bash tests/ftctl_dr_full_lifecycle_smoke.sh

@@ -10089,7 +10089,7 @@ JSON
   selftest_assert_contains "$(ftctl_dr_kvm_vmware_mode_decision "${plan}" FAILBACK_FINAL AUTO)" $'MISSING_EXPECTED\tFULL_REVERSE_SEED\tINITIAL_REVERSE_BASELINE_MISSING\ttrue' "initial failback decision is explicit"
   mkdir -p "$(dirname "${baseline_path}")"
   cat > "${baseline_path}" <<JSON
-{"state":"LOCAL_DURABLE","generation":1,"disks":[{"diskIndex":0,"snapshot":"baseline-1"}]}
+{"state":"LOCAL_DURABLE","commonBaselineVerified":true,"generation":1,"disks":[{"diskIndex":0,"snapshot":"baseline-1"}]}
 JSON
   selftest_assert_eq "$(ftctl_dr_kvm_vmware_cycle_type "${plan}" incremental)" "REVERSE_INCREMENTAL" "durable reverse baseline enables incremental"
   selftest_assert_eq "$(ftctl_dr_kvm_vmware_cycle_type "${plan}" failback-final)" "REVERSE_FINAL" "durable reverse baseline enables final delta"
@@ -10104,7 +10104,7 @@ JSON
 
 selftest_case_dr_kvm_vmware_failover_seeds_reverse_baseline() (
   selftest_reset_env
-  selftest_info "FTCTL_DR failover seeds a durable KVM cutover baseline for the first reverse delta"
+  selftest_info "FTCTL_DR cutover tracking does not assert a common reverse baseline"
 
   local plan="plan-cutover-baseline" run="run-cutover-baseline"
   local profile="${SELFTEST_ROOT}/cutover-baseline-profile.json"
@@ -10142,8 +10142,8 @@ JSON
   selftest_assert_file_contains "${baseline_path}" '"snapshot":"ftctl-dr-plan-cut-cutover-7-run-cuto-0"'
   selftest_assert_file_contains "${rbd_log}" 'snap create rbd/w22-01-dr-disk-0@ftctl-dr-plan-cut-cutover-7-run-cuto-0'
   selftest_assert_contains "$(ftctl_dr_kvm_vmware_mode_decision "${plan}" FAILBACK_FINAL AUTO)" \
-    $'LOCAL_DURABLE\tREVERSE_FINAL\tDURABLE_BASELINE_FINAL_DELTA\tfalse' \
-    "cutover baseline makes the first failback incremental"
+    $'LOCAL_DURABLE\tFULL_REVERSE_SEED\tINITIAL_REVERSE_COMMON_BASELINE_UNVERIFIED\ttrue' \
+    "target-only cutover tracker requires initial full reconciliation"
 )
 
 selftest_case_dr_failback_resume_checkpoint_publishes_terminal_state() {

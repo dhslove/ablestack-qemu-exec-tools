@@ -23,15 +23,15 @@ ftctl_dr_checkpoint_committed_path() {
 
 ftctl_dr_checkpoint_barrier() {
   local plan="${1-}" run="${2-}" sequence="${3-}" output="${4-}" profile="${5-}"
-  local path tool_root="${BASH_SOURCE[0]%/*}" control
+  local path tool_root="${BASH_SOURCE[0]%/*}" control cycle_type="${6-}"
   ftctl_dr_checkpoint_enabled "${profile}" || return 0
   path="$(ftctl_dr_checkpoint_pending_path "${plan}")"
-  python3 - "${tool_root}" "${path}" "${plan}" "${run}" "${sequence}" "${output}" "$(ftctl_dr_ablestack_disk_map_path "${plan}")" <<'PY'
+  python3 - "${tool_root}" "${path}" "${plan}" "${run}" "${sequence}" "${output}" "$(ftctl_dr_ablestack_disk_map_path "${plan}")" "${cycle_type}" <<'PY'
 import json, sys
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
 from dr_checkpoint import atomic_json, request_from_map, digest
-path, plan, run, sequence, output, disk_map = sys.argv[2:]
+path, plan, run, sequence, output, disk_map, cycle_type = sys.argv[2:]
 if not Path(path).exists():
     mapping = json.loads(Path(disk_map).read_text())
     request = request_from_map(plan, run, int(sequence), mapping)
@@ -52,7 +52,8 @@ if not Path(path).exists():
     atomic_json(checkpoint_path, checkpoint)
     atomic_json(path, {"request": request, "exportGeneration": generation,
                       "targetExporterAddress": exporter,
-                      "output": str(manifest_path) + "\t" + str(checkpoint_path), "ack": None})
+                      "output": str(manifest_path) + "\t" + str(checkpoint_path),
+                      "schedulerCycleType": cycle_type, "ack": None})
 PY
   [[ "$?" == "0" ]] || return 108
   # Do not hold a management request open while a checkpoint is being copied.
@@ -69,6 +70,39 @@ PY
     return $?
   fi
   return 107
+}
+
+# Recover the completed transfer identity after an asynchronous publication wait.
+# A newer/canceled request must never inherit the old transfer's terminal result.
+ftctl_dr_checkpoint_resume_context() {
+  python3 - "$@" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path, state, mode, owner, sequence = sys.argv[1:]
+pending = json.loads(Path(path).read_text())
+request = pending["request"]
+checkpoint = json.loads(Path(pending["output"].split("\t")[1]).read_text())
+# VMware legacy top-level runUuid comes from its canonical profile.
+# Cycle metrics carry the actual producer identity for the completed transfer.
+evidence = checkpoint.get("cycleMetrics") or checkpoint
+for key, expected in (("planUuid", request["planUuid"]), ("runUuid", request["producerRunUuid"]),
+                      ("producerRunUuid", request["producerRunUuid"]),
+                      ("checkpointSequence", request["checkpointSequence"]),
+                      ("sequence", request["checkpointSequence"])):
+    if key in evidence and evidence[key] != expected:
+        raise SystemExit("DR_CHECKPOINT_CANDIDATE_IDENTITY_MISMATCH")
+kind = pending.get("schedulerCycleType") or checkpoint.get("requestedMode") or checkpoint.get("effectiveMode") or ""
+kind = kind.lower().replace("_", "-")
+kind = {"cbt-incremental": "incremental", "no-change": "incremental"}.get(kind, kind)
+if kind not in ("full-seed", "full-reseed", "incremental"):
+    raise SystemExit("DR_CHECKPOINT_CYCLE_MODE_MISSING")
+bound = (state in ("PENDING", "RUNNING", "TERMINALIZING") and mode == "FULL_RESEED"
+         and owner == request["producerRunUuid"] and str(sequence) == str(request["checkpointSequence"])
+         and kind in ("full-seed", "full-reseed"))
+print(kind + "\t" + str(bound).lower())
+PY
 }
 
 ftctl_dr_checkpoint_ack() {

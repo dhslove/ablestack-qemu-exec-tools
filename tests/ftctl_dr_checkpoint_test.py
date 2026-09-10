@@ -124,6 +124,32 @@ class PublicationTest(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual(proof, json.loads((self.directory / "plan/checkpoint-committed.json").read_text()))
 
+    def test_delayed_ack_restores_full_reseed_request_identity(self):
+        checkpoint_path = self.directory / "completed.json"
+        checkpoint_path.write_text(json.dumps({"planUuid": "plan", "runUuid": "request-run",
+            "sequence": 206, "requestedMode": "FULL_RESEED"}))
+        pending = {"request": {"planUuid": "plan", "producerRunUuid": "request-run", "checkpointSequence": 206},
+            "output": "manifest\t" + str(checkpoint_path), "schedulerCycleType": "full-reseed"}
+        pending_path = self.directory / "pending.json"
+        pending_path.write_text(json.dumps(pending))
+        probe = 'ftctl_dr_checkpoint_resume_context "$test_root/pending.json" {} FULL_RESEED {} {}'
+        result = self.shell(probe.format("RUNNING", "request-run", "206"))
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("full-reseed\ttrue", result.stdout.strip())
+        for state, owner, sequence in [("CANCELED", "request-run", 206), ("RUNNING", "other", 206),
+                                      ("RUNNING", "request-run", 207)]:
+            result = self.shell(probe.format(state, owner, sequence))
+            self.assertEqual("full-reseed\tfalse", result.stdout.strip())
+        del pending["schedulerCycleType"]
+        pending_path.write_text(json.dumps(pending))
+        result = self.shell(probe.format("RUNNING", "request-run", "206"))
+        self.assertEqual("full-reseed\ttrue", result.stdout.strip())
+        checkpoint_path.write_text(json.dumps({"runUuid": "legacy-profile-run", "requestedMode": "FULL_RESEED",
+            "cycleMetrics": {"planUuid": "plan", "runUuid": "request-run", "sequence": 206}}))
+        self.assertEqual("full-reseed\ttrue", self.shell(probe.format("RUNNING", "request-run", "206")).stdout.strip())
+        checkpoint_path.write_text(json.dumps({"runUuid": "foreign", "requestedMode": "FULL_RESEED"}))
+        self.assertNotEqual(0, self.shell(probe.format("RUNNING", "request-run", "206")).returncode)
+
     def test_partial_next_set_preserves_previous_commit(self):
         first = checkpoint.publish(self.request(), self.directory, self.backend)
         self.backend.fail = "sdb"

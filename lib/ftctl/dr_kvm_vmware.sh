@@ -422,7 +422,7 @@ for disk in disk_map.get("disks") or []:
 payload = {
     "schemaVersion": 1, "planUuid": plan, "runUuid": run,
     "direction": "KVM_TO_VMWARE", "providerPair": "ABLESTACK_TO_VMWARE",
-    "origin": "FAILOVER_CUTOVER", "trackerType": "QCOW2_BITMAP",
+    "origin": "FAILOVER_CUTOVER", "commonBaselineVerified": False, "trackerType": "QCOW2_BITMAP",
     "generation": int(sequence), "createdFromCheckpoint": int(sequence),
     "state": "LOCAL_DURABLE", "committedAt": now,
     "virtualBytes": sum(int(d.get("virtualBytes") or 0) for d in disk_map.get("disks") or []),
@@ -547,6 +547,7 @@ payload = {
     "direction": "KVM_TO_VMWARE",
     "providerPair": "ABLESTACK_TO_VMWARE",
     "origin": "FAILOVER_CUTOVER",
+    "commonBaselineVerified": False,
     "generation": generation,
     "createdFromCheckpoint": generation,
     "state": "LOCAL_DURABLE",
@@ -606,6 +607,10 @@ ftctl_dr_kvm_vmware_mode_decision() {
         effective_mode="FULL_REVERSE_SEED"
         decision_code="INITIAL_REVERSE_BASELINE_MISSING"
         initial_seed=true
+      elif ! jq -e '.commonBaselineVerified == true' "$(ftctl_dr_kvm_vmware_baseline_path "${plan}")" >/dev/null 2>&1; then
+        effective_mode="FULL_REVERSE_SEED"
+        decision_code="INITIAL_REVERSE_COMMON_BASELINE_UNVERIFIED"
+        initial_seed=true
       elif [[ "${operation_intent}" == "FAILBACK_FINAL" ]]; then
         effective_mode="REVERSE_FINAL"
         decision_code="DURABLE_BASELINE_FINAL_DELTA"
@@ -622,6 +627,10 @@ ftctl_dr_kvm_vmware_mode_decision() {
     REVERSE_FINAL|REVERSE_INCREMENTAL)
       if [[ "${baseline_state}" != "LOCAL_DURABLE" ]]; then
         printf '%s\t%s\t%s\t%s\n' "${baseline_state}" "" "DR_REVERSE_BASELINE_REQUIRED" "false"
+        return 83
+      fi
+      if ! jq -e '.commonBaselineVerified == true' "$(ftctl_dr_kvm_vmware_baseline_path "${plan}")" >/dev/null 2>&1; then
+        printf '%s\t%s\t%s\t%s\n' "${baseline_state}" "" "DR_REVERSE_COMMON_BASELINE_UNVERIFIED" "true"
         return 83
       fi
       effective_mode="${requested_mode}"
