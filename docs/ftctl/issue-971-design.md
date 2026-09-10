@@ -24,3 +24,6 @@
 - RBD 및 qcow2: 정상 UI 시험으로 유효 봉인본 준비, 원래 PAUSED 의도 유지 후 source 관리망 실제 차단. source-independent UI Test/QGA/cleanup 실행, 원본 연결 복구 후 PAUSED 유지 및 RUNNING recovery를 분리 확인.
 - source 단절 disaster UI 전환은 명시적 격리 근거와 target-only 경로로 검증. 원본 VM이 통신 단절만으로 중지됐다고 주장하지 않는다. 테스트 VM 네트워크는 격리/NIC_DISABLED 사용.
 - 실행한 네트워크 차단/프로세스 중단과 실제 전원 장애, VMware/혼합 미실행 경로는 구분해 보고한다.
+### 대상 복구 결과 투영과 시작 검사 보완
+
+실환경 source Mold 단절에서 대상 아티팩트 준비는 성공했지만 PLAN_AUTHORITY 조회가 원본으로 라우팅되어 테스트 VM 생성이 지연되는 것을 확인했다. 원본 독립 Test Failover, Test Cleanup, Disaster Failover는 대상 역할로 작업자를 선택하고 대상 상태/작업 결과를 조회한다. 테스트 작업의 대상 관측 결과로 원본 복제 authority와 restore point를 갱신하지 않는다. API 사전 검사는 해당 작업에 대해 DB 기반 readiness와 blockers를 적용하고 실제 capability 검증은 기존 대상 dispatch 경로에서 수행하여, 관련 없는 원본 capability RPC와 timeout을 기다리지 않는다. Planned Failover와 원본 동기화의 검증 조건은 유지한다.
