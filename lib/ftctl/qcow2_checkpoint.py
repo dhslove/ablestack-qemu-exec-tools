@@ -275,6 +275,31 @@ def required_local_mounts(fstab):
     return mounts
 
 
+def load_sealed(args, *, probe=True):
+    """Read immutable evidence; never manufacture a checkpoint from mutable data."""
+    source, root = canonical_under(args.source, args.storage_root, must_exist=True)
+    directory = root / ".ftctl-dr-checkpoints" / safe_component(args.plan) / str(int(args.sequence))
+    checkpoint = directory / (safe_component(args.device) + ".qcow2")
+    metadata_path = checkpoint.with_suffix(".json")
+    try:
+        metadata = json.loads(metadata_path.read_text())
+    except (OSError, ValueError) as exc:
+        raise CheckpointError("DR_TEST_SEALED_CHECKPOINT_MISSING", "requested immutable target checkpoint is absent") from exc
+    expected = {"planUuid": args.plan, "checkpointSequence": int(args.sequence),
+                "checkpointRef": args.checkpoint_ref, "device": args.device, "sourcePath": str(source)}
+    digest = dict(metadata)
+    supplied = digest.pop("contractSha256", None)
+    if supplied != contract_digest(digest) or any(metadata.get(k) != v for k, v in expected.items()):
+        raise CheckpointError("DR_TEST_CHECKPOINT_SEQUENCE_MISMATCH", "immutable checkpoint identity does not match request")
+    canonical_under(checkpoint, root, must_exist=True)
+    qemu_img = require_tool("qemu-img")
+    ensure_source_quiescent(checkpoint)
+    check_image(qemu_img, checkpoint)
+    if probe:
+        probe_checkpoint(qemu_img, checkpoint, directory)
+    return checkpoint, metadata_path, metadata, True
+
+
 def seal(args, *, probe=True):
     qemu_img = require_tool("qemu-img")
     copy_tool = require_tool("cp")
@@ -527,6 +552,7 @@ def execute_set(request):
     created_outputs = []
     newly_sealed = []
     set_manifest_path = None
+    published_manifest = False
     try:
         for disk in disks:
             args = Namespace(
@@ -538,7 +564,7 @@ def execute_set(request):
                 storage_root=disk.get("storageRoot"),
                 output=disk.get("output"),
             )
-            checkpoint, metadata_path, expected, was_reused = seal(args, probe=False)
+            checkpoint, metadata_path, expected, was_reused = (load_sealed if request.get("existingOnly") is True else seal)(args, probe=False)
             checkpoints.append(checkpoint)
             metadata_paths.append(metadata_path)
             metadata.append(expected)
@@ -551,14 +577,21 @@ def execute_set(request):
 
         set_manifest = checkpoint_set_manifest(checkpoints, metadata, plan, sequence, checkpoint_ref)
         set_manifest_path = checkpoint_dir / "checkpoint-set.json"
-        temporary_manifest = set_manifest_path.with_name(f".{set_manifest_path.name}.{os.getpid()}.tmp")
-        with temporary_manifest.open("w", encoding="utf-8") as handle:
-            json.dump(set_manifest, handle, sort_keys=True, separators=(",", ":"))
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary_manifest, set_manifest_path)
-        fsync_path(checkpoint_dir)
+        if request.get("existingOnly") is True:
+            if not set_manifest_path.is_file():
+                raise CheckpointError("DR_TEST_SEALED_CHECKPOINT_MISSING", "sealed disk set manifest is missing")
+            if json.loads(set_manifest_path.read_text(encoding="utf-8")) != set_manifest:
+                raise CheckpointError("DR_TEST_CHECKPOINT_SEQUENCE_MISMATCH", "sealed disk set differs from request")
+        else:
+            temporary_manifest = set_manifest_path.with_name(f".{set_manifest_path.name}.{os.getpid()}.tmp")
+            with temporary_manifest.open("w", encoding="utf-8") as handle:
+                json.dump(set_manifest, handle, sort_keys=True, separators=(",", ":"))
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_manifest, set_manifest_path)
+            fsync_path(checkpoint_dir)
+            published_manifest = True
 
         records = []
         for disk, checkpoint, metadata_path, expected, was_reused in zip(
@@ -601,7 +634,7 @@ def execute_set(request):
         for output in created_outputs:
             if output.exists():
                 output.unlink()
-        if set_manifest_path and set_manifest_path.exists():
+        if published_manifest and set_manifest_path and set_manifest_path.exists():
             set_manifest_path.unlink()
         for checkpoint, metadata_path in newly_sealed:
             if checkpoint.exists():
@@ -612,7 +645,7 @@ def execute_set(request):
 
 
 def execute(args):
-    checkpoint, metadata_path, metadata, reused = seal(args)
+    checkpoint, metadata_path, metadata, reused = (load_sealed if getattr(args, "existing_only", False) else seal)(args)
     qemu_img = require_tool("qemu-img")
     output, root = canonical_under(args.output, args.storage_root, must_exist=False)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -636,6 +669,7 @@ def execute(args):
 
 def parse_args():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--existing-only", action="store_true")
     parser.add_argument("--set-request")
     parser.add_argument("--plan")
     parser.add_argument("--sequence", type=int)

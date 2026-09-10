@@ -2303,7 +2303,7 @@ for record in artifacts.get("records", []) if isinstance(artifacts, dict) else [
             pass
     if clone.startswith("rbd:"):
         subprocess.run(["rbd", "rm", clone[4:]], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    if backing.startswith("rbd:") and snapshot:
+    if backing.startswith("rbd:") and snapshot and not record.get("retainedCheckpoint"):
         snap_ref = backing[4:] + "@" + snapshot
         subprocess.run(["rbd", "snap", "unprotect", snap_ref], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         subprocess.run(["rbd", "snap", "rm", snap_ref], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -2499,7 +2499,7 @@ def cleanup_records():
             if clone.startswith("rbd:"):
                 subprocess.run(["rbd", "rm", clone[4:]], check=False,
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            if backing.startswith("rbd:") and snapshot:
+            if backing.startswith("rbd:") and snapshot and not record.get("retainedCheckpoint"):
                 snap_ref = backing[4:] + "@" + snapshot
                 subprocess.run(["rbd", "snap", "unprotect", snap_ref], check=False,
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -2601,6 +2601,7 @@ else:
                 "sizeBytes": disk.get("sizeBytes") or disk.get("capacityBytes") or 0,
             })
         set_request = {
+            "existingOnly": request.get("checkpointExistingSealRequired") is True,
             "plan": str(session.get("planUuid") or ""),
             "sequence": sequence,
             "checkpointRef": checkpoint_ref,
@@ -2636,30 +2637,47 @@ else:
                 fail(53, f"invalid RBD locator {locator}; expected rbd:pool/image")
             pool, image = source_rbd.split("/", 1)
             suffix = safe_key(session.get("runUuid") or now)
-            snapshot = f"ftctl-dr-test-{suffix}"
+            import hashlib
+            request = session.get("request") or {}
+            checkpoint_ref = str((session.get("restorePoint") or {}).get("ref") or "")
+            seal_key = hashlib.sha256((str(session.get("planUuid")) + ":" + checkpoint_ref + ":" + str(disk.get("device"))).encode()).hexdigest()[:32]
+            snapshot = f"ftctl-dr-seal-{seal_key}"
+            existing_only = request.get("checkpointExistingSealRequired") is True
             clone_image = f"{image}-ftctl-test-{suffix}"
             clone_spec = f"{pool}/{clone_image}"
             snap_spec = f"{source_rbd}@{snapshot}"
             try:
                 subprocess.run(["rbd", "info", source_rbd], check=True,
                                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
-                subprocess.run(["rbd", "snap", "create", snap_spec], check=True)
+                proof_result = subprocess.run(["rbd", "image-meta", "get", source_rbd, snapshot], check=False,
+                                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                reused_seal = proof_result.returncode == 0
+                if existing_only or reused_seal:
+                    proof = proof_result.stdout.strip()
+                    if proof != checkpoint_ref:
+                        fail(53, "DR_TEST_CHECKPOINT_SEQUENCE_MISMATCH: RBD checkpoint seal does not match request")
+                    subprocess.run(["rbd", "info", snap_spec], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                else:
+                    subprocess.run(["rbd", "snap", "create", snap_spec], check=True)
                 records.append({
                     "device": disk.get("device") or f"disk{index}",
                     "state": "CREATING",
                     "type": "rbd-clone",
                     "backing": f"rbd:{source_rbd}",
                     "snapshot": snapshot,
+                    "retainedCheckpoint": existing_only or reused_seal,
+                    "checkpointRef": checkpoint_ref,
                     "clone": f"rbd:{clone_spec}",
                     "path": f"rbd:{clone_spec}",
                     "sizeBytes": disk.get("sizeBytes") or disk.get("capacityBytes") or 0,
                 })
-                subprocess.run(["rbd", "snap", "protect", snap_spec], check=True)
+                if not existing_only and not reused_seal:
+                    subprocess.run(["rbd", "snap", "protect", snap_spec], check=True)
                 subprocess.run(["rbd", "clone", snap_spec, clone_spec], check=True)
                 records[-1]["state"] = "CREATED"
             except subprocess.CalledProcessError as exc:
                 stderr = (exc.stderr or "").strip() if isinstance(exc.stderr, str) else ""
-                fail(46, f"RBD test clone failed for {source_rbd}: {stderr or exc}")
+                fail(46, f"{'DR_TEST_SEALED_CHECKPOINT_MISSING' if existing_only else 'DR_TEST_MATERIALIZATION_FAILED'}: RBD test clone failed for {source_rbd}: {stderr or exc}")
             continue
         if provider == "FILE":
             request = session.get("request") if isinstance(session.get("request"), dict) else {}
@@ -2714,6 +2732,8 @@ else:
                 "--storage-root", storage_root,
                 "--output", copy_path,
             ]
+            if request.get("checkpointExistingSealRequired") is True:
+                command.append("--existing-only")
             try:
                 result = subprocess.run(command, check=False, stdout=subprocess.PIPE,
                                         stderr=subprocess.PIPE, text=True)
@@ -2733,6 +2753,17 @@ else:
             continue
         fail(54, f"unsupported test artifact provider {provider} for disk {index}")
     state = "CREATED" if any(record.get("state") == "CREATED" for record in records) else "NO_MATERIALIZED_DISKS"
+
+# Publish seals only after the complete disk set has materialized successfully.
+for record in records:
+    if record.get("type") == "rbd-clone" and not record.get("retainedCheckpoint"):
+        try:
+            subprocess.run(["rbd", "image-meta", "set", record["backing"][4:], record["snapshot"], record["checkpointRef"]], check=True)
+        except subprocess.CalledProcessError as exc:
+            fail(46, "DR_TEST_CHECKPOINT_SEAL_FAILED: RBD checkpoint publication failed")
+for record in records:
+    if record.get("type") == "rbd-clone":
+        record["retainedCheckpoint"] = True
 
 session["testArtifacts"] = {
     "state": state,
@@ -8156,7 +8187,7 @@ PY
       first="0"
       printf '"%s"' "$(ftctl__json_escape "${command}")"
     done
-    printf '],"supported_features":["async-run","status-projection","status-scope-v2","target-materialized-notify","target-materialized-idempotent","target-materialization-manifest-v2","target-resource-ownership-generation-v1","hardware-contract-projection","control-protocol-v2","control-protocol-v3","control-protocol-v4","dr-site-agent-rbd-transport-v1","dr-target-disaster-promote-v1","dr-reverse-site-agent-rbd-transport-v1","dr-remote-source-failback-commit-v1","dr-scheduler-singleton-v1","dr-scheduler-self-owner-repair-v1","dr-scheduler-systemd-unit-v1","dr-sync-recover-v1","dr-local-reconcile-fence-v1","dr-checkpoint-producer-v1","dr-nbd-deterministic-drain-v1","dr-nbd-cleanup-recovery-v1","dr-plan-authority-snapshot-v1","dr-failover-authority-snapshot-v1","dr-completed-cycle-evidence-v2","dr-failover-abort-v1","dr-failover-cutover-reverse-baseline-v1","dr-transition-preflight-v1","dr-transition-preflight-v2","dr-reverse-preflight-v2","dr-reverse-evidence-publication-v1","dr-reverse-rbd-snapshot-readonly-v1","dr-terminal-causality-v1","dr-requested-cycle-terminal-v1","dr-failback-resume-terminal-v1","dr-worker-journal-v1","dr-live-transfer-progress-v1","dr-runtime-reconciliation-v1","dr-release-tombstone-v1","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","file-checkpoint-invariance-v1","dr-file-planned-failover-qmp-quiesce-v1","dr-file-planned-failover-runtime-quiesce-v2","guest-preparation-v1","guest-preparation-v2","test-domain-lifecycle-v1","test-artifact-lifecycle-v2","cloud-managed-test-vm-v1","cutover-ready-v1","cutover-manifest-v2","cutover-preflight-v1","cloud-cutover-commit-v1","cloud-cutover-commit-envelope-v2","cloud-cutover-commit-journal-v2","cloud-cutover-commit-status-v1","cloud-failback-lifecycle-v1","dr-failback-commit-journal-v1","dr-failback-commit-journal-v2","dr-failback-commit-envelope-v1","dr-failback-commit-journal-v3","dr-failback-late-ack-reconcile-v1","dr-failback-rollback-fence-v1"]}\n'
+    printf '],"supported_features":["async-run","status-projection","status-scope-v2","target-materialized-notify","target-materialized-idempotent","target-materialization-manifest-v2","target-resource-ownership-generation-v1","hardware-contract-projection","control-protocol-v2","control-protocol-v3","control-protocol-v4","dr-site-agent-rbd-transport-v1","dr-target-disaster-promote-v1","dr-source-independent-test-v1","dr-reverse-site-agent-rbd-transport-v1","dr-remote-source-failback-commit-v1","dr-scheduler-singleton-v1","dr-scheduler-self-owner-repair-v1","dr-scheduler-systemd-unit-v1","dr-sync-recover-v1","dr-local-reconcile-fence-v1","dr-checkpoint-producer-v1","dr-nbd-deterministic-drain-v1","dr-nbd-cleanup-recovery-v1","dr-plan-authority-snapshot-v1","dr-failover-authority-snapshot-v1","dr-completed-cycle-evidence-v2","dr-failover-abort-v1","dr-failover-cutover-reverse-baseline-v1","dr-transition-preflight-v1","dr-transition-preflight-v2","dr-reverse-preflight-v2","dr-reverse-evidence-publication-v1","dr-reverse-rbd-snapshot-readonly-v1","dr-terminal-causality-v1","dr-requested-cycle-terminal-v1","dr-failback-resume-terminal-v1","dr-worker-journal-v1","dr-live-transfer-progress-v1","dr-runtime-reconciliation-v1","dr-release-tombstone-v1","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","file-checkpoint-invariance-v1","dr-file-planned-failover-qmp-quiesce-v1","dr-file-planned-failover-runtime-quiesce-v2","guest-preparation-v1","guest-preparation-v2","test-domain-lifecycle-v1","test-artifact-lifecycle-v2","cloud-managed-test-vm-v1","cutover-ready-v1","cutover-manifest-v2","cutover-preflight-v1","cloud-cutover-commit-v1","cloud-cutover-commit-envelope-v2","cloud-cutover-commit-journal-v2","cloud-cutover-commit-status-v1","cloud-failback-lifecycle-v1","dr-failback-commit-journal-v1","dr-failback-commit-journal-v2","dr-failback-commit-envelope-v1","dr-failback-commit-journal-v3","dr-failback-late-ack-reconcile-v1","dr-failback-rollback-fence-v1"]}\n'
     return 0
   fi
 
