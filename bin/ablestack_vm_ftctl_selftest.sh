@@ -7963,7 +7963,8 @@ EOF
   if [[ "${cloud_managed}" == "true" ]]; then
     kill "${ack_pid}" 2>/dev/null || true
     wait "${ack_pid}" 2>/dev/null || true
-    selftest_assert_eq "$(ftctl_dr_scheduler_control_generation "${plan}")" "${before_cleanup_generation}" "Cloud cleanup must not send source RUN"
+    selftest_assert_eq "$(ftctl_dr_scheduler_control_command "${plan}")" "pause" "Cloud cleanup must leave source paused"
+    selftest_assert_eq "$(ftctl_dr_scheduler_control_generation "${plan}")" "$((before_cleanup_generation + 1))" "Cloud cleanup must only request quiesce, never source RUN"
   else
     wait "${ack_pid}"
   fi
