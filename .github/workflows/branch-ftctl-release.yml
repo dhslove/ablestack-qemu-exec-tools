@@ -122,6 +122,7 @@ jobs:
             tests.ftctl_qcow2_checkpoint_test \
             tests.ftctl_qcow2_bitmap_baseline_test \
             tests.ftctl_qcow2_bitmap_commit_test
+          bash tests/ftctl_dr_worker_maintenance_smoke.sh
           bash tests/ftctl_dr_scheduler_nbd_recovery_smoke.sh
           bash tests/ftctl_dr_systemd_async_start_smoke.sh
           bash tests/ftctl_dr_ablestack_remote_rbd_smoke.sh

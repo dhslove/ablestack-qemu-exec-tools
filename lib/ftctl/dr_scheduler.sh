@@ -397,7 +397,7 @@ ftctl_dr_scheduler_recover() {
 
 ftctl_dr_scheduler_reconcile_plan() {
   local plan="${1-}" profile_file status_path state active_side control_state transition_state run="" state_path
-  local control_command scheduler_desired_state recovery_state recovery_trigger
+  local control_command scheduler_desired_state recovery_state recovery_trigger transient_error=false next_retry now
   profile_file="$(ftctl_dr_runtime_profile_path "${plan}")"
   status_path="$(ftctl_dr_runtime_status_path "${plan}")"
   [[ -f "${profile_file}" && -f "${status_path}" ]] || return 0
@@ -430,7 +430,12 @@ ftctl_dr_scheduler_reconcile_plan() {
   control_state="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "control_state")"
   scheduler_desired_state="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "scheduler_desired_state")"
   transition_state="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "transition_state")"
-  [[ "${state}" == "READY" || "${state}" == "SYNCING" ||
+  if [[ "${state}" == "ERROR" && "$(ftctl_dr_runtime_state_get_from_path "${status_path}" "retryable")" == "true" ]]; then
+    case "$(ftctl_dr_runtime_state_get_from_path "${status_path}" "error_code")" in
+      DR_QCOW2_SOURCE_RUNTIME_UNAVAILABLE|DR_QCOW2_OFFLINE_SOURCE_BUSY) transient_error=true ;;
+    esac
+  fi
+  [[ "${state}" == "READY" || "${state}" == "SYNCING" || "${transient_error}" == "true" ||
     "$(ftctl_dr_runtime_state_get_from_path "${status_path}" "nbd_teardown_state")" == "QUARANTINED" ]] || return 0
   [[ "${active_side^^}" != "TARGET" ]] || return 0
   [[ "${control_state}" == "RUNNING" ]] || return 0
@@ -449,6 +454,13 @@ ftctl_dr_scheduler_reconcile_plan() {
   [[ -n "${run}" ]] || return 0
   state_path="$(ftctl_dr_runtime_run_path "${plan}" "${run}")"
   [[ -f "${state_path}" ]] || state_path="${status_path}"
+  if [[ "${transient_error}" == "true" ]]; then
+    now="$(date +%s)"
+    next_retry="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "local_recovery_next_retry_epoch")"
+    [[ "${next_retry}" =~ ^[0-9]+$ ]] || next_retry=0
+    (( now >= next_retry )) || return 0
+    ftctl_dr_runtime_path_set "${status_path}" "local_recovery_next_retry_epoch=$((now + 60))" || return $?
+  fi
   ftctl_dr_scheduler_recover "${plan}" "${run}" "${profile_file}" "${state_path}" "${status_path}" "LOCAL_RECONCILE"
 }
 
