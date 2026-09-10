@@ -2385,6 +2385,14 @@ PY
     "updated_at=${now}"
 }
 
+# A Cloud cleanup profile may intentionally omit source credentials. Only the
+# durable Cloud recovery worker can restore that profile and the operator intent.
+ftctl_dr_runtime_cloud_managed_test_restore() {
+  local profile
+  profile="$(ftctl_dr_runtime_profile_path "${1-}")"
+  [[ -s "${profile}" ]] && jq -e '.request.sourceSchedulerRestoreManagedByCloud == true' "${profile}" >/dev/null 2>&1
+}
+
 ftctl_dr_runtime_finalize_failed_test() {
   local plan="${1-}" run="${2-}" run_path="${3-}" status_path="${4-}"
   local failure_rc="${5-1}" error_code="${6-DR_TEST_FAILOVER_FAILED}" failed_step="${7-test-failed}"
@@ -2405,7 +2413,7 @@ ftctl_dr_runtime_finalize_failed_test() {
       "checkpoint_lease_path=" || true
   fi
   transition_scope="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "scheduler_transition_scope")"
-  if [[ "${transition_scope}" != "REMOTE_SOURCE" ]] && command -v ftctl_dr_scheduler_resume_after_transition >/dev/null 2>&1; then
+  if [[ "${transition_scope}" != "REMOTE_SOURCE" ]] && ! ftctl_dr_runtime_cloud_managed_test_restore "${plan}" && command -v ftctl_dr_scheduler_resume_after_transition >/dev/null 2>&1; then
     ftctl_dr_scheduler_resume_after_transition "${plan}" "${run}" "test-failover-rollback" \
       "${run_path}" "${status_path}" || resume_rc=$?
   fi
@@ -6257,7 +6265,7 @@ ftctl_dr_runtime_action() {
       [[ -n "${test_lease_owner_run}" ]] || test_lease_owner_run="${run}"
       [[ -n "${test_sequence}" ]] && ftctl_dr_scheduler_checkpoint_lease_release_owned "${plan}" "${test_sequence}" "${test_lease_owner_run}"
       ftctl_dr_runtime_path_set "${run_path}" "checkpoint_lease_state=RELEASED" "checkpoint_lease_path=" || true
-      if [[ "${remote_source_transition}" != "1" ]] && command -v ftctl_dr_scheduler_resume_after_transition >/dev/null 2>&1; then
+      if [[ "${remote_source_transition}" != "1" ]] && ! ftctl_dr_runtime_cloud_managed_test_restore "${plan}" && command -v ftctl_dr_scheduler_resume_after_transition >/dev/null 2>&1; then
         ftctl_dr_scheduler_resume_after_transition "${plan}" "${run}" "test-cleanup" "${run_path}" "${status_path}" || rc=$?
       fi
       if [[ "${remote_source_transition}" != "1" ]] && command -v ftctl_dr_scheduler_transition_end >/dev/null 2>&1; then
@@ -8187,7 +8195,7 @@ PY
       first="0"
       printf '"%s"' "$(ftctl__json_escape "${command}")"
     done
-    printf '],"supported_features":["async-run","status-projection","status-scope-v2","target-materialized-notify","target-materialized-idempotent","target-materialization-manifest-v2","target-resource-ownership-generation-v1","hardware-contract-projection","control-protocol-v2","control-protocol-v3","control-protocol-v4","dr-site-agent-rbd-transport-v1","dr-target-disaster-promote-v1","dr-source-independent-test-v1","dr-reverse-site-agent-rbd-transport-v1","dr-remote-source-failback-commit-v1","dr-scheduler-singleton-v1","dr-scheduler-self-owner-repair-v1","dr-scheduler-systemd-unit-v1","dr-sync-recover-v1","dr-local-reconcile-fence-v1","dr-checkpoint-producer-v1","dr-nbd-deterministic-drain-v1","dr-nbd-cleanup-recovery-v1","dr-plan-authority-snapshot-v1","dr-failover-authority-snapshot-v1","dr-completed-cycle-evidence-v2","dr-failover-abort-v1","dr-failover-cutover-reverse-baseline-v1","dr-transition-preflight-v1","dr-transition-preflight-v2","dr-reverse-preflight-v2","dr-reverse-evidence-publication-v1","dr-reverse-rbd-snapshot-readonly-v1","dr-terminal-causality-v1","dr-requested-cycle-terminal-v1","dr-failback-resume-terminal-v1","dr-worker-journal-v1","dr-live-transfer-progress-v1","dr-runtime-reconciliation-v1","dr-release-tombstone-v1","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","file-checkpoint-invariance-v1","dr-file-planned-failover-qmp-quiesce-v1","dr-file-planned-failover-runtime-quiesce-v2","guest-preparation-v1","guest-preparation-v2","test-domain-lifecycle-v1","test-artifact-lifecycle-v2","cloud-managed-test-vm-v1","cutover-ready-v1","cutover-manifest-v2","cutover-preflight-v1","cloud-cutover-commit-v1","cloud-cutover-commit-envelope-v2","cloud-cutover-commit-journal-v2","cloud-cutover-commit-status-v1","cloud-failback-lifecycle-v1","dr-failback-commit-journal-v1","dr-failback-commit-journal-v2","dr-failback-commit-envelope-v1","dr-failback-commit-journal-v3","dr-failback-late-ack-reconcile-v1","dr-failback-rollback-fence-v1"]}\n'
+    printf '],"supported_features":["async-run","status-projection","status-scope-v2","target-materialized-notify","target-materialized-idempotent","target-materialization-manifest-v2","target-resource-ownership-generation-v1","hardware-contract-projection","control-protocol-v2","control-protocol-v3","control-protocol-v4","dr-site-agent-rbd-transport-v1","dr-target-disaster-promote-v1","dr-source-independent-test-v1","dr-cloud-test-recovery-v1","dr-reverse-site-agent-rbd-transport-v1","dr-remote-source-failback-commit-v1","dr-scheduler-singleton-v1","dr-scheduler-self-owner-repair-v1","dr-scheduler-systemd-unit-v1","dr-sync-recover-v1","dr-local-reconcile-fence-v1","dr-checkpoint-producer-v1","dr-nbd-deterministic-drain-v1","dr-nbd-cleanup-recovery-v1","dr-plan-authority-snapshot-v1","dr-failover-authority-snapshot-v1","dr-completed-cycle-evidence-v2","dr-failover-abort-v1","dr-failover-cutover-reverse-baseline-v1","dr-transition-preflight-v1","dr-transition-preflight-v2","dr-reverse-preflight-v2","dr-reverse-evidence-publication-v1","dr-reverse-rbd-snapshot-readonly-v1","dr-terminal-causality-v1","dr-requested-cycle-terminal-v1","dr-failback-resume-terminal-v1","dr-worker-journal-v1","dr-live-transfer-progress-v1","dr-runtime-reconciliation-v1","dr-release-tombstone-v1","plan-scoped-locks","cycle-scoped-lock","quiesce-before-test-failover","checkpoint-lease","file-checkpoint-invariance-v1","dr-file-planned-failover-qmp-quiesce-v1","dr-file-planned-failover-runtime-quiesce-v2","guest-preparation-v1","guest-preparation-v2","test-domain-lifecycle-v1","test-artifact-lifecycle-v2","cloud-managed-test-vm-v1","cutover-ready-v1","cutover-manifest-v2","cutover-preflight-v1","cloud-cutover-commit-v1","cloud-cutover-commit-envelope-v2","cloud-cutover-commit-journal-v2","cloud-cutover-commit-status-v1","cloud-failback-lifecycle-v1","dr-failback-commit-journal-v1","dr-failback-commit-journal-v2","dr-failback-commit-envelope-v1","dr-failback-commit-journal-v3","dr-failback-late-ack-reconcile-v1","dr-failback-rollback-fence-v1"]}\n'
     return 0
   fi
 

@@ -7731,6 +7731,7 @@ EOF
 }
 
 selftest_case_dr_runtime_test_failover_cleanup() {
+  local cloud_managed="${1:-false}"
   selftest_reset_env
   selftest_info "FTCTL_DR test failover selects restore point and cleanup returns READY"
 
@@ -7813,6 +7814,7 @@ JSON
     "restorePointRef": "ftctl:${plan}:run-sync:2",
     "checkpointWriterState": "DRAINED",
     "checkpointImmutableRequired": true,
+    "sourceSchedulerRestoreManagedByCloud": ${cloud_managed},
     "networkMode": "isolated"
   },
   "policy": {"testExecutionMode": "METADATA_ONLY"},
@@ -7950,13 +7952,21 @@ EOF
   ack_pid="$!"
   printf '%s\n' "${scheduler_pid}" > "$(ftctl_dr_scheduler_pid_path "${plan}" run-test-cleanup)"
 
+  local before_cleanup_generation
+  before_cleanup_generation="$(ftctl_dr_scheduler_control_generation "${plan}")"
   cleanup="$(bash "${ROOT_DIR}/bin/ablestack_vm_ftctl.sh" dr-test-artifact-cleanup \
     --config "${SELFTEST_CONFIG}" \
     --plan "${plan}" \
     --run run-test-cleanup \
     --profile-json "${profile}" \
     --json)"
-  wait "${ack_pid}"
+  if [[ "${cloud_managed}" == "true" ]]; then
+    kill "${ack_pid}" 2>/dev/null || true
+    wait "${ack_pid}" 2>/dev/null || true
+    selftest_assert_eq "$(ftctl_dr_scheduler_control_generation "${plan}")" "${before_cleanup_generation}" "Cloud cleanup must not send source RUN"
+  else
+    wait "${ack_pid}"
+  fi
   kill "${scheduler_pid}" 2>/dev/null || true
   wait "${scheduler_pid}" 2>/dev/null || true
   selftest_assert_contains "${cleanup}" '"state":"READY"' "test cleanup state"
@@ -7966,6 +7976,10 @@ EOF
   [[ ! -e "${SELFTEST_ROOT}/run/dr-runtime/plans/${plan}/test-sessions/active.json" ]] || selftest_fail "active test session should be removed"
   [[ ! -d "${artifact_dir}" ]] || selftest_fail "test artifact directory should be removed"
   [[ ! -e "${shared_artifact}" ]] || selftest_fail "Cloud-visible test artifact should be removed"
+}
+
+selftest_case_dr_runtime_cloud_managed_test_cleanup() {
+  selftest_case_dr_runtime_test_failover_cleanup true
 }
 
 selftest_case_dr_runtime_shared_file_artifact_cleanup() {
