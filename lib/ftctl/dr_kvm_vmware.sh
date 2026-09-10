@@ -663,6 +663,12 @@ ftctl_dr_kvm_vmware_reverse_preflight() {
     rc=67; error_code="DR_REVERSE_DISK_MAP_INVALID"; ready=false
   }
   credentials_file="$(ftctl_dr_runtime_credential_path "${plan}" 2>/dev/null || true)"
+  # Cloud supplies current site credentials in this owner-only request profile.
+  # An explicit empty set is authoritative: never revive cached credentials.
+  # Keep runtime lookup only for legacy standalone profiles without the field.
+  if jq -e 'has("credentials")' "${profile_file}" >/dev/null 2>&1; then
+    credentials_file="${profile_file}"
+  fi
   if [[ "${rc}" == "0" ]]; then
     if ftctl_dr_kvm_vmware_refresh_target_backings "${profile_file}" "${map_path}" "${credentials_file}"; then
       target_backing_probe_state="READY"
