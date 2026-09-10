@@ -3677,7 +3677,7 @@ ftctl_dr_runtime_failback_worker() {
     reverse_source_provider="$(ftctl_dr_scheduler_profile_provider "${reverse_profile}" source)"
     reverse_target_provider="$(ftctl_dr_scheduler_profile_provider "${reverse_profile}" target)"
     if [[ "${reverse_source_provider}" == "ABLESTACK" && "${reverse_target_provider}" == "VMWARE" ]]; then
-      reverse_preflight_json="$(ftctl_dr_kvm_vmware_reverse_preflight "${plan}" "${reverse_profile}" "FAILBACK_FINAL" "AUTO" 1)" || rc=$?
+      reverse_preflight_json="$(ftctl_dr_kvm_vmware_reverse_preflight "${plan}" "${reverse_profile}" "FAILBACK_FINAL" "AUTO" 1 "$(ftctl_dr_runtime_credential_path "${plan}")")" || rc=$?
     fi
   fi
   if [[ -n "${reverse_preflight_json}" ]]; then

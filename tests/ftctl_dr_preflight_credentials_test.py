@@ -37,7 +37,7 @@ class PreflightCredentialsTest(unittest.TestCase):
         return {"source": {"type": "VCENTER", "endpoint": "https://vcenter.invalid",
             "principal": "test-user", "auth": {"password": value}, "govcPath": str(self.govc)}}
 
-    def probe(self, supplied, cached, include=True):
+    def probe(self, supplied, cached, include=True, internal=False):
         profile = {"target": {"externalRef": "vm-1"}}
         if include:
             profile["credentials"] = supplied
@@ -55,10 +55,10 @@ ftctl_dr_kvm_vmware_mode_decision() { printf 'ABSENT\tFULL_SEED\tBASELINE_ABSENT
 ftctl_dr_kvm_vmware_baseline_state() { printf ABSENT; }
 ftctl_dr_kvm_vmware_qcow2_source_provider() { return 1; }
 ftctl__json_escape() { printf '%s' "$1"; }
-ftctl_dr_kvm_vmware_reverse_preflight plan "$root/profile.json" FAILBACK_FINAL AUTO 1
+ftctl_dr_kvm_vmware_reverse_preflight plan "$root/profile.json" FAILBACK_FINAL AUTO 1 "${3-}"
 """
         env = dict(os.environ, PATH=str(self.bin) + os.pathsep + os.environ["PATH"], TMPDIR=str(self.root))
-        result = subprocess.run(["bash", "-c", script, "test", str(LIBRARY), str(self.root)],
+        result = subprocess.run(["bash", "-c", script, "test", str(LIBRARY), str(self.root), str(cache) if internal else ""],
                                 capture_output=True, text=True, env=env)
         self.assertEqual(before, cache.read_bytes() if cache.exists() else None)
         self.assertEqual([], list(self.root.glob("ftctl-reverse-map.*")))
@@ -94,6 +94,17 @@ ftctl_dr_kvm_vmware_reverse_preflight plan "$root/profile.json" FAILBACK_FINAL A
 
     def test_target_only_request_cannot_fall_back_to_source_cache(self):
         result, status = self.probe({"target": {"type": "MOLD_KVM"}}, self.credential("current-test-value"))
+        self.assertNotEqual(0, result.returncode)
+        self.assertFalse(status["ready"])
+
+
+    def test_internal_worker_uses_explicit_owner_only_credentials(self):
+        result, status = self.probe("REDACTED", self.credential("current-test-value"), internal=True)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertTrue(status["ready"])
+
+    def test_redacted_external_request_does_not_revive_runtime(self):
+        result, status = self.probe("REDACTED", self.credential("current-test-value"))
         self.assertNotEqual(0, result.returncode)
         self.assertFalse(status["ready"])
 

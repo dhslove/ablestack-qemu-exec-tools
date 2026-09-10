@@ -653,6 +653,7 @@ ftctl_dr_kvm_vmware_cycle_type() {
 ftctl_dr_kvm_vmware_reverse_preflight() {
   local plan="${1-}" profile_file="${2-}" operation_intent="${3-FAILBACK_FINAL}" requested_mode="${4-AUTO}" json="${5-0}"
   local map_path="" decision="" rc=0 baseline_state="" effective_mode="" decision_code="" initial_seed=false
+  local credential_override="${6-}"
   local source_disk_count=0 estimated_virtual_bytes=0
   local source_domain_probe_state="NOT_REQUIRED" source_disk_probe_state="READY" target_writer_probe_state="READY" target_backing_probe_state="NOT_CHECKED" error_code="" ready=true credentials_file
   [[ -n "${plan}" && -f "${profile_file}" ]] || return 2
@@ -662,12 +663,15 @@ ftctl_dr_kvm_vmware_reverse_preflight() {
   ftctl_dr_kvm_vmware_canonicalize_profile "${profile_file}" "${map_path}" || {
     rc=67; error_code="DR_REVERSE_DISK_MAP_INVALID"; ready=false
   }
-  credentials_file="$(ftctl_dr_runtime_credential_path "${plan}" 2>/dev/null || true)"
-  # Cloud supplies current site credentials in this owner-only request profile.
-  # An explicit empty set is authoritative: never revive cached credentials.
-  # Keep runtime lookup only for legacy standalone profiles without the field.
-  if jq -e 'has("credentials")' "${profile_file}" >/dev/null 2>&1; then
-    credentials_file="${profile_file}"
+  credentials_file="${credential_override}"
+  if [[ -z "${credentials_file}" ]]; then
+    credentials_file="$(ftctl_dr_runtime_credential_path "${plan}" 2>/dev/null || true)"
+    # Request profiles carry authoritative credentials, even when empty/invalid.
+    # The internal worker passes its owner-only credential file explicitly because
+    # its persisted reverse profile has credentials redacted for safe storage.
+    if jq -e 'has("credentials")' "${profile_file}" >/dev/null 2>&1; then
+      credentials_file="${profile_file}"
+    fi
   fi
   if [[ "${rc}" == "0" ]]; then
     if ftctl_dr_kvm_vmware_refresh_target_backings "${profile_file}" "${map_path}" "${credentials_file}"; then
