@@ -61,6 +61,29 @@ class OwnershipTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.gate("old", 3, "START")
 
+    def test_missing_manifest_recovers_devices_from_persistent_profile(self):
+        root = self.root / "old"
+        root.mkdir()
+        (root / "profile.json").write_text(json.dumps({"mapping": {"disks": [{"device": "sda"}]}}))
+        result = module.records("plan-a", str(root), "", str(root/"missing"))
+        self.assertEqual(1, len(result))
+        self.assertEqual("/run/ablestack-vm-ftctl/nbd-plana-sda.pid", result[0]["pidFile"])
+
+    def test_corrupt_manifest_and_other_plan_fail_closed(self):
+        path = self.root / "exports.json"
+        path.write_text("broken")
+        with self.assertRaises(ValueError):
+            module.records("plan-a", str(self.root), "", str(path))
+        path.write_text(json.dumps({"planUuid": "different", "exports": []}))
+        with self.assertRaises(ValueError):
+            module.records("plan-a", str(self.root), "", str(path))
+
+    def test_other_process_unit_is_never_authorized(self):
+        path = self.root / "exports.json"
+        path.write_text(json.dumps({"exports": [{"device": "sda", "unitName": "other.service"}]}))
+        with self.assertRaises(ValueError):
+            module.records("plan-a", str(self.root), "", str(path))
+
 
 if __name__ == "__main__":
     unittest.main()

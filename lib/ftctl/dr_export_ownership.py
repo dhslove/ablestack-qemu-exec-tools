@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Durable, host-local export fencing. Caller holds the plan transition flock."""
 import json
+import hashlib
+import re
 import os
 import sys
 from pathlib import Path
@@ -36,9 +38,42 @@ def gate(root, operation, profile):
     return generation
 
 
+def records(plan, root, requested, runtime_manifest):
+    """Recover ownership even if start crashed before publishing its manifest."""
+    result = {}
+    compact = lambda text: re.sub(r"[^A-Za-z0-9]", "", text)
+    def add(device, original=None):
+        if not isinstance(device, str) or not device:
+            raise ValueError("DR_EXPORT_OWNER_EVIDENCE_INVALID")
+        unit = "ablestack-vm-ftctl-dr-export-" + hashlib.sha256((plan+":"+device).encode()).hexdigest()[:20] + ".service"
+        pid = "/run/ablestack-vm-ftctl/nbd-" + compact(plan) + "-" + compact(device) + ".pid"
+        if original and (original.get("unitName", unit) != unit or original.get("pidFile", pid) != pid):
+            raise ValueError("DR_EXPORT_OWNER_EVIDENCE_MISMATCH")
+        result[device] = {"device": device, "unitName": unit, "pidFile": pid}
+    for name in (runtime_manifest, str(Path(root)/"exports.json")):
+        path = Path(name)
+        if path.is_file():
+            data = json.loads(path.read_text())
+            if data.get("planUuid", plan) != plan:
+                raise ValueError("DR_EXPORT_OWNER_PLAN_MISMATCH")
+            for item in data.get("exports", []):
+                add(item.get("device"), item)
+    for name in (str(Path(root)/"profile.json"), requested):
+        path = Path(name) if name else None
+        if path and path.is_file():
+            data = json.loads(path.read_text())
+            for disk in data.get("mapping", {}).get("disks", []):
+                add(disk.get("device") or disk.get("cbtDiskId") or disk.get("sourceDiskRef"))
+    return list(result.values())
+
+
 if __name__ == "__main__":
     try:
-        print(gate(*sys.argv[1:4]))
+        if sys.argv[1] == "records":
+            for item in records(*sys.argv[2:6]):
+                print(json.dumps(item))
+        else:
+            print(gate(*sys.argv[1:4]))
     except (ValueError, OSError, TypeError) as exc:
         print(str(exc), file=sys.stderr)
         sys.exit(93)

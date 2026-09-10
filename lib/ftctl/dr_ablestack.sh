@@ -1477,20 +1477,24 @@ ftctl_dr_ablestack_target_export_stop_unlocked() {
   export_generation="$(python3 "${BASH_SOURCE[0]%/*}/dr_export_ownership.py" \
     "$(ftctl_dr_ablestack_export_persist_dir "${plan}")" STOP "${profile_file}")" || return $?
   ftctl_dr_ablestack_export_persist_intent "${plan}" "${run}" "STOPPED" "" "" "STOPPING" || return $?
-  # Runtime files may disappear across reboot; durable manifest still owns the writer.
-  if [[ ! -f "${manifest}" ]]; then
-    manifest="$(ftctl_dr_ablestack_export_persist_manifest_path "${plan}")"
-  fi
-  if [[ -f "${manifest}" ]]; then
+  if [[ "${export_generation}" -gt 0 ]]; then
+    local owned_records
+    owned_records="$(python3 "${BASH_SOURCE[0]%/*}/dr_export_ownership.py" records "${plan}" \
+      "$(ftctl_dr_ablestack_export_persist_dir "${plan}")" "${profile_file}" "${manifest}")" || return 93
     while IFS= read -r item; do
+      [[ -n "${item}" ]] || continue
       ftctl_dr_ablestack_target_export_stop_item "${item}" || return $?
       stopped=$((stopped + 1))
-    done < <(python3 - "${manifest}" <<'PY'
-import json,sys
-with open(sys.argv[1], encoding="utf-8") as fh: data=json.load(fh)
-for item in data.get("exports") or []: print(json.dumps(item,separators=(",",":")))
-PY
-)
+    done <<< "${owned_records}"
+    rm -f "${manifest}"
+  elif [[ -f "${manifest}" ]]; then
+    local legacy_records
+    legacy_records="$(jq -c '.exports[]' "${manifest}")" || return 93
+    while IFS= read -r item; do
+      [[ -n "${item}" ]] || continue
+      ftctl_dr_ablestack_target_export_stop_item "${item}" || return $?
+      stopped=$((stopped + 1))
+    done <<< "${legacy_records}"
     rm -f "${manifest}"
   fi
   ftctl_dr_ablestack_export_persist_intent "${plan}" "${run}" "STOPPED" "" "" "STOPPED" || return $?
