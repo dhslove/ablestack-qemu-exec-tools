@@ -1078,10 +1078,13 @@ PY
   rm -f "${records}"
   ftctl_dr_ablestack_export_persist_intent "${plan}" "${run}" "RUNNING" "${profile_file}" "${manifest}" "RUNNING" || return $?
   if [[ "${json}" == "1" ]]; then
-    python3 - "${manifest}" "${export_generation}" <<'PY'
-import json,sys
+    python3 - "${manifest}" "${export_generation}" "$(ftctl_dr_ablestack_export_persist_dir "${plan}")/ownership.json" <<'PY'
+import json,sys,os
 with open(sys.argv[1], encoding="utf-8") as fh: data=json.load(fh)
 data.update({"ownershipProtocol":1,"exportGeneration":int(sys.argv[2])})
+owner=json.load(open(sys.argv[3], encoding="utf-8")) if os.path.isfile(sys.argv[3]) else {}
+if owner.get("scope"):
+    data.update(ownershipProtocol=2,exportAuthorityScope=owner["scope"],exportDirection=owner["direction"])
 data.update({"command":"dr-target-export-start","result":"ok","accepted":True,"state":"READY","step":"target-export-ready","progress":100})
 print(json.dumps(data,separators=(",",":")))
 PY
@@ -1513,7 +1516,7 @@ ftctl_dr_ablestack_target_export_stop_unlocked() {
     reverse_baseline_state="$(ftctl_dr_ablestack_reverse_baseline_status "${plan}" "${run}" "${checkpoint_sequence}")"
   fi
   if [[ "${json}" == "1" ]]; then
-    printf '{"command":"dr-target-export-stop","result":"ok","accepted":true,"state":"STOPPED","step":"target-export-stopped","progress":100,"ownershipProtocol":1,"exportGeneration":%s,"stopped":%s,"reverse_baseline_state":"%s"}\n' "${export_generation}" "${stopped}" "$(ftctl__json_escape "${reverse_baseline_state}")"
+    printf '{"command":"dr-target-export-stop","result":"ok","accepted":true,"state":"STOPPED","step":"target-export-stopped","progress":100,"ownershipProtocol":1,"exportGeneration":%s,"stopped":%s,"reverse_baseline_state":"%s"}\n' "${export_generation}" "${stopped}" "$(ftctl__json_escape "${reverse_baseline_state}")" | python3 -c 'import json,sys,os; result=json.load(sys.stdin); owner=json.load(open(sys.argv[1])) if os.path.isfile(sys.argv[1]) else {}; result.update({"ownershipProtocol":2,"exportAuthorityScope":owner["scope"],"exportDirection":owner["direction"]} if owner.get("scope") else {}); print(json.dumps(result))' "$(ftctl_dr_ablestack_export_persist_dir "${plan}")/ownership.json"
   else
     printf 'target exports stopped: plan=%s count=%s reverse_baseline=%s\n' "${plan}" "${stopped}" "${reverse_baseline_state}"
   fi

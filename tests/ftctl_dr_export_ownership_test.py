@@ -20,6 +20,38 @@ class OwnershipTest(unittest.TestCase):
         self.profile.write_text(json.dumps({"request": {} if generation is None else {"exportGeneration": generation}}))
         return module.gate(str(self.root / host), operation, str(self.profile))
 
+    def scoped(self, generation, operation, scope="plan", direction="REVERSE", disks=None):
+        self.profile.write_text(json.dumps({"request": {"exportGeneration": generation,
+            "exportAuthorityScope": scope, "exportDirection": direction}, "mapping": {"disks": disks or []}}))
+        return module.gate(str(self.root / "scoped"), operation, str(self.profile))
+
+    def test_reverse_scope_ack_and_direction_replay(self):
+        self.scoped(2, "STOP")
+        self.scoped(3, "START")
+        ack = module.acknowledgment(self.root / "scoped")
+        self.assertEqual((2, "plan", "REVERSE"), (ack["ownershipProtocol"], ack["exportAuthorityScope"], ack["exportDirection"]))
+        self.assertEqual(3, self.scoped(3, "START"))
+        with self.assertRaisesRegex(ValueError, "SCOPE_MISMATCH"):
+            self.scoped(3, "START", direction="FORWARD")
+        with self.assertRaisesRegex(ValueError, "SCOPE_MISMATCH"):
+            self.scoped(4, "STOP", scope="other")
+        self.scoped(4, "STOP")
+        with self.assertRaisesRegex(ValueError, "STALE_GENERATION"):
+            self.scoped(3, "START")
+
+    def test_same_generation_cannot_change_disk_resource(self):
+        self.scoped(2, "STOP")
+        self.scoped(3, "START", disks=[{"device":"sda","sourceDiskRef":"one"}])
+        with self.assertRaisesRegex(ValueError, "RESOURCE_MISMATCH"):
+            self.scoped(3, "START", disks=[{"device":"sda","sourceDiskRef":"two"}])
+
+    def test_legacy_forward_tombstone_migrates_to_scoped_reverse(self):
+        self.gate("scoped", 10, "STOP")
+        self.scoped(12, "STOP")
+        self.scoped(13, "START")
+        with self.assertRaises(ValueError):
+            self.gate("scoped", 14, "START")
+
     def test_transfer_rejects_late_start_and_stop(self):
         for host in ("old", "new"):
             self.gate(host, 2, "STOP")
