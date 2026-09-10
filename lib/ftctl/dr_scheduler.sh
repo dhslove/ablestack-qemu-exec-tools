@@ -943,6 +943,30 @@ ftctl_dr_scheduler_control_set() {
   printf '%s\n' "${generation}"
 }
 
+# Process startup is not an operator Resume. Initialize only under the same
+# Plan lock used by control_set, so a concurrent PAUSE/STOP cannot be lost.
+ftctl_dr_scheduler_initialize_control() {
+  local plan="${1-}" run="${2-}" path command generation rc=0
+  path="$(ftctl_dr_scheduler_control_path "${plan}")"
+  ftctl_ensure_dir "$(dirname "${path}")" "0755"
+  ftctl_dr_scheduler_lock_acquire "${plan}" "plan" 204 "${FTCTL_DR_TRANSITION_LOCK_TIMEOUT_SEC}" "initialize:${run}" || return $?
+  command="$(ftctl_state_read_kv "${path}" command 2>/dev/null || true)"
+  generation="$(ftctl_state_read_kv "${path}" generation 2>/dev/null || true)"
+  if [[ ! -e "${path}" ]]; then
+    generation=1
+    ftctl_state_write_kv_all "${path}" \
+      "version=${FTCTL_DR_CONTROL_PROTOCOL_VERSION}" "generation=1" \
+      "command=run" "reason=scheduler-initialize" "owner_run=${run}" \
+      "resume_after_cleanup=false" "requested_at=$(ftctl_now_iso8601)" \
+      "updated_at=$(ftctl_now_iso8601)" || rc=$?
+  elif [[ ! "${generation}" =~ ^[1-9][0-9]*$ ]] || [[ "${command}" != run && "${command}" != pause && "${command}" != stop ]]; then
+    rc=2
+  fi
+  ftctl_dr_scheduler_lock_release "${plan}" "plan" 204
+  (( rc == 0 )) || return "${rc}"
+  printf '%s\n' "${generation}"
+}
+
 ftctl_dr_scheduler_control_command() {
   local plan="${1-}"
   local control_path
@@ -1940,23 +1964,26 @@ ftctl_dr_scheduler_worker() {
   scheduler_started_at="$(ftctl_now_iso8601)"
 
   printf '%s\n' "${worker_process_pid}" > "${pid_path}"
-  control_generation="$(ftctl_dr_scheduler_control_generation "${plan}")"
-  if [[ "$(ftctl_dr_scheduler_control_command "${plan}")" != "run" || ! "${control_generation}" =~ ^[1-9][0-9]*$ ]]; then
-    control_generation="$(ftctl_dr_scheduler_control_set "${plan}" "run" "scheduler-start" "${run}")"
-  fi
-  ftctl_dr_scheduler_control_ack "${plan}" "${control_generation}" "RUNNING" "IDLE" "${run}" \
+  control_generation="$(ftctl_dr_scheduler_initialize_control "${plan}" "${run}")" || return $?
+  local startup_state=RUNNING startup_activity=IDLE
+  command="$(ftctl_dr_scheduler_control_command "${plan}")"
+  case "${command}" in
+    pause) startup_state=PAUSED; startup_activity=PAUSED ;;
+    stop) startup_state=STOPPED; startup_activity=STOPPED ;;
+  esac
+  ftctl_dr_scheduler_control_ack "${plan}" "${control_generation}" "${startup_state}" "IDLE" "${run}" \
     "${session}" "${lease_epoch}" "${worker_process_pid}" "${start_ticks}"
   authority_sequence="$(ftctl_dr_scheduler_next_authority_sequence "${plan}")"
   now="$(ftctl_now_iso8601)"
   ftctl_dr_scheduler_update_state "${state_path}" "${status_path}" \
-    "scheduler_state=RUNNING" \
+    "scheduler_state=${startup_state}" \
     "scheduler_health=HEALTHY" \
-    "replication_activity=IDLE" \
+    "replication_activity=${startup_activity}" \
     "protection_state=$([[ "${sequence}" -gt 0 ]] && printf READY || printf SYNCING)" \
     "control_protocol_version=${FTCTL_DR_CONTROL_PROTOCOL_VERSION}" \
     "control_generation=${control_generation}" \
     "control_ack_generation=${control_generation}" \
-    "control_state=RUNNING" \
+    "control_state=${startup_state}" \
     "cycle_state=IDLE" \
     "worker_pid=${worker_process_pid}" \
     "scheduler_session_uuid=${session}" \
@@ -1977,11 +2004,11 @@ ftctl_dr_scheduler_worker() {
     "plan=${plan} run=${run} driver=${driver} interval=${interval} max_cycles=${max_cycles}"
 
   cycle_request_state="$(ftctl_state_read_kv "${sequence_path}" "requested_cycle_state" 2>/dev/null || true)"
-  if [[ "${cycle_request_state}" != "PENDING" ]]; then
+  if [[ "${command}" == "run" && "${cycle_request_state}" != "PENDING" ]]; then
     initial_jitter="$(ftctl_dr_scheduler_initial_jitter "${plan}" "${profile_file}" "${interval}")"
     if [[ "${initial_jitter}" =~ ^[1-9][0-9]*$ ]]; then
       ftctl_dr_scheduler_update_state "${state_path}" "${status_path}" \
-        "scheduler_state=RUNNING" \
+        "scheduler_state=${startup_state}" \
         "scheduler_health=HEALTHY" \
         "replication_activity=WAITING_SCHEDULE" \
         "initial_jitter_seconds=${initial_jitter}" \

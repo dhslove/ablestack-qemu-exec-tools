@@ -1424,6 +1424,35 @@ else:
 PY
 }
 
+# A control Run owns an intent, not a new replication baseline. Preserve only
+# validated completed-cycle evidence; never copy another Run's terminal state.
+ftctl_dr_runtime_inherit_resume_checkpoint() {
+  local plan="${1-}" run_path="${2-}" status_path="${3-}"
+  local checkpoint sequence ref baseline key value
+  local -a updates=()
+  [[ -f "${status_path}" && "${run_path}" != "${status_path}" ]] || return 0
+  checkpoint="$(ftctl_dr_runtime_state_get_from_path "${status_path}" latest_completed_checkpoint_path)"
+  sequence="$(ftctl_dr_runtime_state_get_from_path "${status_path}" latest_completed_checkpoint_sequence)"
+  ref="$(ftctl_dr_runtime_state_get_from_path "${status_path}" latest_completed_checkpoint_ref)"
+  baseline="$(ftctl_dr_runtime_state_get_from_path "${status_path}" baseline_state)"
+  [[ "${baseline}" != INVALID && "${baseline}" != MISSING ]] || return 0
+  [[ "${sequence}" =~ ^[1-9][0-9]*$ && -f "${checkpoint}" && -n "${ref}" ]] || return 0
+  jq -e --arg plan "${plan}" --argjson seq "${sequence}" '
+    .planUuid == $plan and (.state == "READY" or .state == "TARGET_READY")
+    and ((.cycleMetrics.sequence // .sequence // .baselineGeneration) == $seq)
+    and ((.targetDurableAt // "") | length > 0)
+  ' "${checkpoint}" >/dev/null 2>&1 || return 0
+  while IFS='=' read -r key value; do
+    case "${key}" in
+      latest_completed_*|restore_points_path|source_disk_map_path)
+        updates+=("${key}=${value}") ;;
+    esac
+  done < "${status_path}"
+  updates+=("last_target_durable_at=$(jq -r '.targetDurableAt' "${checkpoint}")")
+  updates+=("last_source_checkpoint_at=$(jq -r '.sourceCheckpointAt // empty' "${checkpoint}")")
+  ftctl_dr_runtime_path_set "${run_path}" "${updates[@]}"
+}
+
 ftctl_dr_runtime_publish_latest_completed_checkpoint() {
   local plan="${1-}" run="${2-}" sequence="${3-}" cycle_type="${4-}"
   local manifest_path="${5-}" checkpoint_path="${6-}" run_path="${7-}" status_path="${8-}"
@@ -5992,6 +6021,10 @@ ftctl_dr_runtime_action() {
     fi
   fi
   ftctl_dr_runtime_write_state "${run_path}" "${plan}" "${run}" "${action}" "${state}" "${step}" "${progress}" "${external_ref}" ""
+  case "${action}" in
+    dr-sync-pause|dr-sync-resume)
+      ftctl_dr_runtime_inherit_resume_checkpoint "${plan}" "${run_path}" "${status_path}" || return $? ;;
+  esac
   if [[ "${authority_sequence_floor}" =~ ^[0-9]+$ ]]; then
     ftctl_dr_runtime_path_set "${run_path}" \
       "cloud_authority_sequence_floor=${authority_sequence_floor}" || return $?
