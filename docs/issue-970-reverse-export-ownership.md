@@ -25,3 +25,9 @@ qemu: dr_export_ownership.py, dr_ablestack.sh ACK, ownership smoke 및 branch re
 - 설치 버전·백업·DB schema 확인 후 원본/대상 관리 모듈과 qemu 배포. UI 정적 파일 수정 없음.
 - RBD와 qcow2 UI failover→reverse sync→failback→reprotect를 통해 journal, tombstone, unit/PID/listener, authority, 신규 checkpoint 및 실제 게스트 데이터 확인. 실제 실행한 장애 주입/경로와 자동화 모의 시험을 구분해서 결과 기록. 혼합/VMware 경로 미확인 시 PASS로 집계하지 않는다.
 - 발견한 별도 결함은 이슈로 추적한다. 레거시 DR Cluster 활성화 금지.
+## 최종 구현 및 검증
+- 코드61725fc: ACK protocol2의 scope/direction/generation/state와 같은 generation mapping fingerprint를 검증한다. reverse export 재시작 profile은 변환 전 원래 요청으로 저장한다. 같은 파일 replay 복사를 건너뛰며 복사 오류는 전파한다.
+- Actions34431985704 SUCCESS, release tombstone 및 기존 DR action smoke 통과. 최종 RPM SHA2563dd90c877479b32dfbc5a0c4fcd288a73d4b70336fb749a6cc778a90762b0c0e,13/22/31/32 총12호스트 배포.
+- 실제 qcow2/RBD UI 전환→페일백→자동 복제 재개 PASS, 반환 데이터 SHA 일치. RBD 동일 START 재전송 시 PID 유지, qcow2 이전 세대 START/STOP 거절·writer 미재생성 확인.
+- Cloud 후속#975/#976/#977과 함께 검증했다. 물리 장기 전원 단절, 모든 혼합 경로, VMware UI 전체 회귀는 실측 PASS로 주장하지 않는다.
+- 상세 결과: https://github.com/dhslove/ablestack-cloud/blob/codex/fix-970-reverse-export-ownership/docs/ftctl/issue-970-validation-20260910.md
