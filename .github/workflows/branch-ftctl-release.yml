@@ -153,7 +153,7 @@ jobs:
             cd "$verify_root"
             rpm2cpio "$GITHUB_WORKSPACE/$rpm_path" | cpio -idm --quiet
           )
-          for script in dr_runtime.sh dr_scheduler.sh qcow2_checkpoint.py qcow2_bitmap_baseline.py qcow2_bitmap_backup.py qcow2_bitmap_offline_backup.py qcow2_bitmap_commit.py; do
+          for script in dr_export_ownership.py dr_ablestack.sh dr_runtime.sh dr_scheduler.sh qcow2_checkpoint.py qcow2_bitmap_baseline.py qcow2_bitmap_backup.py qcow2_bitmap_offline_backup.py qcow2_bitmap_commit.py; do
             packaged="$verify_root/usr/local/lib/ablestack-qemu-exec-tools/ftctl/$script"
             source="lib/ftctl/$script"
             expected_interpreter='#!/usr/bin/bash'
