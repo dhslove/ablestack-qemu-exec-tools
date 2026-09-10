@@ -743,12 +743,12 @@ ftctl_dr_ablestack_export_persist_intent() {
       redacted="$(ftctl_dr_runtime_redacted_profile_json "${profile_file}")" || return $?
       ftctl_state_write_json_file "${persist_profile}" "${redacted}"
     else
-      cp -f "${profile_file}" "${persist_profile}"
+      if [[ ! "${profile_file}" -ef "${persist_profile}" ]]; then cp -f "${profile_file}" "${persist_profile}" || return $?; fi
     fi
     chmod 0600 "${persist_profile}" 2>/dev/null || true
   fi
   if [[ -n "${manifest}" && -f "${manifest}" ]]; then
-    cp -f "${manifest}" "${persist_manifest}"
+    if [[ ! "${manifest}" -ef "${persist_manifest}" ]]; then cp -f "${manifest}" "${persist_manifest}" || return $?; fi
     chmod 0600 "${persist_manifest}" 2>/dev/null || true
   fi
   tmp="${intent}.tmp.$$"
@@ -947,7 +947,7 @@ ftctl_dr_ablestack_target_export_start_unlocked() {
       profile_file="${merged_profile}"
     fi
   fi
-  local export_generation
+  local export_generation ownership_profile_file="${profile_file}"
   export_generation="$(python3 "${BASH_SOURCE[0]%/*}/dr_export_ownership.py" \
     "$(ftctl_dr_ablestack_export_persist_dir "${plan}")" START "${profile_file}")" || return $?
   ftctl_dr_ablestack_export_persist_intent "${plan}" "${run}" "RUNNING" "${profile_file}" "" "STARTING" || return $?
@@ -1076,7 +1076,7 @@ with open(tmp,"w",encoding="utf-8") as fh: json.dump(data,fh,sort_keys=True,sepa
 os.replace(tmp,sys.argv[2])
 PY
   rm -f "${records}"
-  ftctl_dr_ablestack_export_persist_intent "${plan}" "${run}" "RUNNING" "${profile_file}" "${manifest}" "RUNNING" || return $?
+  ftctl_dr_ablestack_export_persist_intent "${plan}" "${run}" "RUNNING" "${ownership_profile_file}" "${manifest}" "RUNNING" || return $?
   if [[ "${json}" == "1" ]]; then
     python3 - "${manifest}" "${export_generation}" "$(ftctl_dr_ablestack_export_persist_dir "${plan}")/ownership.json" <<'PY'
 import json,sys,os
