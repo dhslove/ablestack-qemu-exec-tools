@@ -2262,9 +2262,28 @@ import sys
 
 plan, run, active_path, session_path, selection_path, now = sys.argv[1:7]
 session = {}
-if os.path.exists(active_path):
-    with open(active_path, "r", encoding="utf-8") as fh:
+# Failed preparation has a run session before active.json is published.
+selected_path = session_path if os.path.exists(session_path) else active_path
+if os.path.exists(selected_path):
+    with open(selected_path, "r", encoding="utf-8") as fh:
         session = json.load(fh)
+    # active.json can precede materialization; follow its owned run record.
+    if selected_path == active_path:
+        owner = str(session.get("runUuid") or "")
+        if owner and owner not in (".", "..") and all(ch.isalnum() or ch in "-_." for ch in owner):
+            original_path = os.path.join(os.path.dirname(active_path), owner + ".json")
+            if os.path.exists(original_path):
+                with open(original_path, "r", encoding="utf-8") as fh:
+                    original = json.load(fh)
+                if original.get("runUuid") != owner or original.get("planUuid") != plan:
+                    raise RuntimeError("DR_TEST_CLEANUP_OWNER_MISMATCH: original session identity differs")
+                session = original
+    if session.get("planUuid") not in (None, "", plan):
+        raise RuntimeError("DR_TEST_CLEANUP_OWNER_MISMATCH: session belongs to another plan")
+    if selected_path == session_path and session.get("runUuid") not in (None, "", run):
+        # A cleanup run may already contain the original test session after a retry.
+        if session.get("cleanupRunUuid") != run:
+            raise RuntimeError("DR_TEST_CLEANUP_OWNER_MISMATCH: session belongs to another run")
 restore = session.get("restorePoint") if isinstance(session.get("restorePoint"), dict) else {}
 artifacts = session.get("testArtifacts") if isinstance(session.get("testArtifacts"), dict) else {}
 artifact_path = artifacts.get("path") if isinstance(artifacts, dict) else ""
@@ -2302,7 +2321,14 @@ for record in artifacts.get("records", []) if isinstance(artifacts, dict) else [
         except (OSError, ValueError, TypeError):
             pass
     if clone.startswith("rbd:"):
-        subprocess.run(["rbd", "rm", clone[4:]], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        owner = "".join(ch if ch.isalnum() else "-" for ch in str(session.get("runUuid") or "")).strip("-")[:36]
+        if not owner or clone != backing + "-ftctl-test-" + owner:
+            raise RuntimeError("DR_TEST_CLEANUP_OWNER_MISMATCH: unowned RBD clone")
+        removed = subprocess.run(["rbd", "rm", clone[4:]], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if removed.returncode != 0:
+            probe = subprocess.run(["rbd", "info", clone[4:]], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            if probe.returncode != 2 or "No such file or directory" not in probe.stderr:
+                raise RuntimeError("DR_TEST_ARTIFACT_CLEANUP_FAILED: RBD clone removal failed: " + clone)
     if backing.startswith("rbd:") and snapshot and not record.get("retainedCheckpoint"):
         snap_ref = backing[4:] + "@" + snapshot
         subprocess.run(["rbd", "snap", "unprotect", snap_ref], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -2324,7 +2350,10 @@ with open(session_path, "w", encoding="utf-8") as fh:
     json.dump(session, fh, sort_keys=True, separators=(",", ":"))
     fh.write("\n")
 if os.path.exists(active_path):
-    os.unlink(active_path)
+    with open(active_path, "r", encoding="utf-8") as fh:
+        active = json.load(fh)
+    if active.get("sessionId") and active.get("sessionId") == session.get("sessionId"):
+        os.unlink(active_path)
 with open(selection_path, "w", encoding="utf-8") as fh:
     fh.write(f"test_session_id={session_id}\n")
     fh.write(f"test_lease_owner_run={session.get('runUuid', '') or ''}\n")
@@ -2401,6 +2430,10 @@ ftctl_dr_runtime_finalize_failed_test() {
   local transition_scope
 
   ftctl_dr_runtime_cleanup_test_session "${plan}" "${run}" "${run_path}" "${status_path}" || cleanup_rc=$?
+  # Keep failed resources reachable by the operator's later cleanup command.
+  if [[ "${cleanup_rc}" != "0" && ! -e "$(ftctl_dr_runtime_active_test_session_path "${plan}")"       && -f "$(ftctl_dr_runtime_test_session_path "${plan}" "${run}")" ]]; then
+    cp -f "$(ftctl_dr_runtime_test_session_path "${plan}" "${run}")"       "$(ftctl_dr_runtime_active_test_session_path "${plan}")"
+  fi
   sequence="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "test_restore_point_sequence")"
   lease_owner_run="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "test_lease_owner_run")"
   [[ -n "${lease_owner_run}" ]] || lease_owner_run="${run}"
@@ -6188,6 +6221,9 @@ ftctl_dr_runtime_action() {
           error_code="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "guest_preflight_error_code")"
           error_message="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "guest_preflight_error_message")"
           [[ -n "${error_code}" ]] || error_code="$([[ "${rc}" == "47" ]] && printf DR_GUEST_PREP_RUNTIME_UNAVAILABLE || printf DR_GUEST_OS_UNRESOLVED)"
+        fi
+        if [[ "${rc}" == "49" ]]; then
+          error_message="Guest preparation failed (exit $(ftctl_dr_runtime_state_get_from_path "${run_path}" guest_prep_exit_code)); diagnostic log: ${run_path}.guestprep.log"
         fi
         local failed_step="test-session-restore-point-missing"
         [[ "${rc}" == "46" ]] && failed_step="test-materialization-failed"
