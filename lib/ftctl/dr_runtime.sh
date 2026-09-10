@@ -5490,6 +5490,9 @@ PY
   ftctl_dr_runtime_json_number_field "current_checkpoint_invalid_baseline_disk_count" "${current_checkpoint_invalid_baseline_disk_count}"
   ftctl_dr_runtime_json_string_field "current_checkpoint_ref" "${current_checkpoint_ref}"
   ftctl_dr_runtime_json_string_field "current_checkpoint_state" "${current_checkpoint_state}"
+  ftctl_dr_runtime_json_string_field "immutable_checkpoint_ref" "$(jq -r '.contract.checkpointRef // empty' "$(ftctl_dr_checkpoint_committed_path "${plan}")" 2>/dev/null || true)"
+  ftctl_dr_runtime_json_string_field "immutable_checkpoint_manifest_sha256" "$(jq -r '.manifestSha256 // empty' "$(ftctl_dr_checkpoint_committed_path "${plan}")" 2>/dev/null || true)"
+  ftctl_dr_runtime_json_string_field "checkpoint_publication_pending" "$(cat "$(ftctl_dr_checkpoint_pending_path "${plan}")" 2>/dev/null || true)"
   ftctl_dr_runtime_json_number_field "latest_completed_checkpoint_sequence" "${latest_completed_checkpoint_sequence}"
   ftctl_dr_runtime_json_number_field "latest_completed_cycle_sequence" "${latest_completed_checkpoint_sequence}"
   ftctl_dr_runtime_json_string_field "latest_completed_checkpoint_cycle_type" "${latest_completed_checkpoint_cycle_type}"
@@ -8199,6 +8202,9 @@ ftctl_dr_runtime_capabilities() {
     "dr-target-materialized"
     "dr-target-export-start"
     "dr-target-export-stop"
+    "dr-checkpoint-publish"
+    "dr-checkpoint-ack"
+    "dr-checkpoint-restore"
     "dr-target-export-reconcile-v1"
     "dr-cutover-commit"
     "dr-cutover-commit-status"
@@ -8622,3 +8628,6 @@ ftctl_dr_runtime_cancel() {
     printf 'dr-cancel: plan=%s run=%s canceled\n' "${plan}" "${run}"
   fi
 }
+
+# Durable checkpoint publication shares the DR lifecycle libraries.
+source "${BASH_SOURCE[0]%/*}/dr_checkpoint.sh"

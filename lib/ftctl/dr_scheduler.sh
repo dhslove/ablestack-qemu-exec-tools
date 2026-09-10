@@ -1700,8 +1700,18 @@ if metrics:
     ):
         if key in metrics:
             record[key] = metrics[key]
+if os.path.exists(restore_path):
+    with open(restore_path, encoding="utf-8") as previous:
+        for line in previous:
+            existing = json.loads(line)
+            if existing.get("checkpointRef") == record["checkpointRef"]:
+                if existing.get("checkpointSequence") != record["checkpointSequence"] or existing.get("producerRunUuid") != record["producerRunUuid"]:
+                    raise SystemExit("DR_CHECKPOINT_IDENTITY_MISMATCH")
+                raise SystemExit(0)
 with open(restore_path, "a", encoding="utf-8") as fh:
     fh.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+    fh.flush()
+    os.fsync(fh.fileno())
 PY
 }
 
@@ -2121,6 +2131,30 @@ ftctl_dr_scheduler_worker() {
     else
       cycle_type="$(ftctl_dr_scheduler_cycle_type "${next_sequence}" "${source_provider}" "${state_path}" "${target_provider}" "${plan}")"
     fi
+    local checkpoint_pending_path
+    checkpoint_pending_path="$(ftctl_dr_checkpoint_pending_path "${plan}")"
+    if ftctl_dr_checkpoint_enabled "${profile_file}" && [[ -s "${checkpoint_pending_path}" ]]; then
+      local pending_export_generation current_export_generation
+      pending_export_generation="$(jq -r '.exportGeneration // 0' "${checkpoint_pending_path}")"
+      current_export_generation="$(jq -r '.transport.exports[0].exportGeneration // 0' "${profile_file}")"
+      if [[ "${pending_export_generation}" != "${current_export_generation}" ]]; then
+        # Authority changed while ACK was missing. Never relabel current backing
+        # as that old candidate; preserve evidence and restart from a full seed.
+        local abandoned_checkpoint_sequence
+        abandoned_checkpoint_sequence="$(jq -r '.request.checkpointSequence' "${checkpoint_pending_path}")"
+        if [[ "${abandoned_checkpoint_sequence}" =~ ^[0-9]+$ ]] && (( next_sequence <= abandoned_checkpoint_sequence )); then
+          next_sequence=$((abandoned_checkpoint_sequence + 1))
+        fi
+        mv "${checkpoint_pending_path}" "${checkpoint_pending_path}.abandoned-$(date +%s%N)"
+        cycle_type="full-reseed"
+        pending_reseed_sequence="${next_sequence}"
+        pending_reseed_reason="TARGET_EXPORT_GENERATION_CHANGED"
+      fi
+    fi
+    if ftctl_dr_checkpoint_enabled "${profile_file}" && [[ -s "${checkpoint_pending_path}" ]]; then
+      next_sequence="$(jq -r '.request.checkpointSequence' "${checkpoint_pending_path}")"
+      cycle_run="$(jq -r '.request.producerRunUuid' "${checkpoint_pending_path}")"
+    fi
     checkpoint_ref="ftctl:${plan}:${cycle_run}:${next_sequence}"
     transfer_progress_path="$(ftctl_dr_runtime_run_journal_path "${plan}" "${cycle_run}" progress)"
     cycle_started_epoch="$(date +%s)"
@@ -2210,12 +2244,28 @@ ftctl_dr_scheduler_worker() {
     fi
 
     rc=0
+    if ftctl_dr_checkpoint_enabled "${profile_file}" && [[ -s "${checkpoint_pending_path}" ]]; then
+      output="$(jq -r '.output' "${checkpoint_pending_path}")"
+    else
     output="$(FTCTL_DR_TRANSFER_PROGRESS_PATH="${transfer_progress_path}" \
       FTCTL_DR_BANDWIDTH_LIMIT_MBPS="${bandwidth_limit_mbps}" \
       FTCTL_DR_AUTOMATIC_RESEED_REASON="$([[ "${pending_reseed_sequence}" == "${sequence}" ]] && printf '%s' "${pending_reseed_reason}")" \
       ftctl_dr_scheduler_run_cycle "${plan}" "${cycle_run}" "${profile_file}" "${sequence}" "${cycle_type}")" || rc=$?
+    fi
+    if [[ "${rc}" == "0" ]]; then
+      ftctl_dr_checkpoint_barrier "${plan}" "${cycle_run}" "${sequence}" "${output}" "${profile_file}" || rc=$?
+    fi
     ftctl_dr_scheduler_slot_release 203
     ftctl_dr_scheduler_lock_release "${plan}" "cycle" 202
+    if [[ "${rc}" == "107" ]]; then
+      ftctl_dr_scheduler_update_state "${state_path}" "${status_path}" \
+        "step=waiting-checkpoint-publication" "cycle_state=WAITING_CHECKPOINT" \
+        "scheduler_state=RUNNING" "scheduler_health=WAITING_TARGET" \
+        "replication_activity=WAITING_CHECKPOINT" "retryable=true" \
+        "updated_at=$(ftctl_now_iso8601)" || true
+      sleep 2
+      continue
+    fi
     if [[ "${rc}" != "0" ]]; then
       if [[ "${rc}" == "97" || "${rc}" == "100" ]]; then
         now="$(ftctl_now_iso8601)"
@@ -2621,6 +2671,9 @@ ftctl_dr_scheduler_worker() {
     cycle_wall_duration_seconds=$((cycle_completed_epoch - cycle_started_epoch))
     (( cycle_wall_duration_seconds < 0 )) && cycle_wall_duration_seconds=0
     ftctl_dr_scheduler_append_restore_point "${restore_points_path}" "${plan}" "${cycle_run}" "${sequence}" "${cycle_type}" "${driver}" "${manifest_path}" "${checkpoint_path}" "${cycle_wall_duration_seconds}" || return $?
+    if ftctl_dr_checkpoint_enabled "${profile_file}"; then
+      rm -f "${checkpoint_pending_path}"
+    fi
     ftctl_dr_scheduler_mark_resume_checkpoint_completed "${plan}" "${sequence}" || true
     ftctl_state_set_path "${sequence_path}" \
       "pending_resource_sequence=" \

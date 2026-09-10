@@ -360,8 +360,11 @@ def seal(args, *, probe=True):
     temp_path = Path(temp_name)
     metadata_temp = metadata_path.with_name(f".{metadata_path.name}.{os.getpid()}.tmp")
     try:
+        copy_command = ([qemu_img, "convert", "-f", "qcow2", "-O", "qcow2", str(source), str(temp_path)]
+                        if source_info.get("backing-filename") else
+                        [copy_tool, "--reflink=auto", "--sparse=always", "--", str(source), str(temp_path)])
         result = subprocess.run(
-            [copy_tool, "--reflink=auto", "--sparse=always", "--", str(source), str(temp_path)],
+            copy_command,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,

@@ -364,6 +364,7 @@ for export in arr(transport.get("exports")):
             "name": name,
             "uri": uri,
             "targetPath": target_path,
+            "exportGeneration": first_int(export.get("exportGeneration")),
         })
 
 disk_items = []
