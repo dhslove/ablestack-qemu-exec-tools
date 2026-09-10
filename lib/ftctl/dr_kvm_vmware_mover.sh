@@ -114,9 +114,11 @@ ftctl_kvm_vmware_start_writer() {
     thumbprint="$(ftctl_vmware_mover_resolve_thumbprint "${endpoint}" "${tls_verify}" "${thumbprint}" || true)"
     [[ -n "${thumbprint}" ]] || return 77
   fi
+  # Writable snapshot disks must retain the parent chain. Single-link writes
+  # can zero untouched sectors in a newly allocated grain (issue #1011).
   local args=(--exit-with-parent --foreground --unix "${socket_path}" vddk
     "server=${endpoint}" "user=${username}" "password=+${password_file}"
-    "file=${vmdk}" "single-link=true" "vm=moref=${vm_ref}")
+    "file=${vmdk}" "single-link=false" "vm=moref=${vm_ref}")
   [[ -n "${transports}" ]] && args+=("transports=${transports}")
   [[ -n "${thumbprint}" && "${tls_verify}" != "true" ]] && args+=("thumbprint=${thumbprint}")
   [[ -n "${libdir}" && -d "${libdir}" ]] && args+=("libdir=${libdir}")
