@@ -945,6 +945,31 @@ ftctl_dr_scheduler_control_set() {
 
 # Process startup is not an operator Resume. Initialize only under the same
 # Plan lock used by control_set, so a concurrent PAUSE/STOP cannot be lost.
+# A new source assignment supersedes only a host-local target-role suppression.
+# Operator pause/stop and lifecycle authority are not changed by relocation.
+ftctl_dr_scheduler_restore_source_role_control() {
+  local plan="${1-}" run="${2-}" path command reason owner generation rc=0
+  path="$(ftctl_dr_scheduler_control_path "${plan}")"
+  ftctl_dr_scheduler_lock_acquire "${plan}" "plan" 204 "${FTCTL_DR_TRANSITION_LOCK_TIMEOUT_SEC}" "source-role:${run}" || return $?
+  command="$(ftctl_state_read_kv "${path}" command 2>/dev/null || true)"
+  reason="$(ftctl_state_read_kv "${path}" reason 2>/dev/null || true)"
+  owner="$(ftctl_state_read_kv "${path}" owner_run 2>/dev/null || true)"
+  generation="$(ftctl_state_read_kv "${path}" generation 2>/dev/null || true)"
+  if [[ "${command}" == stop && "${reason}" == remote-source-target-suppressed && -z "${owner}" ]]; then
+    if [[ "${generation}" =~ ^[1-9][0-9]*$ && -n "${run}" ]]; then
+      ftctl_state_write_kv_all "${path}" \
+        "version=${FTCTL_DR_CONTROL_PROTOCOL_VERSION}" "generation=$((generation + 1))" \
+        "command=run" "reason=source-role-reassigned" "owner_run=${run}" \
+        "resume_after_cleanup=false" "requested_at=$(ftctl_now_iso8601)" \
+        "updated_at=$(ftctl_now_iso8601)" || rc=$?
+    else
+      rc=2
+    fi
+  fi
+  ftctl_dr_scheduler_lock_release "${plan}" "plan" 204
+  return "${rc}"
+}
+
 ftctl_dr_scheduler_initialize_control() {
   local plan="${1-}" run="${2-}" path command generation rc=0
   path="$(ftctl_dr_scheduler_control_path "${plan}")"

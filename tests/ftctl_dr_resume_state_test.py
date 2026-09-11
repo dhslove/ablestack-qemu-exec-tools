@@ -55,6 +55,33 @@ cat control''')
         self.assertNotEqual(0, self.shell('ftctl_dr_scheduler_initialize_control plan new').returncode)
         self.assertIn('generation=bad', (self.path/'control').read_text())
 
+    def test_new_source_assignment_clears_only_local_target_suppression(self):
+        (self.path/'control').write_text('generation=12\ncommand=stop\nreason=remote-source-target-suppressed\nowner_run=\n')
+        r=self.shell('ftctl_dr_scheduler_restore_source_role_control plan new-source; cat control')
+        self.assertEqual(0,r.returncode,r.stderr)
+        self.assertIn('generation=13',r.stdout)
+        self.assertIn('command=run',r.stdout)
+        self.assertIn('owner_run=new-source',r.stdout)
+
+    def test_source_assignment_preserves_operator_and_lifecycle_intent(self):
+        for command,reason,owner in [('pause','dr-sync-pause','operator'),('stop','dr-sync-stop','operator'),('stop','remote-source-target-suppressed','operator'),('stop','release','operator')]:
+            original=f'generation=12\ncommand={command}\nreason={reason}\nowner_run={owner}\n'
+            (self.path/'control').write_text(original)
+            r=self.shell('ftctl_dr_scheduler_restore_source_role_control plan new-source')
+            self.assertEqual(0,r.returncode,r.stderr)
+            self.assertEqual(original,(self.path/'control').read_text())
+
+    def test_remote_mold_coordinator_recovery_entry_restores_local_suppression(self):
+        for action in ['dr-sync-start', 'dr-sync-recover']:
+            (self.path/'control').write_text('generation=12\ncommand=stop\nreason=remote-source-target-suppressed\nowner_run=\n')
+            # Stop at the next action phase: this exercises real profile/role
+            # dispatch without starting a storage mover in a unit test.
+            setup = 'ftctl_dr_runtime_save_profile() { :; }; ftctl_dr_runtime_record_worker_role() { :; }; ftctl_dr_runtime_action_state() { return 91; }; '
+            r=self.shell(setup+'ftctl_dr_runtime_action '+action+' plan fresh profile coordinator')
+            self.assertEqual(91,r.returncode,r.stderr)
+            self.assertIn('command=run',(self.path/'control').read_text())
+            self.assertIn('owner_run=fresh',(self.path/'control').read_text())
+
     def fixture(self, **changes):
         checkpoint = dict(planUuid='plan', sequence=42, state='TARGET_READY', targetDurableAt='now')
         checkpoint.update(changes)

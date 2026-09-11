@@ -5982,6 +5982,9 @@ ftctl_dr_runtime_action() {
       return 2
     }
     [[ "${dry_run}" == "1" ]] || ftctl_dr_runtime_record_worker_role "${plan}" "${role}" || return $?
+    if [[ "${dry_run}" != "1" && ( "${action}" == "dr-sync-start" || "${action}" == "dr-sync-recover" ) && ( "${role}" == "source" || "${role}" == "coordinator" ) ]]; then
+      ftctl_dr_scheduler_restore_source_role_control "${plan}" "${run}" || return $?
+    fi
   fi
   if [[ "${action}" == "dr-test-prepare" ]]; then
     ftctl_dr_runtime_save_artifact_spec "${plan}" "${run}" "${artifact_spec_file}" || {
