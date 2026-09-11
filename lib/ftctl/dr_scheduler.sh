@@ -2393,7 +2393,7 @@ ftctl_dr_scheduler_worker() {
         ftctl_dr_scheduler_sleep_or_stop "${plan}" "${resource_retry_delay}" "${control_generation}" || true
         continue
       fi
-      if [[ "${rc}" == "98" ]]; then
+      if [[ "${rc}" == "98" || "${rc}" == "110" ]]; then
         now="$(ftctl_now_iso8601)"
         source_outage_since="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "source_outage_since" 2>/dev/null || true)"
         [[ -n "${source_outage_since}" ]] || source_outage_since="${now}"
@@ -2418,7 +2418,7 @@ ftctl_dr_scheduler_worker() {
           "step=waiting-source-recovery" \
           "scheduler_state=RUNNING" \
           "scheduler_health=WAITING_SOURCE" \
-          "scheduler_recovery_state=PENDING" \
+          "scheduler_recovery_state=$([[ "${rc}" == "110" ]] && printf REQUIRED || printf PENDING)" \
           "cycle_state=WAITING_SOURCE" \
           "replication_activity=WAITING_SOURCE" \
           "protection_state=DEGRADED" \
@@ -2428,8 +2428,8 @@ ftctl_dr_scheduler_worker() {
           "retry_after_sec=${source_retry_delay}" \
           "next_retry_at=$(ftctl_dr_scheduler_iso_from_epoch $(( $(date +%s) + source_retry_delay )))" \
           "source_outage_since=${source_outage_since}" \
-          "error_code=DR_SOURCE_SITE_UNAVAILABLE" \
-          "error_message=VMware source site is temporarily unreachable; the last durable baseline is preserved" \
+          "error_code=$([[ "${rc}" == "110" ]] && printf DR_QCOW2_SOURCE_RUNTIME_UNAVAILABLE || printf DR_SOURCE_SITE_UNAVAILABLE)" \
+          "error_message=Source runtime is unavailable on this worker; preserve the durable baseline and resolve current placement" \
           "updated_at=${now}" || true
         ftctl_log_event "dr-runtime" "dr.scheduler.source" "wait" "" "98" \
           "plan=${plan} run=${cycle_run} sequence=${sequence} retry_attempt=${source_retry_attempt} retry_after=${source_retry_delay}"
