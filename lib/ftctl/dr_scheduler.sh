@@ -717,7 +717,9 @@ ftctl_dr_scheduler_seed_relocated_baseline() {
   checkpoint_cycle_token="$(ftctl_dr_runtime_profile_value "${profile_file}" "request.checkpointCycleToken" 2>/dev/null || true)"
   checkpoint_effective_mode="$(ftctl_dr_runtime_profile_value "${profile_file}" "request.checkpointEffectiveMode" 2>/dev/null || true)"
   checkpoint_source_at="$(ftctl_dr_runtime_profile_value "${profile_file}" "request.checkpointSourceCreatedAt" 2>/dev/null || true)"
-  checkpoint_incremental_verified="$(ftctl_dr_runtime_profile_value "${profile_file}" "request.checkpointIncrementalVerified" 2>/dev/null || true)"
+  # The controller reference preserves durability, but carries no local NBD drain
+  # evidence. Do not claim locally verified incremental I/O on the new worker.
+  checkpoint_incremental_verified=""
   [[ -n "${checkpoint_cycle_type}" ]] || checkpoint_cycle_type="incremental"
   [[ -n "${checkpoint_cycle_token}" ]] || checkpoint_cycle_token="${plan}:${baseline}"
 

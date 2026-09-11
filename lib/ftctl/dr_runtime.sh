@@ -688,7 +688,7 @@ def redact(value):
         out = {}
         for key, item in value.items():
             lower = str(key).lower()
-            if any(part in lower for part in SECRET_PARTS):
+            if lower not in ("checkpointcycletoken", "cycletoken", "latest_completed_cycle_token") and any(part in lower for part in SECRET_PARTS):
                 out[key] = "REDACTED"
             else:
                 out[key] = redact(item)
@@ -1210,7 +1210,7 @@ def redact(value):
         out = {}
         for key, item in value.items():
             lower = str(key).lower()
-            if any(part in lower for part in SECRET_PARTS):
+            if lower not in ("checkpointcycletoken", "cycletoken", "latest_completed_cycle_token") and any(part in lower for part in SECRET_PARTS):
                 out[key] = "REDACTED"
             else:
                 out[key] = redact(item)
