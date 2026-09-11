@@ -246,7 +246,7 @@ ftctl_kvm_vmware_patch_qcow2_disk() {
   output="$("${args[@]}")" || rc=$?
   ftctl_vmware_mover_cleanup_nbdkit "${pid}" "${work_dir}"
   [[ "${rc}" == "0" ]] || return "${rc}"
-  jq '. + {writeVerified:true,verifiedBytes:(.targetWrittenBytes // .bytesProcessed // 0),
+  jq '. + {writeVerified:true,transferCompletionVerified:true,verificationMethod:"QEMU_BACKUP_COMPLETION",readbackVerified:false,readbackVerifiedBytes:0,verifiedBytes:0,
       transferPayloadBytes:(.targetWrittenBytes // .bytesProcessed // 0),
       changedExtentCount:(if (.changedBytes // 0) > 0 then 1 else 0 end)}' \
     <<< "${output}" > "${metrics_path}" || return 88
@@ -266,15 +266,16 @@ def load(path):
     with open(path, encoding="utf-8") as handle:
         return json.load(handle)
 disk_map, baseline, metrics = load(map_path), load(baseline_path), load(metrics_path)
-# qcow2 legacy verified counters represent successful QEMU backup completion,
-# not readback. Keep that distinction in the committed baseline evidence.
+# writeVerified remains a legacy durability gate, never readback evidence.
+# A QEMU completion and a byte comparison are different contracts.
 
 if len(metrics) != len(disk_map.get("disks") or []) or not metrics or any(
-        item.get("writeVerified") is not True
-        or int(item.get("verifiedBytes") or 0) != int(item.get("targetWrittenBytes") or 0)
+        item.get("transferCompletionVerified") is not True
+        or item.get("verificationMethod") != "QEMU_BACKUP_COMPLETION"
+        or item.get("writeVerified") is not True
         for item in metrics):
     raise SystemExit("DR_REVERSE_DURABILITY_VERIFY_FAILED")
-if cycle_type == "FULL_REVERSE_SEED" and sum(int(item.get("verifiedBytes") or 0) for item in metrics) != sum(
+if cycle_type == "FULL_REVERSE_SEED" and sum(int(item.get("targetWrittenBytes") or 0) for item in metrics) != sum(
         int(item.get("virtualBytes") or 0) for item in disk_map.get("disks") or []):
     raise SystemExit("DR_REVERSE_FULL_TRANSFER_INCOMPLETE")
 generation = max(int(baseline.get("generation") or 0) + 1, int(sequence or 0))
@@ -299,6 +300,8 @@ payload = {
     "baselineGeneration": generation, "trackerType": "QCOW2_BITMAP",
     "trackerState": "LOCAL_DURABLE", "writerState": "DURABLE",
     "targetWritten": True, "writeVerified": True, "cycleCommitState": "LOCAL_DURABLE",
+    "transferCompletionVerified": True, "verificationMethod": "QEMU_BACKUP_COMPLETION",
+    "readbackVerified": False, "readbackVerifiedBytes": 0,
     "disks": metrics,
 }
 payload.update(totals)
@@ -406,6 +409,8 @@ baseline = {
     "providerPair": "ABLESTACK_TO_VMWARE", "generation": generation,
     "state": "LOCAL_DURABLE", "committedAtEpochMs": now, "disks": baseline_disks,
     "commonBaselineVerified": True, "commonBaselineVerification": "REVERSE_READBACK",
+    "createdFromCheckpoint": old.get("createdFromCheckpoint"),
+    "createdFromRestorePoint": old.get("createdFromRestorePoint"),
 }
 totals = {key: sum(int(item.get(key) or 0) for item in metrics) for key in (
     "changedExtentCount", "changedBytes", "sourceReadBytes", "targetWrittenBytes",
@@ -422,6 +427,8 @@ payload = {
     "throughputBps": int(totals["targetWrittenBytes"] * 1000 / duration_ms) if duration_ms > 0 else 0,
     "baselineGeneration": generation, "trackerState": "LOCAL_DURABLE",
     "writerState": "DURABLE", "targetWritten": True, "writeVerified": True,
+    "transferCompletionVerified": True, "verificationMethod": "REVERSE_READBACK",
+    "readbackVerified": True, "readbackVerifiedBytes": totals["verifiedBytes"],
     "cycleCommitState": "LOCAL_DURABLE", "disks": metrics,
 }
 payload.update(totals)

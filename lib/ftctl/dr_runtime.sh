@@ -2889,6 +2889,49 @@ PY
     "test_checkpoint_path=${test_checkpoint_path}"
 }
 
+# Resolve with the same durable local artifact selector used by guest preparation.
+# Never derive cutover provenance from a copied Run's checkpoint_sequence.
+ftctl_dr_runtime_select_cutover_checkpoint() {
+  local plan="${1-}" run="${2-}" profile="${3-}" selector="${4-}" status="${5-}" output="${6-}"
+  local records libdir
+  records="$(ftctl_dr_runtime_default_restore_points_path "${plan}" "${status}")"
+  libdir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  python3 - "${libdir}" "${plan}" "${run}" "${profile}" "${selector}" "${records}" "${status}" "${output}" <<'PY'
+import hashlib
+import json
+import os
+import sys
+sys.path.insert(0, sys.argv[1])
+from guestprep_manifest import select_checkpoint, ManifestError
+_, plan, run, profile_path, selector, records, status, output = sys.argv[1:]
+with open(profile_path, encoding="utf-8") as handle:
+    profile = json.load(handle)
+request = profile.get("request") or {}
+try:
+    selected = select_checkpoint(plan, run, records,
+        selector or request.get("restorePointRef") or request.get("restorePointId") or "", status)
+except ManifestError as exc:
+    print(exc.code + ": " + exc.message, file=sys.stderr)
+    raise SystemExit(exc.exit_code)
+sequence = selected.get("sequence")
+if not isinstance(sequence, int) or sequence <= 0:
+    raise SystemExit(44)
+proof = {"checkpointSequence": sequence, "checkpointRef": selected["ref"],
+         "planUuid": plan, "cutoverRunUuid": run}
+for key in ("path", "manifest"):
+    path = selected.get(key)
+    if path and os.path.isfile(path):
+        with open(path, "rb") as handle:
+            proof[key + "Sha256"] = hashlib.sha256(handle.read()).hexdigest()
+with open(output + ".tmp", "w", encoding="utf-8") as handle:
+    json.dump(proof, handle, sort_keys=True)
+    handle.flush()
+    os.fsync(handle.fileno())
+os.replace(output + ".tmp", output)
+print(str(sequence) + "\t" + selected["ref"])
+PY
+}
+
 ftctl_dr_runtime_finalize_failover() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" restore_point="${4-}" mode="${5-}" run_path="${6-}" status_path="${7-}"
   local session_path active_path selection_path restore_points_path profile_path now rc=0
@@ -3376,14 +3419,15 @@ ftctl_dr_runtime_failover_worker() {
     restore_point="${final_restore_point_ref}"
   fi
 
-  local cutover_workdir direction cutover_checkpoint_sequence
+  local cutover_workdir direction cutover_checkpoint_sequence=""
   direction="$(jq -r '.direction // ""' "${profile_file}" 2>/dev/null || true)"
   if [[ "${direction}" == "VMWARE_TO_KVM" ]]; then
-    cutover_checkpoint_sequence="$(ftctl_dr_runtime_state_get_from_path "${run_path}" "checkpoint_sequence")"
-    [[ "${cutover_checkpoint_sequence}" =~ ^[1-9][0-9]*$ ]] \
-      || cutover_checkpoint_sequence="$(ftctl_dr_runtime_state_get_from_path "${status_path}" "latest_completed_checkpoint_sequence")"
-    if [[ ! "${cutover_checkpoint_sequence}" =~ ^[1-9][0-9]*$ && "${restore_point##*:}" =~ ^[1-9][0-9]*$ ]]; then
-      cutover_checkpoint_sequence="${restore_point##*:}"
+    local cutover_selection cutover_provenance
+    cutover_provenance="$(ftctl_dr_runtime_plan_dir "${plan}")/cutover-provenance-$(ftctl_dr_runtime_key "${run}").json"
+    cutover_selection="$(ftctl_dr_runtime_select_cutover_checkpoint "${plan}" "${run}" "${profile_file}" \
+      "${restore_point}" "${status_path}" "${cutover_provenance}")" || rc=$?
+    if [[ "${rc}" == "0" ]]; then
+      IFS=$'\t' read -r cutover_checkpoint_sequence restore_point <<< "${cutover_selection}"
     fi
     ftctl_dr_runtime_path_set "${run_path}" \
       "state=RUNNING" \
@@ -3392,8 +3436,17 @@ ftctl_dr_runtime_failover_worker() {
       "reverse_baseline_state=PREPARING" \
       "updated_at=$(ftctl_now_iso8601)" || true
     cp -f "${run_path}" "${status_path}" 2>/dev/null || true
-    ftctl_dr_kvm_vmware_seed_cutover_baseline "${plan}" "${run}" "${profile_file}" \
-      "${cutover_checkpoint_sequence}" || rc=$?
+    if [[ "${rc}" == "0" ]]; then
+      ftctl_dr_kvm_vmware_seed_cutover_baseline "${plan}" "${run}" "${profile_file}" \
+        "${cutover_checkpoint_sequence}" || rc=$?
+    fi
+    if [[ "${rc}" == "0" ]]; then
+      local cutover_baseline
+      cutover_baseline="$(ftctl_dr_kvm_vmware_baseline_path "${plan}")"
+      jq --slurpfile proof "${cutover_provenance}" '. + {createdFromRestorePoint:$proof[0]}' \
+        "${cutover_baseline}" > "${cutover_baseline}.provenance.tmp" \
+        && mv -f "${cutover_baseline}.provenance.tmp" "${cutover_baseline}" || rc=67
+    fi
     if [[ "${rc}" != "0" ]]; then
       if [[ "${source_runtime_quiesce_held}" == "true" ]] \
           && command -v ftctl_dr_ablestack_cutover_quiesce_release >/dev/null 2>&1; then
@@ -5443,6 +5496,27 @@ PY
   ftctl_dr_runtime_json_string_field "writer_state" "${writer_state}"
   ftctl_dr_runtime_json_boolean_field "target_written" "${target_written}" || return $?
   ftctl_dr_runtime_json_boolean_field "write_verified" "${write_verified}" || return $?
+  # Readback claims require explicit evidence from this reverse checkpoint.
+  local reverse_verification_method="" reverse_readback_verified="" reverse_readback_bytes=""
+  if [[ -s "${reverse_evidence_checkpoint_path}" ]]; then
+    reverse_verification_method="$(jq -r '.verificationMethod // .cycleMetrics.verificationMethod // empty' "${reverse_evidence_checkpoint_path}" 2>/dev/null || true)"
+    reverse_readback_verified="$(jq -r 'if .readbackVerified != null then .readbackVerified elif .cycleMetrics.readbackVerified != null then .cycleMetrics.readbackVerified else empty end' "${reverse_evidence_checkpoint_path}" 2>/dev/null || true)"
+    reverse_readback_bytes="$(jq -r '.readbackVerifiedBytes // .cycleMetrics.readbackVerifiedBytes // empty' "${reverse_evidence_checkpoint_path}" 2>/dev/null || true)"
+  fi
+  local provenance_baseline="" provenance_sequence="" provenance_ref=""
+  if command -v ftctl_dr_kvm_vmware_baseline_path >/dev/null 2>&1; then
+    provenance_baseline="$(ftctl_dr_kvm_vmware_baseline_path "${plan}")"
+    if [[ -s "${provenance_baseline}" ]]; then
+      provenance_sequence="$(jq -r '.createdFromRestorePoint.checkpointSequence // empty' "${provenance_baseline}" 2>/dev/null || true)"
+      provenance_ref="$(jq -r '.createdFromRestorePoint.checkpointRef // empty' "${provenance_baseline}" 2>/dev/null || true)"
+    fi
+  fi
+  ftctl_dr_runtime_json_number_field "reverse_origin_checkpoint_sequence" "${provenance_sequence}"
+  ftctl_dr_runtime_json_string_field "reverse_origin_checkpoint_ref" "${provenance_ref}"
+  ftctl_dr_runtime_json_string_field "reverse_verification_method" "${reverse_verification_method}"
+  ftctl_dr_runtime_json_boolean_field "reverse_readback_verified" "${reverse_readback_verified}" || return $?
+  ftctl_dr_runtime_json_number_field "reverse_readback_verified_bytes" "${reverse_readback_bytes}"
+
   ftctl_dr_runtime_json_string_field "reverse_guest_compatibility_state" "${reverse_guest_compatibility_state}"
   printf ',"reverse_evidence_missing_fields":['
   reverse_evidence_first="true"

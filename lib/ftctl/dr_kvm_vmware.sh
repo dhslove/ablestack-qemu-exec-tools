@@ -778,6 +778,10 @@ common = {
     "writerState": metrics.get("writerState", ""),
     "targetWritten": bool(metrics.get("targetWritten")),
     "writeVerified": bool(metrics.get("writeVerified")),
+    "transferCompletionVerified": metrics.get("transferCompletionVerified"),
+    "verificationMethod": metrics.get("verificationMethod"),
+    "readbackVerified": metrics.get("readbackVerified"),
+    "readbackVerifiedBytes": metrics.get("readbackVerifiedBytes"),
 }
 manifest = dict(common, state="reverse-data-durable", disks=disk_map.get("disks", []), completedAt=now)
 checkpoint = dict(common, state="TARGET_READY", sourceCheckpointAt=now, targetDurableAt=now,

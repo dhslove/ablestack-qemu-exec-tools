@@ -50,7 +50,8 @@ class CommonBaselineTest(unittest.TestCase):
                 before = self.baseline.read_bytes()
                 (self.root / "map.json").write_text(json.dumps({"disks": [{"diskIndex": 0, "virtualBytes": 4096}]}))
                 (self.root / "rows.json").write_text(json.dumps([{"diskIndex": 0, "diskIdentityHash": "disk", "sourcePool": "rbd", "sourceImage": "vm", "newSnapshot": "next"}]))
-                (self.root / "metrics.json").write_text(json.dumps([{"writeVerified": verified, "targetWrittenBytes": count, "verifiedBytes": count}]))
+                (self.root / "metrics.json").write_text(json.dumps([{"writeVerified": verified, "targetWrittenBytes": count, "verifiedBytes": count if tracker == "rbd" else 0,
+                    "transferCompletionVerified": verified, "verificationMethod": "QEMU_BACKUP_COMPLETION"}]))
                 command = ('ftctl_kvm_vmware_commit_baseline_and_metrics "$d/map.json" "$d/baseline.json" "$d/rows.json" "$d/metrics.json" "$d/baseline.json" "$d/out.json" FULL_REVERSE_SEED'
                            if tracker == "rbd" else 'ftctl_kvm_vmware_commit_qcow2_baseline_and_metrics "$d/map.json" "$d/baseline.json" "$d/metrics.json" "$d/out.json" FULL_REVERSE_SEED')
                 script = 'source "$1/lib/ftctl/dr_kvm_vmware_mover.sh"; d="$2"; ' + command
@@ -58,6 +59,10 @@ class CommonBaselineTest(unittest.TestCase):
                 self.assertEqual(succeeds, result.returncode == 0, result.stderr)
                 if succeeds:
                     self.assertTrue(json.loads(self.baseline.read_text())["commonBaselineVerified"])
+                    evidence = json.loads((self.root / "out.json").read_text())
+                    self.assertEqual(tracker == "rbd", evidence["readbackVerified"])
+                    self.assertEqual(count if tracker == "rbd" else 0, evidence["readbackVerifiedBytes"])
+                    self.assertEqual(count if tracker == "rbd" else 0, evidence["verifiedBytes"])
                 else:
                     self.assertEqual(before, self.baseline.read_bytes())
 

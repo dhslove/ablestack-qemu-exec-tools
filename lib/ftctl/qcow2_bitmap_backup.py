@@ -170,7 +170,12 @@ def write_progress(path, args, state, processed, total, changed, started, sample
         "transferPayloadBytes": aggregate_processed,
         "sourceReadBytes": aggregate_processed,
         "targetWrittenBytes": aggregate_processed,
-        "verifiedBytes": aggregate_processed if published_state == "COMPLETED" else 0,
+        # QMP completion does not compare destination bytes with the source.
+        "verifiedBytes": 0,
+        "readbackVerified": False,
+        "readbackVerifiedBytes": 0,
+        "verificationMethod": "QEMU_BACKUP_COMPLETION",
+        "transferCompletionVerified": published_state == "COMPLETED",
         "percent": percent,
         "throughputBps": throughput,
         "etaSeconds": eta,
