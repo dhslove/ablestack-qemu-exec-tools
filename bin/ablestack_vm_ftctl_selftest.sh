@@ -10517,13 +10517,13 @@ selftest_case_dr_failback_live_worker_journal_is_read_only() (
   ticks="$(ftctl_dr_scheduler_process_start_ticks "${pid}")"
   ftctl_state_write_kv_all "${run_path}" \
     "action=dr-failback" "state=RUNNING" "step=failback-transfer" "progress=55" \
-    "failback_phase=REVERSE_SYNCING" "worker_state=RUNNING" \
+    "failback_phase=REVERSE_SYNCING" "worker_state=RUNNING" "checkpoint_sequence=185" \
     "worker_pid=${pid}" "worker_start_ticks=$((ticks + 1))" "worker_pid_alive=true" \
     "transfer_progress_path=${progress_path}"
   ftctl_dr_runtime_worker_journal_write "${plan}" "${run}" "nonce-live" "7" \
     "${pid}" "${ticks}" "RUNNING" "$(ftctl_now_iso8601)"
-  printf '{"state":"COPYING","transferPayloadBytes":1048576,"updatedAtEpochMs":%s}\n' \
-    "$(( $(date +%s) * 1000 ))" > "${progress_path}"
+  printf '{"schemaVersion":2,"planUuid":"%s","runUuid":"%s","direction":"KVM_TO_VMWARE","cycleSequence":185,"state":"COPYING","transferPayloadBytes":1048576,"updatedAtEpochMs":%s}\n' \
+    "${plan}" "${run}" "$(( $(date +%s) * 1000 ))" > "${progress_path}"
   before="$(sha256sum "${run_path}" "${worker_path}")"
   output="$(ftctl_dr_runtime_emit_state_json "dr-failback" "ok" "${plan}" "${run}" "${run_path}" "0")"
   after="$(sha256sum "${run_path}" "${worker_path}")"
@@ -10536,6 +10536,16 @@ selftest_case_dr_failback_live_worker_journal_is_read_only() (
   selftest_assert_contains "${output}" '"transfer_activity_state":"COPYING"' "live transfer activity is projected"
   selftest_assert_contains "${output}" '"transfer_payload_bytes":1048576' "live payload bytes are projected"
   selftest_assert_contains "${output}" '"terminal_authoritative":false' "live transfer has no terminal"
+  selftest_assert_contains "${output}" "\"transfer_run_uuid\":\"${run}\"" "progress is bound to operation"
+  jq '.runUuid = "previous-run" | .state = "COMPLETE" | .percent = 100' "${progress_path}" > "${progress_path}.tmp"
+  mv "${progress_path}.tmp" "${progress_path}"
+  output="$(ftctl_dr_runtime_emit_state_json "dr-failback" "ok" "${plan}" "${run}" "${run_path}" "0")"
+  selftest_assert_contains "${output}" '"transfer_activity_state":"UNKNOWN"' "old completed Run is not current transfer"
+  selftest_assert_contains "${output}" '"transfer_payload_bytes":0' "old completed bytes are not reused"
+  jq --arg run "${run}" '.runUuid = $run | .cycleSequence = 184' "${progress_path}" > "${progress_path}.tmp"
+  mv "${progress_path}.tmp" "${progress_path}"
+  output="$(ftctl_dr_runtime_emit_state_json "dr-failback" "ok" "${plan}" "${run}" "${run_path}" "0")"
+  selftest_assert_contains "${output}" '"transfer_activity_state":"UNKNOWN"' "older checkpoint of the same Run is not current transfer"
 )
 
 selftest_case_dr_kvm_vmware_reverse_preflight_ignores_domain_runtime() {

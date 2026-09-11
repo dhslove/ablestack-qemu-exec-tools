@@ -1897,7 +1897,7 @@ ftctl_dr_runtime_reverse_checkpoint() {
     "updated_at=${now}" || true
   cp -f "${run_path}" "${status_path}" 2>/dev/null || true
 
-  output="$(FTCTL_DR_TRANSFER_PROGRESS_PATH="${transfer_progress_path}" \
+  output="$(FTCTL_DR_PROGRESS_RUN_UUID="${run}" FTCTL_DR_TRANSFER_PROGRESS_PATH="${transfer_progress_path}" \
     ftctl_dr_scheduler_run_cycle "${plan}" "${run}-${phase}" "${profile_file}" "${sequence}" "${cycle_type}")" || rc=$?
   [[ "${rc}" == "0" ]] || return "${rc}"
   manifest_path="$(awk -F '\t' 'NF >= 2 {print $1; exit}' <<< "${output}")"
@@ -4565,6 +4565,7 @@ ftctl_dr_runtime_emit_state_json() {
   local replication_activity protection_state resource_disposition active_worker_run_uuid active_worker_pid active_worker_start_ticks
   local worker_heartbeat_at control_request_run_uuid scheduler_control_request_run_uuid owner_matched
   local transfer_owner_run_uuid progress_plan_uuid progress_run_uuid progress_cycle_sequence
+  local transfer_plan_uuid="" transfer_run_uuid="" transfer_direction="" transfer_expected_sequence=""
   local scheduler_desired_state scheduler_service_unit scheduler_unit_active_state scheduler_unit_sub_state
   local scheduler_unit_main_pid scheduler_cgroup scheduler_recovery_state scheduler_recovery_trigger scheduler_recovered_at
   local transition_state transition_action transition_quiesced_at checkpoint_lease_state checkpoint_lease_path
@@ -4796,7 +4797,17 @@ ftctl_dr_runtime_emit_state_json() {
         worker_heartbeat_at="${worker_heartbeat_current}"
       fi
     fi
-    if [[ -f "${progress_journal_path}" ]]; then
+    if [[ "${action}" == dr-failback* ]]; then
+      transfer_expected_sequence="$(ftctl_dr_runtime_state_get_from_path "${state_path}" checkpoint_sequence)"
+    fi
+    if [[ -f "${progress_journal_path}" ]] && jq -e --arg plan "${plan}" --arg run "${run}" \
+        --arg sequence "${transfer_expected_sequence}" \
+        '.planUuid == $plan and .runUuid == $run and
+         ($sequence == "" or $sequence == "0" or (.cycleSequence | tostring) == $sequence)' \
+        "${progress_journal_path}" >/dev/null 2>&1; then
+      transfer_plan_uuid="${plan}"
+      transfer_run_uuid="${run}"
+      transfer_direction="$(jq -r '.direction // empty' "${progress_journal_path}")"
       transfer_activity_state="$(jq -r '.state // "UNKNOWN"' "${progress_journal_path}" 2>/dev/null || printf UNKNOWN)"
       transfer_payload_bytes="$(jq -r '.transferPayloadBytes // 0' "${progress_journal_path}" 2>/dev/null || printf 0)"
       transfer_progress_schema_version="$(jq -r '.schemaVersion // 0' "${progress_journal_path}" 2>/dev/null || printf 0)"
@@ -4952,6 +4963,9 @@ ftctl_dr_runtime_emit_state_json() {
                  || "${progress_cycle_sequence}" == "${plan_cycle_sequence}" ) \
             ]] && jq -e '(.schemaVersion // 0) >= 2 and (.bytesTotal // 0) > 0' \
                  "${progress_journal_path}" >/dev/null 2>&1; then
+        transfer_plan_uuid="${plan}"
+        transfer_run_uuid="${progress_run_uuid}"
+        transfer_direction="$(jq -r '.direction // empty' "${progress_journal_path}")"
         transfer_activity_state="$(jq -r '.state // "UNKNOWN"' "${progress_journal_path}")"
         transfer_payload_bytes="$(jq -r '.transferPayloadBytes // 0' "${progress_journal_path}")"
         transfer_progress_schema_version="$(jq -r '.schemaVersion // 0' "${progress_journal_path}")"
@@ -5555,6 +5569,9 @@ PY
   ftctl_dr_runtime_json_number_field "transfer_cycle_sequence" "${transfer_cycle_sequence}"
   ftctl_dr_runtime_json_number_field "transfer_sample_sequence" "${transfer_sample_sequence}"
   ftctl_dr_runtime_json_string_field "transfer_phase" "${transfer_phase}"
+  ftctl_dr_runtime_json_string_field "transfer_plan_uuid" "${transfer_plan_uuid}"
+  ftctl_dr_runtime_json_string_field "transfer_run_uuid" "${transfer_run_uuid}"
+  ftctl_dr_runtime_json_string_field "transfer_direction" "${transfer_direction}"
   ftctl_dr_runtime_json_string_field "transfer_mode" "${transfer_mode}"
   ftctl_dr_runtime_json_number_field "transfer_bytes_total" "${transfer_bytes_total}"
   ftctl_dr_runtime_json_number_field "transfer_bytes_processed" "${transfer_bytes_processed}"
