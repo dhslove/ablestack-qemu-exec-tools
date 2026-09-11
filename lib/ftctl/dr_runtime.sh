@@ -2717,34 +2717,37 @@ else:
             clone_spec = f"{pool}/{clone_image}"
             snap_spec = f"{source_rbd}@{snapshot}"
             try:
-                subprocess.run(["rbd", "info", source_rbd], check=True,
-                               stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
-                proof_result = subprocess.run(["rbd", "image-meta", "get", source_rbd, snapshot], check=False,
-                                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                reused_seal = proof_result.returncode == 0
-                if existing_only or reused_seal:
-                    proof = proof_result.stdout.strip()
-                    if proof != checkpoint_ref:
-                        fail(53, "DR_TEST_CHECKPOINT_SEQUENCE_MISMATCH: RBD checkpoint seal does not match request")
-                    subprocess.run(["rbd", "info", snap_spec], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-                else:
-                    subprocess.run(["rbd", "snap", "create", snap_spec], check=True)
-                records.append({
-                    "device": disk.get("device") or f"disk{index}",
-                    "state": "CREATING",
-                    "type": "rbd-clone",
-                    "backing": f"rbd:{source_rbd}",
-                    "snapshot": snapshot,
-                    "retainedCheckpoint": existing_only or reused_seal,
-                    "checkpointRef": checkpoint_ref,
-                    "clone": f"rbd:{clone_spec}",
-                    "path": f"rbd:{clone_spec}",
-                    "sizeBytes": disk.get("sizeBytes") or disk.get("capacityBytes") or 0,
-                })
-                if not existing_only and not reused_seal:
-                    subprocess.run(["rbd", "snap", "protect", snap_spec], check=True)
-                subprocess.run(["rbd", "clone", snap_spec, clone_spec], check=True)
-                records[-1]["state"] = "CREATED"
+                sys.path.insert(0, os.path.dirname(checkpoint_tool))
+                from dr_checkpoint_store import storage_lock
+                with storage_lock({"planUuid": str(session.get("planUuid")), "disks": [{"provider": "RBD", "canonicalLocator": locator}]}):
+                    subprocess.run(["rbd", "info", source_rbd], check=True,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+                    proof_result = subprocess.run(["rbd", "image-meta", "get", source_rbd, snapshot], check=False,
+                                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                    reused_seal = proof_result.returncode == 0
+                    if existing_only or reused_seal:
+                        proof = proof_result.stdout.strip()
+                        if proof != checkpoint_ref:
+                            fail(53, "DR_TEST_CHECKPOINT_SEQUENCE_MISMATCH: RBD checkpoint seal does not match request")
+                        subprocess.run(["rbd", "info", snap_spec], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                    else:
+                        subprocess.run(["rbd", "snap", "create", snap_spec], check=True)
+                    records.append({
+                        "device": disk.get("device") or f"disk{index}",
+                        "state": "CREATING",
+                        "type": "rbd-clone",
+                        "backing": f"rbd:{source_rbd}",
+                        "snapshot": snapshot,
+                        "retainedCheckpoint": existing_only or reused_seal,
+                        "checkpointRef": checkpoint_ref,
+                        "clone": f"rbd:{clone_spec}",
+                        "path": f"rbd:{clone_spec}",
+                        "sizeBytes": disk.get("sizeBytes") or disk.get("capacityBytes") or 0,
+                    })
+                    if not existing_only and not reused_seal:
+                        subprocess.run(["rbd", "snap", "protect", snap_spec], check=True)
+                    subprocess.run(["rbd", "clone", snap_spec, clone_spec], check=True)
+                    records[-1]["state"] = "CREATED"
             except subprocess.CalledProcessError as exc:
                 stderr = (exc.stderr or "").strip() if isinstance(exc.stderr, str) else ""
                 fail(46, f"{'DR_TEST_SEALED_CHECKPOINT_MISSING' if existing_only else 'DR_TEST_MATERIALIZATION_FAILED'}: RBD test clone failed for {source_rbd}: {stderr or exc}")

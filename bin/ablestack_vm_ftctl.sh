@@ -426,7 +426,7 @@ parse_args() {
         print_version
         exit "${EXIT_OK}"
         ;;
-      protect|protect-start|status|reconcile|failover|failover-prepare|failback|failback-sync|failback-finalize|failback-reprotect|unprotect|fence-confirm|fence-clear|pause-protection|resume-protection|preflight-remote|dr-key-ensure|dr-key-install|dr-key-remove|check|health|events|snapshot|dr-plan-apply|dr-sync-start|dr-sync-recover|dr-sync-pause|dr-sync-resume|dr-scheduler-run|dr-reconcile|dr-test-failover|dr-test-cleanup|dr-test-prepare|dr-test-artifact-cleanup|dr-failover|dr-failover-abort|dr-failback|dr-reprotect|dr-target-materialized|dr-checkpoint-restore|dr-checkpoint-publish-worker|dr-checkpoint-publish|dr-checkpoint-ack|dr-target-export-start|dr-target-export-stop|dr-cutover-commit|dr-cutover-commit-status|dr-failback-commit|dr-failback-commit-status|dr-failback-abort|dr-release|dr-status|dr-transition-preflight|dr-reverse-preflight|dr-capabilities|dr-cancel|config)
+      protect|protect-start|status|reconcile|failover|failover-prepare|failback|failback-sync|failback-finalize|failback-reprotect|unprotect|fence-confirm|fence-clear|pause-protection|resume-protection|preflight-remote|dr-key-ensure|dr-key-install|dr-key-remove|check|health|events|snapshot|dr-plan-apply|dr-sync-start|dr-sync-recover|dr-sync-pause|dr-sync-resume|dr-scheduler-run|dr-reconcile|dr-test-failover|dr-test-cleanup|dr-test-prepare|dr-test-artifact-cleanup|dr-failover|dr-failover-abort|dr-failback|dr-reprotect|dr-target-materialized|dr-checkpoint-restore|dr-checkpoint-publish-worker|dr-checkpoint-manage|dr-checkpoint-publish|dr-checkpoint-ack|dr-target-export-start|dr-target-export-stop|dr-cutover-commit|dr-cutover-commit-status|dr-failback-commit|dr-failback-commit-status|dr-failback-abort|dr-release|dr-status|dr-transition-preflight|dr-reverse-preflight|dr-capabilities|dr-cancel|config)
         [[ -z "${CLI_COMMAND}" ]] || {
           echo "ERROR: multiple commands specified" >&2
           exit "${EXIT_USAGE}"
@@ -906,6 +906,9 @@ dispatch() {
       ;;
     dr-checkpoint-publish-worker)
       ftctl_dr_checkpoint_publish_worker_result "${CLI_PLAN}" "${CLI_ARTIFACT_SPEC_JSON}"
+      ;;
+    dr-checkpoint-manage)
+      ftctl_dr_checkpoint_manage "${CLI_PLAN}" "${CLI_ARTIFACT_SPEC_JSON}"
       ;;
     dr-checkpoint-publish)
       ftctl_dr_checkpoint_publish "${CLI_PLAN}" "${CLI_ARTIFACT_SPEC_JSON}"

@@ -397,6 +397,13 @@ def seal(args, *, probe=True):
 
 
 def create_overlay(qemu_img, backing, output):
+    # GC and overlay creation share the target storage lock across workers.
+    from dr_checkpoint_store import overlay_guard
+    with overlay_guard(backing, output):
+        return _create_overlay(qemu_img, backing, output)
+
+
+def _create_overlay(qemu_img, backing, output):
     if output.exists():
         raise CheckpointError("DR_TEST_CHECKPOINT_CONTRACT_INVALID", f"test artifact already exists: {output}")
     result = subprocess.run(

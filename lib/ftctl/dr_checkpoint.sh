@@ -270,3 +270,29 @@ if request.get("planUuid") != plan or not owner or owner == request.get("produce
 os.replace(path, path.with_name(path.name + ".rejected-" + str(time.time_ns())))
 PY
 }
+
+ftctl_dr_checkpoint_manage() {
+  python3 - "${BASH_SOURCE[0]%/*}" "${1-}" "${2-}" <<'PYTHON'
+import json, os, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from dr_checkpoint_store import execute
+def emit(value):
+    # Ceph can leave inherited stdout nonblocking. Large inventories must be
+    # completely drained; a partial JSON write must not turn a committed delete
+    # into an unparseable failure response.
+    os.set_blocking(sys.stdout.fileno(), True)
+    print(json.dumps(value, separators=(",", ":")), flush=True)
+try:
+    request = json.loads(Path(sys.argv[3]).read_text())
+    if request.get("planUuid") != sys.argv[2]:
+        raise ValueError("DR_CHECKPOINT_PLAN_MISMATCH")
+    result = execute(request)
+    result.update(result="ok", accepted=True)
+    emit(result)
+except Exception as exc:
+    emit({"result": "error", "error_code": "DR_CHECKPOINT_CLEANUP_FAILED",
+          "error_message": str(exc)[:1000]})
+    raise SystemExit(1)
+PYTHON
+}

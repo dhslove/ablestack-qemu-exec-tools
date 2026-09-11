@@ -8,6 +8,8 @@ A prepared disk is not a restore point. Only the committed manifest is public.
 No failure here removes an earlier generation or an artifact referenced by a VM.
 """
 import argparse
+import contextlib
+import time
 import fcntl
 import hashlib
 import json
@@ -65,6 +67,10 @@ def identity(request):
 
 
 class Backend:
+    def storage_lock(self, contract):
+        from dr_checkpoint_store import storage_lock
+        return storage_lock(contract)
+
     def shared_manifest(self, contract, value=None):
         first = contract["disks"][0]
         key = "ftctl-dr-set-" + digest(contract["checkpointRef"])[:32]
@@ -168,8 +174,13 @@ def publish(request, directory, backend=None):
     directory.mkdir(parents=True, exist_ok=True)
     key = digest(contract["checkpointRef"])
     manifest = directory / (key + ".json")
-    with (directory / "publication.lock").open("a+") as lock:
+    with (backend.storage_lock(contract) if hasattr(backend, "storage_lock") else contextlib.nullcontext()), (directory / "publication.lock").open("a+") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
+        if isinstance(backend, Backend):
+            from dr_checkpoint_store import Store
+            store = Store(contract)
+            if store.record(store.gc_key(contract["checkpointRef"])):
+                raise CheckpointError("DR_CHECKPOINT_EXPIRED")
         result = backend.shared_manifest(contract)
         if result is not None:
             proof = dict(result)
@@ -189,7 +200,7 @@ def publish(request, directory, backend=None):
         for record in records:
             backend.verify(contract, record)
         backend.publish_file_set(contract, records)
-        result = {"state": "COMMITTED", "contract": contract, "contractSha256": digest(contract), "records": records}
+        result = {"state": "COMMITTED", "createdEpoch": time.time(), "contract": contract, "contractSha256": digest(contract), "records": records}
         result["manifestSha256"] = digest(result)
         backend.shared_manifest(contract, result)
         atomic_json(manifest, result)
@@ -205,8 +216,13 @@ def restore(request, directory, backend=None):
     backend = backend or Backend()
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
-    with (directory / "publication.lock").open("a+") as lock:
+    with (backend.storage_lock(contract) if hasattr(backend, "storage_lock") else contextlib.nullcontext()), (directory / "publication.lock").open("a+") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
+        if isinstance(backend, Backend):
+            from dr_checkpoint_store import Store
+            store = Store(contract)
+            if store.record(store.gc_key(contract["checkpointRef"])):
+                raise CheckpointError("DR_CHECKPOINT_EXPIRED")
         result = backend.shared_manifest(contract)
         if result is None or result.get("contract") != contract:
             raise CheckpointError("DR_CHECKPOINT_COMMITTED_SET_MISSING")
