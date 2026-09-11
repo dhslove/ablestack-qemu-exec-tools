@@ -2182,9 +2182,29 @@ ftctl_dr_scheduler_worker() {
       next_sequence="$(jq -r '.request.checkpointSequence' "${checkpoint_pending_path}")"
       cycle_run="$(jq -r '.request.producerRunUuid' "${checkpoint_pending_path}")"
       local pending_cycle_context
-      pending_cycle_context="$(ftctl_dr_checkpoint_resume_context "${checkpoint_pending_path}" \
+      if ! pending_cycle_context="$(ftctl_dr_checkpoint_resume_context "${checkpoint_pending_path}" \
         "${cycle_request_state}" "${cycle_request_mode}" "${cycle_request_owner}" \
-        "$(ftctl_state_read_kv "${sequence_path}" requested_cycle_sequence 2>/dev/null || true)")" || return 108
+        "$(ftctl_state_read_kv "${sequence_path}" requested_cycle_sequence 2>/dev/null || true)")"; then
+        if [[ "${cycle_request_state}" == "PENDING" && "${cycle_request_mode}" == "FULL_RESEED" \
+            && -n "${cycle_request_owner}" && "${cycle_request_owner}" != "${cycle_run}" ]]; then
+          # Preserve rejected evidence. Only an explicit new recovery request may
+          # supersede it; never relabel or approve another producer's candidate.
+          ftctl_dr_checkpoint_abandon_invalid "${checkpoint_pending_path}" "${plan}" \
+            "${cycle_request_owner}" || return 108
+          continue
+        fi
+        ftctl_dr_scheduler_update_state "${state_path}" "${status_path}" \
+          "state=ERROR" "step=checkpoint-recovery-required" \
+          "scheduler_state=RUNNING" "scheduler_health=RECOVERY_REQUIRED" \
+          "scheduler_recovery_state=FAILED" "cycle_retry_mode=OPERATOR_REPAIR_REQUIRED" \
+          "cycle_state=FAILED" "replication_activity=STOPPED" \
+          "protection_state=DEGRADED" "retryable=false" \
+          "error_code=DR_CHECKPOINT_CANDIDATE_INVALID" \
+          "error_message=Checkpoint evidence does not match its producer; request full resynchronization" \
+          "updated_at=$(ftctl_now_iso8601)" || true
+        ftctl_dr_scheduler_sleep_or_stop "${plan}" 30 "${control_generation}" || true
+        continue
+      fi
       IFS=$'\t' read -r cycle_type cycle_request_bound <<< "${pending_cycle_context}"
     fi
     checkpoint_ref="ftctl:${plan}:${cycle_run}:${next_sequence}"

@@ -255,3 +255,18 @@ atomic_json(Path(artifact).with_name("result.json"), result)
 PY
   return "${rc}"
 }
+
+# Evidence is retained for diagnosis; the last committed checkpoint is untouched.
+ftctl_dr_checkpoint_abandon_invalid() {
+  python3 - "$@" <<'PY'
+import json, os, sys, time
+from pathlib import Path
+path, plan, owner = sys.argv[1:]
+path = Path(path)
+pending = json.loads(path.read_text())
+request = pending["request"]
+if request.get("planUuid") != plan or not owner or owner == request.get("producerRunUuid"):
+    raise SystemExit("DR_CHECKPOINT_RECOVERY_REQUEST_INVALID")
+os.replace(path, path.with_name(path.name + ".rejected-" + str(time.time_ns())))
+PY
+}

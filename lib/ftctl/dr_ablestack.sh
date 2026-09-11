@@ -2304,12 +2304,12 @@ ftctl_dr_ablestack_mark_driver_error() {
 ftctl_dr_ablestack_write_manifest() {
   local disk_map="${1-}" records_path="${2-}" manifest_path="${3-}" phase="${4-}"
   ftctl_ensure_dir "$(dirname "${manifest_path}")" "0755"
-  python3 - "${disk_map}" "${records_path}" "${manifest_path}" "${phase}" "$(ftctl_now_iso8601)" <<'PY'
+  python3 - "${disk_map}" "${records_path}" "${manifest_path}" "${phase}" "$(ftctl_now_iso8601)" "${FTCTL_DR_PRODUCER_RUN_UUID:-}" <<'PY'
 import json
 import os
 import sys
 
-disk_map_path, records_path, manifest_path, phase, now = sys.argv[1:6]
+disk_map_path, records_path, manifest_path, phase, now, producer_run = sys.argv[1:7]
 with open(disk_map_path, "r", encoding="utf-8") as fh:
     disk_map = json.load(fh)
 
@@ -2351,7 +2351,7 @@ manifest = {
     "phase": phase,
     "generatedAt": now,
     "planUuid": disk_map.get("planUuid", ""),
-    "runUuid": disk_map.get("runUuid", ""),
+    "runUuid": producer_run or disk_map.get("runUuid", ""),
     "sourceProvider": disk_map.get("sourceProvider", ""),
     "targetProvider": disk_map.get("targetProvider", ""),
     "target": disk_map.get("target", {}),
@@ -2373,14 +2373,14 @@ ftctl_dr_ablestack_write_checkpoint() {
   ftctl_ensure_dir "$(dirname "${checkpoint_path}")" "0755"
   python3 - "${disk_map}" "${manifest_path}" "${checkpoint_path}" "${state}" "${source_at}" "${target_at}" "${rpo}" \
     "${requested_mode}" "${effective_mode}" "${incremental_verified}" "${changed_bytes}" "${reseed_reason}" \
-    "${cycle_sequence}" "${nbd_source_count}" "${nbd_target_count}" <<'PY'
+    "${cycle_sequence}" "${nbd_source_count}" "${nbd_target_count}" "${FTCTL_DR_PRODUCER_RUN_UUID:-}" <<'PY'
 import datetime
 import json
 import os
 import sys
 import uuid
 
-disk_map_path, manifest_path, checkpoint_path, state, source_at, target_at, rpo, requested_mode, effective_mode, incremental_verified, changed_bytes, reseed_reason, cycle_sequence, nbd_source_count, nbd_target_count = sys.argv[1:16]
+disk_map_path, manifest_path, checkpoint_path, state, source_at, target_at, rpo, requested_mode, effective_mode, incremental_verified, changed_bytes, reseed_reason, cycle_sequence, nbd_source_count, nbd_target_count, producer_run = sys.argv[1:17]
 with open(disk_map_path, "r", encoding="utf-8") as fh:
     disk_map = json.load(fh)
 manifest = {}
@@ -2396,7 +2396,7 @@ checkpoint = {
     "targetReadyRpoSeconds": int(rpo) if str(rpo).isdigit() else None,
     "manifest": manifest_path,
     "planUuid": disk_map.get("planUuid", ""),
-    "runUuid": disk_map.get("runUuid", ""),
+    "runUuid": producer_run or disk_map.get("runUuid", ""),
     "disks": manifest.get("disks", disk_map.get("disks", [])),
 }
 if requested_mode:
@@ -2964,6 +2964,8 @@ ftctl_dr_ablestack_cycle_incremental_capable() {
 ftctl_dr_ablestack_replication_cycle() {
   local plan="${1-}" run="${2-}" profile_file="${3-}" sequence="${4-}" cycle_type="${5-}"
   local disk_map manifest_path checkpoint_path cycle_run normalized_cycle_type
+  # The scheduler producer survives profile/control Run changes during a cycle.
+  local -x FTCTL_DR_PRODUCER_RUN_UUID="${run}"
 
   [[ -n "${plan}" && -n "${run}" && -n "${profile_file}" ]] || return 2
   cycle_run="${run}-cycle-${sequence:-0}"
