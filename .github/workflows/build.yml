@@ -83,6 +83,338 @@ jobs:
 
   # One static launcher payload is shared byte-for-byte by every host
   # package and guest ISO. Host vm_exec verifies these guest bytes.
+
+  build-v2k-rpm:
+    needs: [build-winpe]
+    if: ${{ always() && (inputs.use_prebuilt_winpe || needs.build-winpe.result == 'success') }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        host_os_minor: ["9.6", "9.7"]
+    container:
+      image: rockylinux/rockylinux:9
+      options: --user 0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ env.WORKFLOW_SOURCE_REF }}
+
+      - name: Install build deps (v2k, Rocky ${{ matrix.host_os_minor }})
+        run: |
+          set -euo pipefail
+
+          ROCKY_MINOR="${{ matrix.host_os_minor }}"
+          REPO_PREFIX="rocky-build-${ROCKY_MINOR}"
+          case "${ROCKY_MINOR}" in
+            9.6|9.7) REPO_ROOT="https://dl.rockylinux.org/vault/rocky/${ROCKY_MINOR}" ;;
+            9.8) REPO_ROOT="https://dl.rockylinux.org/pub/rocky/${ROCKY_MINOR}" ;;
+            *)
+              echo "[ERR] Unsupported Rocky minor for V2K build: ${ROCKY_MINOR}" >&2
+              exit 2
+              ;;
+          esac
+
+          # Keep V2K build inputs pinned to the intended Rocky minor.
+          # 9.6/9.7 are archived in vault; 9.8 is the current published minor.
+          cat > "/etc/yum.repos.d/${REPO_PREFIX}.repo" <<EOF
+          [${REPO_PREFIX}-baseos]
+          name=Rocky Linux ${ROCKY_MINOR} - BaseOS
+          baseurl=${REPO_ROOT}/BaseOS/\$basearch/os/
+          enabled=1
+          gpgcheck=0
+
+          [${REPO_PREFIX}-appstream]
+          name=Rocky Linux ${ROCKY_MINOR} - AppStream
+          baseurl=${REPO_ROOT}/AppStream/\$basearch/os/
+          enabled=1
+          gpgcheck=0
+
+          [${REPO_PREFIX}-crb]
+          name=Rocky Linux ${ROCKY_MINOR} - CRB
+          baseurl=${REPO_ROOT}/CRB/\$basearch/os/
+          enabled=1
+          gpgcheck=0
+          EOF
+
+          dnf clean all
+          dnf -y --disablerepo="*" --enablerepo="${REPO_PREFIX}-*" makecache
+          # Handle curl vs curl-minimal replacement in the Rocky container image
+          dnf -y --disablerepo="*" --enablerepo="${REPO_PREFIX}-*" install \
+            --allowerasing ca-certificates curl-minimal || true
+
+          dnf -y --disablerepo="*" --enablerepo="${REPO_PREFIX}-*" install \
+            make rpm-build tar git jq dnf-plugins-core createrepo_c python3 gnupg2 binutils xz \
+            gcc make autoconf automake libtool bison flex gperf gettext-devel ocaml ocaml-findlib \
+            libxml2-devel libconfig-devel file-devel libselinux-devel libtirpc-devel \
+            pcre2-devel libzstd-devel augeas-devel json-c-devel ncurses-devel readline-devel
+
+      - name: Configure Rocky ${{ matrix.host_os_minor }} build repos + enable EPEL (build-time only)
+        run: |
+          set -euo pipefail
+
+          ROCKY_MINOR="${{ matrix.host_os_minor }}"
+          REPO_PREFIX="rocky-build-${ROCKY_MINOR}"
+          case "${ROCKY_MINOR}" in
+            9.6|9.7) REPO_ROOT="https://dl.rockylinux.org/vault/rocky/${ROCKY_MINOR}" ;;
+            9.8) REPO_ROOT="https://dl.rockylinux.org/pub/rocky/${ROCKY_MINOR}" ;;
+            *)
+              echo "[ERR] Unsupported Rocky minor for V2K build: ${ROCKY_MINOR}" >&2
+              exit 2
+              ;;
+          esac
+
+          cat > "/etc/yum.repos.d/${REPO_PREFIX}.repo" <<EOF
+          [${REPO_PREFIX}-baseos]
+          name=Rocky Linux ${ROCKY_MINOR} - BaseOS
+          baseurl=${REPO_ROOT}/BaseOS/\$basearch/os/
+          enabled=1
+          gpgcheck=0
+
+          [${REPO_PREFIX}-appstream]
+          name=Rocky Linux ${ROCKY_MINOR} - AppStream
+          baseurl=${REPO_ROOT}/AppStream/\$basearch/os/
+          enabled=1
+          gpgcheck=0
+
+          [${REPO_PREFIX}-crb]
+          name=Rocky Linux ${ROCKY_MINOR} - CRB
+          baseurl=${REPO_ROOT}/CRB/\$basearch/os/
+          enabled=1
+          gpgcheck=0
+          EOF
+
+          echo "[INFO] Enabled repos (${ROCKY_MINOR}):"
+          grep -nE '^\[|^baseurl=' "/etc/yum.repos.d/${REPO_PREFIX}.repo"
+
+          dnf -y --disablerepo="*" --enablerepo="${REPO_PREFIX}-*" makecache
+          # Enable EPEL only for build-time dependencies such as nbd-related packages
+          # Install epel-release directly because it may not resolve from vault-only repos.
+          # Detect the active EPEL repo id after installation.
+          # Use that detected repo id for later repoquery/download steps.
+          # Use the detected repo id for later repoquery and download steps.
+          EPEL_RPM_URL="https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm"
+          echo "[INFO] Installing EPEL release RPM: ${EPEL_RPM_URL}"
+          curl -fL -o /tmp/epel-release.rpm "${EPEL_RPM_URL}"
+          rpm -Uvh --nosignature /tmp/epel-release.rpm
+
+          # Detect the effective EPEL repository id after epel-release installation
+          EPEL_REPO_ID="$(dnf repolist all 2>/dev/null | awk 'tolower($1) ~ /^epel/ {print $1; exit}')"
+          if [[ -z "${EPEL_REPO_ID}" ]]; then
+            echo "[ERR] EPEL repo id not found after installing epel-release." >&2
+            dnf repolist all || true
+            exit 2
+          fi
+          echo "[INFO] Detected EPEL repo id: ${EPEL_REPO_ID}"
+          echo "EPEL_REPO_ID=${EPEL_REPO_ID}" >> "$GITHUB_ENV"
+
+          dnf -y --disablerepo="*" --enablerepo="${REPO_PREFIX}-*","${EPEL_REPO_ID}" makecache
+
+      - name: Stage generated WinPE ISO into V2K RPM source
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.winpe_artifact_name }}
+          path: winpe
+
+      - name: Show staged WinPE ISO for V2K RPM
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "[INFO] WinPE files staged before V2K RPM build:"
+          find winpe -maxdepth 1 -type f -printf '%f %s bytes\n' | sort || true
+          mapfile -d '' -t WINPE_ISOS < <(
+            find winpe -maxdepth 1 -type f -iname '*.iso' -print0 | sort -z
+          )
+          if [[ "${#WINPE_ISOS[@]}" -ne 1 ]]; then
+            echo "[ERR] Expected exactly one staged WinPE ISO, found ${#WINPE_ISOS[@]}." >&2
+            exit 2
+          fi
+          (
+            cd winpe
+            sha256sum -c SHA256SUMS
+          )
+          RELEASE_TAG="${{ inputs.release_tag }}"
+          WINPE_SUFFIX="${RELEASE_TAG:-validation-${GITHUB_RUN_NUMBER}}"
+          EXPECTED_NAME="winpe-ablestack-v2k-${WINPE_SUFFIX}-amd64.iso"
+          if [[ "$(basename "${WINPE_ISOS[0]}")" != "${EXPECTED_NAME}" ]]; then
+            echo "[ERR] Versioned WinPE filename mismatch: expected=${EXPECTED_NAME} actual=$(basename "${WINPE_ISOS[0]}")" >&2
+            exit 2
+          fi
+
+      - name: Stage Ubuntu 22.04 offline guest agent from signed archive indexes
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Extract the distribution keyring from the pinned Ubuntu archive package.
+          curl --fail --location --proto '=https' --tlsv1.2 -o /tmp/ubuntu-keyring.deb https://archive.ubuntu.com/ubuntu/pool/main/u/ubuntu-keyring/ubuntu-keyring_2021.03.26_all.deb
+          echo '0d0e7ed6b112f5d03eabf3c7eb01ebdacf9c57714b279e90495cfc58c8c4520f  /tmp/ubuntu-keyring.deb' | sha256sum -c -
+          ar p /tmp/ubuntu-keyring.deb data.tar.xz | tar -xJ -C /tmp ./usr/share/keyrings/ubuntu-archive-keyring.gpg
+          python3 tools/v2k/prepare-guest-config-assets.py --output assets/guest-config/ubuntu22 --ubuntu-keyring /tmp/usr/share/keyrings/ubuntu-archive-keyring.gpg
+          python3 tools/v2k/prepare-guest-config-appliance.py --archive-only --output assets/guest-config/appliance
+          bash tools/v2k/build-guest-config-native.sh assets/guest-config/native
+          python3 tools/v2k/prepare-guest-config-windows.py --output assets/guest-config/windows
+          python3 tools/v2k/prepare-guest-config-rocky.py --output assets/guest-config/rocky97
+
+      - name: Verify V2K Cloud service-offering CPU speed handling
+        shell: bash
+        run: bash tests/v2k_cloud_offering_cpu_speed_smoke.sh
+
+      - name: Build V2K RPM (separate path)
+        run: |
+          set -e
+          # Build V2K RPM in an isolated path to avoid overlap with other packaging jobs
+          make v2k-rpm
+
+      - name: Verify ablestack_v2k rpm contains bash completion and runtime assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          RPM_FILE=$(ls -1 build/rpm-v2k/ablestack_v2k-*.rpm | head -n 1)
+          echo "[INFO] verifying rpm: ${RPM_FILE}"
+          rpm -qlp "${RPM_FILE}" | grep -E "bash-completion/completions/ablestack_v2k$" >/dev/null
+          rpm -qlp "${RPM_FILE}" | grep -E "/usr/share/ablestack/v2k/runtime-assets/assets/govc_Linux_x86_64.tar.gz$" >/dev/null
+          rpm -qlp "${RPM_FILE}" | grep -E "/usr/share/ablestack/v2k/runtime-assets/assets/VMware-vix-disklib-.*[.]tar[.]gz$" >/dev/null
+          rpm -qlp "${RPM_FILE}" | grep -E "/usr/share/ablestack/v2k/compat/esxi55/profile.json$" >/dev/null
+          rpm -qlp "${RPM_FILE}" | grep -E "/usr/share/ablestack/v2k/runtime-assets/assets/compat/esxi55/VMware-vix-disklib-6[.]5[.]0-4604867[.]x86_64[.]tar[.]gz$" >/dev/null
+          rpm -qlp "${RPM_FILE}" | grep -E "/usr/share/ablestack/v2k/runtime-assets/assets/compat/esxi55/nbdkit-vddk-legacy-1[.]14[.]2-rocky9-x86_64[.]tar[.]gz$" >/dev/null
+          rpm -qlp "${RPM_FILE}" | grep -E "/usr/share/ablestack/v2k/runtime-assets/assets/compat/esxi55/wheels/pyvmomi-5[.]5[.]0[.]2014[.]1[.]1[.]tar[.]gz$" >/dev/null
+          if find winpe -maxdepth 1 -type f -iname '*.iso' | grep -q .; then
+            rpm -qlp "${RPM_FILE}" | grep -E "/usr/share/ablestack/v2k/winpe/.*[.]iso$" >/dev/null
+          fi
+          echo "[OK] bash completion and runtime assets are packaged"
+
+      - name: Create V2K RPM repo (offline) for ABLESTACK (Rocky ${{ matrix.host_os_minor }})
+        run: |
+          set -euo pipefail
+          ROCKY_MINOR="${{ matrix.host_os_minor }}"
+          REPO_PREFIX="rocky-build-${ROCKY_MINOR}"
+          WORKDIR="release/v2k/v2k-rpm-rocky${ROCKY_MINOR}"
+          mkdir -p "$WORKDIR"
+
+          # Collect only installable V2K binary RPMs into the final offline repo.
+          # Source RPMs carry the full bundled asset tree and can push the Rocky
+          # release ISO over GitHub's 2 GiB single-asset limit.
+          cp -v build/rpm-v2k/ablestack_v2k-*.x86_64.rpm "$WORKDIR"/
+
+          echo "[INFO] Collecting runtime deps for Air-Gap (Requires closure minus ABLESTACK baseline)..."
+
+          : "${EPEL_REPO_ID:?EPEL_REPO_ID is not set. Configure step must export it to GITHUB_ENV}"
+          DNF_COMMON_OPTS=(
+            --releasever=${ROCKY_MINOR}
+            --disablerepo=*
+            --enablerepo="${REPO_PREFIX}-*","${EPEL_REPO_ID}"
+            --setopt=install_weak_deps=False
+          )
+
+          REQ_PKGS=(
+            jq
+            python3
+            python3-pip
+            openssl
+            nbd
+            nbdkit
+            nbdkit-vddk-plugin
+            qemu-img
+            libvirt-client
+            tar
+          )
+
+          BASELINE_FILE="rpm/v2k_baseline_pkgs_ablestack_${ROCKY_MINOR}.txt"
+          COMPAT_BASELINE_FILE="rpm/v2k_baseline_pkgs_ablestack_9.7.txt"
+          SHARED_BASELINE_FILE="rpm/v2k_baseline_pkgs_ablestack_9.6.txt"
+
+          echo "[INFO] Sanity check: required pkgs availability (repo view)"
+          dnf -q "${DNF_COMMON_OPTS[@]}" repoquery --available "${REQ_PKGS[@]}" >/dev/null
+
+          dnf -y "${DNF_COMMON_OPTS[@]}" install dnf-plugins-core >/dev/null
+          dnf -q "${DNF_COMMON_OPTS[@]}" repoquery \
+            --requires --resolve --recursive \
+            --qf '%{name}' \
+            "${REQ_PKGS[@]}" | sed '/^$/d' | sort -u > /tmp/v2k_dep_closure.txt
+
+          TMP_PREFIX="/tmp/v2k-${ROCKY_MINOR}"
+          printf '%s\n' "${REQ_PKGS[@]}" | sed '/^$/d' | sort -u > "${TMP_PREFIX}-must-have.txt"
+
+          EFFECTIVE_BASELINE_FILE="${BASELINE_FILE}"
+          if [[ -f "${BASELINE_FILE}" ]]; then
+            echo "[INFO] Using ABLESTACK baseline file: ${BASELINE_FILE}"
+          elif [[ "${ROCKY_MINOR}" == "9.8" && -f "${COMPAT_BASELINE_FILE}" ]]; then
+            EFFECTIVE_BASELINE_FILE="${COMPAT_BASELINE_FILE}"
+            echo "[INFO] Using Rocky 9.7 ABLESTACK baseline for Rocky 9.8 compatibility: ${COMPAT_BASELINE_FILE}"
+          elif [[ -f "${SHARED_BASELINE_FILE}" ]]; then
+            EFFECTIVE_BASELINE_FILE="${SHARED_BASELINE_FILE}"
+            echo "[WARN] Missing minor-specific baseline: ${BASELINE_FILE}"
+            echo "[INFO] Reusing shared ABLESTACK 9.6 baseline: ${SHARED_BASELINE_FILE}"
+          else
+            echo "[ERR] Missing baseline file: ${BASELINE_FILE}" >&2
+            echo "[ERR] Missing shared fallback baseline: ${SHARED_BASELINE_FILE}" >&2
+            echo "      Provide at least ${SHARED_BASELINE_FILE} to avoid downloading unnecessary host packages." >&2
+            exit 2
+          fi
+
+          sort -u "${EFFECTIVE_BASELINE_FILE}" > "${TMP_PREFIX}-baseline.txt"
+          comm -23 /tmp/v2k_dep_closure.txt "${TMP_PREFIX}-baseline.txt" > "${TMP_PREFIX}-to-download-closure.txt"
+
+          # must-have + (closure-baseline) = candidate list
+          cat "${TMP_PREFIX}-must-have.txt" "${TMP_PREFIX}-to-download-closure.txt" | sort -u > "${TMP_PREFIX}-to-download-candidate.txt"
+
+          echo "[INFO] Candidate(to-download) count: $(wc -l < "${TMP_PREFIX}-to-download-candidate.txt")"
+          echo "[INFO] Candidate sample (first 50):"
+          head -n 50 "${TMP_PREFIX}-to-download-candidate.txt" || true
+
+          echo "[INFO] Filtering candidate list by repo availability (STRICT)..."
+          : > "${TMP_PREFIX}-to-download-avail.txt"
+          cat "${TMP_PREFIX}-to-download-candidate.txt" \
+            | xargs -r -n 200 dnf -q "${DNF_COMMON_OPTS[@]}" repoquery --available --qf '%{name}' \
+            | sort -u > "${TMP_PREFIX}-to-download-avail.txt"
+
+          grep -vE '^glibc-all-langpacks$|^glibc-langpack-' "${TMP_PREFIX}-to-download-avail.txt" \
+            | sort -u > "${TMP_PREFIX}-to-download.txt"
+
+          comm -23 "${TMP_PREFIX}-to-download-candidate.txt" "${TMP_PREFIX}-to-download-avail.txt" > "${TMP_PREFIX}-missing-in-repo.txt"
+          if [[ -s "${TMP_PREFIX}-missing-in-repo.txt" ]]; then
+            echo "[WARN] Missing in enabled repos (skipped):"
+            head -n 50 "${TMP_PREFIX}-missing-in-repo.txt" || true
+          fi
+
+          echo "[INFO] Final to-download count(after avail+langpack filter): $(wc -l < "${TMP_PREFIX}-to-download.txt")"
+          echo "[INFO] Final to-download sample (first 50):"
+          head -n 50 "${TMP_PREFIX}-to-download.txt" || true
+
+          for p in nbd nbdkit qemu-img; do
+            if ! grep -qx "$p" "${TMP_PREFIX}-to-download.txt" && ! grep -qx "$p" "${TMP_PREFIX}-baseline.txt"; then
+              echo "[ERR] Required package '$p' is neither in baseline nor in final download list." >&2
+              exit 2
+            fi
+          done
+          if [[ -s "${TMP_PREFIX}-to-download.txt" ]]; then
+            xargs -r dnf "${DNF_COMMON_OPTS[@]}" download --destdir="$WORKDIR" < "${TMP_PREFIX}-to-download.txt"
+          else
+            echo "[INFO] Nothing to download (all deps satisfied by baseline)."
+          fi
+
+          echo "[INFO] Creating repo metadata (createrepo_c)..."
+          createrepo_c "$WORKDIR"
+
+          echo "[INFO] Repo metadata sanity check:"
+          test -f "$WORKDIR/repodata/repomd.xml"
+          ls -al "$WORKDIR/repodata" | head -n 50 || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v2k-rpm-package-rocky${{ matrix.host_os_minor }}
+          path: release/v2k/**
+
+  # ======================================================================
+  # 1-D) N2K RPM BUILD (Rocky 9.6 / 9.7 / 9.8)
+  # ======================================================================
+
+  build-process-tools:
+    uses: ./.github/workflows/windows-process-repair.yml
+    with:
+      source_ref: ${{ inputs.source_ref || github.sha }}
+
   build-process-launchers:
     runs-on: ubuntu-24.04
     steps:
@@ -108,6 +440,98 @@ jobs:
 
   # 1) RPM BUILD (Rocky 9.6 / 9.7 / 9.8)
   # ======================================================================
+
+  build-n2k-rpm:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        host_os_minor: ["9.6", "9.7"]
+    container:
+      image: rockylinux/rockylinux:9
+      options: --user 0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ env.WORKFLOW_SOURCE_REF }}
+
+      - name: Install build deps (n2k, Rocky ${{ matrix.host_os_minor }})
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ROCKY_MINOR="${{ matrix.host_os_minor }}"
+          REPO_PREFIX="rocky-n2k-${ROCKY_MINOR}"
+          case "${ROCKY_MINOR}" in
+            9.6|9.7) REPO_ROOT="https://dl.rockylinux.org/vault/rocky/${ROCKY_MINOR}" ;;
+            9.8) REPO_ROOT="https://dl.rockylinux.org/pub/rocky/${ROCKY_MINOR}" ;;
+            *)
+              echo "[ERR] Unsupported Rocky minor for N2K build: ${ROCKY_MINOR}" >&2
+              exit 2
+              ;;
+          esac
+
+          cat > "/etc/yum.repos.d/${REPO_PREFIX}.repo" <<EOF
+          [${REPO_PREFIX}-baseos]
+          name=Rocky Linux ${ROCKY_MINOR} - BaseOS
+          baseurl=${REPO_ROOT}/BaseOS/\$basearch/os/
+          enabled=1
+          gpgcheck=0
+
+          [${REPO_PREFIX}-appstream]
+          name=Rocky Linux ${ROCKY_MINOR} - AppStream
+          baseurl=${REPO_ROOT}/AppStream/\$basearch/os/
+          enabled=1
+          gpgcheck=0
+
+          [${REPO_PREFIX}-crb]
+          name=Rocky Linux ${ROCKY_MINOR} - CRB
+          baseurl=${REPO_ROOT}/CRB/\$basearch/os/
+          enabled=1
+          gpgcheck=0
+          EOF
+
+          dnf clean all
+          dnf -y --disablerepo="*" --enablerepo="${REPO_PREFIX}-*" makecache
+          dnf -y --disablerepo="*" --enablerepo="${REPO_PREFIX}-*" install \
+            make rpm-build tar git dnf-plugins-core createrepo_c
+
+      - name: Build N2K RPM
+        run: make n2k-rpm
+
+      - name: Create N2K RPM repo (Rocky ${{ matrix.host_os_minor }})
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROCKY_MINOR="${{ matrix.host_os_minor }}"
+          REPO_PREFIX="rocky-n2k-${ROCKY_MINOR}"
+          WORKDIR="release/n2k/n2k-rpm-rocky${ROCKY_MINOR}"
+          mkdir -p "${WORKDIR}"
+
+          cp -v build/rpm-n2k/*.rpm "${WORKDIR}/"
+
+          echo "[INFO] Downloading N2K runtime dependencies for Rocky ${ROCKY_MINOR}..."
+          dnf --releasever="${ROCKY_MINOR}" \
+            --disablerepo="*" \
+            --enablerepo="${REPO_PREFIX}-*" \
+            --setopt=install_weak_deps=False \
+            download --resolve --alldeps \
+            --destdir="${WORKDIR}" \
+            bash bash-completion jq curl openssl qemu-img libvirt-client nfs-utils || true
+
+          createrepo_c "${WORKDIR}"
+          test -f "${WORKDIR}/repodata/repomd.xml"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: n2k-rpm-package-rocky${{ matrix.host_os_minor }}
+          path: release/n2k/**
+
+  # ======================================================================
+  # 2) DEB BUILD (Ubuntu 22.04 / 24.04 / 26.04)
+  # ======================================================================
+
   build-rpm:
     needs: [build-process-tools, build-process-launchers]
     runs-on: ubuntu-latest
@@ -240,7 +664,3 @@ jobs:
         with:
           name: rpm-package-${{ matrix.host_os_minor }}
           path: release/rpm/**
-  build-process-tools:
-    uses: ./.github/workflows/windows-process-repair.yml
-    with:
-      source_ref: ${{ inputs.source_ref || github.sha }}
