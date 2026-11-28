@@ -9,7 +9,32 @@ on:
 permissions:
   contents: read
 jobs:
+  python-cache:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fb4078bdbdbb01ca95c467755a5fb4925f6bf574
+          persist-credentials: false
+      - name: Reproduce the three Python cache entries from the original package
+        run: |
+          set -euo pipefail
+          cd lib/process
+          touch -d @1790842168 process_{action,list,profile}_linux.py
+          python3.12 -m py_compile "$PWD"/process_{action,list,profile}_linux.py
+          pushd __pycache__
+          sha256sum -c <<'SHA'
+          33bb425d591a314babfc097862e5b58256b02bef2c19e630f8808dd5472cf10a  process_action_linux.cpython-312.pyc
+          05287dab251bc2c255a8b12a452c09ef263d0674f3097d1998777aa0381cff26  process_list_linux.cpython-312.pyc
+          df6945c2b310c79c729bdb103fa8de03d5c05987b051def0cb3ee90a8b3deff3  process_profile_linux.cpython-312.pyc
+          SHA
+      - uses: actions/upload-artifact@v4
+        with:
+          name: process-python-cache
+          path: lib/process/__pycache__/*.pyc
+          if-no-files-found: error
   rpm:
+    needs: python-cache
     runs-on: ubuntu-24.04
     container: rockylinux:9
     steps:
@@ -19,6 +44,10 @@ jobs:
         with:
           ref: fb4078bdbdbb01ca95c467755a5fb4925f6bf574
           persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: process-python-cache
+          path: lib/process/__pycache__
       - name: Rebuild the original package release with the published runtime
         env:
           PUBLISHED_RUNTIME: ${{ inputs.published_runtime }}
