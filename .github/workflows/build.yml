@@ -227,8 +227,14 @@ jobs:
             exit 2
           fi
 
-      - name: Install ISO creation tool for guest appliance
-        run: dnf -y install xorriso
+      - name: Install native guest appliance tools
+        run: |
+          set -euo pipefail
+          dnf -y install xorriso qemu-kvm qemu-img supermin
+          if ! command -v qemu-system-x86_64 && test -x /usr/libexec/qemu-kvm; then
+            ln -s /usr/libexec/qemu-kvm /usr/local/bin/qemu-system-x86_64
+          fi
+          command -v qemu-system-x86_64
 
       - name: Stage Ubuntu 22.04 offline guest agent from signed archive indexes
         shell: bash
