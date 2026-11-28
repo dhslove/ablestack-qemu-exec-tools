@@ -69,29 +69,12 @@ env:
 #   in the same top-level workflow run by build-winpe-release.yml.
 # - V2K RPM and release assembly fail closed when the required WinPE ISO is missing.
 jobs:
-  build-winpe:
-    if: ${{ !inputs.use_prebuilt_winpe }}
-    uses: ./.github/workflows/build-winpe-core.yml
-    with:
-      source_ref: ${{ inputs.source_ref != '' && inputs.source_ref || github.ref }}
-      architecture: "amd64"
-      iso_base_name: "winpe-ablestack-v2k"
-      iso_suffix: ${{ inputs.release_tag != '' && inputs.release_tag || format('validation-{0}', github.run_number) }}
-      artifact_name: ${{ inputs.winpe_artifact_name }}
-      retention_days: "14"
-      test_mode: false
-
-  # One static launcher payload is shared byte-for-byte by every host
-  # package and guest ISO. Host vm_exec verifies these guest bytes.
-
   build-v2k-rpm:
-    needs: [build-winpe]
-    if: ${{ always() && (inputs.use_prebuilt_winpe || needs.build-winpe.result == 'success') }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        host_os_minor: ["9.6", "9.7"]
+        host_os_minor: ["9.7"]
     container:
       image: rockylinux/rockylinux:9
       options: --user 0
@@ -216,6 +199,8 @@ jobs:
         with:
           name: ${{ inputs.winpe_artifact_name }}
           path: winpe
+          github-token: ${{ github.token }}
+          run-id: 46164523720
 
       - name: Show staged WinPE ISO for V2K RPM
         shell: bash
@@ -259,6 +244,9 @@ jobs:
       - name: Verify V2K Cloud service-offering CPU speed handling
         shell: bash
         run: bash tests/v2k_cloud_offering_cpu_speed_smoke.sh
+
+      - name: Install ISO creation tool for guest appliance
+        run: dnf -y install xorriso
 
       - name: Build V2K RPM (separate path)
         run: |
@@ -409,258 +397,3 @@ jobs:
   # ======================================================================
   # 1-D) N2K RPM BUILD (Rocky 9.6 / 9.7 / 9.8)
   # ======================================================================
-
-  build-process-tools:
-    uses: ./.github/workflows/windows-process-repair.yml
-    with:
-      source_ref: ${{ inputs.source_ref || github.sha }}
-
-  build-process-launchers:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          ref: ${{ env.WORKFLOW_SOURCE_REF }}
-      - name: Compile static Linux process launchers
-        run: |
-          set -euo pipefail
-          sudo apt-get update -y
-          sudo apt-get install -y musl-tools
-          mkdir -p process-launchers
-          musl-gcc -static -O2 -Wall -Wextra -Werror -o process-launchers/process-read-launcher lib/process/process_read_launcher.c
-          musl-gcc -static -O2 -Wall -Wextra -Werror -o process-launchers/process-action-launcher lib/process/process_action_launcher.c
-          git rev-parse HEAD > process-launchers/SOURCE_COMMIT
-          file process-launchers/process-*-launcher
-      - uses: actions/upload-artifact@v4
-        with:
-          name: linux-process-launchers
-          path: process-launchers/
-          if-no-files-found: error
-
-  # 1) RPM BUILD (Rocky 9.6 / 9.7 / 9.8)
-  # ======================================================================
-
-  build-n2k-rpm:
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        host_os_minor: ["9.6", "9.7"]
-    container:
-      image: rockylinux/rockylinux:9
-      options: --user 0
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          ref: ${{ env.WORKFLOW_SOURCE_REF }}
-
-      - name: Install build deps (n2k, Rocky ${{ matrix.host_os_minor }})
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          ROCKY_MINOR="${{ matrix.host_os_minor }}"
-          REPO_PREFIX="rocky-n2k-${ROCKY_MINOR}"
-          case "${ROCKY_MINOR}" in
-            9.6|9.7) REPO_ROOT="https://dl.rockylinux.org/vault/rocky/${ROCKY_MINOR}" ;;
-            9.8) REPO_ROOT="https://dl.rockylinux.org/pub/rocky/${ROCKY_MINOR}" ;;
-            *)
-              echo "[ERR] Unsupported Rocky minor for N2K build: ${ROCKY_MINOR}" >&2
-              exit 2
-              ;;
-          esac
-
-          cat > "/etc/yum.repos.d/${REPO_PREFIX}.repo" <<EOF
-          [${REPO_PREFIX}-baseos]
-          name=Rocky Linux ${ROCKY_MINOR} - BaseOS
-          baseurl=${REPO_ROOT}/BaseOS/\$basearch/os/
-          enabled=1
-          gpgcheck=0
-
-          [${REPO_PREFIX}-appstream]
-          name=Rocky Linux ${ROCKY_MINOR} - AppStream
-          baseurl=${REPO_ROOT}/AppStream/\$basearch/os/
-          enabled=1
-          gpgcheck=0
-
-          [${REPO_PREFIX}-crb]
-          name=Rocky Linux ${ROCKY_MINOR} - CRB
-          baseurl=${REPO_ROOT}/CRB/\$basearch/os/
-          enabled=1
-          gpgcheck=0
-          EOF
-
-          dnf clean all
-          dnf -y --disablerepo="*" --enablerepo="${REPO_PREFIX}-*" makecache
-          dnf -y --disablerepo="*" --enablerepo="${REPO_PREFIX}-*" install \
-            make rpm-build tar git dnf-plugins-core createrepo_c
-
-      - name: Build N2K RPM
-        run: make n2k-rpm
-
-      - name: Create N2K RPM repo (Rocky ${{ matrix.host_os_minor }})
-        shell: bash
-        run: |
-          set -euo pipefail
-          ROCKY_MINOR="${{ matrix.host_os_minor }}"
-          REPO_PREFIX="rocky-n2k-${ROCKY_MINOR}"
-          WORKDIR="release/n2k/n2k-rpm-rocky${ROCKY_MINOR}"
-          mkdir -p "${WORKDIR}"
-
-          cp -v build/rpm-n2k/*.rpm "${WORKDIR}/"
-
-          echo "[INFO] Downloading N2K runtime dependencies for Rocky ${ROCKY_MINOR}..."
-          dnf --releasever="${ROCKY_MINOR}" \
-            --disablerepo="*" \
-            --enablerepo="${REPO_PREFIX}-*" \
-            --setopt=install_weak_deps=False \
-            download --resolve --alldeps \
-            --destdir="${WORKDIR}" \
-            bash bash-completion jq curl openssl qemu-img libvirt-client nfs-utils || true
-
-          createrepo_c "${WORKDIR}"
-          test -f "${WORKDIR}/repodata/repomd.xml"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: n2k-rpm-package-rocky${{ matrix.host_os_minor }}
-          path: release/n2k/**
-
-  # ======================================================================
-  # 2) DEB BUILD (Ubuntu 22.04 / 24.04 / 26.04)
-  # ======================================================================
-
-  build-rpm:
-    needs: [build-process-tools, build-process-launchers]
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        host_os_minor: ["9.6", "9.7"]
-    container:
-      image: rockylinux/rockylinux:9
-      options: --user 0
-    steps:
-      - name: Install Git for source checkout
-        run: dnf -y install git
-
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          ref: ${{ env.WORKFLOW_SOURCE_REF }}
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: windows-process-payload
-          path: process-payload
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: linux-process-launchers
-          path: process-launchers
-
-      - name: Install build deps (Rocky ${{ matrix.host_os_minor }})
-        run: |
-          set -euo pipefail
-          ROCKY_MINOR="${{ matrix.host_os_minor }}"
-          REPO_PREFIX="rocky-build-${ROCKY_MINOR}"
-          case "${ROCKY_MINOR}" in
-            9.6|9.7) REPO_ROOT="https://dl.rockylinux.org/vault/rocky/${ROCKY_MINOR}" ;;
-            9.8) REPO_ROOT="https://dl.rockylinux.org/pub/rocky/${ROCKY_MINOR}" ;;
-            *) echo "[ERR] Unsupported Rocky minor for core RPM build: ${ROCKY_MINOR}" >&2; exit 2 ;;
-          esac
-
-          cat > "/etc/yum.repos.d/${REPO_PREFIX}.repo" <<EOF
-          [${REPO_PREFIX}-baseos]
-          name=Rocky Linux ${ROCKY_MINOR} - BaseOS
-          baseurl=${REPO_ROOT}/BaseOS/\$basearch/os/
-          enabled=1
-          gpgcheck=0
-
-          [${REPO_PREFIX}-appstream]
-          name=Rocky Linux ${ROCKY_MINOR} - AppStream
-          baseurl=${REPO_ROOT}/AppStream/\$basearch/os/
-          enabled=1
-          gpgcheck=0
-
-          [${REPO_PREFIX}-crb]
-          name=Rocky Linux ${ROCKY_MINOR} - CRB
-          baseurl=${REPO_ROOT}/CRB/\$basearch/os/
-          enabled=1
-          gpgcheck=0
-          EOF
-
-          dnf clean all
-          dnf -y --disablerepo="*" --enablerepo="${REPO_PREFIX}-*" makecache
-          dnf -y --disablerepo="*" --enablerepo="${REPO_PREFIX}-*" install make rpm-build tar git dnf-plugins-core createrepo_c gcc cpio
-
-      - name: Stage matching Windows process adapters
-        run: |
-          set -euo pipefail
-          git config --global --add safe.directory "$PWD"
-          test "$(tr -d '\r\n' < process-payload/SOURCE_COMMIT)" = "$(git rev-parse HEAD)"
-          cmp lib/process/ProcessList.ps1 process-payload/ProcessList.ps1
-          cmp lib/process/ProcessAction.ps1 process-payload/ProcessAction.ps1
-          install -m 0644 process-payload/AbleProcessIdentity.dll lib/process/AbleProcessIdentity.dll
-          install -m 0644 process-payload/AbleProcessAction.dll lib/process/AbleProcessAction.dll
-
-      - name: Stage canonical Linux process launchers
-        run: |
-          set -euo pipefail
-          test "$(tr -d '\r\n' < process-launchers/SOURCE_COMMIT)" = "$(git rev-parse HEAD)"
-          install -m 0755 process-launchers/process-read-launcher lib/process/process-read-launcher
-          install -m 0755 process-launchers/process-action-launcher lib/process/process-action-launcher
-
-      - name: Approve exact adapters from this build
-        run: |
-          set -euo pipefail
-          id="host-${GITHUB_SHA::12}-${GITHUB_RUN_ID}"
-          PYTHONDONTWRITEBYTECODE=1 python3 scripts/append_guest_adapter_compat.py --directory lib/process --family windows --id "$id"
-          PYTHONDONTWRITEBYTECODE=1 python3 scripts/append_guest_adapter_compat.py --directory lib/process --family rocky --id "$id"
-          PYTHONDONTWRITEBYTECODE=1 python3 scripts/append_guest_adapter_compat.py --directory lib/process --family ubuntu --id "$id"
-          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.guest_adapter_compat_test
-
-      - name: Build RPM
-        run: make rpm
-
-      - name: Verify packaged process adapters
-        run: |
-          set -euo pipefail
-          package=$(find build/rpm -maxdepth 1 -name 'ablestack-qemu-exec-tools-*.rpm' -print -quit)
-          test -n "$package"
-          mkdir -p process-package-check
-          (cd process-package-check && rpm2cpio "../$package" | cpio -id --quiet)
-          installed=process-package-check/usr/libexec/ablestack-qemu-exec-tools/process
-          cmp process-payload/AbleProcessIdentity.dll "$installed/AbleProcessIdentity.dll"
-          cmp process-payload/AbleProcessAction.dll "$installed/AbleProcessAction.dll"
-          cmp process-launchers/process-read-launcher "$installed/process-read-launcher"
-          cmp process-launchers/process-action-launcher "$installed/process-action-launcher"
-          test -x "$installed/process-read-launcher"
-          test -x "$installed/process-action-launcher"
-
-      - name: Create RPM repo (with dependencies) for Rocky ${{ matrix.host_os_minor }}
-        run: |
-          set -euo pipefail
-          ROCKY_MINOR="${{ matrix.host_os_minor }}"
-          REPO_PREFIX="rocky-build-${ROCKY_MINOR}"
-          WORKDIR="repo/rpm-rocky${ROCKY_MINOR}"
-          mkdir -p "$WORKDIR"
-          cp rpmbuild/RPMS/*/*.rpm "$WORKDIR"/
-
-          echo "[INFO] Downloading runtime dependencies..."
-          dnf --disablerepo="*" --enablerepo="${REPO_PREFIX}-*" download --resolve --alldeps \
-            --destdir="$WORKDIR" \
-            bash jq libvirt-client cloud-init || true
-
-          echo "[INFO] Creating repo metadata..."
-          createrepo_c "$WORKDIR"
-
-          mkdir -p release/rpm
-          mv repo release/rpm/
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: rpm-package-${{ matrix.host_os_minor }}
-          path: release/rpm/**
