@@ -30,4 +30,21 @@ class DriverQualification(unittest.TestCase):
             with self.assertRaises(RuntimeError):drivers.verify_modules('kernel','')
 
 
+    def test_minimal_rocky_without_lvm_only_adds_planned_storage_drivers(self):
+        with patch.object(drivers.Path, 'is_file', return_value=True), \
+             patch.object(drivers.shutil, 'which', return_value=None), \
+             patch.object(drivers, 'run', side_effect=['base\n', '', 'archive']) as run:
+            self.assertEqual('archive', drivers.prepare_rocky_initramfs('kernel', 'image'))
+        self.assertNotIn('lvm', run.call_args_list[1].args)
+        self.assertIn(' '.join(drivers.MODULES), run.call_args_list[1].args)
+
+    def test_rocky_preserves_and_checks_lvm_from_the_source_initramfs(self):
+        with patch.object(drivers.Path, 'is_file', return_value=True), \
+             patch.object(drivers.shutil, 'which', return_value=None), \
+             patch.object(drivers, 'run', side_effect=['base\nlvm\n', '', 'base\n']) as run:
+            with self.assertRaisesRegex(ValueError, 'INITRAMFS_LVM_MISSING'):
+                drivers.prepare_rocky_initramfs('kernel', 'image')
+        self.assertIn('lvm', run.call_args_list[1].args)
+
+
 if __name__=='__main__':unittest.main(verbosity=2)

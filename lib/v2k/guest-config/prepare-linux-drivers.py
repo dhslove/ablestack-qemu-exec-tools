@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 
 BASE = Path('/var/lib/ablestack-v2k/guest-config')
@@ -29,6 +30,19 @@ def verify_modules(kernel, listing):
             raise ValueError('INITRAMFS_MODULE_MISSING: ' + module + ' (' + filename + ')')
 
 
+def prepare_rocky_initramfs(kernel, image):
+    # Keep LVM support carried by the source image. Minimal guests that do not
+    # use LVM may have neither the tool nor the dracut module installed.
+    previous = run('lsinitrd', '-m', image).split() if Path(image).is_file() else []
+    require_lvm = 'lvm' in previous or shutil.which('lvm') is not None
+    modules = ['--add', 'lvm'] if require_lvm else []
+    run('dracut', '--force', '--no-hostonly', *modules, '--add-drivers',
+        ' '.join(MODULES), image, kernel)
+    if require_lvm and 'lvm' not in run('lsinitrd', '-m', image).split():
+        raise ValueError('INITRAMFS_LVM_MISSING')
+    return run('lsinitrd', image)
+
+
 def main():
     plan = json.loads((BASE / 'plan.json').read_text())
     if plan['os'] != 'linux' or plan['os_id'] not in ['ubuntu', 'rocky']:
@@ -44,11 +58,7 @@ def main():
     for kernel in kernels:
         if plan['os_id'] == 'rocky':
             image = '/boot/initramfs-' + kernel + '.img'
-            run('dracut', '--force', '--no-hostonly', '--add', 'lvm', '--add-drivers',
-                ' '.join(MODULES), image, kernel)
-            listing = run('lsinitrd', image)
-            if 'lvm' not in run('lsinitrd', '-m', image).split():
-                raise ValueError('INITRAMFS_LVM_MISSING')
+            listing = prepare_rocky_initramfs(kernel, image)
         else:
             # Explicit modules survive later kernel updates as part of this clone.
             modules = Path('/etc/initramfs-tools/modules')
