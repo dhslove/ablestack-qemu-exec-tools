@@ -648,7 +648,7 @@ n2k_storage_map_rbd() {
   fi
 
   if [[ "${mode}" == "auto" ]] && command -v rbd-nbd >/dev/null 2>&1; then
-    mapped="$(rbd-nbd map "${image_name}")"
+    mapped="$(rbd-nbd map "${image_name}")" || return $?
     printf '%s' "${mapped}"
     return 0
   fi
@@ -725,11 +725,14 @@ n2k_storage_discard_rbd_region() {
 
 n2k_storage_patch_rbd() {
   local source_path="$1" target_path="$2" regions="$3"
-  local mapped_device offset length region_type map_mode discard_fallbacks=0 discards=0
+  local mapped_device offset length region_type map_mode discard_fallbacks=0 discards=0 patch_rc=0
 
   map_mode="${N2K_RBD_PATCH_MAP_MODE:-auto}"
-  mapped_device="$(n2k_storage_map_rbd "${target_path}" "${map_mode}")"
-  trap 'n2k_storage_unmap_rbd "'"${mapped_device}"'"' RETURN
+  mapped_device="$(n2k_storage_map_rbd "${target_path}" "${map_mode}")" || return $?
+  if [[ -z "${mapped_device}" ]]; then
+    echo "No block device for RBD patch target: ${target_path}" >&2
+    return 2
+  fi
 
   while IFS=$'\t' read -r offset length region_type; do
     [[ -n "${offset}" && -n "${length}" ]] || continue
@@ -742,7 +745,10 @@ n2k_storage_patch_rbd() {
         discard_fallbacks=$((discard_fallbacks + 1))
         ;;
     esac
-    n2k_storage_apply_patch_region_to_device "${source_path}" "${mapped_device}" "${offset}" "${length}" "${region_type:-regular}"
+    n2k_storage_apply_patch_region_to_device "${source_path}" "${mapped_device}" "${offset}" "${length}" "${region_type:-regular}" || {
+      patch_rc=$?
+      break
+    }
   done < <(jq -r '.[] | [(.offset | tostring), (.length | tostring), (.type // "regular")] | @tsv' <<<"${regions}")
 
   if [[ "${discards}" -gt 0 || "${discard_fallbacks}" -gt 0 ]]; then
@@ -750,7 +756,7 @@ n2k_storage_patch_rbd() {
   fi
 
   n2k_storage_unmap_rbd "${mapped_device}"
-  trap - RETURN
+  return "${patch_rc}"
 }
 
 n2k_storage_patch_target() {

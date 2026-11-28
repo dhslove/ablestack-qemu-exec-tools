@@ -465,3 +465,29 @@ jq -e '
 ' "${reentry_manifest}" >/dev/null
 
 echo "[OK] n2k changed-region, cutover, RBD staging, and Cloud checkpoint integrity passed"
+
+# Simulate the caller's conditional context, which suppresses Bash errexit.
+(
+  source lib/n2k/target_storage.sh
+  dirty_regions='[{"offset":0,"length":512},{"offset":512,"length":512}]'
+  n2k_storage_map_rbd() { return 13; }
+  n2k_storage_apply_patch_region_to_device() { echo 'unexpected write after a mapping error' >&2; return 99; }
+  n2k_storage_unmap_rbd() { echo 'unexpected unmap after a mapping error' >&2; return 99; }
+  rc=0
+  n2k_storage_patch_rbd /dev/mock-source rbd:pool/test "$dirty_regions" || rc=$?
+  [[ "$rc" == 13 ]]
+
+  n2k_storage_map_rbd() { return 0; }
+  rc=0
+  n2k_storage_patch_rbd /dev/mock-source rbd:pool/test "$dirty_regions" || rc=$?
+  [[ "$rc" == 2 ]]
+
+  n2k_storage_map_rbd() { printf '%s' /dev/mock-target; }
+  attempted=0
+  unmapped=''
+  n2k_storage_apply_patch_region_to_device() { attempted=$((attempted + 1)); return 7; }
+  n2k_storage_unmap_rbd() { unmapped="$1"; }
+  rc=0
+  n2k_storage_patch_rbd /dev/mock-source rbd:pool/test "$dirty_regions" || rc=$?
+  [[ "$rc" == 7 && "$attempted" == 1 && "$unmapped" == /dev/mock-target ]]
+)
