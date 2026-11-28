@@ -227,6 +227,9 @@ jobs:
             exit 2
           fi
 
+      - name: Install ISO creation tool for guest appliance
+        run: dnf -y install xorriso
+
       - name: Stage Ubuntu 22.04 offline guest agent from signed archive indexes
         shell: bash
         run: |
@@ -244,9 +247,6 @@ jobs:
       - name: Verify V2K Cloud service-offering CPU speed handling
         shell: bash
         run: bash tests/v2k_cloud_offering_cpu_speed_smoke.sh
-
-      - name: Install ISO creation tool for guest appliance
-        run: dnf -y install xorriso
 
       - name: Build V2K RPM (separate path)
         run: |
